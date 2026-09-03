@@ -1,4 +1,6 @@
 service = "payments"
+owner = "equipo-pagos"
+tier = "0"
 version = "1.2.0"
 transport = "pubsub"
 
@@ -11,23 +13,37 @@ amount = "money"
 handler = "onOrderPlaced"
 
 [methods.capturePayment]
+http = "POST /v1/payments"
+idempotent = true
 in = { orderId = "uuid", amount = "money" }
 out = { paymentId = "uuid" }
 
 [[depends]]
 service = "orders"
 method = "getOrder"
+via = "onOrderPlaced"
+timeout_ms = 1000
+retries = 3
+breaker = true
 
 [[depends]]
 external = "stripe"
 method = "charges.create"
+timeout_ms = 8000
+breaker = true
 
 [infra]
 state = "postgres"
 migrations = "sql/payments/"
-runtime = "cloudrun"
+runtime = "container"
 min_instances = 1
 secrets = ["STRIPE_API_KEY"]
 
 [patterns]
 outbox = true
+
+[env.staging]
+min_instances = 0
+
+[env.prod]
+min_instances = 3

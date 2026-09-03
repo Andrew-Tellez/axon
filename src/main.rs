@@ -1,0 +1,256 @@
+//! axon — el manifiesto es la fuente de verdad; el resto son proyecciones.
+mod api;
+mod emit;
+mod infra;
+mod manifest;
+mod plugin;
+mod trace;
+mod verify;
+
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+#[derive(Parser)]
+#[command(
+    name = "axon",
+    version,
+    about = "Compilador manifiesto-primero para microservicios event-driven"
+)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// manifiesto -> contratos y clase base
+    Build {
+        manifest: PathBuf,
+        #[arg(long, default_value = "ts")]
+        lang: String,
+    },
+    /// manifiesto -> pipeline de CI/CD
+    Ci { manifest: PathBuf },
+    /// manifiestos -> IaC. `--target plan` da el plan neutral en JSON.
+    Infra {
+        sources: Vec<String>,
+        #[arg(long, default_value = "plan")]
+        target: String,
+        /// entorno: aplica los overrides de `[env.<nombre>]`
+        #[arg(long, default_value = "local")]
+        env: String,
+    },
+    /// manifiestos -> mermaid: topologia de eventos
+    Graph { sources: Vec<String> },
+    /// manifiestos -> mermaid: diagrama de clases
+    Classes { sources: Vec<String> },
+    /// migraciones -> mermaid: entidad-relacion
+    Er { sources: Vec<String> },
+    /// flujo causal de un evento -> mermaid: secuencia
+    Seq { event: String, sources: Vec<String> },
+    /// registro de servicios y metodos (directorio, archivo o URL)
+    Discover { sources: Vec<String> },
+    /// drift entre manifiestos, migraciones e infraestructura
+    Verify { sources: Vec<String> },
+    /// manifiestos -> OpenAPI 3.1 (un catalogo para toda la plataforma)
+    Openapi { sources: Vec<String> },
+    /// manifiesto -> andamiaje de pruebas (unitarias, integracion, e2e)
+    Test {
+        manifest: PathBuf,
+        sources: Vec<String>,
+        #[arg(long, default_value = "ts")]
+        lang: String,
+    },
+    /// log NDJSON de envelopes -> cadena causal real (para debug local)
+    Trace {
+        /// archivo, o `-` para stdin
+        #[arg(default_value = "-")]
+        log: String,
+        /// solo un flujo de negocio
+        #[arg(long)]
+        correlation: Option<String>,
+        /// mermaid en vez de arbol, para diffear contra `axon seq`
+        #[arg(long)]
+        seq: bool,
+    },
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("axon: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<ExitCode, String> {
+    let cli = Cli::parse();
+    match cli.cmd {
+        Cmd::Build { manifest, lang } => {
+            let m = manifest::load(&manifest)?;
+            if lang == "ts" {
+                println!("{}", emit::build_ts(&m));
+            } else {
+                // un target nativo; el resto por plugin
+                let bin = format!("axon-gen-{lang}");
+                if !plugin::exists(&bin) {
+                    return Err(format!(
+                        "`{bin}` no esta en el PATH. Un generador es cualquier ejecutable \
+                         que lea el manifiesto JSON por stdin y escriba codigo por stdout."
+                    ));
+                }
+                print!(
+                    "{}",
+                    plugin::run(&bin, &serde_json::to_string(&m).unwrap())?
+                );
+            }
+        }
+        Cmd::Ci { manifest } => println!("{}", emit::build_ci(&manifest::load(&manifest)?)),
+        Cmd::Infra {
+            sources,
+            target,
+            env,
+        } => {
+            let ms: Vec<_> = manifest::discover(&sources)?
+                .iter()
+                .map(|m| manifest::for_env(m, &env))
+                .collect();
+            let p = infra::plan(&ms);
+            let bin = format!("axon-infra-{target}");
+            if !infra::NATIVE.contains(&target.as_str()) && plugin::exists(&bin) {
+                print!(
+                    "{}",
+                    plugin::run(&bin, &serde_json::to_string(&p).unwrap())?
+                );
+            } else {
+                println!("{}", infra::render(&p, &target)?);
+            }
+        }
+        Cmd::Graph { sources } => println!("{}", emit::build_graph(&manifest::discover(&sources)?)),
+        Cmd::Classes { sources } => {
+            println!("{}", emit::build_classes(&manifest::discover(&sources)?))
+        }
+        Cmd::Er { sources } => println!("{}", emit::build_er(&manifest::discover(&sources)?)),
+        Cmd::Seq { event, sources } => {
+            println!(
+                "{}",
+                emit::build_seq(&manifest::discover(&sources)?, &event)?
+            )
+        }
+        Cmd::Discover { sources } => {
+            let ms = manifest::discover(&sources)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&registry(&ms)).map_err(|e| e.to_string())?
+            );
+        }
+        Cmd::Verify { sources } => {
+            let ms = manifest::discover(&sources)?;
+            let dir = std::path::Path::new(sources.first().map(|s| s.as_str()).unwrap_or("."));
+            let root = if dir.is_dir() {
+                dir
+            } else {
+                dir.parent().unwrap_or(std::path::Path::new("."))
+            };
+            let mut r = verify::verify(&ms, &verify::load_policy(root));
+            let payload = serde_json::to_string(&ms).unwrap_or_default();
+            for bin in plugin::checks() {
+                match plugin::run(&bin, &payload) {
+                    Ok(out) => match serde_json::from_str::<Vec<plugin::Finding>>(&out) {
+                        Ok(fs) => {
+                            for f in fs {
+                                let line = format!("[{bin}] {}", f.message);
+                                if f.level == "error" {
+                                    r.errors.push(line)
+                                } else {
+                                    r.warnings.push(line)
+                                }
+                            }
+                        }
+                        Err(e) => r.warnings.push(format!("[{bin}] salida invalida: {e}")),
+                    },
+                    Err(e) => r.warnings.push(format!("[{bin}] no corrio: {e}")),
+                }
+            }
+            for w in &r.warnings {
+                println!("warn: {w}");
+            }
+            for e in &r.errors {
+                eprintln!("error: {e}");
+            }
+            println!(
+                "axon: {} servicios, {} errores, {} avisos",
+                ms.len(),
+                r.errors.len(),
+                r.warnings.len()
+            );
+            if !r.errors.is_empty() {
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+        Cmd::Openapi { sources } => println!(
+            "{}",
+            serde_json::to_string_pretty(&api::openapi(&manifest::discover(&sources)?))
+                .map_err(|e| e.to_string())?
+        ),
+        Cmd::Test {
+            manifest,
+            sources,
+            lang,
+        } => {
+            if lang != "ts" {
+                return Err(format!("lang `{lang}` sin generador nativo"));
+            }
+            let target = manifest::load(&manifest)?;
+            let all = if sources.is_empty() {
+                vec![target.clone()]
+            } else {
+                manifest::discover(&sources)?
+            };
+            println!("{}", api::build_tests(&all, &target));
+        }
+        Cmd::Trace {
+            log,
+            correlation,
+            seq,
+        } => {
+            let text = if log == "-" {
+                std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?
+            } else {
+                std::fs::read_to_string(&log).map_err(|e| format!("{log}: {e}"))?
+            };
+            let evs = trace::parse(&text);
+            let c = correlation.as_deref();
+            println!(
+                "{}",
+                if seq {
+                    trace::sequence(&evs, c)
+                } else {
+                    trace::tree(&evs, c)
+                }
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn registry(ms: &[manifest::Manifest]) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for m in ms {
+        out.insert(
+            m.service.clone(),
+            serde_json::json!({
+                "version": m.version,
+                "external": m.external,
+                "source": m.origin.to_string_lossy(),
+                "methods": m.methods,
+                "emits": m.emits.keys().collect::<Vec<_>>(),
+                "consumes": m.consumes.keys().collect::<Vec<_>>(),
+            }),
+        );
+    }
+    serde_json::Value::Object(out)
+}

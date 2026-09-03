@@ -1,0 +1,248 @@
+<h1 align="center">axon</h1>
+
+<p align="center">
+  <em>El manifiesto es la fuente de verdad. El código, la infraestructura y los
+  diagramas son proyecciones. <code>axon verify</code> falla cuando dejan de coincidir.</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Andrew-Tellez/axon/actions/workflows/ci.yml"><img src="https://github.com/Andrew-Tellez/axon/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <img src="https://img.shields.io/badge/dependencias%20en%20runtime-0-brightgreen" alt="cero dependencias">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
+</p>
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
+```
+
+Un binario. Sin runtime, sin Node, sin Python, sin JVM. Corre igual en tu laptop y en un contenedor de CI vacío.
+
+---
+
+## El problema
+
+Preguntá en cualquier equipo con veinte microservicios: *¿quién consume este evento
+y qué se rompe si le cambio un campo?* La respuesta honesta es "hay que leer cinco
+repos". Los frameworks actuales no ayudan porque viven dentro de un lenguaje
+(NestJS, Spring, Micronaut) o son un runtime que hay que desplegar y operar (Dapr).
+
+Ninguno sabe que el `order.placed@v1` que emite un servicio en Go es el mismo que
+consume un servicio en Kotlin. Esa relación existe solo en la cabeza del equipo,
+hasta que alguien renuncia.
+
+## La idea
+
+Declarás el servicio una vez. Todo lo demás se deriva:
+
+```
+                     ┌─ axon build      código: contratos + clase base
+                     ├─ axon test       pruebas: unitarias, integración, e2e
+                     ├─ axon openapi    OpenAPI 3.1 de toda la plataforma
+                     ├─ axon infra      IaC: local · gcp · aws · k8s
+manifiesto.toml ─────┼─ axon ci         pipeline con los gates que importan
+                     ├─ axon graph      topología de eventos
+   fuente de verdad  ├─ axon classes    diagrama de clases
+                     ├─ axon er         entidad-relación (de las migraciones)
+                     ├─ axon seq        flujo causal esperado
+                     ├─ axon trace      flujo causal REAL (debug local)
+                     ├─ axon discover   registro de servicios y métodos
+                     └─ axon verify     drift: falla en CI
+```
+
+Nada de eso se edita a mano. Si el diagrama no coincide con el código, no es que el
+diagrama esté viejo: es que alguien rompió el manifiesto, y CI lo dice antes del merge.
+
+## El manifiesto
+
+```toml
+service = "payments"
+version = "1.2.0"
+owner   = "equipo-pagos"     # gobernanza: nada sin dueño
+tier    = "0"                # criticidad: decide SLO y alertas
+
+[emits."payment.captured@v1"]        # dominio.hecho@versión, siempre
+paymentId = "uuid"
+amount    = "money"
+
+[consumes."order.placed@v1"]
+handler = "onOrderPlaced"
+
+[methods.capturePayment]
+http       = "POST /v1/payments"
+idempotent = true                    # obligatorio si muta
+in  = { orderId = "uuid", amount = "money" }
+out = { paymentId = "uuid" }
+
+[[depends]]
+service    = "orders"
+method     = "getOrder"
+timeout_ms = 1000                    # obligatorio: sin presupuesto, no hay llamada
+retries    = 3
+breaker    = true
+
+[patterns]
+outbox = true
+
+[infra]
+state      = "postgres"
+migrations = "sql/payments/"
+secrets    = ["STRIPE_API_KEY"]
+
+[env.prod]                           # los entornos son deltas, no copias
+min_instances = 3
+```
+
+Tipos: `string int float bool timestamp uuid json money`. `money` es un tipo propio
+a propósito — un `float` para dinero es un bug esperando su turno.
+
+## Patrones: declarados, no recordados
+
+Un patrón que hay que acordarse de aplicar no es un patrón: es una convención que
+alguien va a romper a las 3am. En axon el patrón se declara y el compilador lo emite.
+Si no está en el código generado, no está.
+
+| Patrón | Se declara | Qué produce |
+| --- | --- | --- |
+| **Transactional outbox** | `[patterns] outbox = true` | Los emisores escriben en el outbox; `bus.publish` **desaparece** del código generado. Adiós dual-write. |
+| **Consumidor idempotente** | siempre | `dispatch()` deduplica por id de envelope antes de rutear. |
+| **Cadena causal** | siempre | `traceparent` + `correlationId` + `causationId` propagados por el emisor. |
+| **Dead letter** | siempre | Suscripción con DLQ en los cuatro targets. No hay forma de declarar un consumidor sin ella. |
+| **Database per service** | `[infra] state` | Una base por servicio, y `verify` bloquea cualquier FK que cruce el límite. |
+| **Circuit breaker / timeouts** | `[[depends]]` | `timeout_ms` obligatorio; reintentar algo no idempotente es un error. |
+| **Idempotency-Key** | `idempotent = true` | Header obligatorio en el OpenAPI de todo método mutante. |
+| **RFC 7807** | siempre | Un solo formato de error en toda la plataforma, con el `traceId` dentro. |
+| **Expand / migrate / contract** | nombre del archivo | Un `DROP` fuera de un `.contract.sql` es un error de `verify`. |
+
+Los patrones GoF viven un nivel abajo, en el código que escribe el equipo — para eso
+está [`gof-patterns`](https://github.com/Andrew-Tellez/patterns), en seis lenguajes.
+axon se ocupa de los **arquitectónicos**: los que cruzan procesos y que ninguna
+librería dentro de un lenguaje puede garantizar sola.
+
+## Trazabilidad desde el día uno
+
+Todo mensaje viaja en un envelope CloudEvents extendido con la cadena causal:
+
+```json
+{ "id": "…", "type": "payment.captured@v1", "source": "payments",
+  "traceparent": "00-4bf92f…-00f067…-01",
+  "correlationId": "…",   // estable en todo el flujo de negocio
+  "causationId":   "…" }  // el mensaje que provocó este
+```
+
+El emisor generado recibe el mensaje causante y propaga la cadena. No hay forma de
+publicar un evento huérfano sin salirse del framework. Y como el `causationId` ya
+está ahí, el debug local no necesita colector ni dashboard:
+
+```console
+$ axon trace .axon/local.ndjson
+flujo c1
+└─ order.placed@v1 <- orders
+   └─ payment.captured@v1 <- payments
+      └─ receipt.sent@v1 <- billing
+```
+
+`axon seq` da el flujo **esperado**; `axon trace --seq` da el **real**. Diferenciarlos
+es un test de e2e de una línea.
+
+## Agnóstico del cloud
+
+El manifiesto no menciona ningún proveedor. `axon infra` produce primero un **plan
+neutral** y después lo renderiza:
+
+| Target | Qué genera |
+| --- | --- |
+| `local` | `docker compose`: Postgres por servicio, NATS JetStream, migraciones aplicadas |
+| `gcp` | Terraform: Pub/Sub, DLQ, Cloud SQL, Secret Manager |
+| `aws` | Terraform: SNS + SQS con redrive, RDS, Secrets Manager |
+| `k8s` | Knative Eventing (Broker/Trigger) + External Secrets — corre en cualquier cluster |
+| `plan` | El plan neutral en JSON, para renderizarlo vos mismo |
+
+**Local es un target más, no un subsistema aparte.** Por eso local y producción no
+pueden divergir: salen de la misma declaración.
+
+```sh
+axon infra manifests/ --target local > axon.local.yml
+docker compose -f axon.local.yml up -d --wait   # postgres + broker + migraciones
+```
+
+## Gobernanza
+
+`axon.policy.toml`, versionado junto al código:
+
+```toml
+require_owner          = true
+require_tier           = true
+allowed_event_prefixes = ["order", "payment", "billing"]
+max_deps_per_service   = 7    # si lo pasás, es un monolito distribuido
+```
+
+Lo que `axon verify` bloquea hoy:
+
+| Chequeo | |
+| --- | --- |
+| Se consume un evento que nadie emite | error |
+| Dos emisores del mismo evento con esquemas distintos | error |
+| Se llama un método que el otro servicio no expone | error |
+| Dependencia sin `timeout_ms` | error |
+| Reintentos sobre un método no idempotente | error |
+| Ruta HTTP sin versión, o duplicada entre servicios | error |
+| Método mutante sin `idempotent` | error |
+| FK que cruza el límite de un servicio | error |
+| Migración destructiva sin `.contract.sql` | error |
+| Servicio sin `owner` o sin `tier` | error |
+| Evento sin consumidores · reintentos sin breaker · demasiadas deps síncronas | aviso |
+
+## Plugins
+
+Un plugin es **cualquier ejecutable en el `PATH` llamado `axon-*`**. Recibe JSON por
+stdin, escribe por stdout. Sin ABI, sin cargar librerías, sin versiones que casen:
+el modelo de `git` y de `protoc`. Puede ser un binario de Go o tres líneas de shell.
+
+| Clase | Se invoca con | Recibe | Devuelve |
+| --- | --- | --- | --- |
+| `axon-gen-<lang>` | `axon build --lang go` | el manifiesto | código fuente |
+| `axon-infra-<target>` | `axon infra --target pulumi` | el plan neutral | IaC |
+| `axon-check-<regla>` | `axon verify` (todos, siempre) | todos los manifiestos | `[{level, message}]` |
+
+Una regla de gobernanza propia, completa:
+
+```sh
+#!/bin/sh
+# axon-check-nombres — ningún servicio se llama "service" o "api"
+jq -c '[.[] | select(.service|test("^(service|api)$"))
+        | {level:"error", message:("\(.service): nombre genérico prohibido")}]'
+```
+
+```console
+$ chmod +x axon-check-nombres && mv axon-check-nombres ~/.local/bin/
+$ axon verify manifests/
+error: [axon-check-nombres] api: nombre generico prohibido
+```
+
+Bloquea el pipeline exactamente igual que una regla nativa. Un `axon-gen-<lang>` es
+la forma soportada de agregar un lenguaje: axon trae TS nativo y no pretende traer
+los demás.
+
+## Estado
+
+Preview. La superficie de comandos es estable; el formato del manifiesto todavía puede
+cambiar antes de `v1`.
+
+Saltado a propósito, y cuándo agregarlo:
+
+- **Un generador nativo (TS)** — los demás por plugin, hasta que haya un segundo
+  servicio real en otro lenguaje que justifique traerlo al core.
+- **`verify` compara declaraciones, no el cloud desplegado** — el drift contra el
+  state de Terraform llega cuando haya algo desplegado que verificar.
+- **Sin runtime propio** — `Bus`, `Inbox` y `Outbox` son interfaces de una línea; el
+  adaptador lo pone quien despliega. Un paquete runtime cuando el mismo adaptador se
+  repita en tres servicios.
+
+## Desarrollo
+
+```sh
+cargo test --release      # 8 checks de conformidad
+cargo run -- verify examples
+```
+
+[Diseño y decisiones](DESIGN.md) · [Referencia de comandos](docs/cli.md) · MIT

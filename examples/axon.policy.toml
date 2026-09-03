@@ -1,0 +1,5 @@
+# Gobernanza del equipo, versionada. `axon verify` la aplica.
+require_owner = true
+require_tier = true
+allowed_event_prefixes = ["order", "payment", "billing"]
+max_deps_per_service = 7

@@ -1,4 +1,6 @@
 service = "orders"
+owner = "equipo-comercio"
+tier = "1"
 version = "1.0.0"
 transport = "pubsub"
 
@@ -8,14 +10,24 @@ customerId = "uuid"
 total = "money"
 
 [methods.getOrder]
+http = "GET /v1/orders/{orderId}"
 in = { orderId = "uuid" }
 out = { orderId = "uuid", status = "string", total = "money" }
 
 [[depends]]
 service = "payments"
 method = "capturePayment"
+timeout_ms = 3000
+retries = 2
+breaker = true
 
 [infra]
 state = "postgres"
 migrations = "sql/orders/"
-runtime = "cloudrun"
+runtime = "container"
+
+[env.staging]
+min_instances = 0
+
+[env.prod]
+min_instances = 2
