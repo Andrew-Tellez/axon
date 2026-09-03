@@ -191,20 +191,24 @@ es un test de e2e de una línea.
 El manifiesto no menciona ningún proveedor. `axon infra` produce primero un **plan
 neutral** y después lo renderiza:
 
-| Target | Qué genera |
-| --- | --- |
-| `local` | `docker compose`: Postgres por servicio, NATS JetStream, migraciones aplicadas |
-| `gcp` | Terraform: Pub/Sub, DLQ, Cloud SQL, Secret Manager |
-| `aws` | Terraform: SNS + SQS con redrive, RDS, Secrets Manager |
-| `k8s` | Knative Eventing (Broker/Trigger) + External Secrets — corre en cualquier cluster |
-| `plan` | El plan neutral en JSON, para renderizarlo vos mismo |
+| Target | Mensajería | Cómputo | Estado y secretos |
+| --- | --- | --- | --- |
+| `local` | NATS JetStream | tus servicios con `build:` | Postgres por servicio + migraciones aplicadas |
+| `gcp` | Pub/Sub con push y DLQ | Cloud Run + service account | Cloud SQL + Secret Manager |
+| `aws` | SNS → SQS con redrive | ECS Fargate + autoscaling | RDS + Secrets Manager |
+| `k8s` | Knative Broker/Trigger | Deployment + Service + HPA | External Secrets |
+| `plan` | — | — | El plan neutral en JSON, para renderizarlo vos mismo |
+
+Cada target despliega el sistema completo: la suscripción entrega a un workload que
+existe, y el secreto llega a la variable de entorno del contenedor. La imagen es lo
+único que no se declara — cambia en cada deploy, así que sale como variable del IaC.
 
 **Local es un target más, no un subsistema aparte.** Por eso local y producción no
 pueden divergir: salen de la misma declaración.
 
 ```sh
 axon infra manifests/ --target local > axon.local.yml
-docker compose -f axon.local.yml up -d --wait   # postgres + broker + migraciones
+docker compose -f axon.local.yml up -d --wait   # broker + postgres + migraciones + tus servicios
 ```
 
 ## Gobernanza
@@ -274,6 +278,9 @@ Saltado a propósito, y cuándo agregarlo:
 
 - **Un generador nativo (TS)** — los demás por plugin, hasta que haya un segundo
   servicio real en otro lenguaje que justifique traerlo al core.
+- **Un solo modelo de ejecución (`container`)** — cualquier otro valor de `runtime` es
+  un error de `verify`, no un campo ignorado en silencio. Otro modelo entra por un
+  `axon-infra-*`.
 - **`verify` compara declaraciones, no el cloud desplegado** — el drift contra el
   state de Terraform llega cuando haya algo desplegado que verificar.
 - **Sin runtime propio** — `Bus`, `Inbox` y `Outbox` son interfaces de una línea; el

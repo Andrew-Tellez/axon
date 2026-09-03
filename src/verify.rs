@@ -55,6 +55,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 m.service
             ));
         }
+        match m.infra.runtime.as_deref() {
+            None | Some("container") => {}
+            Some(other) => errors.push(format!(
+                "{}: `runtime = \"{other}\"` no existe; hoy solo hay `container`. \
+                 Otro modelo de ejecucion se agrega con un `axon-infra-*`",
+                m.service
+            )),
+        }
         if m.depends.len() > pol.max_deps_per_service {
             warnings.push(format!(
                 "{}: {} dependencias sincronas (limite {}); revisa si algo deberia ser un evento",

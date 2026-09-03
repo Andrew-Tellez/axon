@@ -62,6 +62,50 @@ fn el_mismo_plan_en_cuatro_targets() {
 }
 
 #[test]
+fn todos_los_targets_despliegan_el_workload() {
+    // sin esto la IaC deja topics y bases sin nada que corra el codigo
+    for (target, marca) in [
+        ("local", "build: ./services/payments"),
+        (
+            "gcp",
+            "resource \"google_cloud_run_v2_service\" \"payments\"",
+        ),
+        ("aws", "resource \"aws_ecs_service\" \"payments\""),
+        ("k8s", "kind: Deployment"),
+    ] {
+        let (out, _, _) = axon(&["infra", "examples", "--target", target]);
+        assert!(out.contains(marca), "{target} no despliega el workload");
+    }
+    // y la entrega llega a alguien: nada de suscripciones al vacio
+    let (gcp, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    assert!(gcp.contains("push_endpoint = google_cloud_run_v2_service.payments.uri"));
+    let (k, _, _) = axon(&["infra", "examples", "--target", "k8s"]);
+    assert!(
+        k.contains("kind: Service\nmetadata:\n  name: payments"),
+        "el Trigger apunta a un Service inexistente"
+    );
+    // el secreto llega al contenedor, no solo al vault
+    assert!(gcp.contains("STRIPE_API_KEY"));
+    let (loc, _, _) = axon(&["infra", "examples", "--target", "local"]);
+    assert!(loc.contains("DATABASE_URL: postgres://postgres:local@db-payments"));
+}
+
+#[test]
+fn runtime_desconocido_no_se_ignora() {
+    let dir = std::env::temp_dir().join("axon-runtime");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("r.toml"),
+        "service = \"r\"\nowner = \"x\"\ntier = \"2\"\n[infra]\nruntime = \"lambda\"\n",
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("solo hay `container`"), "{err}");
+}
+
+#[test]
 fn entornos_son_deltas() {
     let (prod, _, _) = axon(&["infra", "examples", "--target", "plan", "--env", "prod"]);
     let (stg, _, _) = axon(&["infra", "examples", "--target", "plan", "--env", "staging"]);
@@ -125,7 +169,10 @@ method = "charge"
 #[test]
 fn maquinas_de_estado() {
     let (ts, _, _) = axon(&["build", "examples/payments.toml"]);
-    assert!(ts.contains(r#"export type PaymentState = "pending" | "captured" | "failed" | "refunded""#), "{ts}");
+    assert!(
+        ts.contains(r#"export type PaymentState = "pending" | "captured" | "failed" | "refunded""#),
+        "{ts}"
+    );
     assert!(ts.contains("paymentNext(state: PaymentState"));
     let (d, _, _) = axon(&["states", "examples"]);
     assert!(d.contains("pending --> captured: capture"));
@@ -134,7 +181,9 @@ fn maquinas_de_estado() {
     let dir = std::env::temp_dir().join("axon-machine");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("m.toml"), r#"
+    std::fs::write(
+        dir.join("m.toml"),
+        r#"
 service = "m"
 owner = "x"
 tier = "2"
@@ -147,7 +196,9 @@ initial = "a"
 from = ["a"]
 to = "b"
 on = "fantasma"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
     assert!(err.contains("no es ni metodo ni evento consumido"), "{err}");

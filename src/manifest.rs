@@ -84,6 +84,9 @@ pub struct Infra {
     #[serde(default)]
     pub secrets: Vec<String>,
     pub min_instances: Option<u32>,
+    pub max_instances: Option<u32>,
+    /// Puerto HTTP del contenedor.
+    pub port: Option<u16>,
 }
 
 /// Una transicion. El QUE es portable a cualquier lenguaje; el COMO
