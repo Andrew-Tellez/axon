@@ -45,6 +45,8 @@ enum Cmd {
     Graph { sources: Vec<String> },
     /// manifiestos -> mermaid: diagrama de clases
     Classes { sources: Vec<String> },
+    /// maquinas de estado del dominio -> mermaid: stateDiagram
+    States { sources: Vec<String> },
     /// migraciones -> mermaid: entidad-relacion
     Er { sources: Vec<String> },
     /// flujo causal de un evento -> mermaid: secuencia
@@ -132,6 +134,9 @@ fn run() -> Result<ExitCode, String> {
         Cmd::Graph { sources } => println!("{}", emit::build_graph(&manifest::discover(&sources)?)),
         Cmd::Classes { sources } => {
             println!("{}", emit::build_classes(&manifest::discover(&sources)?))
+        }
+        Cmd::States { sources } => {
+            println!("{}", emit::build_states(&manifest::discover(&sources)?))
         }
         Cmd::Er { sources } => println!("{}", emit::build_er(&manifest::discover(&sources)?)),
         Cmd::Seq { event, sources } => {

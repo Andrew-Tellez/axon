@@ -123,6 +123,38 @@ method = "charge"
 }
 
 #[test]
+fn maquinas_de_estado() {
+    let (ts, _, _) = axon(&["build", "examples/payments.toml"]);
+    assert!(ts.contains(r#"export type PaymentState = "pending" | "captured" | "failed" | "refunded""#), "{ts}");
+    assert!(ts.contains("paymentNext(state: PaymentState"));
+    let (d, _, _) = axon(&["states", "examples"]);
+    assert!(d.contains("pending --> captured: capture"));
+
+    // deadlock y disparador fantasma tienen que bloquear
+    let dir = std::env::temp_dir().join("axon-machine");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("m.toml"), r#"
+service = "m"
+owner = "x"
+tier = "2"
+[methods.go]
+in = { a = "int" }
+out = { b = "int" }
+[machine.thing]
+initial = "a"
+[machine.thing.transitions.t1]
+from = ["a"]
+to = "b"
+on = "fantasma"
+"#).unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("no es ni metodo ni evento consumido"), "{err}");
+    assert!(err.contains("deadlock"), "{err}");
+}
+
+#[test]
 fn openapi_exige_idempotency_key() {
     let (json, _, _) = axon(&["openapi", "examples"]);
     assert!(json.contains("Idempotency-Key"));

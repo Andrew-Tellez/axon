@@ -139,6 +139,9 @@ pub fn build_ts(m: &Manifest) -> String {
     }
     cls.push("}\n".into());
     out.push(cls.join("\n"));
+    if !m.machine.is_empty() {
+        out.push(machines_ts(m));
+    }
     out.join("\n")
 }
 
@@ -409,4 +412,78 @@ fn walk(
         }
         out.push(format!("  deactivate {dst}"));
     }
+}
+
+// ---------- maquinas de estado ----------
+
+/// Tabla de transiciones exhaustiva y tipada. Un estado ilegal no compila
+/// donde el lenguaje lo permite, y falla ruidosamente donde no.
+pub fn machines_ts(m: &Manifest) -> String {
+    let mut o = Vec::new();
+    for (name, mac) in &m.machine {
+        let p = pascal(name);
+        let states: Vec<String> = mac.states().iter().map(|s| format!("\"{s}\"")).collect();
+        let actions: Vec<String> = mac.transitions.keys().map(|a| format!("\"{a}\"")).collect();
+        o.push(format!("export type {p}State = {};", states.join(" | ")));
+        o.push(format!("export type {p}Action = {};", actions.join(" | ")));
+        o.push(format!(
+            "export const {}Final: readonly {p}State[] = [{}];",
+            camel(name),
+            mac.final_states
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        o.push(format!(
+            "/** Transiciones declaradas en el manifiesto. Generado: no editar. */\n\
+             export const {}Transitions: Record<{p}Action, {{ from: readonly {p}State[]; to: {p}State; on: string }}> = {{",
+            camel(name)
+        ));
+        for (act, t) in &mac.transitions {
+            o.push(format!(
+                "  {act}: {{ from: [{}], to: \"{}\", on: \"{}\" }},",
+                t.from
+                    .iter()
+                    .map(|f| format!("\"{f}\""))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                t.to,
+                t.on
+            ));
+        }
+        o.push("};".into());
+        o.push(format!(
+            "export function {c}Next(state: {p}State, action: {p}Action): {p}State {{\n  \
+             const t = {c}Transitions[action];\n  \
+             if (!t.from.includes(state)) throw new Error(`{name}: ${{action}} no es legal desde ${{state}}`);\n  \
+             return t.to;\n}}",
+            c = camel(name)
+        ));
+        o.push(format!(
+            "export const {c}Can = (state: {p}State, action: {p}Action) => {c}Transitions[action].from.includes(state);",
+            c = camel(name)
+        ));
+    }
+    o.join("\n")
+}
+
+pub fn build_states(ms: &[Manifest]) -> String {
+    let mut o = vec!["stateDiagram-v2".to_string()];
+    for m in ms {
+        for (name, mac) in &m.machine {
+            o.push(format!("  state \"{}·{name}\" as {name} {{", m.service));
+            o.push(format!("    [*] --> {}", mac.initial));
+            for (act, t) in &mac.transitions {
+                for f in &t.from {
+                    o.push(format!("    {f} --> {}: {act}", t.to));
+                }
+            }
+            for f in &mac.final_states {
+                o.push(format!("    {f} --> [*]"));
+            }
+            o.push("  }".into());
+        }
+    }
+    o.join("\n")
 }

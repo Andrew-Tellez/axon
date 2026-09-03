@@ -18,6 +18,12 @@ idempotent = true
 in = { orderId = "uuid", amount = "money" }
 out = { paymentId = "uuid" }
 
+[methods.refundPayment]
+http = "POST /v1/payments/{paymentId}/refunds"
+idempotent = true
+in = { paymentId = "uuid" }
+out = { paymentId = "uuid", status = "string" }
+
 [[depends]]
 service = "orders"
 method = "getOrder"
@@ -47,3 +53,25 @@ min_instances = 0
 
 [env.prod]
 min_instances = 3
+
+# La unica logica de negocio que vale la pena declarar: la misma en todo lenguaje.
+[machine.payment]
+initial = "pending"
+final = ["refunded", "failed"]
+
+[machine.payment.transitions.capture]
+from = ["pending"]
+to = "captured"
+on = "capturePayment"
+emits = "payment.captured@v1"
+
+[machine.payment.transitions.fail]
+from = ["pending"]
+to = "failed"
+on = "capturePayment"
+
+[machine.payment.transitions.refund]
+from = ["captured"]
+to = "refunded"
+on = "refundPayment"
+compensates = "capture"

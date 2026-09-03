@@ -53,6 +53,7 @@ desplegada.
 | `axon graph <fuentes>` | manifiestos | topología de eventos |
 | `axon classes <fuentes>` | manifiestos | diagrama de clases |
 | `axon er <fuentes>` | migraciones | entidad-relación |
+| `axon states <fuentes>` | `[machine.*]` | máquinas de estado del dominio |
 | `axon seq <evento> <fuentes>` | cadena causal declarada | secuencia esperada |
 
 Todos emiten Mermaid. GitHub los renderiza en un bloque ` ```mermaid `.

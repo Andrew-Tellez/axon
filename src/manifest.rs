@@ -86,6 +86,51 @@ pub struct Infra {
     pub min_instances: Option<u32>,
 }
 
+/// Una transicion. El QUE es portable a cualquier lenguaje; el COMO
+/// (el cuerpo del handler) lo escribe la persona, siempre.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Transition {
+    pub from: Vec<String>,
+    pub to: String,
+    /// Metodo o evento que la dispara.
+    pub on: String,
+    /// Evento que se emite al completarla.
+    pub emits: Option<String>,
+    /// Transicion inversa, para sagas: que deshace este paso.
+    pub compensates: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Machine {
+    pub initial: String,
+    #[serde(default, rename = "final")]
+    pub final_states: Vec<String>,
+    #[serde(default)]
+    pub transitions: IndexMap<String, Transition>,
+}
+
+impl Machine {
+    pub fn states(&self) -> Vec<String> {
+        let mut s = vec![self.initial.clone()];
+        for t in self.transitions.values() {
+            for f in &t.from {
+                if !s.contains(f) {
+                    s.push(f.clone());
+                }
+            }
+            if !s.contains(&t.to) {
+                s.push(t.to.clone());
+            }
+        }
+        for f in &self.final_states {
+            if !s.contains(f) {
+                s.push(f.clone());
+            }
+        }
+        s
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Manifest {
     pub service: String,
@@ -105,6 +150,10 @@ pub struct Manifest {
     pub depends: Vec<Depend>,
     #[serde(default)]
     pub patterns: Patterns,
+    /// Maquinas de estado del dominio: la unica logica de negocio que vale
+    /// la pena declarar, porque es la misma en todos los lenguajes.
+    #[serde(default)]
+    pub machine: IndexMap<String, Machine>,
     #[serde(default)]
     pub infra: Infra,
     /// Overrides por entorno: `[env.prod] min_instances = 3`.

@@ -118,6 +118,48 @@ está [`gof-patterns`](https://github.com/Andrew-Tellez/patterns), en seis lengu
 axon se ocupa de los **arquitectónicos**: los que cruzan procesos y que ninguna
 librería dentro de un lenguaje puede garantizar sola.
 
+## Qué se declara y qué no
+
+La lógica de negocio la escribe la persona. Siempre. Un manifiesto que intente
+expresar *todo* el comportamiento termina siendo un lenguaje de programación nuevo
+y peor que los seis a los que compila — es exactamente donde murieron MDA, Rational
+Rose y el low-code.
+
+Pero hay una franja que **sí** es idéntica en todos los lenguajes y que hoy vive
+dispersa en `if`s: **las reglas de decisión, no la implementación.**
+
+```toml
+[machine.payment]
+initial = "pending"
+final   = ["refunded", "failed"]
+
+[machine.payment.transitions.capture]
+from  = ["pending"]
+to    = "captured"
+on    = "capturePayment"           # el método que la dispara
+emits = "payment.captured@v1"      # el evento que sale al completarla
+
+[machine.payment.transitions.refund]
+from        = ["captured"]
+to          = "refunded"
+on          = "refundPayment"
+compensates = "capture"            # la inversa, para sagas
+```
+
+`axon build` genera la tabla de transiciones exhaustiva y tipada — `PaymentState`,
+`paymentCan()`, `paymentNext()` que revienta ante una transición ilegal. `axon states`
+la dibuja. Y `axon verify` **prueba propiedades sobre ella** antes del merge:
+
+- un estado inalcanzable desde el inicial
+- un estado no final sin salida — un deadlock, encontrado en CI y no en producción
+- una transición disparada por un método o evento que no existe
+- una transición que emite un evento que el servicio no declara emitir
+- una compensación que apunta a un paso inexistente
+
+**El qué es portable; el cómo no.** El cuerpo de `capturePayment` — cobrar en Stripe,
+decidir si falla, escribir la fila — es tuyo, en tu lenguaje, en un `extends` de la
+clase generada. axon se queda con la parte que se puede verificar.
+
 ## Trazabilidad desde el día uno
 
 Todo mensaje viaja en un envelope CloudEvents extendido con la cadena causal:

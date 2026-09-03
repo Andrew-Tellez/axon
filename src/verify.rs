@@ -122,6 +122,77 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // maquinas de estado: estados muertos, inalcanzables y disparadores fantasma
+    for m in ms.iter().filter(|m| !m.external) {
+        for (name, mac) in &m.machine {
+            let states = mac.states();
+            if !states.contains(&mac.initial) {
+                errors.push(format!(
+                    "{}.{name}: estado inicial `{}` no aparece en ninguna transicion",
+                    m.service, mac.initial
+                ));
+            }
+            // alcanzabilidad desde el inicial
+            let mut reach = vec![mac.initial.clone()];
+            let mut grew = true;
+            while grew {
+                grew = false;
+                for t in mac.transitions.values() {
+                    if t.from.iter().any(|f| reach.contains(f)) && !reach.contains(&t.to) {
+                        reach.push(t.to.clone());
+                        grew = true;
+                    }
+                }
+            }
+            for st in &states {
+                if !reach.contains(st) {
+                    errors.push(format!(
+                        "{}.{name}: estado `{st}` inalcanzable desde `{}`",
+                        m.service, mac.initial
+                    ));
+                }
+                let sale = mac.transitions.values().any(|t| t.from.contains(st));
+                if !sale && !mac.final_states.contains(st) {
+                    errors.push(format!(
+                        "{}.{name}: `{st}` no es final y no tiene salida; es un deadlock",
+                        m.service
+                    ));
+                }
+            }
+            for (act, t) in &mac.transitions {
+                if !states.contains(&t.to) {
+                    errors.push(format!(
+                        "{}.{name}.{act}: destino `{}` desconocido",
+                        m.service, t.to
+                    ));
+                }
+                // el disparador tiene que existir de verdad
+                if !m.methods.contains_key(&t.on) && !m.consumes.contains_key(&t.on) {
+                    errors
+                        .push(format!(
+                        "{}.{name}.{act}: la dispara `{}`, que no es ni metodo ni evento consumido",
+                        m.service, t.on));
+                }
+                if let Some(ev) = &t.emits {
+                    if !m.emits.contains_key(ev) {
+                        errors.push(format!(
+                            "{}.{name}.{act}: emite `{ev}`, que el servicio no declara emitir",
+                            m.service
+                        ));
+                    }
+                }
+                if let Some(c) = &t.compensates {
+                    if !mac.transitions.contains_key(c) {
+                        errors.push(format!(
+                            "{}.{name}.{act}: compensa `{c}`, que no existe",
+                            m.service
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     let known: IndexMap<&str, &Manifest> = ms.iter().map(|m| (m.service.as_str(), m)).collect();
     for m in ms {
         let svc = &m.service;
