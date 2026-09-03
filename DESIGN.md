@@ -8,10 +8,26 @@ proyecciones de él.
 ```
 manifiesto.toml ─┬─ axon build --lang ts   → contratos + clase base (envelope, handlers, emisores)
                  ├─ axon infra             → terraform (topics, subs, DLQ, DB, secretos)
-                 ├─ axon graph             → mermaid de la topología real
+                 ├─ axon graph             → mermaid: topología de eventos
+                 ├─ axon classes           → mermaid: diagrama de clases
+                 ├─ axon er                → mermaid: entidad-relación (desde las migraciones)
+                 ├─ axon seq <evento>      → mermaid: flujo causal esperado
                  ├─ axon discover          → registro de servicios y sus métodos (local o en vivo)
                  └─ axon verify            → drift: falla en CI cuando dejan de coincidir
 ```
+
+## Diagramas
+
+Ninguno se dibuja a mano y ninguno introduce una fuente de verdad nueva:
+
+- **Clases** (`axon classes`) — proyección directa del manifiesto: servicios, eventos como
+  clases, handlers, emisores, dependencias síncronas, y qué patrones implementa cada uno.
+- **ER** (`axon er`) — se **introspecta** de las migraciones, no se declara. Meter columnas
+  en el manifiesto sería el problema del dual-write disfrazado de documentación. El
+  manifiesto solo aporta lo que las migraciones no saben: de qué servicio es cada tabla.
+- **Secuencia** (`axon seq order.placed@v1`) — recorre la cadena causal declarada: quién
+  consume, a quién llama, qué emite después. Es el flujo *esperado*; el `causationId` de
+  los envelopes reales dice el que ocurrió. Diferenciarlos es el siguiente chequeo de drift.
 
 ## Por qué existe
 
@@ -58,6 +74,33 @@ está [`gof-patterns`](https://github.com/Andrew-Tellez/patterns), en los seis l
 axon no los reimplementa: se ocupa de los patrones *arquitectónicos*, los que cruzan
 procesos y que ninguna librería dentro de un lenguaje puede garantizar sola.
 
+## Migraciones
+
+axon **no** es una herramienta de migraciones — Flyway, Alembic y golang-migrate ya
+existen y son mejores en eso. Lo que axon hace es tratarlas como la fuente de verdad
+del esquema y verificar lo que ellas no pueden ver:
+
+```toml
+[infra]
+migrations = "sql/payments/"
+```
+
+```
+sql/payments/
+  001_payment.expand.sql       expand:   aditivo, compatible hacia atrás
+  002_provider_ref.expand.sql  expand:   columna nueva nullable
+  003_drop_legacy.contract.sql contract: destructivo, y lo dice en el nombre
+```
+
+- El esquema es la suma de las migraciones plegadas en orden. No hay un `schema.sql`
+  duplicado que se desincronice; el ER sale de aquí.
+- **Expand → migrate → contract** es obligatorio, no una recomendación: una migración
+  con `DROP` que no se llame `.contract.sql` es un error de `verify`. Desplegar un
+  destructivo junto al código que deja de usar la columna rompe el rollback.
+- **Ninguna FK cruza el límite de un servicio.** `verify` lo bloquea: se guarda el id,
+  y la consistencia entre servicios se resuelve con eventos, no con el motor de la base.
+- Prefijo numérico obligatorio, o el orden no es determinista.
+
 ## Verificación de drift
 
 `axon verify` es lo que convierte el manifiesto en algo más que documentación:
@@ -68,6 +111,9 @@ procesos y que ninguna librería dentro de un lenguaje puede garantizar sola.
 | Dos servicios emiten el mismo evento con esquemas distintos | error |
 | Se depende de un método que el otro servicio no expone | error |
 | Se emite un evento sin consumidores | aviso |
+| FK que cruza el límite de un servicio | error |
+| Migración destructiva sin marcar `.contract.sql` | error |
+| Migración sin prefijo numérico | aviso |
 
 En CI, contra los manifiestos vivos (`axon verify https://orders/... https://payments/...`),
 compara lo declarado con lo desplegado.

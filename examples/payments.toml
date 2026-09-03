@@ -24,6 +24,7 @@ method = "charges.create"
 
 [infra]
 state = "postgres"
+migrations = "sql/payments/"
 runtime = "cloudrun"
 min_instances = 1
 secrets = ["STRIPE_API_KEY"]

@@ -51,6 +51,45 @@ def test_infra_derives_dlq_and_secrets():
     assert "payments-stripe-api-key" in tf
     assert "payments-outbox-relay" in tf
 
+def test_diagrams():
+    ms = axon.load_dir("examples")
+    cls = axon.build_classes(ms)
+    assert "+onOrderPlaced(Envelope~OrderPlacedV1~) void" in cls
+    assert "PaymentsService ..|> Outbox" in cls
+
+    er = axon.build_er(ms)
+    assert "ORDER ||--o{ ORDER_ITEM : order_id" in er
+    assert "text provider_ref" in er        # ADD COLUMN plegado
+    assert "currency" not in er             # DROP COLUMN plegado
+
+    seq = axon.build_seq(ms, "order.placed@v1")
+    assert "orders->>payments: order.placed@v1" in seq
+    assert "charges.create (externo)" in seq
+    assert "causationId" in seq
+
+def test_migration_checks(tmp=None):
+    import pathlib as _p
+    d = _p.Path("examples/sql/payments")
+    bad = d / "004_oops.sql"
+    bad.write_text("ALTER TABLE payment DROP COLUMN status;\n")
+    try:
+        errors, warns = axon.verify(axon.load_dir("examples"))
+        assert any("sin marcar" in e for e in errors), errors
+    finally:
+        bad.unlink()
+
+    # FK que cruza el limite de servicio
+    ms = axon.load_dir("examples")
+    f = d / "005_fk.expand.sql"
+    f.write_text('ALTER TABLE payment ADD COLUMN o uuid;\n'
+                 'CREATE TABLE refund (\n  id uuid PRIMARY KEY,\n'
+                 '  order_id uuid REFERENCES "order"(id)\n);\n')
+    try:
+        errors, _ = axon.verify(axon.load_dir("examples"))
+        assert any("cruza el limite" in e for e in errors), errors
+    finally:
+        f.unlink()
+
 def test_discover_registry():
     reg = axon.registry(axon.load_dir("examples"))
     assert reg["stripe"]["external"] and "charges.create" in reg["stripe"]["methods"]

@@ -17,4 +17,5 @@ method = "capturePayment"
 
 [infra]
 state = "postgres"
+migrations = "sql/orders/"
 runtime = "cloudrun"
