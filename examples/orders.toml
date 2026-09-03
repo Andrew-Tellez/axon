@@ -1,0 +1,20 @@
+service = "orders"
+version = "1.0.0"
+transport = "pubsub"
+
+[emits."order.placed@v1"]
+orderId = "uuid"
+customerId = "uuid"
+total = "money"
+
+[methods.getOrder]
+in = { orderId = "uuid" }
+out = { orderId = "uuid", status = "string", total = "money" }
+
+[[depends]]
+service = "payments"
+method = "capturePayment"
+
+[infra]
+state = "postgres"
+runtime = "cloudrun"

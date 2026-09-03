@@ -1,0 +1,32 @@
+service = "payments"
+version = "1.2.0"
+transport = "pubsub"
+
+[emits."payment.captured@v1"]
+paymentId = "uuid"
+orderId = "uuid"
+amount = "money"
+
+[consumes."order.placed@v1"]
+handler = "onOrderPlaced"
+
+[methods.capturePayment]
+in = { orderId = "uuid", amount = "money" }
+out = { paymentId = "uuid" }
+
+[[depends]]
+service = "orders"
+method = "getOrder"
+
+[[depends]]
+external = "stripe"
+method = "charges.create"
+
+[infra]
+state = "postgres"
+runtime = "cloudrun"
+min_instances = 1
+secrets = ["STRIPE_API_KEY"]
+
+[patterns]
+outbox = true

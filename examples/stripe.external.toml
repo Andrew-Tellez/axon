@@ -1,0 +1,8 @@
+# Servicio externo: descubierto desde su OpenAPI, congelado aqui como contrato.
+service = "stripe"
+external = true
+discovered_from = "https://api.stripe.com/openapi.json"
+
+[methods."charges.create"]
+in = { amount = "int", currency = "string", source = "string" }
+out = { id = "string", status = "string" }
