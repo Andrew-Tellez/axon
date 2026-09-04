@@ -117,3 +117,19 @@ sticky_by = "tenant_id"
 [flags.cortar_stripe]
 owner = "equipo-pagos"
 kill_switch = true
+
+# Un flag no booleano: OpenFeature admite string, numero y objeto, y un rollout
+# de configuracion —un limite, un proveedor— necesita justamente eso.
+[flags.proveedor_de_cobro]
+owner = "equipo-pagos"
+expires = "2027-06-30"
+sticky_by = "tenant_id"
+rollout = 20
+default_variant = "stripe"
+variants = { stripe = "stripe", adyen = "adyen" }
+
+[flags.limite_de_reintentos]
+owner = "equipo-pagos"
+kill_switch = true
+default_variant = "normal"
+variants = { normal = 3, degradado = 0 }

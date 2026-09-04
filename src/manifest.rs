@@ -134,6 +134,16 @@ impl Cap {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Flag {
     pub owner: Option<String>,
+    /// Variantes, como en OpenFeature: un flag no es solo un booleano. El
+    /// valor puede ser bool, string, numero u objeto, y la evaluacion devuelve
+    /// el valor de una variante con nombre.
+    ///
+    /// Sin `variants`, el flag es el caso booleano y las variantes son `on` y
+    /// `off` — que es lo que necesita la mayoria y no vale la pena escribir.
+    #[serde(default)]
+    pub variants: IndexMap<String, serde_json::Value>,
+    /// Nombre de la variante por defecto. Con variantes propias es obligatorio.
+    pub default_variant: Option<String>,
     /// `YYYY-MM-DD`. Pasada esa fecha, `verify` falla: el flag se limpia o se
     /// renueva con una decision explicita.
     pub expires: Option<String>,
@@ -149,6 +159,43 @@ pub struct Flag {
     /// gradual, porque se apaga entero o no sirve.
     #[serde(default)]
     pub kill_switch: bool,
+}
+
+impl Flag {
+    /// Las variantes efectivas. Un flag sin `variants` es el caso booleano.
+    pub fn variantes(&self) -> IndexMap<String, serde_json::Value> {
+        if self.variants.is_empty() {
+            let mut v = IndexMap::new();
+            v.insert("on".into(), serde_json::Value::Bool(true));
+            v.insert("off".into(), serde_json::Value::Bool(false));
+            v
+        } else {
+            self.variants.clone()
+        }
+    }
+
+    /// La variante por defecto, o la que corresponda al booleano `default`.
+    pub fn variante_defecto(&self) -> String {
+        self.default_variant.clone().unwrap_or_else(|| {
+            if self.default {
+                "on".into()
+            } else {
+                "off".into()
+            }
+        })
+    }
+
+    /// El tipo de OpenFeature que corresponde a los valores declarados.
+    /// Determina el accesor que se genera: `getBooleanValue`, `getStringValue`,
+    /// `getNumberValue` o `getObjectValue`.
+    pub fn tipo(&self) -> &'static str {
+        match self.variantes().values().next() {
+            Some(serde_json::Value::Bool(_)) | None => "boolean",
+            Some(serde_json::Value::String(_)) => "string",
+            Some(serde_json::Value::Number(_)) => "number",
+            _ => "object",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

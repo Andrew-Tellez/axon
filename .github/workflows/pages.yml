@@ -26,6 +26,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }   # los tags son la fuente de las versiones
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with: { tool: mdbook }
       - uses: actions/configure-pages@v5
 
       # El sitio se reconstruye entero desde git en cada deploy: la raiz es
@@ -34,16 +37,28 @@ jobs:
       - name: armar el sitio con todas las versiones
         run: |
           set -eu
+          mdbook build docs
           mkdir -p site
-          cp -R docs/. site/
+          cp -R docs/book/. site/
           versiones=""
+          trabajo=$(mktemp -d)
           for tag in $(git tag -l 'v*' --sort=-v:refname); do
-            if git cat-file -e "$tag:docs/index.html" 2>/dev/null; then
+            # una version anterior a mdBook servia un index.html suelto: se
+            # copia tal cual en vez de intentar construirla
+            if git cat-file -e "$tag:docs/book.toml" 2>/dev/null; then
+              rm -rf "$trabajo/docs"
+              git archive "$tag" docs | tar -x -C "$trabajo"
+              mdbook build "$trabajo/docs"
+              mkdir -p "site/$tag"
+              cp -R "$trabajo/docs/book/." "site/$tag/"
+            elif git cat-file -e "$tag:docs/index.html" 2>/dev/null; then
               mkdir -p "site/$tag"
               git archive "$tag" docs | tar -x --strip-components=1 -C "site/$tag"
-              versiones="$versiones \"$tag\","
-              echo "  $tag"
+            else
+              continue
             fi
+            versiones="$versiones \"$tag\","
+            echo "  $tag"
           done
           printf '{"actual":"main","versiones":[%s]}\n' \
             "\"main\",${versiones%,}" | sed 's/,]/]/' > site/versions.json

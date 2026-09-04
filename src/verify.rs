@@ -291,6 +291,36 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 )),
                 _ => {}
             }
+            // Una variante por defecto que no existe hace que la evaluacion
+            // caiga siempre al valor del codigo, y el flag deja de servir en
+            // silencio: se ve como "el rollout no hace nada".
+            let variantes = f.variantes();
+            let defecto = f.variante_defecto();
+            if !variantes.contains_key(&defecto) {
+                errors.push(format!(
+                    "{svc}.{nombre}: `default_variant = \"{defecto}\"` no esta en `variants` \
+                     ({}). La evaluacion caeria siempre al valor del codigo",
+                    variantes.keys().cloned().collect::<Vec<_>>().join(", ")
+                ));
+            }
+            // Mezclar tipos entre variantes rompe la evaluacion: OpenFeature
+            // resuelve un tipo por flag, no uno por variante.
+            let tipos: std::collections::BTreeSet<&str> = variantes
+                .values()
+                .map(|v| match v {
+                    serde_json::Value::Bool(_) => "boolean",
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Number(_) => "number",
+                    _ => "object",
+                })
+                .collect();
+            if tipos.len() > 1 {
+                errors.push(format!(
+                    "{svc}.{nombre}: las variantes mezclan tipos ({}). OpenFeature resuelve un \
+                     tipo por flag, no uno por variante",
+                    tipos.into_iter().collect::<Vec<_>>().join(", ")
+                ));
+            }
             if f.default && !f.kill_switch {
                 warnings.push(format!(
                     "{svc}.{nombre}: `default = true` en un flag que no es kill switch. Un flag \

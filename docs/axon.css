@@ -1,0 +1,28 @@
+/* Selector de versiones y aviso de version vieja. Lo minimo para que se
+   integren con el tema de mdBook en vez de pelearse con el. */
+select.axon-versiones {
+  font: inherit;
+  font-size: 0.8rem;
+  margin-left: 0.6rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid var(--theme-popup-border);
+  border-radius: 5px;
+  background: var(--theme-popup-bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+.axon-obsoleta {
+  border-left: 3px solid var(--warning-border, #d9bd6a);
+  background: var(--quote-bg);
+  padding: 0.6rem 1rem;
+  margin-bottom: 1.5rem;
+  font-size: 0.92em;
+}
+/* Las tablas de reglas son largas y estrechas: que respiren y no desborden. */
+.content table {
+  width: 100%;
+  display: table;
+}
+.content table td:last-child:not(:only-child) {
+  white-space: nowrap;
+}

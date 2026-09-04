@@ -1824,7 +1824,9 @@ fn los_flags_se_verifican() {
     // el codigo: el accesor exige el campo por el que se fija
     let (ts, _, _) = axon(&["build", "examples/payments.toml", "examples"]);
     assert!(
-        ts.contains("export const flagCobroV2 = (flags: Flags, tenant_id: string) =>"),
+        ts.contains(
+            "export const flagCobroV2 = (flags: Flags, tenant_id: string): Promise<boolean> =>"
+        ),
         "{ts}"
     );
     assert!(
@@ -1832,7 +1834,29 @@ fn los_flags_se_verifican() {
         "{ts}"
     );
     assert!(
-        ts.contains(r#"export const flagsDeclarados = ["cobro_v2", "cortar_stripe"]"#),
+        ts.contains(r#"export const flagsDeclarados = ["cobro_v2""#),
+        "{ts}"
+    );
+
+    // los cuatro tipos de OpenFeature: un flag no es solo un booleano, y un
+    // rollout de configuracion —un limite, un proveedor— necesita los otros
+    assert!(
+        ts.contains(
+            "export const flagProveedorDeCobro = (flags: Flags, tenant_id: string): Promise<string> =>"
+        ),
+        "sin accesor tipado para un flag de tipo string:\n{ts}"
+    );
+    assert!(
+        ts.contains(r#"flags.evaluar("proveedor_de_cobro", "stripe", "#),
+        "{ts}"
+    );
+    assert!(
+        ts.contains("export const flagLimiteDeReintentos = (flags: Flags): Promise<number> =>"),
+        "sin accesor tipado para un flag numerico:\n{ts}"
+    );
+    // la interfaz cubre los cuatro tipos del estandar
+    assert!(
+        ts.contains("evaluar<T extends boolean | string | number | object>"),
         "{ts}"
     );
 
@@ -1846,6 +1870,34 @@ fn los_flags_se_verifican() {
     assert_eq!(f["targeting"]["fractional"][2][1], 90);
     // un kill switch no lleva targeting
     assert!(v["flags"]["cortar_stripe"]["targeting"].is_null());
+
+    // y las variantes declaradas llegan a flagd tal cual, no un on/off fijo
+    let p = &v["flags"]["proveedor_de_cobro"];
+    assert_eq!(p["variants"]["stripe"], "stripe");
+    assert_eq!(p["variants"]["adyen"], "adyen");
+    assert_eq!(p["defaultVariant"], "stripe");
+    // el rollout reparte entre la variante por defecto y la otra
+    assert_eq!(p["targeting"]["fractional"][1][0], "adyen");
+    assert_eq!(p["targeting"]["fractional"][1][1], 20);
+    assert_eq!(p["targeting"]["fractional"][2][0], "stripe");
+    assert_eq!(v["flags"]["limite_de_reintentos"]["variants"]["normal"], 3);
+
+    // una variante por defecto inexistente hace que la evaluacion caiga
+    // siempre al valor del codigo, y el flag deja de servir en silencio
+    let (msg, ok) = probar(&format!(
+        "{base}[flags.raro]\nowner = \"e\"\nkill_switch = true\n\
+         default_variant = \"no_existe\"\nvariants = {{ a = \"x\" }}\n"
+    ));
+    assert!(!ok);
+    assert!(msg.contains("no esta en `variants`"), "{msg}");
+
+    // OpenFeature resuelve un tipo por flag, no uno por variante
+    let (msg, ok) = probar(&format!(
+        "{base}[flags.mezcla]\nowner = \"e\"\nkill_switch = true\n\
+         default_variant = \"a\"\nvariants = {{ a = \"x\", b = 2 }}\n"
+    ));
+    assert!(!ok);
+    assert!(msg.contains("mezclan tipos"), "{msg}");
 }
 
 /// `axon cap` no repite lo que bloquea `verify`: explica las consecuencias.
@@ -1919,6 +1971,81 @@ fn los_colores_respetan_el_destino() {
         String::from_utf8_lossy(&sin.stderr)
     );
     assert!(!todo.contains('\x1b'), "NO_COLOR no se respeto");
+}
+
+/// Los ejemplos de la documentacion no son texto: cada bloque ```toml de
+/// `docs/src/` se pasa por `axon verify`. Un ejemplo que no valida rompe CI,
+/// asi que la documentacion no puede quedar vieja en silencio — que es
+/// exactamente como queda toda documentacion.
+#[test]
+fn los_ejemplos_de_la_documentacion_validan() {
+    let dir = std::env::temp_dir().join("axon-docs");
+    let mut revisados = 0;
+    let mut paginas = 0;
+
+    for e in std::fs::read_dir("docs/src").expect("docs/src") {
+        let pagina = e.unwrap().path();
+        if pagina.extension().is_none_or(|x| x != "md") {
+            continue;
+        }
+        paginas += 1;
+        let texto = std::fs::read_to_string(&pagina).unwrap();
+        let nombre = pagina.file_name().unwrap().to_string_lossy().to_string();
+
+        // los bloques ```toml, en orden, con su numero de linea para el mensaje
+        let mut dentro = false;
+        let mut inicio = 0usize;
+        let mut bloque = String::new();
+        let mut bloques: Vec<(usize, String)> = Vec::new();
+        for (n, l) in texto.lines().enumerate() {
+            let t = l.trim();
+            if !dentro && (t == "```toml" || t.starts_with("```toml,")) {
+                dentro = true;
+                inicio = n + 1;
+                bloque.clear();
+            } else if dentro && t == "```" {
+                dentro = false;
+                bloques.push((inicio, std::mem::take(&mut bloque)));
+            } else if dentro {
+                bloque.push_str(l);
+                bloque.push('\n');
+            }
+        }
+
+        for (linea, cuerpo) in bloques {
+            // Un bloque sin `service` es un fragmento —una policy, un trozo de
+            // `[infra]`— y no un manifiesto: se le pone una cabecera minima
+            // para poder parsearlo igual.
+            let manifiesto = if cuerpo.contains("service = ") {
+                cuerpo.clone()
+            } else if cuerpo.trim_start().starts_with('[') || cuerpo.contains(" = ") {
+                format!("service = \"doc\"\nowner = \"docs\"\ntier = \"2\"\n{cuerpo}")
+            } else {
+                continue;
+            };
+
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("doc.toml"), &manifiesto).unwrap();
+            let (out, err, _) = axon(&["verify", dir.to_str().unwrap()]);
+            let salida = format!("{out}{err}");
+
+            // Lo que se comprueba es que el TOML sea valido y que el
+            // manifiesto se pueda cargar: un ejemplo puede fallar reglas a
+            // proposito, porque muchos ilustran justamente un error.
+            assert!(
+                !salida.contains("TOML parse error") && !salida.contains("falta `service`"),
+                "{nombre}:{linea}: el ejemplo no es un manifiesto valido:\n{salida}\n---\n{manifiesto}"
+            );
+            revisados += 1;
+        }
+    }
+    assert!(
+        paginas >= 10,
+        "solo se leyeron {paginas} paginas de docs/src"
+    );
+    assert!(revisados >= 10, "solo se revisaron {revisados} ejemplos");
+    eprintln!("{revisados} ejemplos de manifiesto en {paginas} paginas");
 }
 
 #[test]

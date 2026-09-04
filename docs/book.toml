@@ -1,0 +1,23 @@
+[book]
+title = "axon"
+description = "Compilador manifiesto-primero para microservicios event-driven"
+authors = ["Andrew Tellez"]
+language = "es"
+src = "src"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/Andrew-Tellez/axon"
+edit-url-template = "https://github.com/Andrew-Tellez/axon/edit/main/docs/{path}"
+additional-js = ["versiones.js"]
+additional-css = ["axon.css"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 20
+use-boolean-and = true

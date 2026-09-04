@@ -851,26 +851,60 @@ fn flags_ts(m: &Manifest) -> String {
     if m.flags.is_empty() {
         return String::new();
     }
+    // La interfaz cubre los cuatro tipos de OpenFeature. Un flag no es solo un
+    // booleano: el estandar admite string, numero y objeto, y un rollout de
+    // configuracion —un limite, un proveedor, un umbral— necesita justamente eso.
     let mut o = vec![
-        "\n/** Proveedor de flags. La forma es la de OpenFeature: `evaluar` recibe\n \
-         *  el nombre, el valor por defecto y el contexto por el que se fija. */\n\
+        "\n/** Proveedor de flags, con la forma de OpenFeature: `evaluar` recibe el\n \
+         *  nombre, el valor por defecto y el contexto por el que se fija. Los cuatro\n \
+         *  tipos del estandar, para que el SDK real encaje sin traduccion. */\n\
          export interface Flags {\n  \
-           evaluar(nombre: string, porDefecto: boolean, contexto: Record<string, string>): Promise<boolean>;\n\
+           evaluar<T extends boolean | string | number | object>(\n    \
+             nombre: string,\n    porDefecto: T,\n    contexto: Record<string, string>,\n  \
+           ): Promise<T>;\n\
          }\n"
-            .to_string(),
+        .to_string(),
     ];
     let mut nombres = Vec::new();
     for (nombre, f) in &m.flags {
         nombres.push(format!("\"{nombre}\""));
-        let ctx = f
-            .sticky_by
-            .as_ref()
-            .map(|c| {
-                format!(
-                    "/** Se fija por `{c}`: la misma entidad toma siempre el mismo camino. */\n"
-                )
-            })
-            .unwrap_or_default();
+        let variantes = f.variantes();
+        let defecto = f.variante_defecto();
+        let valor = variantes
+            .get(&defecto)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "false".into());
+        let tipo = match f.tipo() {
+            "boolean" => "boolean".to_string(),
+            "string" => "string".to_string(),
+            "number" => "number".to_string(),
+            // el tipo del objeto sale del propio valor por defecto declarado
+            _ => format!("typeof {}", camel(&format!("valor.{nombre}"))),
+        };
+        let mut doc = vec![format!("/** `{nombre}`: {} de OpenFeature.", f.tipo())];
+        if variantes.len() > 2 || !f.variants.is_empty() {
+            doc.push(format!(
+                " *  Variantes: {}.",
+                variantes
+                    .iter()
+                    .map(|(k, v)| format!("`{k}` = {v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(c) = &f.sticky_by {
+            doc.push(format!(
+                " *  Se fija por `{c}`: la misma entidad toma siempre el mismo camino."
+            ));
+        }
+        doc.push(" */".into());
+
+        if f.tipo() == "object" {
+            o.push(format!(
+                "const {} = {valor} as const;",
+                camel(&format!("valor.{nombre}"))
+            ));
+        }
         let firma = match &f.sticky_by {
             Some(c) => format!("(flags: Flags, {c}: string)"),
             None => "(flags: Flags)".to_string(),
@@ -879,11 +913,16 @@ fn flags_ts(m: &Manifest) -> String {
             Some(c) => format!("{{ targetingKey: {c}, {c} }}"),
             None => "{}".to_string(),
         };
+        let por_defecto = if f.tipo() == "object" {
+            camel(&format!("valor.{nombre}"))
+        } else {
+            valor.clone()
+        };
         o.push(format!(
-            "{ctx}export const {} = {firma} =>\n  \
-               flags.evaluar(\"{nombre}\", {}, {contexto});\n",
+            "{}\nexport const {} = {firma}: Promise<{tipo}> =>\n  \
+               flags.evaluar(\"{nombre}\", {por_defecto}, {contexto});\n",
+            doc.join("\n"),
             camel(&format!("flag.{nombre}")),
-            f.default,
         ));
     }
     o.push(format!(
@@ -901,14 +940,34 @@ pub fn build_flagd(ms: &[Manifest]) -> String {
     let mut flags = Vec::new();
     for m in ms.iter().filter(|m| !m.external) {
         for (nombre, f) in &m.flags {
-            let variantes = "{ \"on\": true, \"off\": false }";
-            let por_defecto = if f.default { "on" } else { "off" };
+            // Las variantes declaradas, no un on/off fijo: OpenFeature admite
+            // string, numero y objeto, y flagd los resuelve igual.
+            let variantes = format!(
+                "{{ {} }}",
+                f.variantes()
+                    .iter()
+                    .map(|(k, v)| format!("\"{k}\": {v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let por_defecto = f.variante_defecto();
             let objetivo = match (f.rollout, &f.sticky_by) {
-                (Some(p), Some(campo)) if p > 0 && p < 100 => format!(
-                    ",\n      \"targeting\": {{\n        \"fractional\": [\n          \
-                     {{ \"var\": \"{campo}\" }},\n          [\"on\", {p}],\n          [\"off\", {}]\n        ]\n      }}",
-                    100 - p
-                ),
+                (Some(p), Some(campo)) if p > 0 && p < 100 => {
+                    // el rollout reparte entre la variante por defecto y la
+                    // otra; con mas de dos variantes hay que declararlo a mano
+                    let destino = f
+                        .variantes()
+                        .keys()
+                        .find(|k| **k != por_defecto)
+                        .cloned()
+                        .unwrap_or_else(|| "on".into());
+                    format!(
+                        ",\n      \"targeting\": {{\n        \"fractional\": [\n          \
+                         {{ \"var\": \"{campo}\" }},\n          [\"{destino}\", {p}],\n          \
+                         [\"{por_defecto}\", {}]\n        ]\n      }}",
+                        100 - p
+                    )
+                }
                 _ => String::new(),
             };
             flags.push(format!(

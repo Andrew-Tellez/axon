@@ -8,9 +8,9 @@ Un directorio toma sus `*.toml` salvo los que empiezan con `axon.` (esos son
 configuración de la herramienta). Una URL sin `.json` se resuelve a
 `<url>/.well-known/axon.json`; un servicio caído se reporta y no rompe el resto.
 
-## Código y contratos
+# Código y contratos
 
-### `axon build <manifiesto> [fuentes...] [--lang ts]`
+## `axon build <manifiesto> [fuentes...] [--lang ts]`
 Contratos tipados, el envelope y la clase base abstracta.
 
 Las `fuentes` son los demás manifiestos, y hacen falta en cuanto el servicio
@@ -29,7 +29,7 @@ con su política ejecutándose (timeout, backoff con jitter, circuito), y —si 
 `{"manifest": ..., "peers": [...]}` por stdin. `plugins/axon-gen-go` es el
 generador de referencia.
 
-### `axon test <manifiesto> <fuentes> [--lang ts] [--contracts ./contracts.ts]`
+## `axon test <manifiesto> <fuentes> [--lang ts] [--contracts ./contracts.ts]`
 Un testkit que **compila por sí solo**: dobles en memoria de `Bus`, `Inbox` y
 `Outbox`, fixtures derivadas del esquema del **emisor** de cada evento, y dos suites
 exportadas.
@@ -53,15 +53,15 @@ que cada una sea legal desde sus orígenes e ilegal desde cualquier otro estado.
 
 Corre con `node --test`, sin dependencias.
 
-### `axon openapi <fuentes>`
+## `axon openapi <fuentes>`
 OpenAPI 3.1 de toda la plataforma en un documento. `Idempotency-Key` obligatorio en
 métodos mutantes y `application/problem+json` (RFC 7807) como error uniforme.
 
-### `axon discover <fuentes>`
+## `axon discover <fuentes>`
 Registro JSON: versión, dueño, métodos con entradas y salidas, eventos emitidos y
 consumidos. Funciona contra disco y contra servicios corriendo.
 
-### `axon import asyncapi <archivo|-> [--service <nombre>]`
+## `axon import asyncapi <archivo|-> [--service <nombre>]`
 AsyncAPI 2.x o 3.x, JSON o YAML, a un manifiesto en stdout. El nombre del servicio
 sale de `info.title` salvo que se pase `--service`.
 
@@ -71,7 +71,7 @@ lean (lo que **emite**). axon lo traduce; es la confusión número uno al leer 2
 
 Lo que AsyncAPI no declara sale como `TODO` y `verify` lo trata como ausente.
 
-### `axon rls <fuentes> [--target sql|pg_anon]`
+## `axon rls <fuentes> [--target sql|pg_anon]`
 Políticas de acceso a datos: RLS por fila y vistas enmascaradas por columna. Sale del
 cruce del esquema real (leído de las migraciones) con los campos `pii` del manifiesto.
 
@@ -92,7 +92,7 @@ una **copia** enmascarada (staging, soporte, terceros), no para proteger la cons
 viva. La regla sale del tipo de la columna, y las tablas del framework se excluyen del
 dump porque el `outbox` lleva payloads.
 
-### `axon load <manifiesto> [--check <resumen.json>]`
+## `axon load <manifiesto> [--check <resumen.json>]`
 Sin `--check` emite un script de [k6](https://k6.io): un escenario por ruta HTTP, a la
 tasa que declara su `rate_limit`, con el p95 limitado por su `timeout_ms`. Los umbrales
 salen del manifiesto, no de un número redondo.
@@ -101,9 +101,9 @@ Con `--check` lee el resumen de `k6 --summary-export` y da el veredicto: qué um
 incumplió, cuánto tráfico se midió, y si se acerca al techo que impone el pool declarado.
 Un resumen sin umbrales no es un veredicto, y lo dice.
 
-## Infraestructura
+# Infraestructura
 
-### `axon infra <fuentes> [--target local|gcp|aws|k8s|plan] [--env <nombre>]`
+## `axon infra <fuentes> [--target local|gcp|aws|k8s|plan] [--env <nombre>]`
 Produce el plan neutral y lo renderiza. El plan cubre el edge (rutas, auth, rate
 limit, timeouts), la mensajería (topics, suscripciones, DLQ), el cómputo, el estado,
 los buckets con su CDN, los secretos y las variables de OpenTelemetry.
@@ -116,7 +116,7 @@ sobre `[infra]`. Un `--target` no nativo busca `axon-infra-<target>` en el `PATH
 `--target plan` imprime el plan en JSON: la salida de emergencia para cualquier
 proveedor sin target.
 
-### `axon ci <manifiesto> [--target gcp|aws|k8s]`
+## `axon ci <manifiesto> [--target gcp|aws|k8s]`
 Pipeline de GitHub Actions. Los **gates** los sabe axon: `verify` contra todos los
 manifiestos (no solo el propio), código generado al día, migraciones en dry-run con
 la convención de nombres correcta, OIDC en vez de llaves, e infra aplicada antes que
@@ -138,7 +138,7 @@ contracts_path = "services/{service}/src/contracts.ts"
 image          = "${{ vars.REGISTRY }}/{service}:${{ github.sha }}"
 ```
 
-## Diagramas
+# Diagramas
 
 | Comando | Sale de | Da |
 | --- | --- | --- |
@@ -154,13 +154,13 @@ El esquema para `er` y para el chequeo de FK entre servicios se lee con un parse
 SQL de PostgreSQL, no con expresiones regulares. Un archivo que no parsea aborta el
 comando con el archivo y el error: axon prefiere fallar a adivinar columnas.
 
-## Debug
+# Debug
 
-### `axon trace [log] [--correlation <id>] [--seq]`
+## `axon trace [log] [--correlation <id>] [--seq]`
 Lee NDJSON de envelopes (`-` o nada = stdin) y reconstruye la cadena causal real.
 Sin `--seq` imprime el árbol; con `--seq`, Mermaid para diffear contra `axon seq`.
 
-### `axon cap <fuentes> [-s <servicio>]`
+## `axon cap <fuentes> [-s <servicio>]`
 Reconcilia el lado CAP declarado con los patrones en uso. No repite lo que bloquea
 `verify`: explica las consecuencias. `x` contradice y `verify` lo bloquea, `!` es un
 costo que se paga, `i` es una consecuencia que conviene conocer.
@@ -168,7 +168,7 @@ costo que se paga, `i` es una consecuencia que conviene conocer.
 `-s` acota el informe a ciertos servicios; el análisis igual mira a todos, porque sin
 los demás no se puede saber que una dependencia es AP.
 
-### `axon flags <fuentes>`
+## `axon flags <fuentes>`
 Configuración de [flagd](https://flagd.dev) derivada de los `[flags.*]` declarados. El
 rollout gradual se expresa con su `fractional`, fijado por el campo de `sticky_by`.
 
@@ -176,19 +176,19 @@ El target `local` levanta flagd con esta configuración, y el código generado e
 accesores tipados más una interfaz con la forma de OpenFeature — para que el SDK real
 encaje sin una capa de traducción.
 
-## Colores
+# Colores
 
 Azul informa, amarillo advierte, rojo bloquea. Se apagan solos cuando la salida no es
 una terminal; `NO_COLOR` los desactiva y `CLICOLOR_FORCE` los fuerza.
 
-## Verificación
+# Verificación
 
-### `axon baseline <fuentes>`
+## `axon baseline <fuentes>`
 Snapshot JSON de los contratos publicados: esquema de cada evento con su dueño, y la
 firma de cada método. Guardalo como `axon.baseline.json` junto a los manifiestos y
 commiteálo. Se regenera **al publicar**, no en cada cambio.
 
-### `axon verify <fuentes>`
+## `axon verify <fuentes>`
 Todas las reglas del README, más `axon.policy.toml` si existe junto a la primera
 fuente, más `axon.baseline.json` si está, más todos los `axon-check-*` del `PATH`.
 Sale con 1 si hay errores.

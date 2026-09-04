@@ -156,6 +156,8 @@ export const manifest = {
   "flags": {
     "cobro_v2": {
       "owner": "equipo-pagos",
+      "variants": {},
+      "default_variant": null,
       "expires": "2026-12-31",
       "default": false,
       "rollout": 10,
@@ -164,6 +166,34 @@ export const manifest = {
     },
     "cortar_stripe": {
       "owner": "equipo-pagos",
+      "variants": {},
+      "default_variant": null,
+      "expires": null,
+      "default": false,
+      "rollout": null,
+      "sticky_by": null,
+      "kill_switch": true
+    },
+    "proveedor_de_cobro": {
+      "owner": "equipo-pagos",
+      "variants": {
+        "stripe": "stripe",
+        "adyen": "adyen"
+      },
+      "default_variant": "stripe",
+      "expires": "2027-06-30",
+      "default": false,
+      "rollout": 20,
+      "sticky_by": "tenant_id",
+      "kill_switch": false
+    },
+    "limite_de_reintentos": {
+      "owner": "equipo-pagos",
+      "variants": {
+        "normal": 3,
+        "degradado": 0
+      },
+      "default_variant": "normal",
       "expires": null,
       "default": false,
       "rollout": null,
@@ -338,21 +368,43 @@ export const rutasHttp = ["POST /v1/payments", "POST /v1/payments/{paymentId}/re
 export const nivelAislamiento = "SERIALIZABLE" as const;
 
 
-/** Proveedor de flags. La forma es la de OpenFeature: `evaluar` recibe
- *  el nombre, el valor por defecto y el contexto por el que se fija. */
+/** Proveedor de flags, con la forma de OpenFeature: `evaluar` recibe el
+ *  nombre, el valor por defecto y el contexto por el que se fija. Los cuatro
+ *  tipos del estandar, para que el SDK real encaje sin traduccion. */
 export interface Flags {
-  evaluar(nombre: string, porDefecto: boolean, contexto: Record<string, string>): Promise<boolean>;
+  evaluar<T extends boolean | string | number | object>(
+    nombre: string,
+    porDefecto: T,
+    contexto: Record<string, string>,
+  ): Promise<T>;
 }
 
-/** Se fija por `tenant_id`: la misma entidad toma siempre el mismo camino. */
-export const flagCobroV2 = (flags: Flags, tenant_id: string) =>
+/** `cobro_v2`: boolean de OpenFeature.
+ *  Se fija por `tenant_id`: la misma entidad toma siempre el mismo camino.
+ */
+export const flagCobroV2 = (flags: Flags, tenant_id: string): Promise<boolean> =>
   flags.evaluar("cobro_v2", false, { targetingKey: tenant_id, tenant_id });
 
-export const flagCortarStripe = (flags: Flags) =>
+/** `cortar_stripe`: boolean de OpenFeature.
+ */
+export const flagCortarStripe = (flags: Flags): Promise<boolean> =>
   flags.evaluar("cortar_stripe", false, {});
 
+/** `proveedor_de_cobro`: string de OpenFeature.
+ *  Variantes: `stripe` = "stripe", `adyen` = "adyen".
+ *  Se fija por `tenant_id`: la misma entidad toma siempre el mismo camino.
+ */
+export const flagProveedorDeCobro = (flags: Flags, tenant_id: string): Promise<string> =>
+  flags.evaluar("proveedor_de_cobro", "stripe", { targetingKey: tenant_id, tenant_id });
+
+/** `limite_de_reintentos`: number de OpenFeature.
+ *  Variantes: `normal` = 3, `degradado` = 0.
+ */
+export const flagLimiteDeReintentos = (flags: Flags): Promise<number> =>
+  flags.evaluar("limite_de_reintentos", 3, {});
+
 /** Los flags que declara el manifiesto. Un flag que no esta aca no existe. */
-export const flagsDeclarados = ["cobro_v2", "cortar_stripe"] as const;
+export const flagsDeclarados = ["cobro_v2", "cortar_stripe", "proveedor_de_cobro", "limite_de_reintentos"] as const;
 
 
 /** Todo lo que hace falta para alcanzar a otro servicio. Lo implementa quien
