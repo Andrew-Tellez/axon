@@ -130,13 +130,14 @@ fn run() -> Result<ExitCode, String> {
                 if !plugin::exists(&bin) {
                     return Err(format!(
                         "`{bin}` no esta en el PATH. Un generador es cualquier ejecutable \
-                         que lea el manifiesto JSON por stdin y escriba codigo por stdout."
+                         que lea {{manifest, peers}} por stdin y escriba codigo por stdout."
                     ));
                 }
-                print!(
-                    "{}",
-                    plugin::run(&bin, &serde_json::to_string(&m).unwrap())?
-                );
+                // El plugin recibe lo mismo que el generador nativo: su
+                // manifiesto y el de los demas, porque el esquema de un evento
+                // consumido lo posee su emisor.
+                let entrada = serde_json::json!({ "manifest": m, "peers": all });
+                print!("{}", plugin::run(&bin, &entrada.to_string())?);
             }
         }
         Cmd::Ci { manifest } => println!("{}", emit::build_ci(&manifest::load(&manifest)?)),

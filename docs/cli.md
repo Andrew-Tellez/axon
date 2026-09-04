@@ -20,7 +20,9 @@ compila. Con `[patterns] outbox`
 los emisores escriben en el outbox y `bus.publish` desaparece del archivo. Si hay
 `consumes`, genera `dispatch()` con deduplicación por id.
 
-`--lang` distinto de `ts` busca `axon-gen-<lang>` en el `PATH`.
+`--lang` distinto de `ts` busca `axon-gen-<lang>` en el `PATH` y le pasa
+`{"manifest": ..., "peers": [...]}` por stdin. `plugins/axon-gen-go` es el
+generador de referencia.
 
 ### `axon test <manifiesto> <fuentes> [--lang ts]`
 Andamiaje de las tres capas. Las fixtures se derivan del esquema del **emisor**, no

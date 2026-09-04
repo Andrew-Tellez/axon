@@ -365,6 +365,95 @@ fn import_asyncapi_3_y_2() {
     assert!(err.contains("sin `tier`"), "{err}");
 }
 
+/// El protocolo de plugins tiene que aguantar un generador de verdad, no solo
+/// un check de tres lineas. Este esta escrito en Go, no sabe nada de axon, y
+/// su salida tiene que compilar.
+#[test]
+fn plugin_gen_go() {
+    if !tiene("go") {
+        eprintln!("salteado: go no esta instalado");
+        return;
+    }
+    let dir = std::env::temp_dir().join("axon-gen-go");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // se compila el plugin y se pone en el PATH, como haria cualquier usuario
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let build = Command::new("go")
+        .args([
+            "build",
+            "-o",
+            bin.join("axon-gen-go").to_str().unwrap(),
+            ".",
+        ])
+        .current_dir("plugins/axon-gen-go")
+        .output()
+        .expect("go build");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_axon"))
+        .args([
+            "build",
+            "examples/payments.toml",
+            "examples",
+            "--lang",
+            "go",
+        ])
+        .env("PATH", &path)
+        .output()
+        .expect("axon");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let code = String::from_utf8_lossy(&out.stdout);
+
+    // el esquema de un evento consumido lo posee su emisor: sin `peers` en el
+    // protocolo, el plugin no podria declarar este tipo
+    assert!(code.contains("type OrderPlacedV1 struct"), "{code}");
+    assert!(
+        code.contains("OrderID string `json:\"orderId\"`"),
+        "no usa la convencion de Go"
+    );
+    assert!(
+        code.contains("func PaymentNext(state PaymentState"),
+        "sin maquina de estados"
+    );
+    assert!(
+        code.contains("return s.outbox.Stage(ctx, e)"),
+        "outbox declarado y no respetado"
+    );
+    assert!(code.contains("s.inbox.Once(ctx, e.ID"), "sin deduplicacion");
+
+    // y compila
+    let pkg = dir.join("payments");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("go.mod"), "module tmp/payments\n\ngo 1.22\n").unwrap();
+    std::fs::write(pkg.join("axon.go"), code.as_bytes()).unwrap();
+    let vet = Command::new("go")
+        .args(["vet", "./..."])
+        .current_dir(&pkg)
+        .output()
+        .expect("go vet");
+    assert!(
+        vet.status.success(),
+        "el Go generado no pasa vet:\n{}",
+        String::from_utf8_lossy(&vet.stderr)
+    );
+}
+
 #[test]
 fn openapi_exige_idempotency_key() {
     let (json, _, _) = axon(&["openapi", "examples"]);

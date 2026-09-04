@@ -21,6 +21,8 @@ jobs:
         with: { node-version: "22" }
       - uses: hashicorp/setup-terraform@v3
         with: { terraform_wrapper: false }
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.23" }
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
