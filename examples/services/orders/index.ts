@@ -12,12 +12,38 @@ class Orders extends OrdersService {
     this.#db = db;
   }
 
+  /** Una transaccion con el rol y el inquilino puestos, y los dos mueren en el
+   *  COMMIT. Los dos hacen falta: sin `ROLE` la politica no aplica —el dueno
+   *  de la tabla es superusuario y se la salta— y sin el inquilino no hay
+   *  politica que aplicar. Y tiene que ser el MISMO cliente del pool: con
+   *  `pool.query` cada sentencia puede salir por otra conexion. */
+  async #comoInquilino<T>(tenantId: string, fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
+    const c = await this.#db.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("SET LOCAL ROLE axon_app");
+      // literal, no `set_config($1)`: un pooler intercepta el SET y puede no
+      // interceptar la funcion con parametro bindeado
+      await c.query(`SET LOCAL axon.tenant = '${tenantId}'`);
+      const r = await fn(c);
+      await c.query("COMMIT");
+      return r;
+    } catch (err) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      c.release();
+    }
+  }
+
   async placeOrder(input: PlaceOrderIn, e: Envelope<unknown>): Promise<PlaceOrderOut> {
     const orderId = crypto.randomUUID();
-    await this.#db.query(
-      `INSERT INTO "order" (id, customer_id, customer_email, total_cents, status)
-       VALUES ($1,$2,$3,$4,'placed')`,
-      [orderId, input.customerId, input.customerEmail, input.total.amount],
+    await this.#comoInquilino(input.tenantId, (c) =>
+      c.query(
+        `INSERT INTO "order" (id, tenant_id, customer_id, customer_email, total_cents, status)
+         VALUES ($1,$2,$3,$4,$5,'placed')`,
+        [orderId, input.tenantId, input.customerId, input.customerEmail, input.total.amount],
+      ),
     );
     // `e` es la causa: el emisor generado propaga traceparent y correlationId.
     await this.emitOrderPlacedV1(
@@ -35,7 +61,15 @@ class Orders extends OrdersService {
   }
 
   async getOrder(input: GetOrderIn): Promise<GetOrderOut> {
-    const { rows } = await this.#db.query(`SELECT * FROM "order" WHERE id = $1`, [input.orderId]);
+    // `tenant_id` en el WHERE no es redundante con la RLS: es lo que le dice
+    // al sharder a que nodo ir. Sin el, la consulta no se responde mal, se
+    // rechaza.
+    const { rows } = await this.#comoInquilino(input.tenantId, (c) =>
+      c.query(`SELECT * FROM "order" WHERE tenant_id = $1 AND id = $2`, [
+        input.tenantId,
+        input.orderId,
+      ]),
+    );
     if (!rows[0]) throw new NoEncontrado(`orden ${input.orderId} no existe`);
     return {
       orderId: rows[0].id,
@@ -51,8 +85,10 @@ const svc = new Orders(bus(await conectar()), inbox(db), db);
 servir(
   Number(process.env.PORT ?? 8080),
   {
-    "POST /v1/orders": (body, e) => svc.placeOrder(body, e),
-    "GET /v1/orders/{orderId}": (_body, _e, params) => svc.getOrder({ orderId: params.orderId }),
+    "POST /v1/tenants/{tenantId}/orders": (body, e, params) =>
+      svc.placeOrder({ ...body, tenantId: params.tenantId }, e),
+    "GET /v1/tenants/{tenantId}/orders/{orderId}": (_body, _e, params) =>
+      svc.getOrder({ tenantId: params.tenantId, orderId: params.orderId }),
   },
   // el arranque falla si el manifiesto declara una ruta sin handler
   rutasHttp,

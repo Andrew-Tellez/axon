@@ -114,7 +114,21 @@ enum Cmd {
     /// snapshot de los contratos publicados, para detectar cambios incompatibles
     Baseline { sources: Vec<String> },
     /// configuracion del pooler o sharder, derivada del manifiesto
-    Pooler { sources: Vec<String> },
+    Pooler {
+        sources: Vec<String>,
+        /// `local` nombra los contenedores que levanta `axon infra --target
+        /// local`; el resto deja los hosts como variables de entorno.
+        #[arg(long, default_value = "plan", value_parser = ["plan", "local"])]
+        target: String,
+        /// emite el `users.toml` en vez del `pgdog.toml`: pgdog los lee como
+        /// dos archivos separados
+        #[arg(long)]
+        users: bool,
+        /// de que servicio. Cada uno lleva su propio pgdog.toml, asi que solo
+        /// se puede omitir si hay uno solo con pooler.
+        #[arg(long = "service", short = 's')]
+        service: Option<String>,
+    },
     /// politicas de acceso a datos: RLS por fila y vistas enmascaradas
     Rls {
         sources: Vec<String>,
@@ -370,8 +384,21 @@ fn run() -> Result<ExitCode, String> {
                 serde_json::to_string_pretty(&b).map_err(|e| e.to_string())?
             );
         }
-        Cmd::Pooler { sources } => {
-            print!("{}", pooler::build(&manifest::discover(&sources)?)?)
+        Cmd::Pooler {
+            sources,
+            target,
+            users,
+            service,
+        } => {
+            let ms = manifest::discover(&sources)?;
+            let solo = service.as_deref();
+            print!(
+                "{}",
+                match users {
+                    true => pooler::users(&ms, &target, solo)?,
+                    false => pooler::build(&ms, &target, solo)?,
+                }
+            )
         }
         Cmd::Rls { sources, target } => {
             let ms = manifest::discover(&sources)?;

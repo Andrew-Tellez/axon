@@ -2,7 +2,7 @@ service = "orders"
 owner = "equipo-comercio"
 tier = "1"
 pii = ["customer_email"]
-version = "1.0.0"
+version = "2.0.0"
 transport = "pubsub"
 
 [emits."order.placed@v1"]
@@ -11,20 +11,23 @@ customerId = "uuid"
 customerEmail = "string"
 total = "money"
 
+# El inquilino va en la ruta, no implicito. Con la base repartida por
+# `tenant_id`, una consulta que no lo lleva no se puede rutear a un nodo ni
+# aislar del resto: el pooler la rechaza y `axon verify` no la deja llegar ahi.
 [methods.placeOrder]
-http = "POST /v1/orders"
+http = "POST /v1/tenants/{tenantId}/orders"
 auth = "public"          # la puerta de entrada del sistema
 rate_limit = 60          # por minuto: publica sin freno es una invitacion
 timeout_ms = 5000
 idempotent = true
-in = { customerId = "uuid", customerEmail = "string", total = "money" }
+in = { tenantId = "uuid", customerId = "uuid", customerEmail = "string", total = "money" }
 out = { orderId = "uuid" }
 
 [methods.getOrder]
-http = "GET /v1/orders/{orderId}"
+http = "GET /v1/tenants/{tenantId}/orders/{orderId}"
 auth = "required"
 timeout_ms = 2000
-in = { orderId = "uuid" }
+in = { tenantId = "uuid", orderId = "uuid" }
 out = { orderId = "uuid", status = "string", total = "money" }
 
 [[depends]]

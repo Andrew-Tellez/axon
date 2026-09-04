@@ -140,8 +140,13 @@ pub fn build_pg_anon(ms: &[Manifest]) -> String {
 pub fn build(ms: &[Manifest]) -> String {
     let esquemas = schemas(ms);
     let mut o = vec![
-        "-- generado por axon — no editar. Guardalo como una migracion mas:".to_string(),
-        "--   axon rls manifests/ > sql/<servicio>/090_rls.expand.sql".to_string(),
+        "-- generado por axon — no editar:".to_string(),
+        "--   axon rls manifests/ > sql-policies/<servicio>/010_rls.sql".to_string(),
+        "--".to_string(),
+        "-- Va en `sql-policies/`, NO en `sql/`, y se aplica despues de las".to_string(),
+        "-- migraciones. Dos razones: una politica no es un cambio de esquema, y".to_string(),
+        "-- `axon verify` lee `sql/` con un parser SQL que no entiende `DO $$`.".to_string(),
+        "-- El target local ya trae el job que lo aplica a cada nodo.".to_string(),
         "--".to_string(),
         "-- COMO SE FIJA EL INQUILINO, y por que importa tanto como la politica:".to_string(),
         "--".to_string(),
@@ -170,15 +175,22 @@ pub fn build(ms: &[Manifest]) -> String {
         "-- anterior puesto. Eso no da error: devuelve las filas del inquilino equivocado."
             .to_string(),
         "--".to_string(),
-        "-- Dos cosas mas que esta migracion NO puede garantizar y hay que comprobar:".to_string(),
-        "--   1. El rol de la aplicacion no puede ser SUPERUSER ni tener BYPASSRLS: esos"
+        "-- Y el rol importa tanto como la politica: un SUPERUSER o un rol con".to_string(),
+        "-- BYPASSRLS se salta TODA politica, y FORCE ROW LEVEL SECURITY no lo remedia."
             .to_string(),
-        "--      saltan toda politica y FORCE ROW LEVEL SECURITY no lo remedia. El usuario"
+        "-- Por eso esta migracion crea `axon_app` y le da a el los permisos. Medido:"
             .to_string(),
-        "--      por defecto de Cloud SQL trae cloudsqlsuperuser.".to_string(),
-        "--   2. `set_config()` con parametro bindeado —lo que emiten varios ORM— puede no"
+        "-- consultando como el dueno superusuario, la politica no filtra NADA y el".to_string(),
+        "-- resultado es identico al de una base sin RLS. El `SET LOCAL ROLE axon_app`"
             .to_string(),
-        "--      ser interceptado por un pooler; preferi `SET LOCAL` literal.".to_string(),
+        "-- es lo que la enciende, y va junto al del inquilino en la misma transaccion."
+            .to_string(),
+        "--".to_string(),
+        "-- Lo que esta migracion NO puede garantizar: `set_config()` con parametro"
+            .to_string(),
+        "-- bindeado —lo que emiten varios ORM— puede no ser interceptado por un pooler;"
+            .to_string(),
+        "-- preferi `SET LOCAL` literal.".to_string(),
     ];
     let cabeza = o.len();
     for m in ms.iter().filter(|m| !m.external) {
@@ -204,7 +216,12 @@ pub fn build(ms: &[Manifest]) -> String {
                          DROP POLICY IF EXISTS {pol} ON {tq};\n\
                          CREATE POLICY {pol} ON {tq}\n  \
                            USING ({cq} = NULLIF(current_setting('axon.tenant', true), '')::uuid)\n  \
-                           WITH CHECK ({cq} = NULLIF(current_setting('axon.tenant', true), '')::uuid);",
+                           WITH CHECK ({cq} = NULLIF(current_setting('axon.tenant', true), '')::uuid);\n\
+                         -- Los permisos van al rol de la aplicacion, no al dueno: el dueno\n\
+                         -- tiene FORCE encima, pero un superusuario se salta la politica y\n\
+                         -- ninguna clausula lo remedia. Con esto la politica tiene a quien\n\
+                         -- aplicarsele.\n\
+                         GRANT SELECT, INSERT, UPDATE, DELETE ON {tq} TO axon_app;",
                         svc = m.service,
                         pol = q(&format!("{t}_inquilino")),
                     ));
@@ -239,6 +256,28 @@ pub fn build(ms: &[Manifest]) -> String {
         }
     }
     // el rol se crea una vez, no una por servicio
+    if o.iter().skip(cabeza).any(|l| l.contains("axon_app")) {
+        o.insert(
+            cabeza,
+            "\n-- El rol con el que la aplicacion consulta. Sin LOGIN a proposito: se\n\
+             -- entra con el rol de despliegue y se adopta este dentro de la\n\
+             -- transaccion, junto con el inquilino, y los dos mueren en el COMMIT:\n\
+             --\n\
+             --   BEGIN;\n\
+             --   SET LOCAL ROLE axon_app;            -- deja de ser superusuario\n\
+             --   SET LOCAL axon.tenant = '<uuid>';   -- y pasa a ser un inquilino\n\
+             --   ... las consultas ...\n\
+             --   COMMIT;\n\
+             --\n\
+             -- Sin esto la politica existe y no aplica: el rol por defecto de un\n\
+             -- Postgres recien creado es superusuario, y la aplicacion \"funciona\"\n\
+             -- en local viendo todas las filas de todos los inquilinos.\n\
+             DO $$ BEGIN\n  \
+               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'axon_app') THEN\n    \
+                 CREATE ROLE axon_app NOLOGIN NOSUPERUSER NOBYPASSRLS;\n  END IF;\nEND $$;"
+                .to_string(),
+        );
+    }
     if o.len() > cabeza && o.iter().any(|l| l.contains("axon_lectura")) {
         o.insert(
             cabeza,

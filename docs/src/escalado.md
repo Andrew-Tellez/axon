@@ -90,6 +90,24 @@ Dos decisiones que el generador toma solo, y por qué:
   ser interceptada. Y el síntoma **desaparece al agregar una réplica**, así que no se
   reproduce en un staging que la tenga.
 
+### La regla del manifiesto que se descubre sola
+
+Con la base repartida por inquilino, **un método que no recibe el inquilino no se puede
+servir**. El router rechaza la consulta y el sharder no sabe a qué nodo ir. Salió de
+correr el demo: `getOrder` buscaba por su clave primaria y pgdog la rechazó en la primera
+petición.
+
+```console
+$ axon verify manifests/
+error  orders.getOrder: no recibe `tenant_id` y la base esta repartida por esa columna.
+       El router rechaza la consulta que no filtra por el inquilino (`no multi tenant
+       id`), y el sharder no sabe a que nodo mandarla. Agregala a `in`, normalmente
+       tambien a la ruta
+```
+
+Buscar por clave primaria deja de alcanzar, y eso no es una limitación del pooler: es lo
+que significa repartir por inquilino.
+
 ### La regla que importa
 
 ```console

@@ -51,6 +51,7 @@ export interface OrderPlacedV1 {
 }
 
 export interface PlaceOrderIn {
+  tenantId: string;
   customerId: string;
   customerEmail: string;
   total: { amount: number; currency: string };
@@ -61,6 +62,7 @@ export interface PlaceOrderOut {
 }
 
 export interface GetOrderIn {
+  tenantId: string;
   orderId: string;
 }
 
@@ -72,7 +74,7 @@ export interface GetOrderOut {
 
 export const manifest = {
   "service": "orders",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "owner": "equipo-comercio",
   "tier": "1",
   "pii": [
@@ -91,6 +93,7 @@ export const manifest = {
   "methods": {
     "placeOrder": {
       "in": {
+        "tenantId": "uuid",
         "customerId": "uuid",
         "customerEmail": "string",
         "total": "money"
@@ -98,7 +101,7 @@ export const manifest = {
       "out": {
         "orderId": "uuid"
       },
-      "http": "POST /v1/orders",
+      "http": "POST /v1/tenants/{tenantId}/orders",
       "idempotent": true,
       "auth": "public",
       "rate_limit": 60,
@@ -107,6 +110,7 @@ export const manifest = {
     },
     "getOrder": {
       "in": {
+        "tenantId": "uuid",
         "orderId": "uuid"
       },
       "out": {
@@ -114,7 +118,7 @@ export const manifest = {
         "status": "string",
         "total": "money"
       },
-      "http": "GET /v1/orders/{orderId}",
+      "http": "GET /v1/tenants/{tenantId}/orders/{orderId}",
       "idempotent": false,
       "auth": "required",
       "rate_limit": null,
@@ -235,7 +239,7 @@ export abstract class OrdersService {
 
 /** Rutas HTTP que declara el manifiesto. El arranque debe fallar si
  *  alguna no tiene handler: un 404 en produccion no avisa a nadie. */
-export const rutasHttp = ["POST /v1/orders", "GET /v1/orders/{orderId}"] as const;
+export const rutasHttp = ["POST /v1/tenants/{tenantId}/orders", "GET /v1/tenants/{tenantId}/orders/{orderId}"] as const;
 
 
 /** Lado del teorema CAP declarado en el manifiesto: eventual/degrade.

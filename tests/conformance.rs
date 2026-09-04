@@ -20,6 +20,85 @@ fn axon(args: &[&str]) -> (String, String, bool) {
     )
 }
 
+/// El ejemplo, pero sin el `[pooler]`.
+///
+/// `orders` declara 4 nodos de reparto y hoy eso solo se levanta en el target
+/// local: el resto RECHAZA el plan en vez de emitir una instancia sola, que
+/// aplicaria sin error y dejaria el reparto sin existir. Asi que todo lo que se
+/// afirma sobre gcp, aws y k8s se afirma sobre esta copia — y `el_reparto_no_se_
+/// renderiza_donde_no_existe` cubre el rechazo.
+fn sin_pooler() -> String {
+    // un directorio por llamada: los tests corren en paralelo y compartir la
+    // ruta hace que uno borre el arbol que otro esta leyendo
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "axon-sin-pooler-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for e in std::fs::read_dir("examples").unwrap().flatten() {
+        let nombre = e.file_name().to_string_lossy().to_string();
+        if e.path().is_dir() {
+            if nombre == "sql" || nombre == "sql-policies" {
+                copiar(&e.path(), &dir.join(&nombre));
+            }
+            continue;
+        }
+        if !nombre.ends_with(".toml") && !nombre.ends_with(".json") {
+            continue;
+        }
+        let texto = std::fs::read_to_string(e.path()).unwrap();
+        // el bloque va al final del manifiesto, asi que cortar desde ahi
+        // alcanza y no hay que parsear TOML en un test
+        let sin = match texto.find("\n[pooler]") {
+            Some(i) => texto[..i].to_string(),
+            None => texto,
+        };
+        std::fs::write(dir.join(&nombre), sin).unwrap();
+    }
+    dir.to_string_lossy().to_string()
+}
+
+/// De donde sale el plan para este target: el ejemplo tal cual donde el
+/// reparto se renderiza, y la copia sin pooler donde todavia no.
+fn fuente(target: &str) -> String {
+    match target {
+        "local" | "plan" => "examples".to_string(),
+        _ => sin_pooler(),
+    }
+}
+
+fn copiar(de: &std::path::Path, a: &std::path::Path) {
+    std::fs::create_dir_all(a).unwrap();
+    for e in std::fs::read_dir(de).unwrap().flatten() {
+        if e.path().is_dir() {
+            copiar(&e.path(), &a.join(e.file_name()));
+        } else {
+            std::fs::copy(e.path(), a.join(e.file_name())).unwrap();
+        }
+    }
+}
+
+/// Lo que este rechazo evita: `terraform apply` sin un error y un solo Postgres
+/// donde el manifiesto declara cuatro. El reparto no existiria y nada lo diria.
+#[test]
+fn el_reparto_no_se_renderiza_donde_no_existe() {
+    for t in ["gcp", "aws", "k8s"] {
+        let (_, err, ok) = axon(&["infra", "examples", "--target", t]);
+        assert!(!ok, "{t} renderizo un plan con reparto que no sabe repartir");
+        assert!(err.contains("shards = 4"), "{t}: {err}");
+        assert!(err.contains("--target local"), "{t}: {err}");
+    }
+    // y sin el pooler, los tres siguen rindiendo
+    let base = sin_pooler();
+    for t in ["gcp", "aws", "k8s"] {
+        let (_, err, ok) = axon(&["infra", &base, "--target", t]);
+        assert!(ok, "{t}: {err}");
+    }
+}
+
 #[test]
 fn ejemplos_limpios() {
     let (out, err, ok) = axon(&["verify", "examples"]);
@@ -146,13 +225,13 @@ fn el_mismo_plan_en_cuatro_targets() {
         ("aws", "aws_sqs_queue"),
         ("k8s", "kind: Trigger"),
     ] {
-        let (out, err, ok) = axon(&["infra", "examples", "--target", target]);
+        let (out, err, ok) = axon(&["infra", &fuente(target), "--target", target]);
         assert!(ok, "{target}: {err}");
         assert!(out.contains(marca), "{target} no genero {marca}");
     }
     // DLQ siempre, en todos los targets
     for t in ["gcp", "aws", "k8s"] {
-        let (out, _, _) = axon(&["infra", "examples", "--target", t]);
+        let (out, _, _) = axon(&["infra", &fuente(t), "--target", t]);
         assert!(out.to_lowercase().contains("dead"), "{t} sin DLQ");
     }
 }
@@ -169,13 +248,13 @@ fn todos_los_targets_despliegan_el_workload() {
         ("aws", "resource \"aws_ecs_service\" \"payments\""),
         ("k8s", "kind: Deployment"),
     ] {
-        let (out, _, _) = axon(&["infra", "examples", "--target", target]);
+        let (out, _, _) = axon(&["infra", &fuente(target), "--target", target]);
         assert!(out.contains(marca), "{target} no despliega el workload");
     }
     // y la entrega llega a alguien: nada de suscripciones al vacio
-    let (gcp, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    let (gcp, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
     assert!(gcp.contains("push_endpoint = google_cloud_run_v2_service.payments.uri"));
-    let (k, _, _) = axon(&["infra", "examples", "--target", "k8s"]);
+    let (k, _, _) = axon(&["infra", &sin_pooler(), "--target", "k8s"]);
     assert!(
         k.contains("kind: Service\nmetadata:\n  name: payments"),
         "el Trigger apunta a un Service inexistente"
@@ -337,7 +416,7 @@ fn el_hcl_generado_valida() {
         let dir = std::env::temp_dir().join(format!("axon-tf-{target}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let (tf, _, _) = axon(&["infra", "examples", "--target", target]);
+        let (tf, _, _) = axon(&["infra", &fuente(target), "--target", target]);
         std::fs::write(dir.join("main.tf"), tf).unwrap();
         std::fs::write(dir.join("vars.tf"), vars).unwrap();
         std::fs::write(
@@ -772,18 +851,18 @@ fn el_edge_y_los_buckets_salen_del_plan() {
         ("aws", "aws_apigatewayv2_route"),
         ("k8s", "kind: HTTPRoute"),
     ] {
-        let (out, _, _) = axon(&["infra", "examples", "--target", target]);
+        let (out, _, _) = axon(&["infra", &fuente(target), "--target", target]);
         assert!(out.contains(marca), "{target} no genero el edge ({marca})");
     }
     // auth y rate limit llegan a la configuracion, no se quedan en el manifiesto
-    let (k, _, _) = axon(&["infra", "examples", "--target", "k8s"]);
+    let (k, _, _) = axon(&["infra", &sin_pooler(), "--target", "k8s"]);
     assert!(k.contains("axon.dev/auth: public"), "{k}");
     assert!(k.contains("axon.dev/rate-limit: \"60\""), "{k}");
     assert!(
         k.contains("timeouts: { request: 5s }"),
         "el timeout del edge no llego"
     );
-    let (a, _, _) = axon(&["infra", "examples", "--target", "aws"]);
+    let (a, _, _) = axon(&["infra", &sin_pooler(), "--target", "aws"]);
     assert!(
         a.contains("authorization_type = \"JWT\""),
         "ruta privada sin authorizer"
@@ -794,7 +873,7 @@ fn el_edge_y_los_buckets_salen_del_plan() {
     );
 
     // publico implica CDN; privado implica que no la lleva
-    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
     assert!(g.contains("enable_cdn  = true"), "bucket publico sin CDN");
     assert!(
         g.contains("default_ttl = 86400"),
@@ -913,7 +992,7 @@ public = true
     }
 
     // A05: el endurecimiento va generado, no recordado
-    let (k, _, _) = axon(&["infra", "examples", "--target", "k8s"]);
+    let (k, _, _) = axon(&["infra", &sin_pooler(), "--target", "k8s"]);
     for marca in [
         "runAsNonRoot: true",
         "readOnlyRootFilesystem: true",
@@ -924,7 +1003,7 @@ public = true
         assert!(k.contains(marca), "k8s sin `{marca}`");
     }
     // A01: sin ruta publica no hay puerta a internet
-    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
     assert!(
         g.contains("ingress  = \"INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER\""),
         "un servicio sin ruta publica quedo expuesto"
@@ -1237,10 +1316,13 @@ fn una_version_publicada_es_inmutable() {
     let err = cambiar(
         "ruta",
         "orders.toml",
-        "http = \"POST /v1/orders\"",
+        "http = \"POST /v1/tenants/{tenantId}/orders\"",
         "http = \"POST /v1/pedidos\"",
     );
-    assert!(err.contains("la ruta cambio de `POST /v1/orders`"), "{err}");
+    assert!(
+        err.contains("la ruta cambio de `POST /v1/tenants/{tenantId}/orders`"),
+        "{err}"
+    );
     assert!(
         !err.contains("Some("),
         "el mensaje filtra el Debug de Option:\n{err}"
@@ -1478,7 +1560,7 @@ fn otel_en_los_cuatro_targets() {
         "OTEL_TRACES_SAMPLER",
     ];
     for target in ["local", "gcp", "aws", "k8s"] {
-        let (out, err, ok) = axon(&["infra", "examples", "--target", target]);
+        let (out, err, ok) = axon(&["infra", &fuente(target), "--target", target]);
         assert!(ok, "{target}: {err}");
         for v in esperado {
             assert!(out.contains(v), "{target} no inyecta {v}");
@@ -1502,7 +1584,7 @@ fn otel_en_los_cuatro_targets() {
         ("aws", "${var.otlp_endpoint}"),
         ("k8s", "${OTLP_ENDPOINT}"),
     ] {
-        let (o, _, _) = axon(&["infra", "examples", "--target", target]);
+        let (o, _, _) = axon(&["infra", &fuente(target), "--target", target]);
         assert!(
             o.contains(endpoint),
             "{target} sin destino OTLP configurable"
@@ -1511,7 +1593,7 @@ fn otel_en_los_cuatro_targets() {
 
     // el muestreo sale del tier: un tier 0 se traza entero, porque cuando se
     // cae la traza que falta es justo la que hacia falta
-    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
     assert!(
         g.contains("parentbased_always_on"),
         "tier 0 sin muestreo completo"
@@ -1756,7 +1838,7 @@ fn el_escalado_de_la_base_se_verifica() {
     assert!(msg.contains("sin `ha = true`"), "{msg}");
 
     // y los recursos: standby, respaldos y replicas salen del manifiesto
-    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
     assert!(
         g.contains("availability_type = \"REGIONAL\""),
         "payments es tier 0: falta el standby"
@@ -1776,7 +1858,7 @@ fn el_escalado_de_la_base_se_verifica() {
         !g.contains("var.sql_instance"),
         "las bases siguen compartiendo instancia"
     );
-    let (a, _, _) = axon(&["infra", "examples", "--target", "aws"]);
+    let (a, _, _) = axon(&["infra", &sin_pooler(), "--target", "aws"]);
     assert!(a.contains("multi_az                = true"), "{a}");
     assert!(a.contains("backup_retention_period = 30"), "{a}");
     assert!(
@@ -1871,7 +1953,9 @@ fn la_carga_sale_del_manifiesto() {
 fn las_rutas_declaradas_llegan_al_codigo() {
     let (ts, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
     assert!(
-        ts.contains(r#"export const rutasHttp = ["POST /v1/orders", "GET /v1/orders/{orderId}"]"#),
+        ts.contains(
+            r#"export const rutasHttp = ["POST /v1/tenants/{tenantId}/orders", "GET /v1/tenants/{tenantId}/orders/{orderId}"]"#
+        ),
         "{ts}"
     );
 }
@@ -2245,7 +2329,7 @@ fn los_esquemas_de_bodega_son_sql_valido() {
     );
 
     // y el sink nativo: Pub/Sub escribe directo, sin un proceso intermedio
-    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
     assert!(g.contains("bigquery_config"), "{g}");
     assert!(g.contains("use_table_schema = true"), "{g}");
     // la bodega tambien necesita DLQ: un mensaje que no encaja no desaparece
@@ -2348,7 +2432,7 @@ fn las_reglas_de_reparto_bloquean() {
 /// nadie fija esta comparando contra el default del motor, que es mas bajo.
 #[test]
 fn el_tope_de_conexiones_se_aplica() {
-    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
     assert!(
         g.contains("name  = \"max_connections\""),
         "gcp no aplica el tope:\n{g}"
@@ -2357,7 +2441,7 @@ fn el_tope_de_conexiones_se_aplica() {
         g.contains("value = \"200\""),
         "el valor de payments no llego:\n{g}"
     );
-    let (a, _, _) = axon(&["infra", "examples", "--target", "aws"]);
+    let (a, _, _) = axon(&["infra", &sin_pooler(), "--target", "aws"]);
     // en RDS el tope va en un parameter group, no en la instancia
     assert!(a.contains("resource \"aws_db_parameter_group\""), "{a}");
     assert!(

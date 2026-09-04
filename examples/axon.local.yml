@@ -7,37 +7,202 @@ services:
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 2s
-  db-orders:
+  db-orders-0:
     image: postgres:16-alpine
+    # el mismo tope que en produccion: agotar conexiones en local es la unica
+    # forma de descubrirlo antes de que escale
+    command: ["postgres", "-c", "max_connections=100"]
     environment: { POSTGRES_DB: orders, POSTGRES_PASSWORD: local }
-    ports: ["${AXON_DB_PORT_orders:-15432}:5432"]
+    ports: ["${AXON_DB_PORT_orders_0:-15432}:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
-  migrate-orders:
+  migrate-db-orders-0:
     image: flyway/flyway:10-alpine
-    depends_on: { db-orders: { condition: service_healthy } }
+    depends_on: { db-orders-0: { condition: service_healthy } }
     volumes: ["./sql/orders:/flyway/sql:ro"]
     command: >
-      -url=jdbc:postgresql://db-orders:5432/orders
+      -url=jdbc:postgresql://db-orders-0:5432/orders
       -user=postgres -password=local -connectRetries=10
       -sqlMigrationPrefix= -sqlMigrationSeparator=_
       -validateMigrationNaming=true
       migrate
-  db-payments:
+  policies-db-orders-0:
+    image: flyway/flyway:10-alpine
+    depends_on: { migrate-db-orders-0: { condition: service_completed_successfully } }
+    volumes: ["./sql-policies/orders:/flyway/sql:ro"]
+    # `baselineOnMigrate`: este historial es el SEGUNDO sobre un esquema que ya
+    # tiene tablas, las creo el otro. Sin eso Flyway se niega a inicializarse
+    # sobre un esquema no vacio, que es la situacion normal aca. Y el comentario
+    # va ACA y no dentro del bloque `>`: ahi dentro un `#` es texto, y termina
+    # siendo un argumento de Flyway.
+    command: >
+      -url=jdbc:postgresql://db-orders-0:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -table=axon_policies_history
+      -baselineOnMigrate=true
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+  db-orders-1:
     image: postgres:16-alpine
-    environment: { POSTGRES_DB: payments, POSTGRES_PASSWORD: local }
-    ports: ["${AXON_DB_PORT_payments:-15433}:5432"]
+    # el mismo tope que en produccion: agotar conexiones en local es la unica
+    # forma de descubrirlo antes de que escale
+    command: ["postgres", "-c", "max_connections=100"]
+    environment: { POSTGRES_DB: orders, POSTGRES_PASSWORD: local }
+    ports: ["${AXON_DB_PORT_orders_1:-15433}:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
-  migrate-payments:
+  migrate-db-orders-1:
+    image: flyway/flyway:10-alpine
+    depends_on: { db-orders-1: { condition: service_healthy } }
+    volumes: ["./sql/orders:/flyway/sql:ro"]
+    command: >
+      -url=jdbc:postgresql://db-orders-1:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+  policies-db-orders-1:
+    image: flyway/flyway:10-alpine
+    depends_on: { migrate-db-orders-1: { condition: service_completed_successfully } }
+    volumes: ["./sql-policies/orders:/flyway/sql:ro"]
+    # `baselineOnMigrate`: este historial es el SEGUNDO sobre un esquema que ya
+    # tiene tablas, las creo el otro. Sin eso Flyway se niega a inicializarse
+    # sobre un esquema no vacio, que es la situacion normal aca. Y el comentario
+    # va ACA y no dentro del bloque `>`: ahi dentro un `#` es texto, y termina
+    # siendo un argumento de Flyway.
+    command: >
+      -url=jdbc:postgresql://db-orders-1:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -table=axon_policies_history
+      -baselineOnMigrate=true
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+  db-orders-2:
+    image: postgres:16-alpine
+    # el mismo tope que en produccion: agotar conexiones en local es la unica
+    # forma de descubrirlo antes de que escale
+    command: ["postgres", "-c", "max_connections=100"]
+    environment: { POSTGRES_DB: orders, POSTGRES_PASSWORD: local }
+    ports: ["${AXON_DB_PORT_orders_2:-15434}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+  migrate-db-orders-2:
+    image: flyway/flyway:10-alpine
+    depends_on: { db-orders-2: { condition: service_healthy } }
+    volumes: ["./sql/orders:/flyway/sql:ro"]
+    command: >
+      -url=jdbc:postgresql://db-orders-2:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+  policies-db-orders-2:
+    image: flyway/flyway:10-alpine
+    depends_on: { migrate-db-orders-2: { condition: service_completed_successfully } }
+    volumes: ["./sql-policies/orders:/flyway/sql:ro"]
+    # `baselineOnMigrate`: este historial es el SEGUNDO sobre un esquema que ya
+    # tiene tablas, las creo el otro. Sin eso Flyway se niega a inicializarse
+    # sobre un esquema no vacio, que es la situacion normal aca. Y el comentario
+    # va ACA y no dentro del bloque `>`: ahi dentro un `#` es texto, y termina
+    # siendo un argumento de Flyway.
+    command: >
+      -url=jdbc:postgresql://db-orders-2:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -table=axon_policies_history
+      -baselineOnMigrate=true
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+  db-orders-3:
+    image: postgres:16-alpine
+    # el mismo tope que en produccion: agotar conexiones en local es la unica
+    # forma de descubrirlo antes de que escale
+    command: ["postgres", "-c", "max_connections=100"]
+    environment: { POSTGRES_DB: orders, POSTGRES_PASSWORD: local }
+    ports: ["${AXON_DB_PORT_orders_3:-15435}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+  migrate-db-orders-3:
+    image: flyway/flyway:10-alpine
+    depends_on: { db-orders-3: { condition: service_healthy } }
+    volumes: ["./sql/orders:/flyway/sql:ro"]
+    command: >
+      -url=jdbc:postgresql://db-orders-3:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+  policies-db-orders-3:
+    image: flyway/flyway:10-alpine
+    depends_on: { migrate-db-orders-3: { condition: service_completed_successfully } }
+    volumes: ["./sql-policies/orders:/flyway/sql:ro"]
+    # `baselineOnMigrate`: este historial es el SEGUNDO sobre un esquema que ya
+    # tiene tablas, las creo el otro. Sin eso Flyway se niega a inicializarse
+    # sobre un esquema no vacio, que es la situacion normal aca. Y el comentario
+    # va ACA y no dentro del bloque `>`: ahi dentro un `#` es texto, y termina
+    # siendo un argumento de Flyway.
+    command: >
+      -url=jdbc:postgresql://db-orders-3:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -table=axon_policies_history
+      -baselineOnMigrate=true
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+  pooler-orders:
+    # Fijado por digest: pgdog solo publica el tag `main`, que se mueve. Un tag
+    # movil en un archivo generado cambia el binario sin cambiar el diff.
+    image: ghcr.io/pgdogdev/pgdog:main@sha256:16c85d1c6471de9aefbb2eceae1c48080786d74f9aa8bcadd32fe183c26184a3
+    depends_on: { policies-db-orders-0: { condition: service_completed_successfully }, policies-db-orders-1: { condition: service_completed_successfully }, policies-db-orders-2: { condition: service_completed_successfully }, policies-db-orders-3: { condition: service_completed_successfully } }
+    # el workdir de la imagen es /pgdog, de ahi lee su configuracion
+    volumes: ["./.axon/pgdog/orders:/pgdog:ro"]
+    ports: ["${AXON_POOLER_PORT_orders:-16432}:6432"]
+    healthcheck:
+      # contra el pooler, no contra un nodo: comprueba que pgdog acepta el
+      # protocolo, que es lo unico que el servicio va a ver
+      test: ["CMD-SHELL", "PGPASSWORD=local psql -h 127.0.0.1 -p 6432 -U postgres -d orders -c 'select 1' >/dev/null"]
+      interval: 2s
+      retries: 30
+  db-payments:
+    image: postgres:16-alpine
+    # el mismo tope que en produccion: agotar conexiones en local es la unica
+    # forma de descubrirlo antes de que escale
+    command: ["postgres", "-c", "max_connections=200"]
+    environment: { POSTGRES_DB: payments, POSTGRES_PASSWORD: local }
+    ports: ["${AXON_DB_PORT_payments:-15436}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+  migrate-db-payments:
     image: flyway/flyway:10-alpine
     depends_on: { db-payments: { condition: service_healthy } }
     volumes: ["./sql/payments:/flyway/sql:ro"]
     command: >
       -url=jdbc:postgresql://db-payments:5432/payments
       -user=postgres -password=local -connectRetries=10
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+  policies-db-payments:
+    image: flyway/flyway:10-alpine
+    depends_on: { migrate-db-payments: { condition: service_completed_successfully } }
+    volumes: ["./sql-policies/payments:/flyway/sql:ro"]
+    # `baselineOnMigrate`: este historial es el SEGUNDO sobre un esquema que ya
+    # tiene tablas, las creo el otro. Sin eso Flyway se niega a inicializarse
+    # sobre un esquema no vacio, que es la situacion normal aca. Y el comentario
+    # va ACA y no dentro del bloque `>`: ahi dentro un `#` es texto, y termina
+    # siendo un argumento de Flyway.
+    command: >
+      -url=jdbc:postgresql://db-payments:5432/payments
+      -user=postgres -password=local -connectRetries=10
+      -table=axon_policies_history
+      -baselineOnMigrate=true
       -sqlMigrationPrefix= -sqlMigrationSeparator=_
       -validateMigrationNaming=true
       migrate
@@ -71,6 +236,9 @@ services:
     image: traefik:v3
     command:
       - --providers.docker=true
+      # solo lo que declara `traefik.enable`: si no, intenta rutear tambien los
+      # jobs de migracion y llena el log de "port is missing"
+      - --providers.docker.exposedByDefault=false
       - --entrypoints.web.address=:80
     ports: ["${AXON_EDGE_PORT:-8000}:80"]
     volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
@@ -78,29 +246,29 @@ services:
     build:
       context: .
       dockerfile: services/orders/Dockerfile
-    depends_on: { broker: { condition: service_healthy }, traza: { condition: service_healthy }, db-orders: { condition: service_healthy }, migrate-orders: { condition: service_completed_successfully } }
+    depends_on: { broker: { condition: service_healthy }, traza: { condition: service_healthy }, pooler-orders: { condition: service_healthy } }
     ports: ["${AXON_PORT_orders:-8080}:8080"]
     env_file: [.env.local]
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/local.ndjson
-      DATABASE_URL: postgres://postgres:local@db-orders:5432/orders
+      DATABASE_URL: postgres://postgres:local@pooler-orders:6432/orders
       AXON_FLAGS_URL: http://flags:8016
       OTEL_SERVICE_NAME: "orders"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://traza:4318"
       OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
-      OTEL_RESOURCE_ATTRIBUTES: "service.name=orders,axon.owner=equipo-comercio,axon.tier=1,service.version=1.0.0"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=orders,axon.owner=equipo-comercio,axon.tier=1,service.version=2.0.0"
       OTEL_TRACES_SAMPLER: "parentbased_always_on"
     volumes: ["./.axon:/out"]
     labels:
       - traefik.enable=true
-      - traefik.http.routers.orders.rule=PathPrefix(`/v1/orders`)
+      - traefik.http.routers.orders.rule=PathPrefix(`/v1/tenants`)
       - traefik.http.services.orders.loadbalancer.server.port=8080
   payments:
     build:
       context: .
       dockerfile: services/payments/Dockerfile
-    depends_on: { broker: { condition: service_healthy }, traza: { condition: service_healthy }, crear-buckets: { condition: service_completed_successfully }, db-payments: { condition: service_healthy }, migrate-payments: { condition: service_completed_successfully } }
+    depends_on: { broker: { condition: service_healthy }, traza: { condition: service_healthy }, crear-buckets: { condition: service_completed_successfully }, db-payments: { condition: service_healthy }, policies-db-payments: { condition: service_completed_successfully } }
     ports: ["${AXON_PORT_payments:-8081}:8080"]
     env_file: [.env.local]
     environment:

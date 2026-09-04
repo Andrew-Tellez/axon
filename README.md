@@ -63,8 +63,9 @@ diagrama esté viejo: es que alguien rompió el manifiesto, y CI lo dice antes d
 
 ## La demo, en dos comandos
 
-`examples/` trae dos servicios que corren de verdad. `./demo.sh` levanta el sistema
-completo y comprueba **cuatro** cosas contra la realidad:
+`examples/` trae dos servicios que corren de verdad —uno de ellos sobre cuatro nodos de
+Postgres con [pgdog](https://pgdog.dev) delante. `./demo.sh` levanta el sistema completo
+y comprueba **cinco** cosas contra la realidad:
 
 ```console
 $ cd examples && ./demo.sh
@@ -78,6 +79,10 @@ $ cd examples && ./demo.sh
 
 ==> esperado (manifiesto) vs real (log de envelopes)
   OK: el sistema hace exactamente lo que declara
+
+==> aislamiento por inquilino a traves del pooler
+  OK: pgdog rechaza en el router la consulta sin inquilino
+  OK: 20 de 20 conexiones vieron 1 fila propia y 0 del inquilino ajeno
 
 ==> rollout declarado vs aplicado
   declarado 10%  medido 10.7%  (32 de 300)
@@ -114,7 +119,7 @@ proyecto producían salida inválida y el suite no lo veía, porque axon se veri
 | **OpenFeature / flagd** | `axon flags`: evaluación por OFREP | el demo mide el rollout declarado contra el aplicado |
 | **Flyway** | aplica las migraciones; axon las lee, no las ejecuta | `validateMigrationNaming` obligatorio: ignoraba archivos en silencio |
 | **BigQuery / Snowflake / ClickHouse** | `axon analytics` | el DDL se parsea con **el dialecto de cada uno** |
-| **pgdog** | `axon pooler`: pooler y sharder | el `pgdog.toml` se valida contra su **JSON Schema oficial** |
+| **pgdog** | `axon pooler`: pooler y sharder, levantado por el target local | el `pgdog.toml` se valida contra su **JSON Schema oficial**, y el demo mide el aislamiento por inquilino a través del pooler |
 | **cocogitto** | Conventional Commits y el changelog | el hook rechaza el mensaje antes de crear el commit |
 | **mdBook** | esta documentación | cada bloque `toml` de las páginas pasa por `axon verify` |
 

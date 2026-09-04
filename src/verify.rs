@@ -444,6 +444,26 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             ));
         }
 
+        // Medido contra pgdog: con la columna de inquilino declarada, TODA
+        // consulta sobre una tabla que la lleva tiene que filtrar por ella o el
+        // router la rechaza con `no multi tenant id`. Y para el sharder es lo
+        // mismo: sin la clave no sabe a que nodo ir. Asi que un metodo que no
+        // recibe el inquilino no se puede servir — y el sintoma aparece en la
+        // primera peticion contra un pooler real, no en el manifiesto.
+        if let (true, Some(col)) = (pl.shards > 1, m.infra.tenant_column.as_ref()) {
+            for (nombre, me) in m.methods.iter() {
+                if me.input.keys().any(|k| normalizar(k) == normalizar(col)) {
+                    continue;
+                }
+                errors.push(format!(
+                    "{svc}.{nombre}: no recibe `{col}` y la base esta repartida por esa columna. \
+                     El router rechaza la consulta que no filtra por el inquilino (`no multi \
+                     tenant id`), y el sharder no sabe a que nodo mandarla. Agregala a `in`, \
+                     normalmente tambien a la ruta"
+                ));
+            }
+        }
+
         // Con el pooler delante, el sujeto de la aritmetica cambia dos veces.
         let techo = m.infra.max_instances.unwrap_or(10);
         if let (Some(pool), Some(clientes)) = (m.infra.pool_size, pl.max_client_conn) {

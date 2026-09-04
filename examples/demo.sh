@@ -57,15 +57,22 @@ mkdir -p .axon
 # flagd lee este JSON: los flags tambien salen del manifiesto
 "$AXON" flags . > .axon/flags.json
 
+# pgdog lee dos archivos, y los dos salen del manifiesto. Los hosts que nombra
+# `--target local` son los contenedores que acaba de emitir `axon infra`.
+mkdir -p .axon/pgdog/orders
+"$AXON" pooler . --service orders --target local > .axon/pgdog/orders/pgdog.toml
+"$AXON" pooler . --service orders --target local --users > .axon/pgdog/orders/users.toml
+
 paso "levantando broker, bases, migraciones y servicios"
 docker compose -f axon.local.yml up -d --build --wait
 
 rm -f .axon/local.ndjson
 mkdir -p .axon
 
-paso "POST /v1/orders"
+TENANT="${AXON_TENANT:-11111111-1111-4111-8111-111111111111}"
+paso "POST /v1/tenants/{tenantId}/orders"
 if ! respuesta=$(curl -sS --fail-with-body --max-time 30 \
-    -X POST "localhost:$PORT/v1/orders" \
+    -X POST "localhost:$PORT/v1/tenants/$TENANT/orders" \
     -H 'content-type: application/json' \
     -d '{"customerId":"11111111-1111-4111-8111-111111111111","total":{"amount":25000,"currency":"MXN"}}' 2>&1); then
   codigo=$?
@@ -113,6 +120,9 @@ else
   exit 1
 fi
 
+
+paso "aislamiento por inquilino a traves del pooler"
+./verificar-pooler.sh
 
 paso "rollout declarado vs aplicado"
 python3 verificar-flags.py "localhost:${AXON_FLAGS_PORT:-8016}" cobro_v2 10

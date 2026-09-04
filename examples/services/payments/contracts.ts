@@ -521,6 +521,7 @@ export function cabeceras(e: Envelope<unknown>, idempotente: boolean): Record<st
 }
 
 export interface OrdersGetOrderIn {
+  tenantId: string;
   orderId: string;
 }
 

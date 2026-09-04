@@ -22,6 +22,7 @@
   "methods": {
     "orders.getOrder": {
       "in": {
+        "tenantId": "uuid",
         "orderId": "uuid"
       },
       "out": {
@@ -29,10 +30,11 @@
         "status": "string",
         "total": "money"
       },
-      "http": "GET /v1/orders/{orderId}"
+      "http": "GET /v1/tenants/{tenantId}/orders/{orderId}"
     },
     "orders.placeOrder": {
       "in": {
+        "tenantId": "uuid",
         "customerId": "uuid",
         "customerEmail": "string",
         "total": "money"
@@ -40,7 +42,7 @@
       "out": {
         "orderId": "uuid"
       },
-      "http": "POST /v1/orders"
+      "http": "POST /v1/tenants/{tenantId}/orders"
     },
     "payments.capturePayment": {
       "in": {

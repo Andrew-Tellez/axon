@@ -43,6 +43,13 @@ pub struct Store {
     /// que nadie fija esta comparando contra el default del motor, que suele
     /// ser mucho mas bajo.
     pub max_connections: Option<u32>,
+    /// El servicio tiene politicas de acceso que aplicar despues de migrar:
+    /// `axon rls`. Van aparte porque una politica no es un cambio de esquema.
+    pub policies: bool,
+    /// Nodos detras del pooler. `None` es sin pooler: el servicio habla
+    /// directo con su motor. `Some(n)` son n motores y un pgdog delante, y el
+    /// renderer que no sepa repartir tiene que fallar, no emitir uno solo.
+    pub shards: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,6 +160,8 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 read_replicas: m.infra.read_replicas.unwrap_or(0),
                 pool_size: m.infra.pool_size,
                 max_connections: m.infra.max_connections,
+                policies: m.infra.tenant_column.is_some() || !m.pii.is_empty(),
+                shards: m.pooler.activo().then_some(m.pooler.shards.max(1)),
             });
         }
         for (_, me) in m.methods.iter() {
@@ -218,6 +227,18 @@ pub fn plan(ms: &[Manifest]) -> Plan {
 pub const NATIVE: [&str; 5] = ["local", "gcp", "aws", "k8s", "plan"];
 
 pub fn render(p: &Plan, target: &str) -> Result<String, String> {
+    // Solo `local` sabe levantar los nodos del sharder. Emitir UNA instancia
+    // donde el manifiesto declara cuatro seria el peor resultado posible: la
+    // infraestructura se aplica sin error y el reparto no existe.
+    if matches!(target, "gcp" | "aws" | "k8s") {
+        if let Some(s) = p.stores.iter().find(|s| s.shards.unwrap_or(1) > 1) {
+            return Err(format!(
+                "{}: `[pooler] shards = {}` todavia no se renderiza en `{target}`.                  Hoy el reparto solo se levanta en `--target local`; emitir una sola                  instancia aca aplicaria sin error y dejaria el reparto sin existir.                  `--target plan` da el plan con los nodos para renderizarlo con tu plantilla.",
+                s.service,
+                s.shards.unwrap_or(1)
+            ));
+        }
+    }
     match target {
         "gcp" => Ok(gcp(p)),
         "aws" => Ok(aws(p)),
@@ -233,6 +254,10 @@ pub fn render(p: &Plan, target: &str) -> Result<String, String> {
 }
 
 const HEAD: &str = "# generado por axon — no editar\n";
+
+/// pgdog solo publica el tag `main`, que se mueve. Actualizarlo es un acto
+/// deliberado, igual que el esquema pineado con el que se valida su config.
+const PGDOG: &str = "16c85d1c6471de9aefbb2eceae1c48080786d74f9aa8bcadd32fe183c26184a3";
 
 fn gcp(p: &Plan) -> String {
     const PROY: &str = "${var.project}";
@@ -937,6 +962,27 @@ spec:
 
 /// El mismo plan, en tu laptop. Ese es el punto: local y produccion salen de
 /// la misma declaracion, asi que no pueden divergir.
+/// Los motores detras de un store: uno solo, o los nodos del sharder. El
+/// nombre del contenedor es tambien el host que ve pgdog, asi que sale de aca
+/// y no de dos lados.
+fn nodos(s: &Store) -> Vec<(u32, String)> {
+    match s.shards {
+        None => vec![(0, nodo(&s.service, None, 0))],
+        Some(n) => (0..n).map(|i| (i, nodo(&s.service, Some(n), i))).collect(),
+    }
+}
+
+/// El nombre del contenedor de un motor en el target local. Vive aca y lo usa
+/// tambien `axon pooler --target local`: el pgdog.toml tiene que nombrar
+/// exactamente los hosts que el compose levanta, y dos funciones que
+/// concatenan lo mismo se desincronizan en el primer cambio.
+pub fn nodo(svc: &str, shards: Option<u32>, i: u32) -> String {
+    match shards {
+        None => format!("db-{svc}"),
+        Some(_) => format!("db-{svc}-{i}"),
+    }
+}
+
 fn local(p: &Plan) -> String {
     const PROY: &str = "local";
     let mut o = String::from(
@@ -951,34 +997,96 @@ services:
       interval: 2s
 ",
     );
-    for (i, s) in p.stores.iter().enumerate() {
+    let mut siguiente = 15432;
+    for s in p.stores.iter() {
         let svc = &s.service;
-        let port = 15432 + i;
         let v = tfname(&s.service);
         let conexiones = s.max_connections.unwrap_or(100);
-        o.push_str(&format!(
-            "  db-{svc}:
+        for (nodo, host) in nodos(s) {
+            let port = siguiente;
+            siguiente += 1;
+            let sufijo = match s.shards {
+                Some(_) => format!("_{nodo}"),
+                None => String::new(),
+            };
+            o.push_str(&format!(
+                "  {host}:
     image: postgres:16-alpine
     # el mismo tope que en produccion: agotar conexiones en local es la unica
     # forma de descubrirlo antes de que escale
     command: [\"postgres\", \"-c\", \"max_connections={conexiones}\"]
     environment: {{ POSTGRES_DB: {svc}, POSTGRES_PASSWORD: local }}
-    ports: [\"${{AXON_DB_PORT_{v}:-{port}}}:5432\"]
+    ports: [\"${{AXON_DB_PORT_{v}{sufijo}:-{port}}}:5432\"]
     healthcheck:
       test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]
       interval: 2s
-  migrate-{svc}:
+  migrate-{host}:
     image: flyway/flyway:10-alpine
-    depends_on: {{ db-{svc}: {{ condition: service_healthy }} }}
+    depends_on: {{ {host}: {{ condition: service_healthy }} }}
     volumes: [\"./sql/{svc}:/flyway/sql:ro\"]
     command: >
-      -url=jdbc:postgresql://db-{svc}:5432/{svc}
+      -url=jdbc:postgresql://{host}:5432/{svc}
       -user=postgres -password=local -connectRetries=10
       -sqlMigrationPrefix= -sqlMigrationSeparator=_
       -validateMigrationNaming=true
       migrate
 "
-        ));
+            ));
+            // Las politicas van en su propio job y su propio historial: se
+            // aplican DESPUES del esquema, y regenerarlas no es un cambio de
+            // esquema que haya que versionar contra el mismo historial.
+            if s.policies {
+                o.push_str(&format!(
+                    "  policies-{host}:
+    image: flyway/flyway:10-alpine
+    depends_on: {{ migrate-{host}: {{ condition: service_completed_successfully }} }}
+    volumes: [\"./sql-policies/{svc}:/flyway/sql:ro\"]
+    # `baselineOnMigrate`: este historial es el SEGUNDO sobre un esquema que ya
+    # tiene tablas, las creo el otro. Sin eso Flyway se niega a inicializarse
+    # sobre un esquema no vacio, que es la situacion normal aca. Y el comentario
+    # va ACA y no dentro del bloque `>`: ahi dentro un `#` es texto, y termina
+    # siendo un argumento de Flyway.
+    command: >
+      -url=jdbc:postgresql://{host}:5432/{svc}
+      -user=postgres -password=local -connectRetries=10
+      -table=axon_policies_history
+      -baselineOnMigrate=true
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+"
+                ));
+            }
+        }
+        // El pooler solo tiene sentido si hay algo detras y ya migrado: pgdog
+        // parsea la consulta contra el esquema, y contra una base vacia no
+        // sabe a que nodo mandarla.
+        if s.shards.is_some() {
+            let port = 16432 + p.stores.iter().position(|x| x.service == *svc).unwrap();
+            let ultimo = if s.policies { "policies" } else { "migrate" };
+            let espera: Vec<String> = nodos(s)
+                .iter()
+                .map(|(_, h)| format!("{ultimo}-{h}: {{ condition: service_completed_successfully }}"))
+                .collect();
+            o.push_str(&format!(
+                "  pooler-{svc}:
+    # Fijado por digest: pgdog solo publica el tag `main`, que se mueve. Un tag
+    # movil en un archivo generado cambia el binario sin cambiar el diff.
+    image: ghcr.io/pgdogdev/pgdog:main@sha256:{PGDOG}
+    depends_on: {{ {espera} }}
+    # el workdir de la imagen es /pgdog, de ahi lee su configuracion
+    volumes: [\"./.axon/pgdog/{svc}:/pgdog:ro\"]
+    ports: [\"${{AXON_POOLER_PORT_{v}:-{port}}}:6432\"]
+    healthcheck:
+      # contra el pooler, no contra un nodo: comprueba que pgdog acepta el
+      # protocolo, que es lo unico que el servicio va a ver
+      test: [\"CMD-SHELL\", \"PGPASSWORD=local psql -h 127.0.0.1 -p 6432 -U postgres -d {svc} -c 'select 1' >/dev/null\"]
+      interval: 2s
+      retries: 30
+",
+                espera = espera.join(", ")
+            ));
+        }
     }
     // los servicios tuyos, no solo sus dependencias
     // Jaeger all-in-one acepta OTLP directo, asi que el backend de trazas es
@@ -1031,6 +1139,9 @@ services:
     image: traefik:v3
     command:
       - --providers.docker=true
+      # solo lo que declara `traefik.enable`: si no, intenta rutear tambien los
+      # jobs de migracion y llena el log de \"port is missing\"
+      - --providers.docker.exposedByDefault=false
       - --entrypoints.web.address=:80
     ports: [\"${AXON_EDGE_PORT:-8000}:80\"]
     volumes: [\"/var/run/docker.sock:/var/run/docker.sock:ro\"]
@@ -1048,16 +1159,27 @@ services:
         if !env_buckets(p, &w.service, PROY).is_empty() {
             deps.push("crear-buckets: { condition: service_completed_successfully }".into());
         }
-        if w.db {
-            deps.push(format!("db-{svc}: {{ condition: service_healthy }}"));
-            deps.push(format!(
-                "migrate-{svc}: {{ condition: service_completed_successfully }}"
-            ));
-        }
-        let db_env = if w.db {
-            format!("      DATABASE_URL: postgres://postgres:local@db-{svc}:5432/{svc}\n")
-        } else {
-            String::new()
+        // Con pooler, la app NO ve los nodos: ve pgdog. Si el DATABASE_URL
+        // apuntara a un nodo, el reparto se saltaria y en local todo
+        // funcionaria — con una cuarta parte de los datos.
+        let store = p.stores.iter().find(|s| s.service == *svc);
+        let db_env = match (w.db, store.and_then(|s| s.shards)) {
+            (false, _) => String::new(),
+            (true, Some(_)) => {
+                deps.push(format!("pooler-{svc}: {{ condition: service_healthy }}"));
+                format!("      DATABASE_URL: postgres://postgres:local@pooler-{svc}:6432/{svc}\n")
+            }
+            (true, None) => {
+                deps.push(format!("db-{svc}: {{ condition: service_healthy }}"));
+                let ultimo = match store.is_some_and(|s| s.policies) {
+                    true => "policies",
+                    false => "migrate",
+                };
+                deps.push(format!(
+                    "{ultimo}-db-{svc}: {{ condition: service_completed_successfully }}"
+                ));
+                format!("      DATABASE_URL: postgres://postgres:local@db-{svc}:5432/{svc}\n")
+            }
         };
         let mut secrets: String = w
             .secrets
