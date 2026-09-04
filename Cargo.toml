@@ -20,3 +20,6 @@ sqlparser = "0.62.0"
 strip = true
 lto = true
 opt-level = "z"
+
+[dev-dependencies]
+serde_yaml_ng = "0.10.0"

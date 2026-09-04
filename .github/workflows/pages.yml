@@ -2,7 +2,8 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: ["docs/**", ".github/workflows/pages.yml"]
+    paths: ["docs/**", ".github/workflows/pages.yml", "CHANGELOG.md"]
+    tags: ["v*"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -19,8 +20,31 @@ jobs:
       url: ${{ steps.pages.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # los tags son la fuente de las versiones
       - uses: actions/configure-pages@v5
+
+      # El sitio se reconstruye entero desde git en cada deploy: la raiz es
+      # `main` y cada tag queda bajo su propio prefijo. Sin estado externo, sin
+      # rama gh-pages que se desincronice.
+      - name: armar el sitio con todas las versiones
+        run: |
+          set -eu
+          mkdir -p site
+          cp -R docs/. site/
+          versiones=""
+          for tag in $(git tag -l 'v*' --sort=-v:refname); do
+            if git cat-file -e "$tag:docs/index.html" 2>/dev/null; then
+              mkdir -p "site/$tag"
+              git archive "$tag" docs | tar -x --strip-components=1 -C "site/$tag"
+              versiones="$versiones \"$tag\","
+              echo "  $tag"
+            fi
+          done
+          printf '{"actual":"main","versiones":[%s]}\n' \
+            "\"main\",${versiones%,}" | sed 's/,]/]/' > site/versions.json
+          cat site/versions.json
+
       - uses: actions/upload-pages-artifact@v3
-        with: { path: docs }
+        with: { path: site }
       - uses: actions/deploy-pages@v4
         id: pages

@@ -90,6 +90,20 @@
     margin: 1.25rem 0; color: var(--suave); max-width: 70ch;
   }
   .nota strong { color: var(--texto); }
+  select.version {
+    font: inherit; font-size: .8rem; padding: .18rem 1.4rem .18rem .5rem;
+    border: 1px solid var(--linea); border-radius: 6px; background: var(--papel);
+    color: var(--texto); cursor: pointer; appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--suave) 50%),
+                      linear-gradient(135deg, var(--suave) 50%, transparent 50%);
+    background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+    background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+  }
+  .obsoleta {
+    background: var(--codigo); border-bottom: 1px solid var(--linea);
+    padding: .6rem 0; font-size: .87rem; color: var(--texto);
+  }
+  .obsoleta a { font-weight: 600; }
   footer { border-top: 1px solid var(--linea); padding: 2rem 0; color: var(--suave); font-size: .86rem; }
   footer a { color: var(--suave); }
   @media (max-width: 700px) { header.tope nav { display: none; } .heroe { padding: 3rem 0 2rem; } }
@@ -109,9 +123,19 @@
       <a href="#seguridad">Seguridad</a>
       <a href="#plugins">Plugins</a>
       <a href="https://github.com/Andrew-Tellez/axon">GitHub</a>
+      <select class="version" id="version" aria-label="Version de la documentacion">
+        <option>main</option>
+      </select>
     </nav>
   </div>
 </header>
+
+<div class="obsoleta" id="obsoleta" hidden>
+  <div class="envoltura">
+    Estás viendo la documentación de <strong id="obsoleta-v"></strong>.
+    <a href="#" id="obsoleta-ir">Ir a la última</a>.
+  </div>
+</div>
 
 <div class="heroe">
   <div class="envoltura">
@@ -473,7 +497,13 @@ jq -c <span class="cad">'[.[] | select(.service|test("^(service|api)$"))
 
 <section id="estado">
   <h2>Estado</h2>
-  <p class="sub">Preview. La superficie de comandos es estable; el formato del manifiesto todavía puede cambiar antes de <code>v1</code>.</p>
+  <p class="sub">
+    Preview. La superficie de comandos es estable; el formato del manifiesto todavía
+    puede cambiar antes de <code>v1</code>. El
+    <a href="https://github.com/Andrew-Tellez/axon/blob/main/CHANGELOG.md">changelog</a>
+    lleva la cuenta, y el selector de arriba cambia a la documentación de cada versión
+    liberada.
+  </p>
   <p>
     Los generadores no se validan con asserts propios: se validan con la herramienta
     real de su ecosistema. Un compilador que solo se verifica a sí mismo produce salida
@@ -508,10 +538,59 @@ jq -c <span class="cad">'[.[] | select(.service|test("^(service|api)$"))
     <a href="https://github.com/Andrew-Tellez/axon">GitHub</a> ·
     <a href="https://github.com/Andrew-Tellez/axon/blob/main/DESIGN.md">Diseño y decisiones</a> ·
     <a href="https://github.com/Andrew-Tellez/axon/blob/main/docs/cli.md">Referencia de comandos</a> ·
+    <a href="https://github.com/Andrew-Tellez/axon/blob/main/CHANGELOG.md">Changelog</a> ·
     <a href="https://github.com/Andrew-Tellez/patterns">gof-patterns</a> ·
     MIT
   </div>
 </footer>
+
+<script>
+// Documentacion versionada. El sitio se reconstruye desde los tags de git, y
+// `versions.json` en la raiz dice cuales existen. La version que estas viendo
+// sale de la URL: /axon/ es main, /axon/v0.1.0/ es ese tag.
+(async () => {
+  const partes = location.pathname.split("/").filter(Boolean);
+  const esTag = (s) => /^v\d+\.\d+\.\d+/.test(s);
+  const actual = partes.findLast?.(esTag) ?? [...partes].reverse().find(esTag) ?? "main";
+  const raiz = actual === "main"
+    ? location.pathname.replace(/[^/]*$/, "")
+    : location.pathname.replace(new RegExp(`${actual}/.*$`), "");
+
+  const sel = document.getElementById("version");
+  let datos;
+  try {
+    const r = await fetch(raiz + "versions.json", { cache: "no-cache" });
+    if (!r.ok) throw new Error(r.status);
+    datos = await r.json();
+  } catch {
+    // sin versions.json el selector no sirve de nada: se esconde en vez de
+    // mostrar una lista inventada
+    sel.hidden = true;
+    return;
+  }
+
+  sel.textContent = "";
+  for (const v of datos.versiones ?? ["main"]) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = v === "main" ? "main (sin liberar)" : v;
+    o.selected = v === actual;
+    sel.append(o);
+  }
+  sel.onchange = () => {
+    location.href = raiz + (sel.value === "main" ? "" : sel.value + "/");
+  };
+
+  // La primera de la lista es la mas nueva: si no es la que estas viendo, decilo
+  const ultima = (datos.versiones ?? []).find((v) => v !== "main");
+  if (ultima && actual !== "main" && actual !== ultima) {
+    const aviso = document.getElementById("obsoleta");
+    document.getElementById("obsoleta-v").textContent = actual;
+    document.getElementById("obsoleta-ir").href = raiz + ultima + "/";
+    aviso.hidden = false;
+  }
+})();
+</script>
 
 </body>
 </html>

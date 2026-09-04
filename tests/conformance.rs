@@ -382,6 +382,44 @@ fn el_hcl_generado_valida() {
     }
 }
 
+/// El suite validaba el YAML que axon genera y nunca el del propio repo. Un
+/// workflow que no parsea no falla: GitHub lo reporta con su ruta como nombre
+/// y sin un solo job, o sea que un release roto se ve como que no corrio.
+#[test]
+fn los_workflows_del_repo_parsean() {
+    let dir = std::path::Path::new(".github/workflows");
+    let mut vistos = 0;
+    for e in std::fs::read_dir(dir).expect("workflows") {
+        let p = e.unwrap().path();
+        if p.extension().is_none_or(|x| x != "yml" && x != "yaml") {
+            continue;
+        }
+        let texto = std::fs::read_to_string(&p).unwrap();
+        let doc: Result<serde_yaml_ng::Value, _> = serde_yaml_ng::from_str(&texto);
+        assert!(doc.is_ok(), "{}: {}", p.display(), doc.unwrap_err());
+        let doc = doc.unwrap();
+        assert!(doc.get("jobs").is_some(), "{}: sin `jobs`", p.display());
+        // `${{ }}` sin comillas dentro de un mapa en linea rompe el parseo,
+        // porque la `{` abre un mapa anidado
+        for (n, l) in texto.lines().enumerate() {
+            let t = l.trim();
+            if let (Some(mapa), Some(expr)) = (t.find(": {"), t.find("${{")) {
+                // dentro de un escalar citado hay un numero impar de comillas
+                // antes de la expresion
+                let citado = t[..expr].matches('"').count() % 2 == 1;
+                assert!(
+                    mapa > expr || citado,
+                    "{}:{}: `${{{{ }}}}` sin comillas en un mapa en linea:\n  {t}",
+                    p.display(),
+                    n + 1
+                );
+            }
+        }
+        vistos += 1;
+    }
+    assert!(vistos >= 3, "solo se validaron {vistos} workflows");
+}
+
 #[test]
 fn el_ci_generado_es_yaml_valido() {
     let (yml, _, _) = axon(&["ci", "examples/payments.toml"]);
