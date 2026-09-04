@@ -12,7 +12,11 @@ import { OFREPProvider } from "@openfeature/ofrep-provider";
 // declara aca porque un modulo compartido no puede importar un contrato que es
 // por servicio; el tipado estructural hace que encajen.
 export interface Flags {
-  evaluar(nombre: string, porDefecto: boolean, contexto: Record<string, string>): Promise<boolean>;
+  evaluar<T extends boolean | string | number | object>(
+    nombre: string,
+    porDefecto: T,
+    contexto: Record<string, string>,
+  ): Promise<T>;
 }
 
 let cliente: Client | undefined;
@@ -37,6 +41,17 @@ export async function arrancarFlags() {
 export const flags: Flags = {
   async evaluar(nombre, porDefecto, contexto) {
     if (!cliente) return porDefecto;
-    return cliente.getBooleanValue(nombre, porDefecto, contexto);
+    // OpenFeature resuelve un tipo por flag, asi que el accesor correcto sale
+    // del tipo del valor por defecto —que el manifiesto ya declaro.
+    switch (typeof porDefecto) {
+      case "boolean":
+        return (await cliente.getBooleanValue(nombre, porDefecto, contexto)) as typeof porDefecto;
+      case "string":
+        return (await cliente.getStringValue(nombre, porDefecto, contexto)) as typeof porDefecto;
+      case "number":
+        return (await cliente.getNumberValue(nombre, porDefecto, contexto)) as typeof porDefecto;
+      default:
+        return (await cliente.getObjectValue(nombre, porDefecto as never, contexto)) as typeof porDefecto;
+    }
   },
 };

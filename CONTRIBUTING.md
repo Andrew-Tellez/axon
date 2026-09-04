@@ -54,10 +54,14 @@ documentación de esa versión bajo su propio prefijo.
 ```sh
 cargo fmt
 cargo clippy --all-targets -- -D warnings
-cargo test --release
+cargo test --release              # incluye tsc, go vet, terraform validate y node --test
 cargo run --release -- verify examples
 cd examples && ./demo.sh          # necesita Docker
+mdbook serve docs --open          # la documentacion
 ```
+
+Encadenalos con `&&`, no con `;`. Con `;` el commit corre igual aunque los tests
+fallen — lo hice, y empuje nueve pruebas rojas.
 
 ### La regla que rige el suite
 

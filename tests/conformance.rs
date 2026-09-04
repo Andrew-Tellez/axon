@@ -675,6 +675,49 @@ fn plugin_gen_go() {
     );
 }
 
+/// El codigo del servicio de ejemplo tambien tiene que typechequear, no solo
+/// lo generado. Sin esto quedaba un hueco: cambiar la interfaz que emite axon
+/// rompia la implementacion del ejemplo y el suite no lo veia, porque el
+/// type-stripping de Node borra los tipos y en tiempo de ejecucion no falla.
+#[test]
+fn el_ejemplo_typechequea() {
+    if !tiene("node") || !std::path::Path::new("examples/services/node_modules").exists() {
+        eprintln!("salteado: falta node o `npm i` en examples/services");
+        return;
+    }
+    // el testkit y los contratos se regeneran para que no se compruebe una
+    // version vieja en disco
+    for (manifiesto, destino) in [
+        (
+            "examples/orders.toml",
+            "examples/services/orders/contracts.ts",
+        ),
+        (
+            "examples/payments.toml",
+            "examples/services/payments/contracts.ts",
+        ),
+    ] {
+        let (ts, err, ok) = axon(&["build", manifiesto, "examples"]);
+        assert!(ok, "{err}");
+        assert_eq!(
+            ts.trim(),
+            std::fs::read_to_string(destino).unwrap().trim(),
+            "{destino} quedo desactualizado: corre axon build"
+        );
+    }
+    let out = Command::new("npm")
+        .args(["run", "typecheck"])
+        .current_dir("examples/services")
+        .output()
+        .expect("npm run typecheck");
+    assert!(
+        out.status.success(),
+        "el ejemplo no typechequea:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// `axon test` genera un testkit que tiene que compilar y correr contra la
 /// implementacion real, no un esqueleto con huecos.
 #[test]
