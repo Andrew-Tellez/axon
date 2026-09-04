@@ -406,6 +406,12 @@ fn run() -> Result<ExitCode, String> {
 /// `` `asi` `` para nombrar campos y valores; esto lo aprovecha en vez de
 /// pedir un formato nuevo.
 fn realzar(msg: &str) -> String {
+    // Sin color, el mensaje sale tal cual: quitar los acentos graves cambiaria
+    // el contenido, y un realce no debe cambiar lo que dice el texto. Lo
+    // descubri rompiendo nueve pruebas que verifican los mensajes.
+    if !color::activos() {
+        return msg.to_string();
+    }
     let mut out = String::with_capacity(msg.len());
     let mut dentro = false;
     for parte in msg.split('`') {

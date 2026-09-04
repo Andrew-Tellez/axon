@@ -11,7 +11,9 @@
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
-fn activos() -> bool {
+/// Si el destino admite color. Publico porque quien resalta texto necesita
+/// saberlo: sin color, el realce no debe alterar el contenido.
+pub fn activos() -> bool {
     static A: OnceLock<bool> = OnceLock::new();
     *A.get_or_init(|| {
         if std::env::var_os("NO_COLOR").is_some() {
