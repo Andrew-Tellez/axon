@@ -466,12 +466,13 @@ services:
     );
     for (i, s) in p.stores.iter().enumerate() {
         let svc = &s.service;
-        let port = 5432 + i;
+        let port = 15432 + i;
+        let v = tfname(&s.service);
         o.push_str(&format!(
             "  db-{svc}:
     image: postgres:16-alpine
     environment: {{ POSTGRES_DB: {svc}, POSTGRES_PASSWORD: local }}
-    ports: [\"{port}:5432\"]
+    ports: [\"${{AXON_DB_PORT_{v}:-{port}}}:5432\"]
     healthcheck:
       test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]
       interval: 2s
@@ -481,7 +482,10 @@ services:
     volumes: [\"./sql/{svc}:/flyway/sql:ro\"]
     command: >
       -url=jdbc:postgresql://db-{svc}:5432/{svc}
-      -user=postgres -password=local -connectRetries=10 migrate
+      -user=postgres -password=local -connectRetries=10
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
 "
         ));
     }
@@ -503,13 +507,15 @@ services:
         let secrets: String = w
             .secrets
             .iter()
-            .map(|s| format!("      {s}: ${{{s}:?falta en .env.local}}\n"))
+            .map(|s| format!("      # {s}: viene de .env.local\n"))
             .collect();
         o.push_str(&format!(
             "  {svc}:
-    build: ./services/{svc}
+    build:
+      context: .
+      dockerfile: services/{svc}/Dockerfile
     depends_on: {{ {deps} }}
-    ports: [\"{host}:{port}\"]
+    ports: [\"${{AXON_PORT_{v}:-{host}}}:{port}\"]
     env_file: [.env.local]
     environment:
       AXON_BROKER_URL: nats://broker:4222
@@ -518,7 +524,8 @@ services:
 ",
             deps = deps.join(", "),
             host = 8080 + i,
-            port = w.port
+            port = w.port,
+            v = tfname(&w.service)
         ));
     }
     o.push_str("\n# streams JetStream a crear al arrancar:\n");

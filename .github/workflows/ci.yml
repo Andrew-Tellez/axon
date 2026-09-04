@@ -26,3 +26,15 @@ jobs:
       - run: cargo test --release
       # axon se verifica a si mismo: sus propios ejemplos pasan sus propias reglas
       - run: cargo run --release -- verify examples
+
+  e2e:
+    # La prueba que ninguna de las otras puede dar: el sistema levanta de verdad
+    # y su cadena causal real coincide con la que declara el manifiesto.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - run: ./demo.sh
+        working-directory: examples

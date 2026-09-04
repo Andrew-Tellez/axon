@@ -100,10 +100,12 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         serde_json::to_string_pretty(m).unwrap_or_default()
     ));
 
+    // Campos explicitos, no parameter properties: son TS puro y no sobreviven
+    // al type-stripping de Node ni a un port directo a otro lenguaje.
     let ctor = if m.patterns.outbox {
-        "  constructor(protected readonly bus: Bus, protected readonly inbox: Inbox, protected readonly outbox: Outbox) {}"
+        "  protected readonly bus: Bus;\n  protected readonly inbox: Inbox;\n  protected readonly outbox: Outbox;\n  constructor(bus: Bus, inbox: Inbox, outbox: Outbox) {\n    this.bus = bus;\n    this.inbox = inbox;\n    this.outbox = outbox;\n  }"
     } else {
-        "  constructor(protected readonly bus: Bus, protected readonly inbox: Inbox) {}"
+        "  protected readonly bus: Bus;\n  protected readonly inbox: Inbox;\n  constructor(bus: Bus, inbox: Inbox) {\n    this.bus = bus;\n    this.inbox = inbox;\n  }"
     };
     let sink = if m.patterns.outbox {
         "this.outbox.stage"
@@ -375,7 +377,7 @@ pub fn build_er(ms: &[Manifest]) -> String {
 
 /// Flujo causal esperado. Lo que DEBERIA pasar; el causationId de los
 /// envelopes reales dice lo que paso.
-pub fn build_seq(ms: &[Manifest], root: &str) -> Result<String, String> {
+pub fn build_seq(ms: &[Manifest], root: &str, solo_eventos: bool) -> Result<String, String> {
     let emitter: IndexMap<&str, &str> = ms
         .iter()
         .flat_map(|m| {
@@ -397,8 +399,38 @@ pub fn build_seq(ms: &[Manifest], root: &str) -> Result<String, String> {
         .collect();
     let mut out = vec!["sequenceDiagram".to_string(), "  autonumber".to_string()];
     let mut seen = BTreeSet::new();
-    walk(ms, &emitter, &external, root, 0, &mut seen, &mut out);
+    if solo_eventos {
+        // Misma forma que `axon trace --seq`: la cadena causal de eventos, sin
+        // las llamadas sincronas, que la traza de envelopes no puede ver.
+        out.push(format!("  cliente->>{}: {root}", emitter[root]));
+        eventos(ms, &emitter, root, 0, &mut seen, &mut out);
+    } else {
+        walk(ms, &emitter, &external, root, 0, &mut seen, &mut out);
+    }
     Ok(out.join("\n"))
+}
+
+fn eventos(
+    ms: &[Manifest],
+    emitter: &IndexMap<&str, &str>,
+    ev: &str,
+    depth: u32,
+    seen: &mut BTreeSet<(String, u32)>,
+    out: &mut Vec<String>,
+) {
+    if depth > 8 || !seen.insert((ev.to_string(), depth)) {
+        return;
+    }
+    let src = emitter.get(ev).copied().unwrap_or("?");
+    for m in ms {
+        if !m.consumes.contains_key(ev) {
+            continue;
+        }
+        for nxt in m.emits.keys() {
+            out.push(format!("  {src}->>{}: {nxt}", m.service));
+            eventos(ms, emitter, nxt, depth + 1, seen, out);
+        }
+    }
 }
 
 fn walk(

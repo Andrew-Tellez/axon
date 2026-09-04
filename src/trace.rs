@@ -19,9 +19,13 @@ pub struct Envelope {
 }
 
 pub fn parse(text: &str) -> Vec<Envelope> {
+    // El broker entrega al menos una vez, asi que un log real trae el mismo
+    // envelope repetido. Un mensaje existe una vez: gana la primera aparicion.
+    let mut vistos = std::collections::HashSet::new();
     text.lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<Envelope>(l).ok())
+        .filter(|e| vistos.insert(e.id.clone()))
         .collect()
 }
 
@@ -73,7 +77,15 @@ fn render(
     }
 }
 
-/// El flujo real como mermaid, para compararlo con `axon seq` (el esperado).
+/// Un evento del dominio lleva version: `dominio.hecho@vN`. Lo demas en el log
+/// es un borde (una request HTTP, una llamada RPC): origina la cadena pero no
+/// es parte de ella.
+fn es_evento(t: &str) -> bool {
+    t.contains('@')
+}
+
+/// El flujo real como mermaid, en la misma forma que `axon seq --events`, para
+/// que diffear el esperado contra el real sea una comparacion de texto.
 pub fn sequence(evs: &[Envelope], only: Option<&str>) -> String {
     let by_id: HashMap<&str, &Envelope> = evs.iter().map(|e| (e.id.as_str(), e)).collect();
     let mut out = vec!["sequenceDiagram".to_string(), "  autonumber".to_string()];
@@ -83,10 +95,15 @@ pub fn sequence(evs: &[Envelope], only: Option<&str>) -> String {
         .collect();
     rows.sort_by(|a, b| a.time.cmp(&b.time));
     for e in rows {
+        if !es_evento(&e.kind) {
+            continue;
+        }
+        // Si la causa no es un evento del dominio, la cadena empieza afuera.
         let from = e
             .causation_id
             .as_deref()
             .and_then(|c| by_id.get(c))
+            .filter(|p| es_evento(&p.kind))
             .map(|p| p.source.as_str())
             .unwrap_or("cliente");
         out.push(format!("  {from}->>{}: {}", e.source, e.kind));

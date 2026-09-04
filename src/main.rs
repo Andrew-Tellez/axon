@@ -52,7 +52,13 @@ enum Cmd {
     /// migraciones -> mermaid: entidad-relacion
     Er { sources: Vec<String> },
     /// flujo causal de un evento -> mermaid: secuencia
-    Seq { event: String, sources: Vec<String> },
+    Seq {
+        event: String,
+        sources: Vec<String>,
+        /// Solo la cadena de eventos, comparable con `axon trace --seq`.
+        #[arg(long)]
+        events: bool,
+    },
     /// registro de servicios y metodos (directorio, archivo o URL)
     Discover { sources: Vec<String> },
     /// drift entre manifiestos, migraciones e infraestructura
@@ -150,10 +156,14 @@ fn run() -> Result<ExitCode, String> {
             println!("{}", emit::build_states(&manifest::discover(&sources)?))
         }
         Cmd::Er { sources } => println!("{}", emit::build_er(&manifest::discover(&sources)?)),
-        Cmd::Seq { event, sources } => {
+        Cmd::Seq {
+            event,
+            sources,
+            events,
+        } => {
             println!(
                 "{}",
-                emit::build_seq(&manifest::discover(&sources)?, &event)?
+                emit::build_seq(&manifest::discover(&sources)?, &event, events)?
             )
         }
         Cmd::Discover { sources } => {

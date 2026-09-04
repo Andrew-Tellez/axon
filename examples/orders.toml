@@ -9,6 +9,12 @@ orderId = "uuid"
 customerId = "uuid"
 total = "money"
 
+[methods.placeOrder]
+http = "POST /v1/orders"
+idempotent = true
+in = { customerId = "uuid", total = "money" }
+out = { orderId = "uuid" }
+
 [methods.getOrder]
 http = "GET /v1/orders/{orderId}"
 in = { orderId = "uuid" }

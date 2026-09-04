@@ -1,0 +1,74 @@
+# generado por axon — no editar.  docker compose -f axon.local.yml up -d --wait
+services:
+  broker:
+    image: nats:2-alpine
+    command: ["-js", "-m", "8222"]
+    ports: ["4222:4222", "8222:8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 2s
+  db-orders:
+    image: postgres:16-alpine
+    environment: { POSTGRES_DB: orders, POSTGRES_PASSWORD: local }
+    ports: ["${AXON_DB_PORT_orders:-15432}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+  migrate-orders:
+    image: flyway/flyway:10-alpine
+    depends_on: { db-orders: { condition: service_healthy } }
+    volumes: ["./sql/orders:/flyway/sql:ro"]
+    command: >
+      -url=jdbc:postgresql://db-orders:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+  db-payments:
+    image: postgres:16-alpine
+    environment: { POSTGRES_DB: payments, POSTGRES_PASSWORD: local }
+    ports: ["${AXON_DB_PORT_payments:-15433}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+  migrate-payments:
+    image: flyway/flyway:10-alpine
+    depends_on: { db-payments: { condition: service_healthy } }
+    volumes: ["./sql/payments:/flyway/sql:ro"]
+    command: >
+      -url=jdbc:postgresql://db-payments:5432/payments
+      -user=postgres -password=local -connectRetries=10
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+  orders:
+    build:
+      context: .
+      dockerfile: services/orders/Dockerfile
+    depends_on: { broker: { condition: service_healthy }, db-orders: { condition: service_healthy }, migrate-orders: { condition: service_completed_successfully } }
+    ports: ["${AXON_PORT_orders:-8080}:8080"]
+    env_file: [.env.local]
+    environment:
+      AXON_BROKER_URL: nats://broker:4222
+      AXON_TRACE_LOG: /out/local.ndjson
+      DATABASE_URL: postgres://postgres:local@db-orders:5432/orders
+    volumes: ["./.axon:/out"]
+  payments:
+    build:
+      context: .
+      dockerfile: services/payments/Dockerfile
+    depends_on: { broker: { condition: service_healthy }, db-payments: { condition: service_healthy }, migrate-payments: { condition: service_completed_successfully } }
+    ports: ["${AXON_PORT_payments:-8081}:8080"]
+    env_file: [.env.local]
+    environment:
+      AXON_BROKER_URL: nats://broker:4222
+      AXON_TRACE_LOG: /out/local.ndjson
+      DATABASE_URL: postgres://postgres:local@db-payments:5432/payments
+      # STRIPE_API_KEY: viene de .env.local
+    volumes: ["./.axon:/out"]
+
+# streams JetStream a crear al arrancar:
+#   nats stream add order.placed.v1 --subjects order.placed.v1
+#   nats stream add payment.captured.v1 --subjects payment.captured.v1
+# el log de envelopes cae en ./.axon/local.ndjson -> `axon trace .axon/local.ndjson`
+

@@ -211,6 +211,38 @@ axon infra manifests/ --target local > axon.local.yml
 docker compose -f axon.local.yml up -d --wait   # broker + postgres + migraciones + tus servicios
 ```
 
+### La demo, en dos comandos
+
+`examples/` trae dos servicios que corren de verdad — `orders` y `payments`, en
+TypeScript sobre Node 24, sin paso de build. `./demo.sh` levanta el sistema
+completo, dispara un flujo y comprueba que la realidad coincide con lo declarado:
+
+```console
+$ cd examples && ./demo.sh
+==> POST /v1/orders
+{"orderId":"64f37016-7ed5-4be5-b45c-bd0074e9df2c"}
+
+==> cadena causal real
+flujo fce36b59-36c7-4d88-81d1-25d90988e204
+└─ POST /v1/orders <- http
+   └─ order.placed@v1 <- orders
+      └─ payment.captured@v1 <- payments
+
+==> esperado (manifiesto) vs real (log de envelopes)
+OK: el sistema hace exactamente lo que declara
+```
+
+Esa última línea es un `diff` entre `axon seq --events` y `axon trace --seq`.
+Corre en CI en cada push.
+
+El ejemplo honra los patrones que declara, no los simula: el pago se escribe en
+la misma transacción que su evento (outbox real en Postgres, publicado por un
+relay), reentregar el mismo envelope no duplica el cobro (inbox real), y la
+transición de estado la impone `paymentNext()`, que revienta si no está en el
+manifiesto. Los adaptadores de infraestructura son
+[150 líneas](examples/services/runtime.ts) — eso es todo lo que axon deja
+deliberadamente en manos de quien despliega.
+
 ## Gobernanza
 
 `axon.policy.toml`, versionado junto al código:

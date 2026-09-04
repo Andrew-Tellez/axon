@@ -72,7 +72,7 @@ fn el_mismo_plan_en_cuatro_targets() {
 fn todos_los_targets_despliegan_el_workload() {
     // sin esto la IaC deja topics y bases sin nada que corra el codigo
     for (target, marca) in [
-        ("local", "build: ./services/payments"),
+        ("local", "dockerfile: services/payments/Dockerfile"),
         (
             "gcp",
             "resource \"google_cloud_run_v2_service\" \"payments\"",
