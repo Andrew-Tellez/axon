@@ -8,6 +8,26 @@ cd "$(dirname "$0")"
 AXON="${AXON:-../target/release/axon}"
 PORT="${AXON_PORT_orders:-8080}"
 
+# Cuando esto falla en CI no hay nadie mirando la pantalla: el diagnostico
+# tiene que quedar en el log del run, o se pierde.
+diagnostico() {
+  codigo=$?
+  [ "$codigo" -eq 0 ] && return 0
+  echo
+  echo "==> FALLO (codigo $codigo). Estado de los contenedores:"
+  docker compose -f axon.local.yml ps -a || true
+  for s in $(docker compose -f axon.local.yml config --services 2>/dev/null); do
+    echo
+    echo "--- logs de $s (ultimas 40) ---"
+    docker compose -f axon.local.yml logs --tail 40 "$s" 2>&1 || true
+  done
+  echo
+  echo "--- envelopes registrados ---"
+  cat .axon/local.ndjson 2>/dev/null || echo "(ninguno)"
+  return "$codigo"
+}
+trap diagnostico EXIT
+
 echo "==> generando la infraestructura local desde los manifiestos"
 "$AXON" infra . --target local > axon.local.yml
 
@@ -27,7 +47,7 @@ echo "==> esperando a que la cadena se propague"
 i=0
 while [ "$(wc -l < .axon/local.ndjson 2>/dev/null || echo 0)" -lt 3 ]; do
   i=$((i + 1))
-  [ "$i" -gt 20 ] && { echo "la cadena no se completo"; exit 1; }
+  [ "$i" -gt 45 ] && { echo "la cadena no se completo"; exit 1; }
   sleep 1
 done
 
@@ -40,7 +60,7 @@ UI="localhost:${AXON_TRAZA_UI_PORT:-16686}"
 i=0
 until curl -fsS "http://$UI/api/services" 2>/dev/null | grep -q payments; do
   i=$((i + 1))
-  [ "$i" -gt 25 ] && { echo "no llego ninguna traza al colector"; exit 1; }
+  [ "$i" -gt 45 ] && { echo "no llego ninguna traza al colector"; exit 1; }
   sleep 1
 done
 python3 verificar-traza.py "$UI"

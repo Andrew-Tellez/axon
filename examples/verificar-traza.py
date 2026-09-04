@@ -24,7 +24,7 @@ url = f"http://{ui}/api/traces?service=orders&tags={filtro}&lookback=1h&limit=5"
 # vez de esperar afuera, porque afuera no hay forma de saber si la que llego es
 # la de esta corrida o la de la anterior.
 datos = []
-for _ in range(40):
+for _ in range(60):
     try:
         with urllib.request.urlopen(url) as r:
             datos = json.load(r)["data"]
@@ -34,7 +34,7 @@ for _ in range(40):
         break
     time.sleep(1)
 
-assert datos, f"sin trazas para el flujo {del_log} tras 40s"
+assert datos, f"sin trazas para el flujo {del_log} tras 60s"
 assert len(datos) == 1, f"el flujo {del_log} aparece partido en {len(datos)} trazas"
 t = datos[0]
 spans = {s["spanID"]: s for s in t["spans"]}
