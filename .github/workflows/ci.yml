@@ -25,6 +25,7 @@ jobs:
         with: { go-version: "1.23" }
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: npm ci --prefix examples/services || npm i --prefix examples/services
       - run: cargo test --release
       # axon se verifica a si mismo: sus propios ejemplos pasan sus propias reglas
       - run: cargo run --release -- verify examples

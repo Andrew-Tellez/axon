@@ -257,6 +257,20 @@ OK: el sistema hace exactamente lo que declara
 Esa última línea es un `diff` entre `axon seq --events` y `axon trace --seq`.
 Corre en CI en cada push.
 
+`axon test` genera el testkit que prueba esos patrones, y corre contra la
+implementación real con `node --test`, sin dependencias:
+
+```console
+▶ payments · contrato
+  ✔ acepta order.placed@v1 tal como lo emite su dueno
+  ✔ la segunda entrega de order.placed@v1 no repite el efecto
+  ✔ propaga la cadena causal al reaccionar a order.placed@v1
+  ✔ nada se publica fuera del outbox
+▶ payments · maquina payment
+  ✔ cada transicion declarada es legal desde sus estados de origen
+  ✔ una transicion no declarada revienta
+```
+
 El ejemplo honra los patrones que declara, no los simula: el pago se escribe en
 la misma transacción que su evento (outbox real en Postgres, publicado por un
 relay), reentregar el mismo envelope no duplica el cobro (inbox real), y la

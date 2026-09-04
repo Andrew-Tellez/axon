@@ -6,7 +6,7 @@ import { PaymentsService, paymentNext, paymentCan,
 import { bus, conectar, esperarDb, inbox, outbox, relay, servir, suscribir } from "../runtime.ts";
 import type pg from "pg";
 
-class Payments extends PaymentsService {
+export class Payments extends PaymentsService {
   #db: pg.Pool;
   constructor(b: any, i: any, o: any, db: pg.Pool) {
     super(b, i, o);
@@ -52,6 +52,10 @@ class Payments extends PaymentsService {
   }
 }
 
+// Arranque solo cuando se ejecuta como programa, no al importarlo desde un test.
+if (process.env.NODE_TEST_CONTEXT === undefined) await main();
+
+async function main() {
 const db = await esperarDb();
 const nc = await conectar();
 const b = bus(nc);
@@ -66,3 +70,4 @@ await suscribir(nc, ["order.placed@v1"], (e) => svc.dispatch(e));
 servir(Number(process.env.PORT ?? 8080), {
   "POST /v1/payments": (body, e) => svc.capturePayment(body, e),
 });
+}

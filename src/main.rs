@@ -83,6 +83,9 @@ enum Cmd {
         sources: Vec<String>,
         #[arg(long, default_value = "ts")]
         lang: String,
+        /// Ruta del modulo que genero `axon build`.
+        #[arg(long, default_value = "./contracts.ts")]
+        contracts: String,
     },
     /// log NDJSON de envelopes -> cadena causal real (para debug local)
     Trace {
@@ -251,6 +254,7 @@ fn run() -> Result<ExitCode, String> {
             manifest,
             sources,
             lang,
+            contracts,
         } => {
             if lang != "ts" {
                 return Err(format!("lang `{lang}` sin generador nativo"));
@@ -261,7 +265,7 @@ fn run() -> Result<ExitCode, String> {
             } else {
                 manifest::discover(&sources)?
             };
-            println!("{}", api::build_tests(&all, &target));
+            println!("{}", api::build_tests(&all, &target, &contracts)?);
         }
         Cmd::Trace {
             log,

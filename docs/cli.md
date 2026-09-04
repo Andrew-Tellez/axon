@@ -24,11 +24,29 @@ los emisores escriben en el outbox y `bus.publish` desaparece del archivo. Si ha
 `{"manifest": ..., "peers": [...]}` por stdin. `plugins/axon-gen-go` es el
 generador de referencia.
 
-### `axon test <manifiesto> <fuentes> [--lang ts]`
-Andamiaje de las tres capas. Las fixtures se derivan del esquema del **emisor**, no
-de lo que el consumidor cree que recibe — ahí es donde aparece el drift. Incluye por
-defecto el test de idempotencia (dos entregas del mismo id, un solo efecto) y un e2e
-que compara `axon trace --seq` contra `axon seq`.
+### `axon test <manifiesto> <fuentes> [--lang ts] [--contracts ./contracts.ts]`
+Un testkit que **compila por sí solo**: dobles en memoria de `Bus`, `Inbox` y
+`Outbox`, fixtures derivadas del esquema del **emisor** de cada evento, y dos suites
+exportadas.
+
+No adivina dónde vive tu código: `pruebasDeContrato` recibe una fábrica. Tejerlo son
+tres líneas escritas a mano:
+
+```ts
+import { pruebasDeContrato, pruebasDeMaquinas } from "./axon.testkit.ts";
+import { Payments } from "./index.ts";
+pruebasDeContrato((bus, inbox, outbox) => new Payments(bus, inbox, outbox, db));
+pruebasDeMaquinas();
+```
+
+`pruebasDeContrato` comprueba lo que el manifiesto promete: que el handler acepta el
+evento tal como lo emite su dueño, que la segunda entrega del mismo id no repite el
+efecto, que la cadena causal (`causationId`, `correlationId`, `traceparent`) sobrevive
+al handler, y que con `outbox` declarado nada se publica directo al bus.
+`pruebasDeMaquinas` no necesita tu código: recorre la tabla de transiciones y verifica
+que cada una sea legal desde sus orígenes e ilegal desde cualquier otro estado.
+
+Corre con `node --test`, sin dependencias.
 
 ### `axon openapi <fuentes>`
 OpenAPI 3.1 de toda la plataforma en un documento. `Idempotency-Key` obligatorio en

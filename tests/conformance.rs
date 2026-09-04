@@ -454,6 +454,49 @@ fn plugin_gen_go() {
     );
 }
 
+/// `axon test` genera un testkit que tiene que compilar y correr contra la
+/// implementacion real, no un esqueleto con huecos.
+#[test]
+fn el_testkit_generado_corre() {
+    if !tiene("node") {
+        eprintln!("salteado: node no esta instalado");
+        return;
+    }
+    let pkg = std::path::Path::new("examples/services/payments");
+    if !std::path::Path::new("examples/services/node_modules").exists() {
+        eprintln!("salteado: falta `npm i` en examples/services");
+        return;
+    }
+
+    // el testkit commiteado tiene que estar al dia con el manifiesto
+    let (kit, err, ok) = axon(&["test", "examples/payments.toml", "examples"]);
+    assert!(ok, "{err}");
+    let commiteado = std::fs::read_to_string(pkg.join("axon.testkit.ts")).unwrap();
+    assert_eq!(
+        kit.trim(),
+        commiteado.trim(),
+        "el testkit commiteado quedo desactualizado: corre axon test"
+    );
+
+    let out = Command::new("node")
+        .arg("--test")
+        .current_dir(pkg)
+        .output()
+        .expect("node --test");
+    let salida = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "las pruebas generadas fallan:\n{salida}"
+    );
+    assert!(salida.contains("propaga la cadena causal"), "{salida}");
+    assert!(salida.contains("no repite el efecto"), "{salida}");
+    assert!(salida.contains("fail 0"), "{salida}");
+}
+
 #[test]
 fn openapi_exige_idempotency_key() {
     let (json, _, _) = axon(&["openapi", "examples"]);

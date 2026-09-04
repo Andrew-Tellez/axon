@@ -79,101 +79,228 @@ pub fn openapi(ms: &[Manifest]) -> Value {
 
 // ---------- pruebas ----------
 
-fn fixture(fields: &Fields) -> String {
-    let body: Vec<String> = fields
-        .iter()
-        .map(|(k, t)| {
-            let v = match t.as_str() {
-                "uuid" => "\"00000000-0000-4000-8000-000000000000\"".to_string(),
-                "timestamp" => "\"2026-01-01T00:00:00.000Z\"".to_string(),
-                "int" | "float" => "1".to_string(),
-                "bool" => "true".to_string(),
-                "money" => "{ amount: 100, currency: \"MXN\" }".to_string(),
-                _ => format!("\"{k}\""),
-            };
-            format!("  {k}: {v},")
-        })
-        .collect();
-    format!("{{\n{}\n}}", body.join("\n"))
+fn valor(t: &str, k: &str) -> String {
+    match t {
+        "uuid" => "\"00000000-0000-4000-8000-000000000000\"".into(),
+        "timestamp" => "\"2026-01-01T00:00:00.000Z\"".into(),
+        "int" | "float" => "1".into(),
+        "bool" => "true".into(),
+        "money" => "{ amount: 100, currency: \"MXN\" }".into(),
+        _ => format!("\"{k}\""),
+    }
 }
 
-/// Tres capas, cada una desde una parte distinta del manifiesto:
-/// - unitaria: el handler contra una fixture del esquema del EMISOR
-/// - integracion: el mismo compose de `--target local`, no un mock
-/// - e2e: la cadena causal de `axon seq` como escenario ejecutable
-pub fn build_tests(ms: &[Manifest], target: &Manifest) -> String {
-    let svc = &target.service;
+fn fixture(nombre: &str, tipo: &str, campos: &Fields) -> String {
+    let body: Vec<String> = campos
+        .iter()
+        .map(|(k, t)| format!("  {k}: {},", valor(t, k)))
+        .collect();
+    format!(
+        "export const {nombre}: {tipo} = {{\n{}\n}};\n",
+        body.join("\n")
+    )
+}
+
+/// Testkit que compila por si solo: dobles, fixtures y suites exportadas.
+///
+/// No adivina donde vive el codigo de la persona — le pasa una fabrica. Asi el
+/// archivo generado nunca depende de un layout que no controla, y el que teje
+/// las dos partes son tres lineas escritas a mano.
+pub fn build_tests(ms: &[Manifest], m: &Manifest, contracts: &str) -> Result<String, String> {
+    let svc = &m.service;
     let cls = format!("{}Service", pascal(svc));
-    let emitters: Vec<(&String, &Fields)> = ms.iter().flat_map(|m| m.emits.iter()).collect();
+    let mut tipos = vec![
+        "newEnvelope".to_string(),
+        "type Envelope".into(),
+        "type Bus".into(),
+        "type Inbox".into(),
+        cls.clone(),
+    ];
+    if m.patterns.outbox {
+        tipos.push("type Outbox".into());
+    }
+
+    // el esquema de un evento consumido lo declara su emisor
+    let mut consumidos: Vec<(&String, &Fields)> = Vec::new();
+    for ev in m.consumes.keys() {
+        let campos = m
+            .emits
+            .get(ev)
+            .or_else(|| ms.iter().find_map(|o| o.emits.get(ev)))
+            .ok_or_else(|| format!("{svc}: consume `{ev}` y no se encontro quien lo emite"))?;
+        consumidos.push((ev, campos));
+        tipos.push(format!("type {}", pascal(ev)));
+    }
+    for name in m.machine.keys() {
+        tipos.push(format!("{}Transitions", camel(name)));
+        tipos.push(format!("{}Next", camel(name)));
+        tipos.push(format!("{}Can", camel(name)));
+        tipos.push(format!("type {}State", pascal(name)));
+        tipos.push(format!("type {}Action", pascal(name)));
+    }
 
     let mut o = vec![format!(
-        "// generado por axon — andamiaje. Rellena los asserts de negocio.\n\
-         import {{ describe, it, expect, beforeAll }} from \"vitest\";\n\
-         import type {{ Envelope }} from \"./contracts\";\n\
-         import {{ newEnvelope }} from \"./contracts\";\n\
-         import {{ {svc} }} from \"./{svc}\";\n"
+        "// generado por axon — no editar.\n\
+         //\n\
+         // Enchufalo desde tu propio archivo de pruebas:\n\
+         //\n\
+         //   import {{ pruebasDeContrato, pruebasDeMaquinas }} from \"./axon.testkit.ts\";\n\
+         //   import {{ {p} }} from \"./index.ts\";\n\
+         //   pruebasDeContrato((bus, inbox{o}) => new {p}(bus, inbox{o}));\n\
+         //   pruebasDeMaquinas();\n\
+         import {{ describe, it }} from \"node:test\";\n\
+         import assert from \"node:assert/strict\";\n\
+         import {{\n{t},\n}} from \"{c}\";\n",
+        p = pascal(svc),
+        o = if m.patterns.outbox { ", outbox" } else { "" },
+        t = tipos
+            .iter()
+            .map(|t| format!("  {t}"))
+            .collect::<Vec<_>>()
+            .join(",\n"),
+        c = contracts,
     )];
 
-    // fixtures: del esquema del emisor, no de lo que el consumidor cree
-    o.push("// fixtures derivadas del esquema declarado por el EMISOR de cada evento".into());
-    for ev in target.consumes.keys() {
-        if let Some((_, fields)) = emitters.iter().find(|(e, _)| *e == ev) {
+    o.push(
+        "// Dobles en memoria. Deterministas y sin dependencias: las pruebas de\n\
+         // contrato no necesitan infraestructura, las de integracion si.\n\
+         export class BusFalso implements Bus {\n  \
+           readonly publicados: Envelope<unknown>[] = [];\n  \
+           async publish(e: Envelope<unknown>) {\n    this.publicados.push(e);\n  }\n}\n\n\
+         export class InboxEnMemoria implements Inbox {\n  \
+           readonly vistos = new Set<string>();\n  \
+           async once(id: string, fn: () => Promise<void>) {\n    \
+             if (this.vistos.has(id)) return;\n    this.vistos.add(id);\n    await fn();\n  }\n}\n"
+            .to_string(),
+    );
+    if m.patterns.outbox {
+        o.push(
+            "export class OutboxFalso implements Outbox {\n  \
+               readonly guardados: Envelope<unknown>[] = [];\n  \
+               async stage(e: Envelope<unknown>) {\n    this.guardados.push(e);\n  }\n}\n"
+                .to_string(),
+        );
+    }
+
+    o.push(
+        "// Fixtures derivadas del esquema que declara el DUENO de cada evento,\n\
+            // no de lo que el consumidor cree recibir: ahi es donde aparece el drift."
+            .into(),
+    );
+    for (ev, campos) in &consumidos {
+        o.push(fixture(
+            &camel(&format!("fixture.{ev}")),
+            &pascal(ev),
+            campos,
+        ));
+    }
+
+    let (args, params) = if m.patterns.outbox {
+        (
+            "bus: BusFalso, inbox: InboxEnMemoria, outbox: OutboxFalso",
+            "bus, inbox, outbox",
+        )
+    } else {
+        ("bus: BusFalso, inbox: InboxEnMemoria", "bus, inbox")
+    };
+    let sink = if m.patterns.outbox {
+        "outbox.guardados"
+    } else {
+        "bus.publicados"
+    };
+
+    o.push(format!(
+        "/** Pruebas de contrato. `crear` devuelve tu implementacion del servicio. */\n\
+         export function pruebasDeContrato(crear: ({args}) => {cls}) {{\n  \
+           const montar = () => {{\n    \
+             const bus = new BusFalso();\n    const inbox = new InboxEnMemoria();\n    \
+             {decl}const svc = crear({params});\n    \
+             return {{ svc, bus, inbox{ret} }};\n  }};\n\n  \
+           describe(\"{svc} · contrato\", () => {{",
+        decl = if m.patterns.outbox {
+            "const outbox = new OutboxFalso();\n    "
+        } else {
+            ""
+        },
+        ret = if m.patterns.outbox { ", outbox" } else { "" },
+    ));
+
+    if consumidos.is_empty() {
+        o.push("    it(\"no consume eventos\", () => assert.ok(true));".into());
+    }
+    for (ev, _) in &consumidos {
+        let fx = camel(&format!("fixture.{ev}"));
+        o.push(format!(
+            "    it(\"acepta {ev} tal como lo emite su dueno\", async () => {{\n      \
+               const {{ svc }} = montar();\n      \
+               await svc.dispatch(newEnvelope(\"{ev}\", \"prueba\", {fx}));\n    }});\n\n    \
+             it(\"la segunda entrega de {ev} no repite el efecto\", async () => {{\n      \
+               const {{ svc, {s} }} = montar();\n      \
+               const e = newEnvelope(\"{ev}\", \"prueba\", {fx});\n      \
+               await svc.dispatch(e);\n      const despues = {sink}.length;\n      \
+               await svc.dispatch(e);\n      \
+               assert.equal({sink}.length, despues, \"el mismo envelope tuvo efecto dos veces\");\n    }});",
+            s = if m.patterns.outbox { "outbox" } else { "bus" },
+        ));
+        if !m.emits.is_empty() {
             o.push(format!(
-                "export const {} = {};",
-                camel(&format!("fixture.{ev}")),
-                fixture(fields)
+                "    it(\"propaga la cadena causal al reaccionar a {ev}\", async () => {{\n      \
+                   const {{ svc, {s} }} = montar();\n      \
+                   const causa = newEnvelope(\"{ev}\", \"prueba\", {fx});\n      \
+                   await svc.dispatch(causa);\n      \
+                   const salida = {sink};\n      \
+                   assert.ok(salida.length > 0, \"no emitio nada\");\n      \
+                   for (const e of salida) {{\n        \
+                     assert.equal(e.causationId, causa.id, \"causationId no apunta a la causa\");\n        \
+                     assert.equal(e.correlationId, causa.correlationId, \"se perdio el flujo\");\n        \
+                     assert.equal(e.traceparent.split(\"-\")[1], causa.traceparent.split(\"-\")[1], \"se perdio la traza\");\n      \
+                   }}\n    }});",
+                s = if m.patterns.outbox { "outbox" } else { "bus" },
             ));
         }
     }
+    if m.patterns.outbox {
+        o.push(
+            "    it(\"nada se publica fuera del outbox\", async () => {\n      \
+               const { bus } = montar();\n      \
+               assert.equal(bus.publicados.length, 0, \"dual-write: el handler toco el bus\");\n    });"
+                .into(),
+        );
+    }
+    o.push("  });\n}\n".into());
 
-    // unitarias
-    o.push(format!("\ndescribe(\"{svc} · unitarias\", () => {{"));
-    for (ev, spec) in &target.consumes {
+    // maquinas de estado: puras, no necesitan nada de la persona
+    o.push("/** Pruebas de las maquinas de estado. No necesitan tu codigo. */\nexport function pruebasDeMaquinas() {".into());
+    if m.machine.is_empty() {
+        o.push("  // este servicio no declara maquinas de estado".into());
+    }
+    for (name, mac) in &m.machine {
+        let (c, p) = (camel(name), pascal(name));
         o.push(format!(
-            "  it(\"{} acepta {ev} tal como lo emite su dueno\", async () => {{\n    \
-             const e = newEnvelope(\"{ev}\", \"test\", {});\n    \
-             await new {cls}(bus, inbox).{}(e);\n    \
-             expect(bus.published).toHaveLength(1); // TODO: assert de negocio\n  }});",
-            spec.handler,
-            camel(&format!("fixture.{ev}")),
-            spec.handler
+            "  describe(\"{svc} · maquina {name}\", () => {{\n    \
+               it(\"cada transicion declarada es legal desde sus estados de origen\", () => {{\n      \
+                 for (const [accion, t] of Object.entries({c}Transitions)) {{\n        \
+                   for (const desde of t.from) {{\n          \
+                     assert.equal({c}Next(desde, accion as {p}Action), t.to);\n          \
+                     assert.ok({c}Can(desde, accion as {p}Action));\n        \
+                   }}\n      \
+                 }}\n    }});\n\n    \
+               it(\"una transicion no declarada revienta\", () => {{\n      \
+                 const estados: {p}State[] = [{estados}];\n      \
+                 for (const [accion, t] of Object.entries({c}Transitions)) {{\n        \
+                   for (const e of estados.filter((s) => !t.from.includes(s))) {{\n          \
+                     assert.throws(() => {c}Next(e, accion as {p}Action));\n          \
+                     assert.equal({c}Can(e, accion as {p}Action), false);\n        \
+                   }}\n      \
+                 }}\n    }});\n  }});",
+            estados = mac
+                .states()
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
         ));
     }
-    // el patron que mas se rompe en produccion, probado por defecto
-    if let Some((ev, spec)) = target.consumes.iter().next() {
-        o.push(format!(
-            "  it(\"es idempotente: la segunda entrega no repite el efecto\", async () => {{\n    \
-             const e = newEnvelope(\"{ev}\", \"test\", {});\n    \
-             const s = new {cls}(bus, inbox);\n    \
-             await s.dispatch(e);\n    await s.dispatch(e); // misma id\n    \
-             expect(bus.published).toHaveLength(1);\n  }});",
-            camel(&format!("fixture.{ev}"))
-        ));
-        let _ = spec;
-    }
-    o.push("});".into());
-
-    // integracion contra el compose local
-    o.push(format!(
-        "\ndescribe(\"{svc} · integracion\", () => {{\n  \
-         // infra real, la misma que `axon infra --target local`: nada de mocks de DB\n  \
-         beforeAll(async () => {{ await sh(\"docker compose -f axon.local.yml up -d --wait\"); }});\n  \
-         it(\"persiste y publica en la misma transaccion\", async () => {{\n    \
-         // TODO: caso real contra postgres + NATS\n    expect(true).toBe(true);\n  }});\n}});"
-    ));
-
-    // e2e desde la cadena causal declarada
-    let roots: Vec<&String> = target.emits.keys().collect();
-    if !roots.is_empty() {
-        o.push(format!(
-            "\ndescribe(\"{svc} · e2e\", () => {{\n  \
-             it(\"el flujo causal real coincide con `axon seq`\", async () => {{\n    \
-             // publica el evento raiz y compara el arbol de `axon trace` con el esperado\n    \
-             const esperado = await sh(\"axon seq {} manifests/\");\n    \
-             const real = await sh(\"axon trace .axon/local.ndjson --seq\");\n    \
-             expect(normaliza(real)).toEqual(normaliza(esperado));\n  }});\n}});",
-            roots[0]
-        ));
-    }
-    o.join("\n")
+    o.push("}\n".into());
+    Ok(o.join("\n"))
 }
