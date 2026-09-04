@@ -253,6 +253,7 @@ export const manifest = {
       }
     }
   },
+  "saga": {},
   "infra": {
     "state": "postgres",
     "runtime": "container",

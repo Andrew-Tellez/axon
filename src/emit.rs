@@ -173,6 +173,9 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     if !m.machine.is_empty() {
         out.push(machines_ts(m));
     }
+    if !m.saga.is_empty() {
+        out.push(sagas_ts(m));
+    }
     let rutas: Vec<String> = m
         .methods
         .values()
@@ -495,6 +498,62 @@ pub fn build_er(ms: &[Manifest]) -> String {
     out.join("\n")
 }
 
+/// La saga como diagrama: el camino de ida y, en la misma imagen, la vuelta.
+///
+/// Que la compensacion se dibuje sola es la mitad del valor de declararla: en
+/// una revision, un paso sin flecha de vuelta se ve.
+fn seq_saga(m: &Manifest, nombre: &str, sg: &Saga) -> String {
+    let mut o = vec![
+        "sequenceDiagram".to_string(),
+        "  autonumber".to_string(),
+        format!("  participant coord as {}·{nombre}", m.service),
+    ];
+    let mut vistos: Vec<&str> = Vec::new();
+    for paso in &sg.steps {
+        for r in [Some(&paso.hacer), paso.undo.as_ref()].into_iter().flatten() {
+            if let Some((svc, _)) = Paso::partes(r) {
+                if svc != m.service && !vistos.contains(&svc) {
+                    vistos.push(svc);
+                    o.push(format!("  participant {svc}"));
+                }
+            }
+        }
+    }
+    o.push(format!(
+        "  Note over coord: presupuesto {}",
+        match sg.timeout_ms {
+            Some(ms) => format!("{ms}ms"),
+            None => "sin declarar".to_string(),
+        }
+    ));
+    for (i, paso) in sg.steps.iter().enumerate() {
+        if let Some((svc, met)) = Paso::partes(&paso.hacer) {
+            o.push(format!("  coord->>{svc}: {} {met}", i + 1));
+            o.push(format!("  {svc}-->>coord: ok"));
+        }
+    }
+    o.push("  Note over coord: hasta aca, el camino feliz".to_string());
+    // la vuelta: en orden inverso, que es el unico correcto
+    o.push("  rect rgba(200,80,80,0.12)".to_string());
+    o.push("  Note over coord: si un paso falla, se deshace lo intentado en orden INVERSO".into());
+    for (i, paso) in sg.steps.iter().enumerate().rev() {
+        match &paso.undo {
+            Some(u) => {
+                if let Some((svc, met)) = Paso::partes(u) {
+                    o.push(format!("  coord->>{svc}: deshacer {} · {met}", i + 1));
+                    o.push(format!("  {svc}-->>coord: ok (idempotente)"));
+                }
+            }
+            None => o.push(format!(
+                "  Note over coord: paso {} sin compensacion: es el ultimo",
+                i + 1
+            )),
+        }
+    }
+    o.push("  end".to_string());
+    o.join("\n")
+}
+
 /// Flujo causal esperado. Lo que DEBERIA pasar; el causationId de los
 /// envelopes reales dice lo que paso.
 pub fn build_seq(ms: &[Manifest], root: &str, solo_eventos: bool) -> Result<String, String> {
@@ -506,11 +565,28 @@ pub fn build_seq(ms: &[Manifest], root: &str, solo_eventos: bool) -> Result<Stri
                 .map(move |ev| (ev.as_str(), m.service.as_str()))
         })
         .collect();
+    // Una saga tambien es un flujo, y el suyo tiene una rama que ningun
+    // diagrama de eventos muestra: la compensacion.
+    if let Some((m, sg)) = ms
+        .iter()
+        .find_map(|m| m.saga.get(root).map(|sg| (m, sg)))
+    {
+        return Ok(seq_saga(m, root, sg));
+    }
     if !emitter.contains_key(root) {
         let known: Vec<_> = emitter.keys().copied().collect();
+        let sagas: Vec<&str> = ms
+            .iter()
+            .flat_map(|m| m.saga.keys().map(|k| k.as_str()))
+            .collect();
         return Err(format!(
-            "{root}: nadie lo emite. Eventos: {}",
-            known.join(", ")
+            "{root}: nadie lo emite y ninguna saga se llama asi. Eventos: {}. Sagas: {}",
+            known.join(", "),
+            if sagas.is_empty() {
+                "ninguna".to_string()
+            } else {
+                sagas.join(", ")
+            }
         ));
     }
     let external: IndexMap<&str, bool> = ms
@@ -645,6 +721,220 @@ pub fn machines_ts(m: &Manifest) -> String {
         o.push(format!(
             "export const {c}Can = (state: {p}State, action: {p}Action) => {c}Transitions[action].from.includes(state);",
             c = camel(name)
+        ));
+    }
+    o.join("\n")
+}
+
+/// El coordinador de cada saga.
+///
+/// Lo que se genera es el CAMINO: el orden de los pasos, el diario, la
+/// compensacion en orden inverso y el presupuesto de tiempo. Lo que no se
+/// genera son las entradas de cada llamada, porque son datos de negocio: eso
+/// es la interfaz que se implementa. Asi que un paso sin implementar no
+/// compila, y un paso implementado no puede correr fuera de orden.
+pub fn sagas_ts(m: &Manifest) -> String {
+    let mut o = vec![
+        "\n/** El diario de una saga: donde vive el avance. Sin el, un reinicio a\n \
+         *  mitad de camino deja los pasos ya hechos aplicados y sin registro de\n \
+         *  cuales fueron: no se puede terminar ni compensar.\n \
+         *\n \
+         *  `intentando` se escribe ANTES de la llamada y `hecho` DESPUES. Un paso\n \
+         *  que quedo en `intentando` puede haber ocurrido o no, asi que al retomar\n \
+         *  se COMPENSA, no se reintenta: por eso toda compensacion tiene que\n \
+         *  tolerar que no haya nada que deshacer. */\n\
+         export interface SagaDiario {\n  \
+           abrir(id: string, saga: string): Promise<void>;\n  \
+           marcar(id: string, paso: number, estado: \"intentando\" | \"hecho\" | \"deshecho\"): Promise<void>;\n  \
+           cerrar(id: string, estado: SagaEstado): Promise<void>;\n  \
+           /** Hasta donde llego, para retomar. `null` si es nueva. */\n  \
+           leer(id: string): Promise<{ paso: number; estado: string } | null>;\n\
+         }\n\
+         \n\
+         export type SagaEstado = \"completada\" | \"compensada\" | \"atascada\";\n\
+         \n\
+         /** Una compensacion que falla no tiene nada detras: la saga queda a\n \
+         *  medias y necesita una persona. Se lanza para que eso no pase\n \
+         *  desapercibido. */\n\
+         export class SagaAtascada extends Error {\n  \
+           readonly saga: string;\n  \
+           readonly paso: number;\n  \
+           readonly causa: unknown;\n  \
+           constructor(saga: string, paso: number, causa: unknown) {\n    \
+             super(`${saga}: la compensacion del paso ${paso} fallo; la saga quedo a medias`);\n    \
+             this.saga = saga;\n    \
+             this.paso = paso;\n    \
+             this.causa = causa;\n  \
+           }\n\
+         }\n"
+            .to_string(),
+    ];
+    for (nombre, sg) in &m.saga {
+        let p = pascal(nombre);
+        let c = camel(nombre);
+        let mut acciones = Vec::new();
+        let mut tabla = Vec::new();
+        for (i, paso) in sg.steps.iter().enumerate() {
+            let n = i + 1;
+            let met = Paso::partes(&paso.hacer).map(|(_, x)| x).unwrap_or("?");
+            acciones.push(format!(
+                "  /** paso {n} · {} */\n  paso{n}{}(e: Envelope<unknown>): Promise<void>;",
+                paso.hacer,
+                pascal(met)
+            ));
+            match &paso.undo {
+                Some(u) => {
+                    let umet = Paso::partes(u).map(|(_, x)| x).unwrap_or("?");
+                    acciones.push(format!(
+                        "  /** deshace el paso {n} · {u} · tiene que tolerar que no haya nada que deshacer */\n  \
+                         deshacer{n}{}(e: Envelope<unknown>): Promise<void>;",
+                        pascal(umet)
+                    ));
+                    tabla.push(format!(
+                        "  {{ paso: {n}, hacer: \"{}\", deshacer: \"{u}\" }},",
+                        paso.hacer
+                    ));
+                }
+                None => tabla.push(format!(
+                    "  // el ultimo paso no lleva compensacion: si falla, no hay nada suyo que deshacer\n  \
+                     {{ paso: {n}, hacer: \"{}\", deshacer: null }},",
+                    paso.hacer
+                )),
+            }
+        }
+        o.push(format!(
+            "/** Los pasos declarados en el manifiesto. Generado: no editar. */\n\
+             export const {c}Pasos = [\n{}\n] as const;\n",
+            tabla.join("\n")
+        ));
+        o.push(format!(
+            "/** Un metodo por paso y uno por compensacion. Los implementa quien\n \
+             *  conoce los datos: el coordinador sabe el orden, no el contenido. */\n\
+             export interface {p}Acciones {{\n{}\n}}\n",
+            acciones.join("\n")
+        ));
+
+        // el cuerpo: hacia adelante hasta que algo falla, y de vuelta
+        let mut adelante = Vec::new();
+        let mut atras = Vec::new();
+        for (i, paso) in sg.steps.iter().enumerate() {
+            let n = i + 1;
+            let met = Paso::partes(&paso.hacer).map(|(_, x)| x).unwrap_or("?");
+            adelante.push(format!(
+                "      case {n}:\n        \
+                   await diario.marcar(id, {n}, \"intentando\");\n        \
+                   await acciones.paso{n}{}(e);\n        \
+                   await diario.marcar(id, {n}, \"hecho\");\n        \
+                   break;",
+                pascal(met)
+            ));
+            if let Some(u) = &paso.undo {
+                let umet = Paso::partes(u).map(|(_, x)| x).unwrap_or("?");
+                atras.push(format!(
+                    "      case {n}:\n        \
+                       await acciones.deshacer{n}{}(e);\n        \
+                       break;",
+                    pascal(umet)
+                ));
+            } else {
+                atras.push(format!(
+                    "      case {n}:\n        \
+                       break; // sin compensacion declarada: es el ultimo paso"
+                ));
+            }
+        }
+        let plazo = match sg.timeout_ms {
+            Some(ms) => format!("{ms}"),
+            None => "Number.POSITIVE_INFINITY".to_string(),
+        };
+        o.push(format!(
+            "/** Corre la saga `{nombre}`.\n \
+             *\n \
+             *  Hacia adelante hasta que un paso falla o se agota el presupuesto; de\n \
+             *  ahi en orden INVERSO deshaciendo solo lo que se intento. El orden\n \
+             *  inverso no es estetica: compensar hacia adelante deshace un paso\n \
+             *  cuyo efecto otro paso posterior ya uso.\n \
+             *\n \
+             *  Si `id` ya tiene diario, retoma: el paso que quedo en `intentando`\n \
+             *  se compensa, porque no se sabe si ocurrio. */\n\
+             export async function correr{p}(\n  \
+               id: string,\n  \
+               acciones: {p}Acciones,\n  \
+               diario: SagaDiario,\n  \
+               e: Envelope<unknown>,\n\
+             ): Promise<{{ estado: SagaEstado; hasta: number; error?: unknown }}> {{\n  \
+               const total = {total};\n  \
+               // presupuesto declarado en el manifiesto; `axon verify` ya comprobo\n  \
+               // que cubre la suma de los pasos y sus compensaciones\n  \
+               const limite = Date.now() + {plazo};\n  \
+               const previo = await diario.leer(id);\n  \
+               if (!previo) await diario.abrir(id, \"{nombre}\");\n  \
+               // un paso a medio intentar no se reintenta: se deshace\n  \
+               let hecho = previo ? (previo.estado === \"hecho\" ? previo.paso : previo.paso - 1) : 0;\n  \
+               const dudoso = previo?.estado === \"intentando\" ? previo.paso : 0;\n  \
+               // El paso que FALLO tambien se deshace: un timeout no dice que no\n  \
+               // paso nada del otro lado. Compensar solo hasta el ultimo exito\n  \
+               // deja ese efecto aplicado para siempre.\n  \
+               let intentado = dudoso;\n  \
+               let fallo: unknown = dudoso ? new Error(\"retomada con un paso en duda\") : undefined;\n  \
+               if (!dudoso) {{\n    \
+                 for (let paso = hecho + 1; paso <= total; paso++) {{\n      \
+                   if (Date.now() > limite) {{\n        \
+                     fallo = new Error(`{nombre}: presupuesto agotado antes del paso ${{paso}}`);\n        \
+                     break;\n      \
+                   }}\n      \
+                   intentado = paso;\n      \
+                   try {{\n        \
+                     await paso{p}(paso, acciones, diario, e, id);\n        \
+                     hecho = paso;\n      \
+                   }} catch (err) {{\n        \
+                     fallo = err;\n        \
+                     break;\n      \
+                   }}\n    \
+                 }}\n  \
+               }}\n  \
+               if (!fallo) {{\n    \
+                 await diario.cerrar(id, \"completada\");\n    \
+                 return {{ estado: \"completada\", hasta: total }};\n  \
+               }}\n  \
+               // de vuelta: todo lo que se INTENTO, en orden inverso\n  \
+               for (let paso = intentado; paso >= 1; paso--) {{\n    \
+                 try {{\n      \
+                   await deshacer{p}(paso, acciones, e);\n      \
+                   await diario.marcar(id, paso, \"deshecho\");\n    \
+                 }} catch (err) {{\n      \
+                   await diario.cerrar(id, \"atascada\");\n      \
+                   throw new SagaAtascada(\"{nombre}\", paso, err);\n    \
+                 }}\n  \
+               }}\n  \
+               await diario.cerrar(id, \"compensada\");\n  \
+               return {{ estado: \"compensada\", hasta: hecho, error: fallo }};\n\
+             }}\n\
+             \n\
+             async function paso{p}(\n  \
+               paso: number,\n  \
+               acciones: {p}Acciones,\n  \
+               diario: SagaDiario,\n  \
+               e: Envelope<unknown>,\n  \
+               id: string,\n\
+             ): Promise<void> {{\n  \
+               switch (paso) {{\n\
+             {adelante}\n    \
+                 default:\n      \
+                   throw new Error(`{nombre}: paso ${{paso}} no declarado en el manifiesto`);\n  \
+               }}\n\
+             }}\n\
+             \n\
+             async function deshacer{p}(paso: number, acciones: {p}Acciones, e: Envelope<unknown>): Promise<void> {{\n  \
+               switch (paso) {{\n\
+             {atras}\n    \
+                 default:\n      \
+                   throw new Error(`{nombre}: paso ${{paso}} no declarado en el manifiesto`);\n  \
+               }}\n\
+             }}\n",
+            total = sg.steps.len(),
+            adelante = adelante.join("\n"),
+            atras = atras.join("\n"),
         ));
     }
     o.join("\n")

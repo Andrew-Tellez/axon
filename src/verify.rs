@@ -852,6 +852,181 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    let known: IndexMap<&str, &Manifest> = ms.iter().map(|m| (m.service.as_str(), m)).collect();
+
+    // sagas: un paso sin compensacion no es una saga, es un dual-write con
+    // mas pasos y mas formas de quedarse a medias
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        for (nombre, sg) in &m.saga {
+            if sg.steps.is_empty() {
+                errors.push(format!("{svc}.{nombre}: una saga sin pasos no coordina nada"));
+                continue;
+            }
+
+            // El disparador tiene que existir: una saga que nadie arranca es
+            // codigo generado que nunca corre.
+            match &sg.on {
+                None => errors.push(format!(
+                    "{svc}.{nombre}: sin `on`. Una saga la arranca un metodo propio o un \
+                     evento consumido, y sin decir cual el coordinador se genera y nunca corre"
+                )),
+                Some(on) => {
+                    if !m.methods.contains_key(on) && !m.consumes.contains_key(on) {
+                        errors.push(format!(
+                            "{svc}.{nombre}: la arranca `{on}`, que no es un metodo de `{svc}` \
+                             ni un evento que consuma"
+                        ));
+                    }
+                }
+            }
+
+            // El avance tiene que estar en disco. Un coordinador que pierde la
+            // saga a medias no la termina ni la compensa: los pasos ya hechos
+            // quedan aplicados para siempre y nadie sabe cuales fueron.
+            let tabla = Saga::tabla(nombre);
+            match esquemas.get(svc) {
+                None => errors.push(format!(
+                    "{svc}.{nombre}: sin migraciones, y la saga necesita la tabla `{tabla}` para \
+                     sobrevivir a un reinicio del coordinador"
+                )),
+                Some(tablas) => match tablas.get(&tabla) {
+                    None => errors.push(format!(
+                        "{svc}.{nombre}: falta la tabla `{tabla}`. Sin ella un reinicio a mitad \
+                         de la saga deja los pasos ya hechos aplicados y sin registro de cuales \
+                         fueron: no se puede terminar ni compensar"
+                    )),
+                    Some(t) => {
+                        for col in ["id", "paso", "estado"] {
+                            if !t.tiene(col) {
+                                errors.push(format!(
+                                    "{svc}.{nombre}: `{tabla}` sin columna `{col}`. El \
+                                     coordinador generado guarda ahi hasta donde llego"
+                                ));
+                            }
+                        }
+                    }
+                },
+            }
+
+            let ultimo = sg.steps.len() - 1;
+            let mut presupuesto = 0u32;
+            for (i, paso) in sg.steps.iter().enumerate() {
+                // Cada referencia se resuelve contra los manifiestos, no contra
+                // la buena fe: un `undo` mal escrito es una compensacion que no
+                // existe, y se descubre el dia que hay que compensar.
+                let mut resolver = |campo: &str, r: &str| -> Option<(u32, &Method)> {
+                    let Some((s, met)) = Paso::partes(r) else {
+                        errors.push(format!(
+                            "{svc}.{nombre}.{campo}: `{r}` no tiene la forma `servicio.metodo`"
+                        ));
+                        return None;
+                    };
+                    let Some(otro) = known.get(s) else {
+                        errors.push(format!(
+                            "{svc}.{nombre}.{campo}: `{r}` apunta a `{s}`, que no existe"
+                        ));
+                        return None;
+                    };
+                    let Some(me) = otro.methods.get(met) else {
+                        errors.push(format!("{svc}.{nombre}.{campo}: `{s}` no ofrece `{met}`"));
+                        return None;
+                    };
+                    // El paso se invoca con el cliente generado, y ese cliente
+                    // existe solo si la dependencia esta declarada. Sin eso la
+                    // saga se genera y no tiene con que llamar.
+                    let dep = m
+                        .depends
+                        .iter()
+                        .find(|d| d.service.as_deref() == Some(s) && d.method == met);
+                    if s != svc.as_str() && dep.is_none() {
+                        errors.push(format!(
+                            "{svc}.{nombre}.{campo}: usa `{r}` sin declararlo en `[[depends]]`. \
+                             El cliente resiliente —timeout, reintentos, breaker— sale de ahi, y \
+                             sin el la saga no tiene con que llamar"
+                        ));
+                    }
+                    // El presupuesto del paso es el del LLAMADOR, no el que el
+                    // otro servicio declara para si, y con los reintentos
+                    // dentro: el coordinador espera lo que dice `[[depends]]`.
+                    let unitario = dep.and_then(|d| d.timeout_ms).or(me.timeout_ms).unwrap_or(0);
+                    let intentos = dep.map(|d| d.retries + 1).unwrap_or(1);
+                    Some((unitario * intentos, me))
+                };
+
+                if let Some((ms, _)) = resolver("do", &paso.hacer) {
+                    presupuesto += ms;
+                }
+
+                match &paso.undo {
+                    // Carve-out deliberado: si el ULTIMO paso falla, no hay
+                    // nada suyo que deshacer. Exigirle compensacion seria un
+                    // falso positivo, y una regla con falsos positivos se
+                    // silencia entera.
+                    None if i == ultimo => {}
+                    None => errors.push(format!(
+                        "{svc}.{nombre}: el paso {} (`{}`) no tiene `undo`, y no es el ultimo. \
+                         Si falla un paso posterior, este queda aplicado para siempre: eso no es \
+                         una saga, es un dual-write con mas pasos",
+                        i + 1,
+                        paso.hacer
+                    )),
+                    Some(u) => {
+                        if let Some((ms, me)) = resolver("undo", u) {
+                            // La compensacion se reintenta hasta que entra: no
+                            // hay nada detras de ella. Una que no es idempotente
+                            // aplica el efecto dos veces.
+                            if !me.idempotent {
+                                errors.push(format!(
+                                    "{svc}.{nombre}: `{u}` compensa el paso {} y no es \
+                                     `idempotent`. Una compensacion se reintenta hasta que entra \
+                                     —no hay nada detras— y reintentar la que no es idempotente \
+                                     aplica el efecto dos veces",
+                                    i + 1
+                                ));
+                            }
+                            presupuesto += ms;
+                        }
+                        if *u == paso.hacer {
+                            errors.push(format!(
+                                "{svc}.{nombre}: el paso {} se compensa consigo mismo",
+                                i + 1
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // La misma clase de aritmetica que la de las conexiones, y el mismo
+            // error de fondo: un numero declarado que no cubre la suma de los
+            // que ya estaban declarados.
+            match sg.timeout_ms {
+                Some(tope) if presupuesto > tope => errors.push(format!(
+                    "{svc}.{nombre}: `timeout_ms = {tope}` y los pasos mas sus compensaciones \
+                     suman {presupuesto}ms. Rendirse mientras un paso sigue en vuelo deja al \
+                     coordinador compensando algo que despues tiene exito"
+                )),
+                Some(_) => {}
+                None => warnings.push(format!(
+                    "{svc}.{nombre}: sin `timeout_ms`. Una saga sin presupuesto de tiempo se \
+                     queda en vuelo hasta que alguien la mira"
+                )),
+            }
+
+            // Una saga es consistencia eventual por construccion: entre el
+            // primer paso y el ultimo el sistema pasa por estados que ningun
+            // invariante describe. Prometer CP encima es la misma contradiccion
+            // que leer de una replica y prometer CP.
+            if !m.cap.eventual() {
+                errors.push(format!(
+                    "{svc}.{nombre}: coordina una saga con `consistency = \"strong\"`. Entre el \
+                     primer paso y el ultimo hay estados intermedios visibles que ningun \
+                     invariante describe: la garantia real del flujo es eventual"
+                ));
+            }
+        }
+    }
+
     // maquinas de estado: estados muertos, inalcanzables y disparadores fantasma
     for m in ms.iter().filter(|m| !m.external) {
         for (name, mac) in &m.machine {
@@ -923,7 +1098,6 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
-    let known: IndexMap<&str, &Manifest> = ms.iter().map(|m| (m.service.as_str(), m)).collect();
     for m in ms {
         let svc = &m.service;
         for ev in m.consumes.keys() {

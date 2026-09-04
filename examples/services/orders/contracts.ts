@@ -160,6 +160,7 @@ export const manifest = {
     "tenant_binding": "set_local"
   },
   "machine": {},
+  "saga": {},
   "infra": {
     "state": "postgres",
     "runtime": "container",

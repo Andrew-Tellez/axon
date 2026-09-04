@@ -64,7 +64,7 @@ emits = "payment.captured@v1"      # el evento que sale al completarla
 from        = ["captured"]
 to          = "refunded"
 on          = "refundPayment"
-compensates = "capture"            # la inversa, para sagas
+compensates = "capture"            # la inversa, dentro de la misma maquina
 ```
 
 `axon build` genera la tabla de transiciones exhaustiva y tipada — `PaymentState`,

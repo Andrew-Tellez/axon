@@ -124,7 +124,28 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
             });
         }
 
-        // --- sagas ---
+        // --- sagas declaradas ---
+        for (nombre, sg) in &m.saga {
+            // El error ya lo emite `verify`; aca se explica el costo, que es
+            // lo que este informe agrega.
+            let compensables = sg.steps.iter().filter(|p| p.undo.is_some()).count();
+            hs.push(Hallazgo {
+                nivel: if cap.eventual() {
+                    Nivel::Implica
+                } else {
+                    Nivel::Contradice
+                },
+                patron: format!("saga.{nombre}"),
+                texto: format!(
+                    "{} pasos, {compensables} con compensacion. Entre el primer paso y el \
+                     ultimo hay estados intermedios visibles que ningun invariante describe: \
+                     el estado propio puede ser CP, el FLUJO es eventual",
+                    sg.steps.len()
+                ),
+            });
+        }
+
+        // --- sagas dentro de una maquina de estado ---
         let compensa: Vec<&str> = m
             .machine
             .values()

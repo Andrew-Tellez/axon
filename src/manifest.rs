@@ -406,6 +406,54 @@ impl Machine {
     }
 }
 
+/// Un paso de una saga: la accion y lo que la deshace.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Paso {
+    /// `servicio.metodo` a invocar. Tiene que ser una dependencia declarada.
+    #[serde(rename = "do")]
+    pub hacer: String,
+    /// `servicio.metodo` que revierte el paso. Solo el ULTIMO puede omitirlo:
+    /// si el ultimo falla, no hay nada suyo que deshacer.
+    pub undo: Option<String>,
+}
+
+impl Paso {
+    /// `("payments", "capturePayment")`. `None` si no tiene la forma
+    /// `servicio.metodo`.
+    pub fn partes(r: &str) -> Option<(&str, &str)> {
+        let (svc, met) = r.split_once('.')?;
+        (!svc.is_empty() && !met.is_empty() && !met.contains('.')).then_some((svc, met))
+    }
+}
+
+/// Saga: una secuencia de pasos en servicios distintos, cada uno con su
+/// compensacion, coordinada por este servicio.
+///
+/// Lo que la hace declarable es que el coordinador no tiene logica de negocio:
+/// llama en orden, y si algo falla deshace en orden inverso lo que ya hizo. Eso
+/// se genera. Lo que no se puede generar —que exista la compensacion, que sea
+/// idempotente, que el presupuesto de tiempo cierre— se puede REFUTAR, y es
+/// donde estan los errores que cuestan dinero.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Saga {
+    /// Metodo propio o evento consumido que la arranca.
+    pub on: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<Paso>,
+    /// Presupuesto del flujo completo. Tiene que cubrir la suma de los pasos:
+    /// rendirse mientras un paso sigue en vuelo deja al coordinador
+    /// compensando algo que despues tiene exito.
+    pub timeout_ms: Option<u32>,
+}
+
+impl Saga {
+    /// La tabla donde vive el avance. Sin ella un reinicio del coordinador
+    /// pierde la saga a medias: ni termina ni compensa.
+    pub fn tabla(nombre: &str) -> String {
+        format!("saga_{}", nombre.to_lowercase())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Manifest {
     pub service: String,
@@ -446,6 +494,9 @@ pub struct Manifest {
     /// la pena declarar, porque es la misma en todos los lenguajes.
     #[serde(default)]
     pub machine: IndexMap<String, Machine>,
+    /// Sagas que coordina este servicio. Ver `Saga`.
+    #[serde(default)]
+    pub saga: IndexMap<String, Saga>,
     #[serde(default)]
     pub infra: Infra,
     /// Overrides por entorno: `[env.prod] min_instances = 3`.

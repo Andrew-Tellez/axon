@@ -148,7 +148,7 @@ por cada release.
 | --- | --- |
 | [Tu primer manifiesto](https://andrew-tellez.github.io/axon/primeros-pasos.html) | Diez minutos, de cero a verificado |
 | [Referencia del manifiesto](https://andrew-tellez.github.io/axon/manifiesto.html) | Cada campo y por qué existe |
-| [Patrones](https://andrew-tellez.github.io/axon/patrones.html) | Declarados, no recordados |
+| [Patrones](https://andrew-tellez.github.io/axon/patrones.html) | Declarados, no recordados: outbox, inbox idempotente, **saga** |
 | [CAP y resiliencia](https://andrew-tellez.github.io/axon/cap.html) | El lado que sí se elige |
 | [Reglas y drift](https://andrew-tellez.github.io/axon/verificacion.html) | Todo lo que `verify` bloquea |
 | [Seguridad](https://andrew-tellez.github.io/axon/seguridad.html) | OWASP, RLS, enmascarado |

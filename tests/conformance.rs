@@ -2659,3 +2659,420 @@ fn openapi_exige_idempotency_key() {
     );
     assert!(json.contains("/v1/payments"));
 }
+
+/// Una saga no se valida leyendo el codigo generado: se corre. Lo que tiene que
+/// pasar cuando el paso 2 falla es que el paso 1 quede DESHECHO, y que el
+/// diario diga que la saga se compenso. Eso no se puede afirmar con un assert
+/// sobre el texto.
+#[test]
+fn la_saga_generada_compensa_al_reves() {
+    if !tiene("node") {
+        eprintln!("salteado: falta node");
+        return;
+    }
+    let dir = std::env::temp_dir().join("axon-saga");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(
+        dir.join("sql/001_init.expand.sql"),
+        "CREATE TABLE saga_checkout (\n  id uuid PRIMARY KEY,\n  paso int NOT NULL,\n  \
+         estado text NOT NULL\n);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("almacen.toml"),
+        r#"service = "almacen"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[cap]
+consistency = "eventual"
+on_partition = "reject"
+max_staleness_ms = 5000
+
+[methods.checkout]
+in = { orderId = "uuid" }
+out = { ok = "string" }
+timeout_ms = 20000
+idempotent = true
+
+[saga.checkout]
+on = "checkout"
+timeout_ms = 20000
+steps = [
+  { do = "banco.cobrar", undo = "banco.reembolsar" },
+  { do = "banco.pagarProveedor" },
+]
+
+[[depends]]
+service = "banco"
+method = "cobrar"
+timeout_ms = 3000
+retries = 1
+
+[[depends]]
+service = "banco"
+method = "reembolsar"
+timeout_ms = 3000
+retries = 2
+
+[[depends]]
+service = "banco"
+method = "pagarProveedor"
+timeout_ms = 5000
+
+[infra]
+state = "postgres"
+migrations = "sql/"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("banco.toml"),
+        r#"service = "banco"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[methods.cobrar]
+in = { orderId = "uuid" }
+out = { ok = "string" }
+timeout_ms = 3000
+idempotent = true
+
+[methods.reembolsar]
+in = { orderId = "uuid" }
+out = { ok = "string" }
+timeout_ms = 3000
+idempotent = true
+
+[methods.pagarProveedor]
+in = { orderId = "uuid" }
+out = { ok = "string" }
+timeout_ms = 5000
+idempotent = true
+"#,
+    )
+    .unwrap();
+
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "el fixture de la saga no esta limpio:\n{err}");
+
+    // el coordinador se genera y se corre con el testkit de Node, en el mismo
+    // directorio del ejemplo para reusar su node_modules
+    let (ts, err, ok) = axon(&[
+        "build",
+        dir.join("almacen.toml").to_str().unwrap(),
+        dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "{err}");
+    // su propio directorio: el testkit generado no importa ninguna dependencia
+    // —solo `node:test` y el modulo generado— y escribir en el del ejemplo hace
+    // que este test y el typecheck se pisen cuando corren en paralelo
+    let destino = dir.join("prueba");
+    std::fs::create_dir_all(&destino).unwrap();
+    let destino = destino.as_path();
+    std::fs::write(destino.join("axon.saga.contratos.ts"), &ts).unwrap();
+    std::fs::write(
+        destino.join("axon.saga.test.ts"),
+        r#"import { test } from "node:test";
+import assert from "node:assert/strict";
+import { correrCheckout, newEnvelope, checkoutPasos, SagaAtascada,
+         type CheckoutAcciones, type SagaDiario, type SagaEstado } from "./axon.saga.contratos.ts";
+
+class Diario implements SagaDiario {
+  marcas: string[] = [];
+  final: SagaEstado | null = null;
+  #estado: { paso: number; estado: string } | null = null;
+  async abrir(id: string, saga: string) { this.marcas.push(`abrir ${saga}`); }
+  async marcar(id: string, paso: number, estado: "intentando" | "hecho" | "deshecho") {
+    this.marcas.push(`${paso}:${estado}`);
+    this.#estado = { paso, estado };
+  }
+  async cerrar(id: string, estado: SagaEstado) { this.final = estado; }
+  async leer(id: string) { return this.#estado; }
+}
+
+/** Acciones de mentira: registran el orden y fallan cuando se les dice. */
+function acciones(rompe: string[]) {
+  const hechas: string[] = [];
+  const a: CheckoutAcciones = {
+    async paso1Cobrar() { if (rompe.includes("cobrar")) throw new Error("cobrar"); hechas.push("cobrar"); },
+    async deshacer1Reembolsar() { if (rompe.includes("reembolsar")) throw new Error("reembolsar"); hechas.push("reembolsar"); },
+    async paso2PagarProveedor() { if (rompe.includes("pagar")) throw new Error("pagar"); hechas.push("pagar"); },
+  };
+  return { a, hechas };
+}
+
+test("el camino feliz no compensa nada", async () => {
+  const { a, hechas } = acciones([]);
+  const d = new Diario();
+  const r = await correrCheckout("s1", a, d, newEnvelope("x@v1", "prueba", {}));
+  assert.equal(r.estado, "completada");
+  assert.deepEqual(hechas, ["cobrar", "pagar"]);
+  assert.equal(d.final, "completada");
+});
+
+test("si el paso 2 falla, el paso 1 se deshace", async () => {
+  const { a, hechas } = acciones(["pagar"]);
+  const d = new Diario();
+  const r = await correrCheckout("s2", a, d, newEnvelope("x@v1", "prueba", {}));
+  assert.equal(r.estado, "compensada");
+  // el orden importa: primero se hizo cobrar, y lo ultimo que corrio fue su inversa
+  assert.deepEqual(hechas, ["cobrar", "reembolsar"]);
+  assert.equal(d.final, "compensada");
+});
+
+test("si el paso 1 falla, no hay nada hecho que deshacer", async () => {
+  const { a, hechas } = acciones(["cobrar"]);
+  const d = new Diario();
+  const r = await correrCheckout("s3", a, d, newEnvelope("x@v1", "prueba", {}));
+  assert.equal(r.estado, "compensada");
+  // se intento, asi que se deshace igual: la compensacion tolera que no haya nada
+  assert.deepEqual(hechas, ["reembolsar"]);
+});
+
+test("una compensacion que falla deja la saga atascada, y se nota", async () => {
+  const { a } = acciones(["pagar", "reembolsar"]);
+  const d = new Diario();
+  await assert.rejects(
+    () => correrCheckout("s4", a, d, newEnvelope("x@v1", "prueba", {})),
+    (err: unknown) => err instanceof SagaAtascada && err.paso === 1,
+  );
+  assert.equal(d.final, "atascada");
+});
+
+test("el ultimo paso no lleva compensacion, y el resto si", () => {
+  assert.equal(checkoutPasos.length, 2);
+  assert.equal(checkoutPasos[0].deshacer, "banco.reembolsar");
+  assert.equal(checkoutPasos[1].deshacer, null);
+});
+"#,
+    )
+    .unwrap();
+    let out = Command::new("node")
+        .args(["--test", "axon.saga.test.ts"])
+        .current_dir(destino)
+        .output()
+        .expect("node --test");
+    let salida = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "el coordinador generado no compensa como dice:\n{salida}"
+    );
+    assert!(salida.contains("pass 5"), "{salida}");
+}
+
+/// Las reglas de la saga: cada una bloquea una forma distinta de quedarse a
+/// medias. Sin ellas la saga se genera igual y falla el dia que hay que
+/// compensar, que es el peor dia para descubrirlo.
+#[test]
+fn las_reglas_de_la_saga_bloquean() {
+    let dir = std::env::temp_dir().join("axon-saga-reglas");
+    let base = |saga: &str, extra: &str| -> String {
+        format!(
+            r#"service = "almacen"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[cap]
+consistency = "eventual"
+on_partition = "reject"
+
+[methods.checkout]
+in = {{ orderId = "uuid" }}
+out = {{ ok = "string" }}
+timeout_ms = 20000
+idempotent = true
+
+{saga}
+
+[[depends]]
+service = "banco"
+method = "cobrar"
+timeout_ms = 3000
+
+[[depends]]
+service = "banco"
+method = "reembolsar"
+timeout_ms = 3000
+
+[[depends]]
+service = "banco"
+method = "pagarProveedor"
+timeout_ms = 5000
+
+[infra]
+state = "postgres"
+migrations = "sql/"
+{extra}
+"#
+        )
+    };
+    let banco = r#"service = "banco"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[methods.cobrar]
+in = { orderId = "uuid" }
+out = { ok = "string" }
+timeout_ms = 3000
+idempotent = true
+
+[methods.reembolsar]
+in = { orderId = "uuid" }
+out = { ok = "string" }
+timeout_ms = 3000
+idempotent = true
+
+[methods.pagarProveedor]
+in = { orderId = "uuid" }
+out = { ok = "string" }
+timeout_ms = 5000
+"#;
+    let correr = |saga: &str, ddl: &str| -> String {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sql")).unwrap();
+        std::fs::write(dir.join("sql/001_init.expand.sql"), ddl).unwrap();
+        std::fs::write(dir.join("almacen.toml"), base(saga, "")).unwrap();
+        std::fs::write(dir.join("banco.toml"), banco).unwrap();
+        let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        assert!(!ok, "paso limpio:\n{saga}");
+        err
+    };
+    const TABLA: &str = "CREATE TABLE saga_checkout (\n  id uuid PRIMARY KEY,\n  \
+                         paso int NOT NULL,\n  estado text NOT NULL\n);\n";
+
+    // un paso intermedio sin compensacion
+    let err = correr(
+        r#"[saga.checkout]
+on = "checkout"
+timeout_ms = 20000
+steps = [
+  { do = "banco.cobrar" },
+  { do = "banco.pagarProveedor" },
+]"#,
+        TABLA,
+    );
+    assert!(err.contains("no tiene `undo`, y no es el ultimo"), "{err}");
+    assert!(err.contains("dual-write con mas pasos"), "{err}");
+
+    // una compensacion que no es idempotente
+    let err = correr(
+        r#"[saga.checkout]
+on = "checkout"
+timeout_ms = 20000
+steps = [
+  { do = "banco.cobrar", undo = "banco.pagarProveedor" },
+  { do = "banco.reembolsar" },
+]"#,
+        TABLA,
+    );
+    assert!(err.contains("no es `idempotent`"), "{err}");
+    assert!(err.contains("aplica el efecto dos veces"), "{err}");
+
+    // el presupuesto no cubre la suma de los pasos
+    let err = correr(
+        r#"[saga.checkout]
+on = "checkout"
+timeout_ms = 1000
+steps = [
+  { do = "banco.cobrar", undo = "banco.reembolsar" },
+  { do = "banco.pagarProveedor" },
+]"#,
+        TABLA,
+    );
+    assert!(err.contains("suman 11000ms"), "{err}");
+    assert!(err.contains("compensando algo que despues tiene exito"), "{err}");
+
+    // sin la tabla del diario, un reinicio pierde la saga
+    let err = correr(
+        r#"[saga.checkout]
+on = "checkout"
+timeout_ms = 20000
+steps = [
+  { do = "banco.cobrar", undo = "banco.reembolsar" },
+  { do = "banco.pagarProveedor" },
+]"#,
+        "CREATE TABLE otra (id uuid PRIMARY KEY);\n",
+    );
+    assert!(err.contains("falta la tabla `saga_checkout`"), "{err}");
+
+    // un `undo` que no existe
+    let err = correr(
+        r#"[saga.checkout]
+on = "checkout"
+timeout_ms = 20000
+steps = [
+  { do = "banco.cobrar", undo = "banco.devolver" },
+  { do = "banco.pagarProveedor" },
+]"#,
+        TABLA,
+    );
+    assert!(err.contains("`banco` no ofrece `devolver`"), "{err}");
+
+    // un paso que nadie declaro como dependencia: no hay con que llamarlo
+    let dir2 = std::env::temp_dir().join("axon-saga-dep");
+    let _ = std::fs::remove_dir_all(&dir2);
+    std::fs::create_dir_all(dir2.join("sql")).unwrap();
+    std::fs::write(dir2.join("sql/001_init.expand.sql"), TABLA).unwrap();
+    std::fs::write(dir2.join("banco.toml"), banco).unwrap();
+    std::fs::write(
+        dir2.join("almacen.toml"),
+        base(
+            r#"[saga.checkout]
+on = "checkout"
+timeout_ms = 20000
+steps = [
+  { do = "banco.cobrar", undo = "banco.reembolsar" },
+  { do = "banco.pagarProveedor" },
+]"#,
+            "",
+        )
+        .replace(
+            r#"[[depends]]
+service = "banco"
+method = "cobrar"
+timeout_ms = 3000
+
+"#,
+            "",
+        ),
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir2.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("sin declararlo en `[[depends]]`"), "{err}");
+    assert!(err.contains("El cliente resiliente"), "{err}");
+
+    // y una saga bajo `consistency = "strong"`
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(dir.join("sql/001_init.expand.sql"), TABLA).unwrap();
+    std::fs::write(dir.join("banco.toml"), banco).unwrap();
+    std::fs::write(
+        dir.join("almacen.toml"),
+        base(
+            r#"[saga.checkout]
+on = "checkout"
+timeout_ms = 20000
+steps = [
+  { do = "banco.cobrar", undo = "banco.reembolsar" },
+  { do = "banco.pagarProveedor" },
+]"#,
+            "",
+        )
+        .replace("consistency = \"eventual\"", "consistency = \"strong\""),
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("la garantia real del flujo es eventual"), "{err}");
+}
