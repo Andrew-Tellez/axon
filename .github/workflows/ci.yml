@@ -41,3 +41,28 @@ jobs:
       - run: cargo build --release
       - run: ./demo.sh
         working-directory: examples
+
+  commits:
+    # La convencion se verifica solo en el rango que trae este push o este PR:
+    # la historia anterior a adoptarla no es convencional, y reescribirla en un
+    # repo publico para satisfacer un linter es peor que la inconsistencia.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: taiki-e/install-action@v2
+        with: { tool: cocogitto }
+      - name: verificar los mensajes de este cambio
+        run: |
+          set -eu
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            desde="${{ github.event.pull_request.base.sha }}"
+          else
+            desde="${{ github.event.before }}"
+          fi
+          # el primer push a una rama trae ceros como `before`
+          case "$desde" in
+            ""|0000000000000000000000000000000000000000)
+              echo "sin rango previo: no hay nada que verificar"; exit 0 ;;
+          esac
+          cog check "$desde..${{ github.sha }}"

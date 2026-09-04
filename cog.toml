@@ -1,0 +1,34 @@
+# Convención de commits: Conventional Commits, verificada por cocogitto.
+# La misma que `patterns`, para no tener dos convenciones entre repos.
+#
+# El changelog no se escribe a mano: `cog bump --auto` lee los commits desde el
+# último tag, decide si el salto es patch, minor o major, escribe la sección
+# nueva en CHANGELOG.md, commitea y tagea. Ese tag dispara el release.
+tag_prefix = "v"
+from_latest_tag = false
+ignore_merge_commits = true
+ignore_fixup_commits = true
+disable_changelog = false
+disable_bump_commit = false
+branch_whitelist = ["main"]
+skip_ci = "[skip ci]"
+skip_untracked = false
+
+# El hook rechaza el commit antes de crearlo: `cog install-hook --all`.
+[git_hooks.commit-msg]
+script = """#!/bin/sh
+set -eu
+cog verify --file "$1" --ignore-merge-commits --ignore-fixup-commits
+"""
+
+[changelog]
+path = "CHANGELOG.md"
+authors = []
+
+# Tipos propios además de los del estándar. `feat` y `fix` mueven la versión;
+# el resto solo aparece en el changelog, que es lo correcto: cambiar la
+# documentación no es una versión nueva del binario.
+[commit_types]
+gen = { changelog_title = "Generadores" }
+infra = { changelog_title = "Infraestructura" }
+sec = { changelog_title = "Seguridad" }
