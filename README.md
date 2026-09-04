@@ -288,6 +288,10 @@ require_owner          = true
 require_tier           = true
 allowed_event_prefixes = ["order", "payment", "billing"]
 max_deps_per_service   = 7    # si lo pasás, es un monolito distribuido
+
+[ci]                          # el layout del repo es del equipo, no de axon
+service_dir = "services/{service}"
+test_cmd    = "make -C services/{service} test"
 ```
 
 Lo que `axon verify` bloquea hoy:

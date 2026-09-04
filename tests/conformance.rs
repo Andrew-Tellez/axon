@@ -260,6 +260,50 @@ fn el_ci_generado_es_yaml_valido() {
     assert!(yml.contains("id-token: write"), "sin OIDC");
 }
 
+/// El unico generador que hardcodeaba un cloud. Ahora el despliegue sale del
+/// target, igual que la infraestructura.
+#[test]
+fn el_ci_no_hardcodea_un_cloud() {
+    let marcas = [
+        ("gcp", "gcloud run deploy", ["aws ecs", "kubectl"]),
+        ("aws", "aws ecs update-service", ["gcloud", "kubectl"]),
+        ("k8s", "kubectl rollout status", ["gcloud", "aws ecs"]),
+    ];
+    for (target, propia, ajenas) in marcas {
+        let (yml, err, ok) = axon(&["ci", "examples/payments.toml", "--target", target]);
+        assert!(ok, "{err}");
+        assert!(yml.contains(propia), "{target} no genero `{propia}`");
+        for ajena in ajenas {
+            assert!(!yml.contains(ajena), "{target} filtro `{ajena}`");
+        }
+        // la infra va antes que el codigo, con el mismo target
+        assert!(
+            yml.contains(&format!("axon infra ./ --target {target}")),
+            "{target} no aplica la infra antes de desplegar"
+        );
+    }
+    // sin target no se inventa una plataforma
+    let (sin, _, _) = axon(&["ci", "examples/payments.toml"]);
+    for nube in ["gcloud", "aws ecs", "kubectl"] {
+        assert!(!sin.contains(nube), "sin --target aparecio `{nube}`");
+    }
+    assert!(
+        sin.contains("axon verify"),
+        "sin --target se perdieron los gates"
+    );
+
+    // el layout del repo lo dice la policy, no axon
+    let (yml, _, _) = axon(&["ci", "examples/payments.toml", "--target", "k8s"]);
+    assert!(
+        yml.contains("run: node --test services/payments"),
+        "ignoro [ci].test_cmd"
+    );
+    assert!(
+        yml.contains("> services/payments/contracts.ts"),
+        "ignoro [ci].contracts_path"
+    );
+}
+
 #[test]
 fn maquinas_de_estado() {
     let (ts, _, _) = axon(&["build", "examples/payments.toml", "examples"]);

@@ -75,11 +75,27 @@ sobre `[infra]`. Un `--target` no nativo busca `axon-infra-<target>` en el `PATH
 `--target plan` imprime el plan en JSON: la salida de emergencia para cualquier
 proveedor sin target.
 
-### `axon ci <manifiesto>`
-Pipeline de GitHub Actions con los gates que importan: `verify` contra **todos** los
-manifiestos (no solo el propio), código generado al día, migraciones en dry-run,
-OIDC en vez de llaves, infra antes que código, y un `verify` final contra la URL
-desplegada.
+### `axon ci <manifiesto> [--target gcp|aws|k8s]`
+Pipeline de GitHub Actions. Los **gates** los sabe axon: `verify` contra todos los
+manifiestos (no solo el propio), código generado al día, migraciones en dry-run con
+la convención de nombres correcta, OIDC en vez de llaves, e infra aplicada antes que
+código — el topic tiene que existir cuando arranque el primer pod que publica en él.
+
+El **despliegue** sale del `--target`, igual que la infraestructura: Cloud Run, ECS o
+`kubectl rollout`. Sin `--target` genera solo los gates y falla en el paso de deploy
+con una nota: esa parte la sabe tu equipo, no axon.
+
+El **layout del repo** sale de `[ci]` en `axon.policy.toml`, donde `{service}` se
+sustituye por el nombre del servicio:
+
+```toml
+[ci]
+manifests_dir  = "manifests"
+service_dir    = "services/{service}"
+test_cmd       = "make -C services/{service} test"
+contracts_path = "services/{service}/src/contracts.ts"
+image          = "${{ vars.REGISTRY }}/{service}:${{ github.sha }}"
+```
 
 ## Diagramas
 

@@ -174,33 +174,85 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
 
 // ---------- CI/CD ----------
 
-/// El pipeline tambien es una proyeccion: los gates salen del manifiesto,
-/// no de un YAML que alguien copio de otro repo y edito a medias.
-pub fn build_ci(m: &Manifest) -> String {
+/// El pipeline tambien es una proyeccion. Los gates los sabe axon; el layout
+/// del repo lo dice `axon.policy.toml`, y el despliegue depende del target,
+/// igual que la infraestructura. Nada de un cloud hardcodeado.
+pub fn build_ci(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String {
     let svc = &m.service;
-    let mut steps = String::new();
+    let en = |campo: &String| ci.para(campo, svc);
+    let (dir, test, contracts, image, manifests) = (
+        en(&ci.service_dir),
+        en(&ci.test_cmd),
+        en(&ci.contracts_path),
+        en(&ci.image),
+        ci.manifests_dir.clone(),
+    );
+
+    let mut gates = String::new();
     if !migrations_of(m).is_empty() {
-        steps.push_str(
-            "      # gate: expand -> migrate -> contract. Un `.contract.sql` en el mismo\n      \
-             # deploy que el codigo que deja de usar la columna rompe el rollback.\n      \
-             - name: migraciones (dry-run)\n        \
-             run: |\n          \
-             flyway -url=$DB_URL -locations=filesystem:./sql/SERVICE validate\n          \
-             flyway -url=$DB_URL -locations=filesystem:./sql/SERVICE migrate -dryRunOutput=/dev/stdout\n"
-                .replace("SERVICE", svc)
-                .as_str(),
-        );
+        let ruta = m.infra.migrations.clone().unwrap_or_default();
+        gates.push_str(&format!(
+            "      # gate: expand -> migrate -> contract. Un `.contract.sql` en el mismo
+      # deploy que el codigo que deja de usar la columna rompe el rollback.
+      - name: migraciones (dry-run)
+        run: |
+          flyway -url=$DB_URL -locations=filesystem:./{ruta} \\
+            -sqlMigrationPrefix= -sqlMigrationSeparator=_ \\
+            -validateMigrationNaming=true validate
+"
+        ));
     }
+
+    let despliegue = match target {
+        "gcp" => format!(
+            "      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{{{ vars.WIF_PROVIDER }}}}
+      # la infra va antes que el codigo: el topic tiene que existir cuando
+      # arranque el primer pod que publica en el
+      - run: axon infra {manifests}/ --target gcp --env prod > infra/generated.tf
+      - run: terraform apply -auto-approve
+      - run: gcloud run deploy {svc} --image {image} --region ${{{{ vars.REGION }}}}
+"
+        ),
+        "aws" => format!(
+            "      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{{{ vars.AWS_ROLE_ARN }}}}
+          aws-region: ${{{{ vars.AWS_REGION }}}}
+      - run: axon infra {manifests}/ --target aws --env prod > infra/generated.tf
+      - run: terraform apply -auto-approve
+      - run: |
+          aws ecs update-service --cluster ${{{{ vars.ECS_CLUSTER }}}} \\
+            --service {svc} --force-new-deployment
+"
+        ),
+        "k8s" => format!(
+            "      - run: axon infra {manifests}/ --target k8s --env prod > k8s/generated.yaml
+      - run: kubectl apply -f k8s/generated.yaml
+      - run: kubectl set image deployment/{svc} {svc}={image}
+      - run: kubectl rollout status deployment/{svc} --timeout=5m
+"
+        ),
+        _ => format!(
+            "      # Sin target de despliegue. `axon ci --target gcp|aws|k8s` lo genera,
+      # o pone aqui el comando de tu plataforma: los gates de arriba son la
+      # parte que axon puede saber, esta es la que sabe tu equipo.
+      - run: echo \"despliega {svc} aqui\" && exit 1
+"
+        ),
+    };
+
     format!(
         r#"# generado por axon — no editar
 name: {svc}
 
 on:
   pull_request:
-    paths: ["services/{svc}/**", "manifests/{svc}.toml"]
+    paths: ["{dir}/**", "{manifests}/{svc}.toml"]
   push:
     branches: [main]
-    paths: ["services/{svc}/**", "manifests/{svc}.toml"]
+    paths: ["{dir}/**", "{manifests}/{svc}.toml"]
 
 concurrency:
   group: {svc}-${{{{ github.ref }}}}
@@ -215,22 +267,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # el gate que importa: el manifiesto contra TODOS los demas, no solo el propio
       - run: curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
-      - run: axon verify manifests/
+      # el gate que importa: este manifiesto contra TODOS los demas
+      - run: axon verify {manifests}/
       - name: codigo generado al dia
         run: |
-          axon build manifests/{svc}.toml manifests/ --lang ts > services/{svc}/src/contracts.ts
+          axon build {manifests}/{svc}.toml {manifests}/ --lang ts > {contracts}
           git diff --exit-code || {{
             echo "::error::codigo generado desactualizado; corre axon build"
             exit 1
           }}
-{steps}
+{gates}
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: make -C services/{svc} test
+      - run: {test}
 
   deploy:
     needs: [contratos, test]
@@ -239,14 +291,8 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
-      - uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{{{ vars.WIF_PROVIDER }}}}
-      # la infra va antes que el codigo: el topic tiene que existir cuando
-      # arranque el primer pod que publica en el
-      - run: axon infra manifests/ > infra/generated.tf && terraform apply -auto-approve
-      - run: gcloud run deploy {svc} --image $IMAGE --revision-suffix ${{{{ github.sha }}}}
-      # verificacion contra lo desplegado, no contra el repo
+      - run: curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
+{despliegue}      # verificacion contra lo desplegado, no contra el repo
       - run: axon verify https://{svc}.internal
 "#
     )

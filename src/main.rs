@@ -34,7 +34,12 @@ enum Cmd {
         lang: String,
     },
     /// manifiesto -> pipeline de CI/CD
-    Ci { manifest: PathBuf },
+    Ci {
+        manifest: PathBuf,
+        /// plataforma de despliegue; sin esto solo genera los gates
+        #[arg(long, default_value = "none")]
+        target: String,
+    },
     /// manifiestos -> IaC. `--target plan` da el plan neutral en JSON.
     Infra {
         sources: Vec<String>,
@@ -143,7 +148,12 @@ fn run() -> Result<ExitCode, String> {
                 print!("{}", plugin::run(&bin, &entrada.to_string())?);
             }
         }
-        Cmd::Ci { manifest } => println!("{}", emit::build_ci(&manifest::load(&manifest)?)),
+        Cmd::Ci { manifest, target } => {
+            let m = manifest::load(&manifest)?;
+            let dir = manifest.parent().unwrap_or(std::path::Path::new("."));
+            let pol = verify::load_policy(dir);
+            println!("{}", emit::build_ci(&m, &pol.ci, &target));
+        }
         Cmd::Infra {
             sources,
             target,

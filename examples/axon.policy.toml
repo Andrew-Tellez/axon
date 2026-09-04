@@ -3,3 +3,10 @@ require_owner = true
 require_tier = true
 allowed_event_prefixes = ["order", "payment", "billing"]
 max_deps_per_service = 7
+
+# El layout del repo es del equipo, no de axon. `{service}` se sustituye.
+[ci]
+manifests_dir  = "."
+service_dir    = "services/{service}"
+test_cmd       = "node --test services/{service}"
+contracts_path = "services/{service}/contracts.ts"

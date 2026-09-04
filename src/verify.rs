@@ -12,6 +12,38 @@ pub struct Policy {
     pub require_tier: bool,
     pub allowed_event_prefixes: Vec<String>,
     pub max_deps_per_service: usize,
+    /// El layout del repo es del equipo, no de axon. Sin esto, `axon ci`
+    /// tendria que adivinarlo, y adivinar es lo que lo volvia inservible.
+    pub ci: Ci,
+}
+
+/// `{service}` se reemplaza por el nombre del servicio.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default)]
+pub struct Ci {
+    pub manifests_dir: String,
+    pub service_dir: String,
+    pub test_cmd: String,
+    pub contracts_path: String,
+    pub image: String,
+}
+
+impl Default for Ci {
+    fn default() -> Self {
+        Self {
+            manifests_dir: "manifests".into(),
+            service_dir: "services/{service}".into(),
+            test_cmd: "make -C services/{service} test".into(),
+            contracts_path: "services/{service}/src/contracts.ts".into(),
+            image: "${{ vars.REGISTRY }}/{service}:${{ github.sha }}".into(),
+        }
+    }
+}
+
+impl Ci {
+    pub fn para(&self, campo: &str, service: &str) -> String {
+        campo.replace("{service}", service)
+    }
 }
 
 impl Default for Policy {
@@ -21,6 +53,7 @@ impl Default for Policy {
             require_tier: true,
             allowed_event_prefixes: vec![],
             max_deps_per_service: 7, // acoplamiento sincrono: si pasa de esto, es un monolito distribuido
+            ci: Ci::default(),
         }
     }
 }
