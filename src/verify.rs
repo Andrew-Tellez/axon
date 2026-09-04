@@ -238,6 +238,132 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // ---- escalado de la base: aritmetica sobre lo declarado ----
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        let inf = &m.infra;
+        if inf.state.is_none() {
+            if inf.pool_size.is_some() || inf.read_replicas.is_some() {
+                errors.push(format!(
+                    "{svc}: declara pool o replicas sin `state`; no tiene base propia"
+                ));
+            }
+            continue;
+        }
+
+        // El agotamiento de conexiones no aparece cuando lo probas con una
+        // instancia: aparece el dia que escala. Es una multiplicacion, y nadie
+        // la hace.
+        if let (Some(pool), Some(tope)) = (inf.pool_size, inf.max_connections) {
+            let techo = inf.max_instances.unwrap_or(10);
+            let pico = pool * techo;
+            // el relay del outbox y las migraciones tambien abren conexiones
+            let reservado = if m.patterns.outbox { 5 } else { 2 };
+            if pico + reservado > tope {
+                errors.push(format!(
+                    "{svc}: {pool} conexiones x {techo} instancias = {pico}, mas {reservado} \
+                     reservadas, supera el tope de {tope}. El servicio se cae por agotamiento \
+                     cuando escale, no cuando lo pruebes: baja el pool, baja max_instances, \
+                     o pon un pooler delante"
+                ));
+            } else if pico * 2 > tope {
+                warnings.push(format!(
+                    "{svc}: al pico usa {pico} de {tope} conexiones; queda poco margen para \
+                     migraciones, un pooler o un segundo servicio en la misma instancia"
+                ));
+            }
+        }
+        if inf.pool_size.is_some() != inf.max_connections.is_some() {
+            warnings.push(format!(
+                "{svc}: declara `pool_size` o `max_connections` pero no el otro; sin los dos \
+                 no se puede comprobar el agotamiento"
+            ));
+        }
+
+        // Un tier 0 sin failover no es un tier 0: es una declaracion de
+        // intenciones sin nada detras.
+        let tier0 = m.tier.as_deref() == Some("0");
+        if tier0 && inf.ha != Some(true) {
+            errors.push(format!(
+                "{svc}: `tier = \"0\"` sin `ha = true`. Un servicio critico con una sola \
+                 instancia de base cae con ella: o declara el standby, o baja el tier"
+            ));
+        }
+        // Alta disponibilidad no es respaldo: un standby replica el DROP TABLE
+        // en segundos. Son dos problemas distintos con dos soluciones distintas.
+        match inf.backup_retention_days {
+            None if tier0 => errors.push(format!(
+                "{svc}: `tier = \"0\"` sin `backup_retention_days`. Alta disponibilidad no es \
+                 respaldo: el standby replica un borrado en segundos"
+            )),
+            Some(d) if d < 7 && tier0 => errors.push(format!(
+                "{svc}: {d} dias de respaldo en un tier 0. Un borrado logico se descubre \
+                 despues del fin de semana, no en el minuto siguiente"
+            )),
+            _ => {}
+        }
+        if inf.pitr == Some(true) && inf.backup_retention_days.is_none() {
+            errors.push(format!(
+                "{svc}: `pitr` sin `backup_retention_days`. Recuperar a un punto en el tiempo \
+                 necesita un respaldo base desde el que avanzar"
+            ));
+        }
+        if inf.ha.is_some() && inf.state.is_none() {
+            errors.push(format!(
+                "{svc}: declara `ha` sin `state`; no tiene base propia"
+            ));
+        }
+
+        // Una replica va con retraso. Leer de ella y prometer consistencia
+        // fuerte es la contradiccion del teorema, escrita en dos lugares.
+        if inf.read_replicas.unwrap_or(0) > 0 && !m.cap.eventual() {
+            errors.push(format!(
+                "{svc}: lee de {} replicas y declara `consistency = \"strong\"`. Una replica \
+                 va con retraso: o las lecturas son `eventual`, o no se leen de ahi",
+                inf.read_replicas.unwrap_or(0)
+            ));
+        }
+    }
+
+    // ---- reparto entre nodos: la tabla que se olvida la clave no se puede repartir ----
+    let esquemas_shard = schemas(ms);
+    for m in ms.iter().filter(|m| !m.external) {
+        let Some(clave) = &m.infra.shard_key else {
+            continue;
+        };
+        let Some(tablas) = esquemas_shard.get(&m.service) else {
+            continue;
+        };
+        let repartidas: Vec<&String> = tablas
+            .iter()
+            .filter(|(_, cols)| cols.iter().any(|c| &c.name == clave))
+            .map(|(t, _)| t)
+            .collect();
+        for (t, cols) in tablas {
+            if ["outbox", "inbox_seen"].contains(&t.as_str()) {
+                continue;
+            }
+            if !repartidas.contains(&t) {
+                errors.push(format!(
+                    "{}.{t}: sin la columna `{clave}`, asi que no se puede repartir. Agregala \
+                     o saca la tabla del esquema repartido",
+                    m.service
+                ));
+                continue;
+            }
+            for c in cols {
+                let Some(fk) = &c.fk else { continue };
+                if tablas.contains_key(fk) && !repartidas.contains(&fk) {
+                    errors.push(format!(
+                        "{}.{t}.{}: FK a `{fk}`, que no lleva `{clave}`. Una FK entre una tabla \
+                         repartida y una que no lo esta cruza nodos, y eso no se puede garantizar",
+                        m.service, c.name
+                    ));
+                }
+            }
+        }
+    }
+
     // ---- CAP: la particion no se elige, que hacer mientras dura si ----
     let lado: IndexMap<&str, &Cap> = ms.iter().map(|m| (m.service.as_str(), &m.cap)).collect();
     for m in ms.iter().filter(|m| !m.external) {

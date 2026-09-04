@@ -1,5 +1,5 @@
 // La logica de negocio. La maquina de estados la impone el codigo generado.
-import { PaymentsService, paymentNext, paymentCan,
+import { PaymentsService, rutasHttp, paymentNext, paymentCan,
          type CapturePaymentIn, type CapturePaymentOut,
          type RefundPaymentIn, type RefundPaymentOut,
          type OrderPlacedV1, type Envelope, type PaymentState } from "./contracts.ts";
@@ -69,7 +69,13 @@ relay(db, b);
 // dispatch() es el punto de entrada unico que genero axon: rutea y deduplica.
 await suscribir(nc, ["order.placed@v1"], (e) => svc.dispatch(e));
 
-servir(Number(process.env.PORT ?? 8080), {
-  "POST /v1/payments": (body, e) => svc.capturePayment(body, e),
-});
+servir(
+  Number(process.env.PORT ?? 8080),
+  {
+    "POST /v1/payments": (body, e) => svc.capturePayment(body, e),
+    "POST /v1/payments/{paymentId}/refunds": (_b, _e, params) =>
+      svc.refundPayment({ paymentId: params.paymentId }),
+  },
+  rutasHttp,
+);
 }

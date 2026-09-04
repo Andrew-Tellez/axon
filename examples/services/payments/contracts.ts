@@ -213,6 +213,13 @@ export const manifest = {
         "cache_ttl": 86400
       }
     },
+    "pool_size": 8,
+    "max_connections": 200,
+    "ha": true,
+    "backup_retention_days": 30,
+    "pitr": true,
+    "read_replicas": null,
+    "shard_key": null,
     "tenant_column": "tenant_id",
     "tenant_exempt": []
   },
@@ -226,6 +233,13 @@ export const manifest = {
       "max_instances": null,
       "port": null,
       "buckets": {},
+      "pool_size": null,
+      "max_connections": null,
+      "ha": null,
+      "backup_retention_days": null,
+      "pitr": null,
+      "read_replicas": null,
+      "shard_key": null,
       "tenant_column": null,
       "tenant_exempt": []
     },
@@ -238,6 +252,13 @@ export const manifest = {
       "max_instances": 40,
       "port": null,
       "buckets": {},
+      "pool_size": null,
+      "max_connections": null,
+      "ha": null,
+      "backup_retention_days": null,
+      "pitr": null,
+      "read_replicas": null,
+      "shard_key": null,
       "tenant_column": null,
       "tenant_exempt": []
     }
@@ -287,6 +308,11 @@ export function paymentNext(state: PaymentState, action: PaymentAction): Payment
   return t.to;
 }
 export const paymentCan = (state: PaymentState, action: PaymentAction) => paymentTransitions[action].from.includes(state);
+
+/** Rutas HTTP que declara el manifiesto. El arranque debe fallar si
+ *  alguna no tiene handler: un 404 en produccion no avisa a nadie. */
+export const rutasHttp = ["POST /v1/payments", "POST /v1/payments/{paymentId}/refunds"] as const;
+
 
 /** Lado del teorema CAP declarado en el manifiesto: strong/reject.
  *  De ahi sale el nivel de aislamiento: pagar dos veces sale mas caro

@@ -81,7 +81,7 @@ CREATE INDEX ledger_entry_account_idx ON "ledger_entry" (account_id, posted_at D
     .unwrap();
     std::fs::write(
         dir.join("l.toml"),
-        "service = \"ledger\"\nowner = \"x\"\ntier = \"0\"\n[infra]\nstate = \"postgres\"\nmigrations = \"sql/\"\n",
+        "service = \"ledger\"\nowner = \"x\"\ntier = \"2\"\n[infra]\nstate = \"postgres\"\nmigrations = \"sql/\"\n",
     )
     .unwrap();
 
@@ -324,7 +324,7 @@ fn el_hcl_generado_valida() {
         (
             "gcp",
             "google = { source = \"hashicorp/google\", version = \"~> 6.0\" }",
-            "variable \"project\" {}\nvariable \"region\" {}\nvariable \"sql_instance\" {}\n",
+            "variable \"project\" {}\nvariable \"region\" {}\nvariable \"db_tier\" {}\n",
         ),
         (
             "aws",
@@ -1589,6 +1589,174 @@ fn el_diccionario_pg_anon_funciona() {
     assert!(
         salida.contains("2026-01-01"),
         "la fecha no se trunco:\n{salida}"
+    );
+}
+
+/// Escalado de la base: aritmetica sobre lo declarado. El agotamiento de
+/// conexiones no aparece con una instancia; aparece el dia que escala.
+#[test]
+fn el_escalado_de_la_base_se_verifica() {
+    let dir = std::env::temp_dir().join("axon-escala");
+    let escribir = |cuerpo: &str| {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("s.toml"), cuerpo).unwrap();
+        let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        (format!("{out}{err}"), ok)
+    };
+
+    // 20 x 10 instancias = 200 conexiones contra un tope de 100
+    let (msg, ok) = escribir(
+        "service = \"s\"\nowner = \"x\"\ntier = \"2\"\n[infra]\nstate = \"postgres\"\n\
+         pool_size = 20\nmax_connections = 100\nmax_instances = 10\n",
+    );
+    assert!(!ok);
+    assert!(msg.contains("20 conexiones x 10 instancias = 200"), "{msg}");
+    assert!(msg.contains("supera el tope de 100"), "{msg}");
+
+    // una replica va con retraso: leer de ella y prometer consistencia fuerte
+    // es la contradiccion del teorema escrita en dos lugares
+    let (msg, ok) = escribir(
+        "service = \"s\"\nowner = \"x\"\ntier = \"2\"\n[cap]\nconsistency = \"strong\"\n\
+         [infra]\nstate = \"postgres\"\nread_replicas = 2\n",
+    );
+    assert!(!ok);
+    assert!(msg.contains("lee de 2 replicas y declara"), "{msg}");
+
+    // alta disponibilidad no es respaldo: el standby replica el DROP TABLE
+    let (msg, ok) = escribir(
+        "service = \"s\"\nowner = \"x\"\ntier = \"0\"\n[infra]\nstate = \"postgres\"\nha = true\n",
+    );
+    assert!(!ok);
+    assert!(msg.contains("sin `backup_retention_days`"), "{msg}");
+    assert!(msg.contains("no es respaldo"), "{msg}");
+
+    // un tier 0 sin failover no es un tier 0
+    let (msg, ok) = escribir(
+        "service = \"s\"\nowner = \"x\"\ntier = \"0\"\n[infra]\nstate = \"postgres\"\n\
+         backup_retention_days = 30\n",
+    );
+    assert!(!ok);
+    assert!(msg.contains("sin `ha = true`"), "{msg}");
+
+    // y los recursos: standby, respaldos y replicas salen del manifiesto
+    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    assert!(
+        g.contains("availability_type = \"REGIONAL\""),
+        "payments es tier 0: falta el standby"
+    );
+    assert!(g.contains("retained_backups = 30"), "{g}");
+    assert!(g.contains("point_in_time_recovery_enabled = true"), "{g}");
+    assert!(
+        g.contains("master_instance_name = google_sql_database_instance.orders.name"),
+        "sin replicas"
+    );
+    // una base por servicio es una INSTANCIA por servicio
+    assert!(
+        g.contains("resource \"google_sql_database_instance\" \"payments\""),
+        "{g}"
+    );
+    assert!(
+        !g.contains("var.sql_instance"),
+        "las bases siguen compartiendo instancia"
+    );
+    let (a, _, _) = axon(&["infra", "examples", "--target", "aws"]);
+    assert!(a.contains("multi_az                = true"), "{a}");
+    assert!(a.contains("backup_retention_period = 30"), "{a}");
+    assert!(
+        a.contains("replicate_source_db = aws_db_instance.orders.identifier"),
+        "{a}"
+    );
+}
+
+/// La prueba de carga sale del manifiesto, y su veredicto compara lo medido
+/// con lo declarado. Un numero declarado que nadie mide es una opinion.
+#[test]
+fn la_carga_sale_del_manifiesto() {
+    let (js, err, ok) = axon(&["load", "examples/orders.toml"]);
+    assert!(ok, "{err}");
+    // la tasa es el rate_limit declarado, no un numero elegido a ojo
+    assert!(
+        js.contains("rate: 60,              // declarado en rate_limit"),
+        "{js}"
+    );
+    // el umbral es el timeout declarado
+    assert!(
+        js.contains(r#""http_req_duration{escenario:placeOrder}": ["p(95)<5000"]"#),
+        "{js}"
+    );
+    assert!(
+        js.contains(r#""http_req_duration{escenario:getOrder}": ["p(95)<2000"]"#),
+        "{js}"
+    );
+    // una ruta con parametro se prueba con un id inventado: un 404 ahi no es
+    // un fallo del servicio, asi que el umbral va sobre el check
+    assert!(
+        js.contains(r#""checks{escenario:getOrder}": ["rate>0.99"]"#),
+        "{js}"
+    );
+    assert!(js.contains("r.status === 404"), "{js}");
+    // el techo que impone el pool declarado queda escrito
+    assert!(js.contains("4 conexiones x 10 instancias = 40"), "{js}");
+
+    // y el veredicto: `true` en un umbral de k6 significa INCUMPLIDO
+    let dir = std::env::temp_dir().join("axon-carga");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bien = dir.join("bien.json");
+    std::fs::write(
+        &bien,
+        r#"{"metrics":{"http_req_duration{escenario:placeOrder}":{"p(95)":23.8,"thresholds":{"p(95)<5000":false}},"http_reqs":{"count":41,"rate":2.05}}}"#,
+    )
+    .unwrap();
+    let (out, err, ok) = axon(&[
+        "load",
+        "examples/orders.toml",
+        "--check",
+        bien.to_str().unwrap(),
+    ]);
+    assert!(ok, "{err}");
+    assert!(out.contains("0 umbrales incumplidos"), "{out}");
+    assert!(out.contains("41 peticiones medidas"), "{out}");
+
+    let mal = dir.join("mal.json");
+    std::fs::write(
+        &mal,
+        r#"{"metrics":{"http_req_duration{escenario:placeOrder}":{"p(95)":9000,"thresholds":{"p(95)<5000":true}}}}"#,
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&[
+        "load",
+        "examples/orders.toml",
+        "--check",
+        mal.to_str().unwrap(),
+    ]);
+    assert!(!ok, "un umbral incumplido tiene que fallar");
+    assert!(err.contains("incumplio `p(95)<5000`"), "{err}");
+
+    // un resumen sin umbrales no es un veredicto, y decirlo es mejor que
+    // dar por bueno lo que no se midio
+    let vacio = dir.join("vacio.json");
+    std::fs::write(&vacio, r#"{"metrics":{"http_reqs":{"count":1,"rate":1}}}"#).unwrap();
+    let (_, err, ok) = axon(&[
+        "load",
+        "examples/orders.toml",
+        "--check",
+        vacio.to_str().unwrap(),
+    ]);
+    assert!(!ok);
+    assert!(err.contains("no trae umbrales"), "{err}");
+}
+
+/// Una ruta declarada que nadie sirve devuelve 404 en produccion y no aparece
+/// en ninguna prueba. El codigo generado publica la lista para que el arranque
+/// pueda negarse.
+#[test]
+fn las_rutas_declaradas_llegan_al_codigo() {
+    let (ts, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
+    assert!(
+        ts.contains(r#"export const rutasHttp = ["POST /v1/orders", "GET /v1/orders/{orderId}"]"#),
+        "{ts}"
     );
 }
 

@@ -1,6 +1,7 @@
 //! axon — el manifiesto es la fuente de verdad; el resto son proyecciones.
 mod api;
 mod baseline;
+mod carga;
 mod dbsec;
 mod emit;
 mod import;
@@ -81,6 +82,14 @@ enum Cmd {
         /// nombre del servicio, si no hay que deducirlo de info.title
         #[arg(long)]
         service: Option<String>,
+    },
+    /// prueba de carga derivada del manifiesto, y su veredicto
+    Load {
+        manifest: PathBuf,
+        /// resumen de k6 (`--summary-export`) para comparar lo medido con lo
+        /// declarado; sin esto emite el script
+        #[arg(long)]
+        check: Option<PathBuf>,
     },
     /// snapshot de los contratos publicados, para detectar cambios incompatibles
     Baseline { sources: Vec<String> },
@@ -278,6 +287,27 @@ fn run() -> Result<ExitCode, String> {
                 std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?
             };
             print!("{}", import::asyncapi(&text, service.as_deref())?);
+        }
+        Cmd::Load { manifest, check } => {
+            let m = manifest::load(&manifest)?;
+            match check {
+                None => println!("{}", carga::build_k6(&m)?),
+                Some(f) => {
+                    let json =
+                        std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+                    let (errores, avisos) = carga::revisar(&m, &json)?;
+                    for a in &avisos {
+                        println!("info: {a}");
+                    }
+                    for e in &errores {
+                        eprintln!("error: {e}");
+                    }
+                    println!("axon: {} umbrales incumplidos", errores.len());
+                    if !errores.is_empty() {
+                        return Ok(ExitCode::FAILURE);
+                    }
+                }
+            }
         }
         Cmd::Baseline { sources } => {
             let b = baseline::tomar(&manifest::discover(&sources)?);

@@ -36,6 +36,12 @@ breaker = true
 [infra]
 state = "postgres"
 tenant_column = "tenant_id"
+backup_retention_days = 14
+pool_size = 4
+max_connections = 100
+# Se lee de las replicas, van con retraso, y por eso este servicio se declara
+# `eventual`: la garantia y la topologia dicen lo mismo.
+read_replicas = 2
 migrations = "sql/orders/"
 runtime = "container"
 

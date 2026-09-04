@@ -173,6 +173,23 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     if !m.machine.is_empty() {
         out.push(machines_ts(m));
     }
+    let rutas: Vec<String> = m
+        .methods
+        .values()
+        .filter_map(|me| me.http.clone())
+        .map(|h| format!("\"{h}\""))
+        .collect();
+    if !rutas.is_empty() {
+        // Una ruta declarada que nadie sirve devuelve 404 en produccion y no
+        // aparece en ningun test. El runtime puede negarse a arrancar, pero
+        // solo si sabe cuales tenia que haber.
+        out.push(format!(
+            "\n/** Rutas HTTP que declara el manifiesto. El arranque debe fallar si\n \
+             *  alguna no tiene handler: un 404 en produccion no avisa a nadie. */\n\
+             export const rutasHttp = [{}] as const;\n",
+            rutas.join(", ")
+        ));
+    }
     out.push(format!(
         "\n/** Lado del teorema CAP declarado en el manifiesto: {c}/{p}.\n \
          *  De ahi sale el nivel de aislamiento: pagar dos veces sale mas caro\n \

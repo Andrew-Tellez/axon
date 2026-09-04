@@ -45,6 +45,13 @@ breaker = true
 [infra]
 state = "postgres"
 tenant_column = "tenant_id"
+# Tier 0: standby con failover, y respaldos aparte —el standby replica un
+# borrado en segundos, asi que no cubre ese caso.
+ha = true
+backup_retention_days = 30
+pitr = true
+pool_size = 8
+max_connections = 200
 migrations = "sql/payments/"
 runtime = "container"
 min_instances = 1

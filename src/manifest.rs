@@ -158,6 +158,32 @@ pub struct Infra {
     /// Almacenamiento de objetos del servicio, por nombre logico.
     #[serde(default)]
     pub buckets: IndexMap<String, Bucket>,
+    /// Conexiones que abre CADA instancia. Multiplicado por el techo de
+    /// instancias es lo que le llega al motor.
+    pub pool_size: Option<u32>,
+    /// Tope de conexiones del motor. Si el producto lo pasa, el servicio se
+    /// cae por agotamiento cuando escala, no cuando lo pruebas.
+    pub max_connections: Option<u32>,
+    /// Alta disponibilidad: un standby con failover automatico.
+    ///
+    /// NO es lo mismo que una replica de lectura, y confundirlos es el error
+    /// mas comun del tema. Del standby no se lee: existe para que el servicio
+    /// siga en pie cuando el primario se cae, y por eso NO rompe la
+    /// consistencia. De una replica de lectura si se lee, va con retraso, y
+    /// por eso si la rompe.
+    pub ha: Option<bool>,
+    /// Dias de retencion de respaldos. Alta disponibilidad no es respaldo: un
+    /// standby replica el `DROP TABLE` en segundos.
+    pub backup_retention_days: Option<u32>,
+    /// Recuperacion a un punto en el tiempo. Lo unico que salva de un borrado
+    /// logico, que es de lo que un standby no salva.
+    pub pitr: Option<bool>,
+    /// Replicas de LECTURA: se lee de ellas, y van con retraso. Declararlas es
+    /// elegir disponibilidad sobre consistencia para esas lecturas.
+    pub read_replicas: Option<u32>,
+    /// Columna por la que se reparte la tabla entre nodos. Toda tabla la
+    /// necesita, y ninguna FK puede cruzar de una repartida a una que no.
+    pub shard_key: Option<String>,
     /// Columna que identifica al inquilino. Si esta, toda tabla la necesita y
     /// `axon rls` genera la politica que la aplica.
     pub tenant_column: Option<String>,
@@ -285,6 +311,24 @@ pub fn for_env(m: &Manifest, env: &str) -> Manifest {
         }
         if !o.tenant_exempt.is_empty() {
             out.infra.tenant_exempt = o.tenant_exempt.clone();
+        }
+        if o.pool_size.is_some() {
+            out.infra.pool_size = o.pool_size;
+        }
+        if o.max_connections.is_some() {
+            out.infra.max_connections = o.max_connections;
+        }
+        if o.read_replicas.is_some() {
+            out.infra.read_replicas = o.read_replicas;
+        }
+        if o.ha.is_some() {
+            out.infra.ha = o.ha;
+        }
+        if o.backup_retention_days.is_some() {
+            out.infra.backup_retention_days = o.backup_retention_days;
+        }
+        if o.pitr.is_some() {
+            out.infra.pitr = o.pitr;
         }
     }
     out

@@ -26,6 +26,13 @@ pub struct Store {
     pub service: String,
     pub engine: String,
     pub outbox: bool,
+    /// Standby con failover. No se lee de el, asi que no rompe consistencia.
+    pub ha: bool,
+    pub backup_retention_days: u32,
+    pub pitr: bool,
+    /// Replicas de las que SI se lee, con el retraso que eso implica.
+    pub read_replicas: u32,
+    pub pool_size: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,6 +131,11 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 service: svc.clone(),
                 engine: engine.clone(),
                 outbox: m.patterns.outbox,
+                ha: m.infra.ha.unwrap_or(false),
+                backup_retention_days: m.infra.backup_retention_days.unwrap_or(0),
+                pitr: m.infra.pitr.unwrap_or(false),
+                read_replicas: m.infra.read_replicas.unwrap_or(0),
+                pool_size: m.infra.pool_size,
             });
         }
         for (_, me) in m.methods.iter() {
@@ -218,6 +230,13 @@ fn gcp(p: &Plan) -> String {
         o.push(
             "variable \"otlp_endpoint\" {\n  type        = string\n  \
              description = \"Colector OTLP: Cloud Trace via OpenTelemetry Collector, o el que uses\"\n}\n"
+                .to_string(),
+        );
+    }
+    if !p.stores.is_empty() {
+        o.push(
+            "variable \"db_tier\" {\n  type        = string\n  \
+             description = \"Tamano de instancia de Cloud SQL, por ejemplo db-custom-2-7680\"\n}\n"
                 .to_string(),
         );
     }
@@ -329,9 +348,50 @@ fn gcp(p: &Plan) -> String {
     for s in &p.stores {
         let sv = tfname(&s.service);
         o.push(format!(
-            "resource \"google_sql_database\" \"{sv}\" {{\n  name     = \"{}\"\n  instance = var.sql_instance\n}}\n",
+            "resource \"google_sql_database_instance\" \"{sv}\" {{\n  \
+             name             = \"{svc}\"\n  \
+             database_version = \"POSTGRES_16\"\n  \
+             region           = var.region\n  \
+             # una base por servicio quiere decir una INSTANCIA por servicio: con\n  \
+             # todas en la misma, un vecino ruidoso las tira juntas\n  \
+             deletion_protection = true\n  \
+             settings {{\n    \
+               tier              = var.db_tier\n    \
+               # REGIONAL es el standby con failover; del standby no se lee\n    \
+               availability_type = \"{disp}\"\n{respaldo}  }}\n}}\n",
+            svc = s.service,
+            disp = if s.ha { "REGIONAL" } else { "ZONAL" },
+            respaldo = if s.backup_retention_days > 0 {
+                format!(
+                    "    backup_configuration {{\n      enabled                        = true\n      \
+                     point_in_time_recovery_enabled = {}\n      \
+                     backup_retention_settings {{\n        retained_backups = {}\n      }}\n    }}\n",
+                    s.pitr, s.backup_retention_days
+                )
+            } else {
+                String::new()
+            }
+        ));
+        o.push(format!(
+            "resource \"google_sql_database\" \"{sv}\" {{\n  name     = \"{}\"\n  \
+             instance = google_sql_database_instance.{sv}.name\n}}\n",
             s.service
         ));
+        for i in 1..=s.read_replicas {
+            o.push(format!(
+                "resource \"google_sql_database_instance\" \"{sv}_ro_{i}\" {{\n  \
+                 name                 = \"{svc}-ro-{i}\"\n  \
+                 database_version     = \"POSTGRES_16\"\n  \
+                 region               = var.region\n  \
+                 master_instance_name = google_sql_database_instance.{sv}.name\n  \
+                 deletion_protection  = false\n  \
+                 # una replica no lleva respaldo propio: se respalda el primario\n  \
+                 replica_configuration {{\n    failover_target = false\n  }}\n  \
+                 settings {{\n    tier              = var.db_tier\n    \
+                 availability_type = \"ZONAL\"\n  }}\n}}\n",
+                svc = s.service
+            ));
+        }
         o.push(format!(
             "resource \"google_secret_manager_secret\" \"{sv}_database_url\" {{\n  \
              secret_id = \"{}-database-url\"\n  replication {{\n    auto {{}}\n  }}\n}}\n",
@@ -339,7 +399,9 @@ fn gcp(p: &Plan) -> String {
         ));
         if s.outbox {
             o.push(format!(
-                "resource \"google_sql_user\" \"{sv}_relay\" {{\n  name     = \"{}-outbox-relay\"\n  instance = var.sql_instance\n}}\n",
+                "resource \"google_sql_user\" \"{sv}_relay\" {{\n  \
+                 name     = \"{}-outbox-relay\"\n  \
+                 instance = google_sql_database_instance.{sv}.name\n}}\n",
                 s.service
             ));
         }
@@ -511,10 +573,35 @@ fn aws(p: &Plan) -> String {
     for s in &p.stores {
         let sv = tfname(&s.service);
         o.push(format!(
-            "resource \"aws_db_instance\" \"{sv}\" {{\n  identifier        = \"{}\"\n  engine            = \"{}\"\n  \
-             instance_class    = var.db_instance_class\n  allocated_storage = 20\n}}\n",
-            s.service, s.engine
+            "resource \"aws_db_instance\" \"{sv}\" {{\n  \
+             identifier        = \"{svc}\"\n  \
+             engine            = \"{eng}\"\n  \
+             instance_class    = var.db_instance_class\n  \
+             allocated_storage = 20\n  \
+             # multi_az es el standby con failover; no se lee de el\n  \
+             multi_az                = {ha}\n  \
+             # en RDS, retencion > 0 ya habilita recuperacion a un punto en el\n  \
+             # tiempo: no hay un atributo `pitr` aparte\n  \
+             backup_retention_period = {ret}\n  \
+             deletion_protection     = true\n  \
+             skip_final_snapshot     = false\n}}\n",
+            svc = s.service,
+            eng = s.engine,
+            ha = s.ha,
+            ret = s.backup_retention_days
         ));
+        for i in 1..=s.read_replicas {
+            o.push(format!(
+                "resource \"aws_db_instance\" \"{sv}_ro_{i}\" {{\n  \
+                 identifier          = \"{svc}-ro-{i}\"\n  \
+                 replicate_source_db = aws_db_instance.{sv}.identifier\n  \
+                 instance_class      = var.db_instance_class\n  \
+                 # una replica no lleva respaldo propio\n  \
+                 backup_retention_period = 0\n  \
+                 skip_final_snapshot     = true\n}}\n",
+                svc = s.service
+            ));
+        }
         o.push(format!(
             "resource \"aws_secretsmanager_secret\" \"{sv}_database_url\" {{\n  name = \"{}-database-url\"\n}}\n",
             s.service

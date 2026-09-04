@@ -147,6 +147,13 @@ export const manifest = {
     "max_instances": null,
     "port": null,
     "buckets": {},
+    "pool_size": 4,
+    "max_connections": 100,
+    "ha": null,
+    "backup_retention_days": 14,
+    "pitr": null,
+    "read_replicas": 2,
+    "shard_key": null,
     "tenant_column": "tenant_id",
     "tenant_exempt": []
   },
@@ -160,6 +167,13 @@ export const manifest = {
       "max_instances": null,
       "port": null,
       "buckets": {},
+      "pool_size": null,
+      "max_connections": null,
+      "ha": null,
+      "backup_retention_days": null,
+      "pitr": null,
+      "read_replicas": null,
+      "shard_key": null,
       "tenant_column": null,
       "tenant_exempt": []
     },
@@ -172,6 +186,13 @@ export const manifest = {
       "max_instances": null,
       "port": null,
       "buckets": {},
+      "pool_size": null,
+      "max_connections": null,
+      "ha": null,
+      "backup_retention_days": null,
+      "pitr": null,
+      "read_replicas": null,
+      "shard_key": null,
       "tenant_column": null,
       "tenant_exempt": []
     }
@@ -192,6 +213,11 @@ export abstract class OrdersService {
   abstract placeOrder(input: PlaceOrderIn, e: Envelope<unknown>): Promise<PlaceOrderOut>;
   abstract getOrder(input: GetOrderIn, e: Envelope<unknown>): Promise<GetOrderOut>;
 }
+
+
+/** Rutas HTTP que declara el manifiesto. El arranque debe fallar si
+ *  alguna no tiene handler: un 404 en produccion no avisa a nadie. */
+export const rutasHttp = ["POST /v1/orders", "GET /v1/orders/{orderId}"] as const;
 
 
 /** Lado del teorema CAP declarado en el manifiesto: eventual/degrade.

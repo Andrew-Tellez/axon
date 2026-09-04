@@ -155,19 +155,63 @@ export async function esperarDb(): Promise<pg.Pool> {
   }
 }
 
-type Ruta = (body: any, e: Envelope<unknown>) => Promise<unknown>;
+type Ruta = (body: any, e: Envelope<unknown>, params: Record<string, string>) => Promise<unknown>;
 
-/** Servidor minimo. El framework real de HTTP lo elige cada equipo. */
-export function servir(port: number, rutas: Record<string, Ruta>) {
+/** Un recurso que no existe es un error del cliente, no del servidor. */
+export class NoEncontrado extends Error {}
+
+/** `POST /v1/orders/{orderId}` -> matcher con captura de `orderId`. */
+function compilar(clave: string) {
+  const [metodo, patron] = clave.split(" ");
+  const nombres: string[] = [];
+  const regex = new RegExp(
+    "^" +
+      patron
+        .split("/")
+        .map((seg) => {
+          if (!seg.startsWith("{")) return seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          nombres.push(seg.slice(1, -1));
+          return "([^/]+)";
+        })
+        .join("/") +
+      "$",
+  );
+  return { metodo, regex, nombres };
+}
+
+/** Servidor minimo. El framework real de HTTP lo elige cada equipo.
+ *
+ *  `declaradas` son las rutas del manifiesto: si falta el handler de alguna,
+ *  el proceso no arranca. Sin esto, una ruta declarada y no servida devuelve
+ *  404 en produccion y no aparece en ninguna prueba. */
+export function servir(
+  port: number,
+  rutas: Record<string, Ruta>,
+  declaradas: readonly string[] = [],
+) {
+  const faltan = declaradas.filter((d) => !(d in rutas));
+  if (faltan.length) {
+    throw new Error(
+      `${process.env.AXON_SERVICE}: el manifiesto declara rutas sin handler: ${faltan.join(", ")}`,
+    );
+  }
+  const tabla = Object.entries(rutas).map(([clave, fn]) => ({ ...compilar(clave), clave, fn }));
+
   createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (req.url === "/healthz") return res.writeHead(200).end("ok");
-    const clave = `${req.method} ${req.url}`;
-    const ruta = rutas[clave];
-    if (!ruta) {
+    const camino = (req.url ?? "/").split("?")[0];
+    const hallado = tabla
+      .filter((r) => r.metodo === req.method)
+      .map((r) => ({ r, m: r.regex.exec(camino) }))
+      .find(({ m }) => m);
+    if (!hallado) {
       // RFC 7807, el mismo formato que declara el OpenAPI generado
       res.writeHead(404, { "content-type": "application/problem+json" });
       return res.end(JSON.stringify({ type: "about:blank", title: "no encontrado", status: 404 }));
     }
+    const { r, m } = hallado;
+    const params = Object.fromEntries(r.nombres.map((n, i) => [n, decodeURIComponent(m![i + 1])]));
+
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
@@ -176,12 +220,14 @@ export function servir(port: number, rutas: Record<string, Ruta>) {
     // envelope inventara el traceparent, el span raiz quedaria colgando de un
     // padre que nunca existio. Si el llamador ya manda uno, se continua.
     const entrante = req.headers["traceparent"];
-    await enBorde(clave, typeof entrante === "string" ? entrante : undefined,
-      { "http.request.method": req.method ?? "" },
+    await enBorde(
+      r.clave,
+      typeof entrante === "string" ? entrante : undefined,
+      { "http.request.method": req.method ?? "", "http.route": r.clave },
       async (traceparent: string) => {
         const raiz: Envelope<unknown> = {
           id: crypto.randomUUID(),
-          type: clave,
+          type: r.clave,
           source: "http",
           time: new Date().toISOString(),
           traceparent,
@@ -195,22 +241,29 @@ export function servir(port: number, rutas: Record<string, Ruta>) {
         anotar({ "messaging.message.id": raiz.id, "axon.correlation_id": raiz.correlationId });
         await traza(raiz);
         try {
-          const out = await ruta(body, raiz);
+          const out = await r.fn(body, raiz, params);
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify(out));
         } catch (err) {
           // No se re-lanza: el handler de createServer es async, asi que un
           // throw aca sale como rechazo no manejado y Node mata el proceso
-          // en medio de la respuesta. El cliente ve una conexion cortada y el
-          // servicio se cae por una peticion mala.
-          console.error(`[${process.env.AXON_SERVICE}] ${clave} fallo:`, err);
-          anotar({ "error.type": String(err) });
-          res.writeHead(500, { "content-type": "application/problem+json" });
-          res.end(JSON.stringify({
-            type: "about:blank", title: String(err), status: 500,
-            traceId: traceparent.split("-")[1],
-          }));
+          // en medio de la respuesta.
+          const estado = err instanceof NoEncontrado ? 404 : 500;
+          if (estado === 500) {
+            console.error(`[${process.env.AXON_SERVICE}] ${r.clave} fallo:`, err);
+            anotar({ "error.type": String(err) });
+          }
+          res.writeHead(estado, { "content-type": "application/problem+json" });
+          res.end(
+            JSON.stringify({
+              type: "about:blank",
+              title: String(err),
+              status: estado,
+              traceId: traceparent.split("-")[1],
+            }),
+          );
         }
-      });
+      },
+    );
   }).listen(port, () => console.log(`[${process.env.AXON_SERVICE}] escuchando en :${port}`));
 }

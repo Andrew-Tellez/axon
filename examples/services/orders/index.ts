@@ -1,8 +1,8 @@
 // La logica de negocio. Lo unico que escribe una persona.
-import { OrdersService, type PlaceOrderIn, type PlaceOrderOut,
+import { OrdersService, rutasHttp, type PlaceOrderIn, type PlaceOrderOut,
          type GetOrderIn, type GetOrderOut, type Envelope } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
-import { bus, conectar, esperarDb, inbox, servir } from "../runtime.ts";
+import { NoEncontrado, bus, conectar, esperarDb, inbox, servir } from "../runtime.ts";
 import type pg from "pg";
 
 class Orders extends OrdersService {
@@ -28,7 +28,7 @@ class Orders extends OrdersService {
 
   async getOrder(input: GetOrderIn): Promise<GetOrderOut> {
     const { rows } = await this.#db.query(`SELECT * FROM "order" WHERE id = $1`, [input.orderId]);
-    if (!rows[0]) throw new Error(`orden ${input.orderId} no existe`);
+    if (!rows[0]) throw new NoEncontrado(`orden ${input.orderId} no existe`);
     return {
       orderId: rows[0].id,
       status: rows[0].status,
@@ -40,6 +40,12 @@ class Orders extends OrdersService {
 arrancarTelemetria();
 const db = await esperarDb();
 const svc = new Orders(bus(await conectar()), inbox(db), db);
-servir(Number(process.env.PORT ?? 8080), {
-  "POST /v1/orders": (body, e) => svc.placeOrder(body, e),
-});
+servir(
+  Number(process.env.PORT ?? 8080),
+  {
+    "POST /v1/orders": (body, e) => svc.placeOrder(body, e),
+    "GET /v1/orders/{orderId}": (_body, _e, params) => svc.getOrder({ orderId: params.orderId }),
+  },
+  // el arranque falla si el manifiesto declara una ruta sin handler
+  rutasHttp,
+);

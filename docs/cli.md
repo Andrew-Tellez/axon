@@ -92,6 +92,15 @@ una **copia** enmascarada (staging, soporte, terceros), no para proteger la cons
 viva. La regla sale del tipo de la columna, y las tablas del framework se excluyen del
 dump porque el `outbox` lleva payloads.
 
+### `axon load <manifiesto> [--check <resumen.json>]`
+Sin `--check` emite un script de [k6](https://k6.io): un escenario por ruta HTTP, a la
+tasa que declara su `rate_limit`, con el p95 limitado por su `timeout_ms`. Los umbrales
+salen del manifiesto, no de un número redondo.
+
+Con `--check` lee el resumen de `k6 --summary-export` y da el veredicto: qué umbral se
+incumplió, cuánto tráfico se midió, y si se acerca al techo que impone el pool declarado.
+Un resumen sin umbrales no es un veredicto, y lo dice.
+
 ## Infraestructura
 
 ### `axon infra <fuentes> [--target local|gcp|aws|k8s|plan] [--env <nombre>]`

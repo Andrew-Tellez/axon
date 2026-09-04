@@ -93,15 +93,32 @@ until curl -fsS "http://$UI/api/services" 2>/dev/null | grep -q payments; do
 done
 python3 verificar-traza.py "$UI"
 
-
 paso "esperado (manifiesto) vs real (log de envelopes)"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+# Se acota al flujo que disparo este demo. Comparar un flujo esperado contra
+# TODOS los del log solo funciona si hay exactamente uno, y eso deja de ser
+# cierto en cuanto algo mas toca el sistema —una prueba de carga, por ejemplo.
+FLUJO=$(python3 -c 'import json;print(json.loads(open(".axon/local.ndjson").readline())["correlationId"])')
 "$AXON" seq order.placed@v1 . --events > "$tmp/esperado"
-"$AXON" trace .axon/local.ndjson --seq > "$tmp/real"
+"$AXON" trace .axon/local.ndjson --seq --correlation "$FLUJO" > "$tmp/real"
 if diff -u "$tmp/esperado" "$tmp/real"; then
   echo "OK: el sistema hace exactamente lo que declara"
 else
   echo "DRIFT: el sistema no hace lo que declara"
   exit 1
 fi
+
+
+paso "capacidad declarada vs medida"
+if command -v k6 >/dev/null 2>&1; then
+  "$AXON" load orders.toml > .axon/carga.js
+  k6 run --quiet --summary-export=.axon/carga.json \
+    --env AXON_BASE="http://localhost:$PORT" \
+    --env AXON_CARGA_DURACION="${AXON_CARGA_DURACION:-10s}" \
+    .axon/carga.js > /dev/null 2>&1 || true
+  "$AXON" load orders.toml --check .axon/carga.json
+else
+  echo "  salteado: k6 no esta instalado"
+fi
+
