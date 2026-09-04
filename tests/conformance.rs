@@ -1101,6 +1101,60 @@ SELECT 'ENMASCARADA=' || min(customer_email) FROM "order_enmascarada";
         salida.contains("ENMASCARADA=[redactado]"),
         "la vista no enmascara:\n{salida}"
     );
+
+    // Como se fija el inquilino importa tanto como la politica, y esto lo mide
+    // en vez de inferirlo. El resultado es mas fuerte que "usá SET LOCAL":
+    // un solo `SET` de sesion envenena la conexion para todo SET LOCAL
+    // posterior, porque SET LOCAL revierte al valor de la SESION y no a nada.
+    let prueba = r#"
+BEGIN; SET LOCAL axon.tenant = 'aaaaaaaa-0000-4000-8000-000000000001'; COMMIT;
+SELECT 'LIMPIA=' || coalesce(NULLIF(current_setting('axon.tenant', true), ''), 'SIN_FIJAR');
+SET axon.tenant = 'bbbbbbbb-0000-4000-8000-000000000002';
+BEGIN; SET LOCAL axon.tenant = 'aaaaaaaa-0000-4000-8000-000000000001'; COMMIT;
+SELECT 'ENVENENADA=' || current_setting('axon.tenant', true);
+RESET ALL;
+SELECT 'TRAS_RESET=' || coalesce(NULLIF(current_setting('axon.tenant', true), ''), 'SIN_FIJAR');
+"#;
+    let out2 = Command::new("docker")
+        .args([
+            "exec", "-i", nombre, "psql", "-q", "-tA", "-U", "postgres", "-d", "t",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            c.stdin.take().unwrap().write_all(prueba.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("docker exec psql");
+    let s2 = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out2.stdout),
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    // en una conexion limpia, SET LOCAL no sobrevive al commit
+    assert!(
+        s2.contains("LIMPIA=SIN_FIJAR"),
+        "SET LOCAL sobrevivio al commit:\n{s2}"
+    );
+    // pero tras un `SET` de sesion, revierte a ESE valor: la fuga persiste
+    assert!(
+        s2.contains("ENVENENADA=bbbbbbbb-0000-4000-8000-000000000002"),
+        "el comportamiento medido cambio; revisar la prescripcion de la RLS:\n{s2}"
+    );
+    assert!(s2.contains("TRAS_RESET=SIN_FIJAR"), "{s2}");
+
+    // y la prescripcion generada dice exactamente eso
+    assert!(
+        sql.contains("NUNCA un `SET` de"),
+        "la migracion no prescribe como fijar el inquilino"
+    );
+    assert!(
+        sql.contains("NULLIF(current_setting('axon.tenant', true), '')::uuid"),
+        "{sql}"
+    );
 }
 
 /// El hueco mas grave que tuvo la herramienta: se le podia cambiar un campo a
@@ -2203,6 +2257,115 @@ fn los_esquemas_de_bodega_son_sql_valido() {
         bodega.contains("dead_letter_policy"),
         "el sink de bodega sin DLQ:\n{bodega}"
     );
+}
+
+/// Reglas de reparto que ninguna otra herramienta impone: el validador de
+/// esquema de PgDog esta en su roadmap sin empezar y Citus solo falla en
+/// tiempo de ejecucion al distribuir. Cada una describe una colision o una
+/// fuga que NO da error, solo datos mal.
+#[test]
+fn las_reglas_de_reparto_bloquean() {
+    let dir = std::env::temp_dir().join("axon-reparto");
+    let probar = |ddl: &str, toml: &str| {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sql")).unwrap();
+        std::fs::write(dir.join("sql/001.expand.sql"), ddl).unwrap();
+        std::fs::write(dir.join("s.toml"), toml).unwrap();
+        let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        (format!("{out}{err}"), ok)
+    };
+    let base = "service = \"s\"\nowner = \"e\"\ntier = \"2\"\n[infra]\nstate = \"postgres\"\n\
+                migrations = \"sql/\"\nshard_key = \"tenant_id\"\ntenant_column = \"tenant_id\"\n";
+
+    // una UNIQUE que no incluye la clave: cada nodo la cumple, el conjunto no
+    let (msg, ok) = probar(
+        "CREATE TABLE cuenta (id uuid PRIMARY KEY, tenant_id uuid NOT NULL,\n  \
+         handle varchar(64) NOT NULL UNIQUE);\n",
+        base,
+    );
+    assert!(!ok);
+    assert!(
+        msg.contains("`UNIQUE (handle)` no incluye `tenant_id`"),
+        "{msg}"
+    );
+
+    // una compuesta que SI la incluye es segura, y una PK uuid es unica por
+    // construccion: sin esas dos excepciones la regla seria ruido, y una regla
+    // con falsos positivos se silencia
+    let (msg, ok) = probar(
+        "CREATE TABLE cuenta (id uuid PRIMARY KEY, tenant_id uuid NOT NULL,\n  \
+         handle varchar(64) NOT NULL,\n  CONSTRAINT u UNIQUE (tenant_id, handle));\n",
+        base,
+    );
+    assert!(
+        ok,
+        "una UNIQUE compuesta con la clave no deberia fallar:\n{msg}"
+    );
+
+    // una secuencia por nodo arranca en 1 en cada uno
+    let (msg, ok) = probar(
+        "CREATE TABLE cuenta (id uuid PRIMARY KEY, tenant_id uuid NOT NULL, numero bigserial);\n",
+        base,
+    );
+    assert!(!ok);
+    assert!(
+        msg.contains("se genera de una secuencia (`bigserial`)"),
+        "{msg}"
+    );
+
+    // aislar por una columna y repartir por otra hace que toda consulta de un
+    // inquilino toque todos los nodos
+    let (msg, ok) = probar(
+        "CREATE TABLE cuenta (id uuid PRIMARY KEY, tenant_id uuid, cliente_id uuid);\n",
+        &base.replace(
+            "tenant_column = \"tenant_id\"",
+            "tenant_column = \"cliente_id\"",
+        ),
+    );
+    assert!(!ok);
+    assert!(
+        msg.contains("se aisla por `cliente_id` y se reparte por `tenant_id`"),
+        "{msg}"
+    );
+
+    // N nodos son N lineas de tiempo: no hay punto de recuperacion global
+    let (msg, ok) = probar(
+        "CREATE TABLE cuenta (id uuid PRIMARY KEY, tenant_id uuid NOT NULL);\n",
+        &format!("{base}pitr = true\nbackup_retention_days = 7\n"),
+    );
+    assert!(!ok);
+    assert!(
+        msg.contains("no existe un punto de recuperacion consistente"),
+        "{msg}"
+    );
+}
+
+/// El motor tiene que existir. Antes `state = "neo4j"` pasaba `verify` sin un
+/// error y generaba una instancia de Cloud SQL Postgres: salida incorrecta,
+/// en silencio, que es el peor modo de fallo que hay.
+#[test]
+fn un_motor_desconocido_no_genera_postgres() {
+    let dir = std::env::temp_dir().join("axon-motor");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("g.toml"),
+        "service = \"g\"\nowner = \"e\"\ntier = \"2\"\n[infra]\nstate = \"neo4j\"\n",
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "un motor no soportado tiene que fallar");
+    assert!(err.contains("no esta soportado"), "{err}");
+    // y el mensaje dice como seguir, no solo que no se puede
+    assert!(err.contains("axon-infra-neo4j"), "{err}");
+    // postgres sigue siendo valido
+    std::fs::write(
+        dir.join("g.toml"),
+        "service = \"g\"\nowner = \"e\"\ntier = \"2\"\n[infra]\nstate = \"postgres\"\n",
+    )
+    .unwrap();
+    let (_, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok);
 }
 
 #[test]

@@ -466,7 +466,7 @@ pub fn build_er(ms: &[Manifest]) -> String {
     for (svc, tables) in schemas(ms) {
         out.push(format!("  %% servicio: {svc}"));
         for (t, cols) in &tables {
-            for c in cols {
+            for c in &cols.cols {
                 if let Some(fk) = &c.fk {
                     out.push(format!(
                         "  {} ||--o{{ {} : {}",
@@ -479,7 +479,7 @@ pub fn build_er(ms: &[Manifest]) -> String {
         }
         for (t, cols) in &tables {
             out.push(format!("  {} {{", t.to_uppercase()));
-            for c in cols {
+            for c in &cols.cols {
                 let tag = if c.pk {
                     " PK"
                 } else if c.fk.is_some() {

@@ -88,7 +88,8 @@ pub fn build_pg_anon(ms: &[Manifest]) -> String {
                 ));
                 continue;
             }
-            let sensibles: Vec<&Column> = cols.iter().filter(|c| es_pii(pii, &c.name)).collect();
+            let sensibles: Vec<&Column> =
+                cols.cols.iter().filter(|c| es_pii(pii, &c.name)).collect();
             if sensibles.is_empty() {
                 continue;
             }
@@ -141,6 +142,43 @@ pub fn build(ms: &[Manifest]) -> String {
     let mut o = vec![
         "-- generado por axon — no editar. Guardalo como una migracion mas:".to_string(),
         "--   axon rls manifests/ > sql/<servicio>/090_rls.expand.sql".to_string(),
+        "--".to_string(),
+        "-- COMO SE FIJA EL INQUILINO, y por que importa tanto como la politica:".to_string(),
+        "--".to_string(),
+        "--   BEGIN;".to_string(),
+        "--   SET LOCAL axon.tenant = '<uuid>';   -- LOCAL, no SET a secas".to_string(),
+        "--   ... las consultas ...".to_string(),
+        "--   COMMIT;".to_string(),
+        "--".to_string(),
+        "-- Medido contra Postgres 16, no inferido:".to_string(),
+        "--   * conexion limpia + solo SET LOCAL  -> tras el COMMIT la GUC queda SIN FIJAR"
+            .to_string(),
+        "--   * un solo `SET` de sesion, una vez  -> tras el COMMIT, SET LOCAL revierte a ESE"
+            .to_string(),
+        "--     valor, no a nada. La fuga persiste aunque el resto del codigo use SET LOCAL"
+            .to_string(),
+        "--     correctamente, hasta que alguien haga RESET ALL o se recicle la conexion."
+            .to_string(),
+        "--".to_string(),
+        "-- De ahi la regla, que es mas fuerte que \"usá SET LOCAL\": NUNCA un `SET` de"
+            .to_string(),
+        "-- sesion sobre `axon.tenant`, en ningun lado. Uno solo envenena la conexion para"
+            .to_string(),
+        "-- todos los que vengan despues, y si hay un pooler en modo transaccion delante,"
+            .to_string(),
+        "-- la siguiente peticion —de OTRO inquilino— recibe esa conexion con el valor".to_string(),
+        "-- anterior puesto. Eso no da error: devuelve las filas del inquilino equivocado."
+            .to_string(),
+        "--".to_string(),
+        "-- Dos cosas mas que esta migracion NO puede garantizar y hay que comprobar:".to_string(),
+        "--   1. El rol de la aplicacion no puede ser SUPERUSER ni tener BYPASSRLS: esos"
+            .to_string(),
+        "--      saltan toda politica y FORCE ROW LEVEL SECURITY no lo remedia. El usuario"
+            .to_string(),
+        "--      por defecto de Cloud SQL trae cloudsqlsuperuser.".to_string(),
+        "--   2. `set_config()` con parametro bindeado —lo que emiten varios ORM— puede no"
+            .to_string(),
+        "--      ser interceptado por un pooler; preferi `SET LOCAL` literal.".to_string(),
     ];
     let cabeza = o.len();
     for m in ms.iter().filter(|m| !m.external) {
@@ -155,7 +193,7 @@ pub fn build(ms: &[Manifest]) -> String {
             }
             // ---- RLS por fila ----
             if let Some(tenant) = &m.infra.tenant_column {
-                if cols.iter().any(|c| &c.name == tenant) {
+                if cols.tiene(tenant) {
                     let (tq, cq) = (q(t), q(tenant));
                     o.push(format!(
                         "\n-- {svc}.{t}: aislamiento por inquilino\n\
@@ -165,17 +203,19 @@ pub fn build(ms: &[Manifest]) -> String {
                          ALTER TABLE {tq} FORCE ROW LEVEL SECURITY;\n\
                          DROP POLICY IF EXISTS {pol} ON {tq};\n\
                          CREATE POLICY {pol} ON {tq}\n  \
-                           USING ({cq} = current_setting('axon.tenant', true)::uuid)\n  \
-                           WITH CHECK ({cq} = current_setting('axon.tenant', true)::uuid);",
+                           USING ({cq} = NULLIF(current_setting('axon.tenant', true), '')::uuid)\n  \
+                           WITH CHECK ({cq} = NULLIF(current_setting('axon.tenant', true), '')::uuid);",
                         svc = m.service,
                         pol = q(&format!("{t}_inquilino")),
                     ));
                 }
             }
             // ---- enmascarado por columna ----
-            let sensibles: Vec<&Column> = cols.iter().filter(|c| es_pii(pii, &c.name)).collect();
+            let sensibles: Vec<&Column> =
+                cols.cols.iter().filter(|c| es_pii(pii, &c.name)).collect();
             if !sensibles.is_empty() {
                 let proyeccion: Vec<String> = cols
+                    .cols
                     .iter()
                     .map(|c| {
                         if sensibles.iter().any(|s| s.name == c.name) {

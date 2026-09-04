@@ -228,7 +228,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if ["outbox", "inbox_seen"].contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
                 continue;
             }
-            if !cols.iter().any(|c| &c.name == tenant) {
+            if !cols.tiene(tenant) {
                 errors.push(format!(
                     "[A01] {}.{t}: sin la columna `{tenant}`; se queda sin politica RLS y \
                      devuelve filas de todos los inquilinos. Agregala o ponla en `tenant_exempt`",
@@ -370,6 +370,23 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // ---- el motor tiene que existir ----
+    for m in ms.iter().filter(|m| !m.external) {
+        let Some(motor) = &m.infra.state else {
+            continue;
+        };
+        if !MOTORES.contains(&motor.as_str()) {
+            errors.push(format!(
+                "{}: `state = \"{motor}\"` no esta soportado. Motores nativos: {}. Un motor \
+                 distinto se resuelve con un plugin `axon-infra-{motor}`, que recibe el plan \
+                 neutral por stdin; sin eso, axon generaria infraestructura de Postgres para \
+                 algo que no lo es",
+                m.service,
+                MOTORES.join(", ")
+            ));
+        }
+    }
+
     // ---- escalado de la base: aritmetica sobre lo declarado ----
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
@@ -457,39 +474,104 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
-    // ---- reparto entre nodos: la tabla que se olvida la clave no se puede repartir ----
+    // ---- reparto entre nodos ----
+    //
+    // Estas reglas son ciertas contra Postgres a secas con reparto en la
+    // aplicacion, que es como lo hace la mayoria de quien reparte de verdad.
+    // Y no las impone nadie: el validador de esquema de PgDog esta en su
+    // roadmap sin empezar, y Citus solo falla en tiempo de ejecucion al
+    // distribuir la tabla. Cada una describe una fuga o una colision que no
+    // da error, solo datos mal.
     let esquemas_shard = schemas(ms);
     for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
         let Some(clave) = &m.infra.shard_key else {
             continue;
         };
-        let Some(tablas) = esquemas_shard.get(&m.service) else {
+        let Some(tablas) = esquemas_shard.get(svc) else {
             continue;
         };
+
+        // Aislar por una columna y repartir por otra hace que toda consulta de
+        // un inquilino toque todos los nodos: el reparto deja de servir.
+        if let Some(inq) = &m.infra.tenant_column {
+            if inq != clave {
+                errors.push(format!(
+                    "{svc}: se aisla por `{inq}` y se reparte por `{clave}`. Toda consulta de un \
+                     inquilino tocaria todos los nodos, asi que el reparto no compra nada"
+                ));
+            }
+        }
+
+        // N nodos son N lineas de tiempo: no hay punto de recuperacion global.
+        // Restaurar a un instante deja las transacciones que cruzaron nodos
+        // partidas por la mitad.
+        if m.infra.pitr == Some(true) {
+            errors.push(format!(
+                "{svc}: `pitr = true` con `shard_key`. Cada nodo tiene su propia linea de tiempo: \
+                 no existe un punto de recuperacion consistente para el conjunto, y restaurar \
+                 deja partidas las transacciones que cruzaron nodos"
+            ));
+        }
+
         let repartidas: Vec<&String> = tablas
             .iter()
-            .filter(|(_, cols)| cols.iter().any(|c| &c.name == clave))
+            .filter(|(_, t)| t.tiene(clave))
             .map(|(t, _)| t)
             .collect();
-        for (t, cols) in tablas {
-            if ["outbox", "inbox_seen"].contains(&t.as_str()) {
+
+        for (t, tb) in tablas {
+            if ["outbox", "inbox_seen"].contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
                 continue;
             }
             if !repartidas.contains(&t) {
                 errors.push(format!(
-                    "{}.{t}: sin la columna `{clave}`, asi que no se puede repartir. Agregala \
-                     o saca la tabla del esquema repartido",
-                    m.service
+                    "{svc}.{t}: sin la columna `{clave}`, asi que no se puede repartir. Agregala \
+                     o saca la tabla del esquema repartido"
                 ));
                 continue;
             }
-            for c in cols {
+
+            // Cada nodo cumple una UNIQUE localmente; el conjunto no. Si la
+            // restriccion no incluye la clave de reparto, dos nodos pueden
+            // aceptar el mismo valor y nadie da error.
+            for u in &tb.uniques {
+                // Un uuid es unico por construccion en todo el mundo, asi que
+                // que cada nodo lo cumpla por separado ALCANZA. Sin esta
+                // excepcion la regla marca toda PK uuid y se vuelve ruido, y
+                // una regla con falsos positivos se silencia.
+                let global =
+                    u.len() == 1 && tb.col(&u[0]).is_some_and(|c| c.ty.starts_with("uuid"));
+                if global {
+                    continue;
+                }
+                if !u.iter().any(|c| c == clave) {
+                    errors.push(format!(
+                        "{svc}.{t}: `UNIQUE ({})` no incluye `{clave}`. Cada nodo la cumple por \
+                         separado y el conjunto no: dos nodos aceptan el mismo valor sin error. \
+                         Agregá la clave a la restriccion, o la unicidad es una ilusion",
+                        u.join(", ")
+                    ));
+                }
+            }
+
+            // Cada nodo tiene su propia secuencia, arrancando en 1.
+            for c in tb.cols.iter().filter(|c| c.serial) {
+                errors.push(format!(
+                    "{svc}.{t}.{}: se genera de una secuencia (`{}`) en un esquema repartido. \
+                     Cada nodo tiene la suya y los valores colisionan: usá un uuid o un \
+                     generador que lleve el nodo dentro",
+                    c.name, c.ty
+                ));
+            }
+
+            for c in &tb.cols {
                 let Some(fk) = &c.fk else { continue };
                 if tablas.contains_key(fk) && !repartidas.contains(&fk) {
                     errors.push(format!(
-                        "{}.{t}.{}: FK a `{fk}`, que no lleva `{clave}`. Una FK entre una tabla \
+                        "{svc}.{t}.{}: FK a `{fk}`, que no lleva `{clave}`. Una FK entre una tabla \
                          repartida y una que no lo esta cruza nodos, y eso no se puede garantizar",
-                        m.service, c.name
+                        c.name
                     ));
                 }
             }
@@ -773,7 +855,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     }
     for (svc, tables) in &by_svc {
         for (t, cols) in tables {
-            for c in cols {
+            for c in &cols.cols {
                 let Some(fk) = &c.fk else { continue };
                 if let Some(owner) = owner_of.get(fk.as_str()) {
                     if owner != svc {

@@ -240,6 +240,20 @@ pub struct Bucket {
     pub cache_ttl: Option<u32>,
 }
 
+/// Motores de almacen que axon soporta HOY.
+///
+/// Es una lista cerrada a proposito. Antes `state` era una cadena libre, asi
+/// que `state = "neo4j"` pasaba `verify` sin un error y generaba una instancia
+/// de Cloud SQL Postgres: salida incorrecta, en silencio, que es el peor modo
+/// de fallo que existe.
+///
+/// El plan es soportar mas familias —series temporales, grafos, columnares,
+/// documentales—, y el orden natural son las extensiones de Postgres
+/// (TimescaleDB, Apache AGE, pgvector), porque reusan el parser SQL, las
+/// migraciones, la RLS y los cuatro targets que ya existen. Hasta entonces,
+/// declarar un motor que no esta aca tiene que fallar y decir como seguir.
+pub const MOTORES: [&str; 1] = ["postgres"];
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Infra {
     pub state: Option<String>,
@@ -502,9 +516,36 @@ pub struct Column {
     pub ty: String,
     pub pk: bool,
     pub fk: Option<String>,
+    /// Genera su valor de una secuencia: `serial`, `bigserial`,
+    /// `GENERATED ... AS IDENTITY`. Al repartir, cada nodo tiene su propia
+    /// secuencia y los valores colisionan.
+    pub serial: bool,
 }
 
-pub type Tables = IndexMap<String, Vec<Column>>;
+/// Una tabla: sus columnas y sus restricciones de unicidad.
+///
+/// Las unicidades van como conjuntos de columnas y no como una marca por
+/// columna, porque eso es lo que decide si son seguras al repartir: una
+/// `UNIQUE (tenant_id, handle)` la puede garantizar cada nodo por separado;
+/// una `UNIQUE (handle)` no, y el conjunto de nodos tampoco.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Tabla {
+    pub cols: Vec<Column>,
+    /// Cada entrada es el conjunto de columnas de una restriccion UNIQUE o
+    /// PRIMARY KEY.
+    pub uniques: Vec<Vec<String>>,
+}
+
+impl Tabla {
+    pub fn col(&self, nombre: &str) -> Option<&Column> {
+        self.cols.iter().find(|c| c.name == nombre)
+    }
+    pub fn tiene(&self, nombre: &str) -> bool {
+        self.col(nombre).is_some()
+    }
+}
+
+pub type Tables = IndexMap<String, Tabla>;
 
 use sqlparser::ast::{AlterTableOperation, ColumnOption, ObjectType, Statement, TableConstraint};
 use sqlparser::dialect::PostgreSqlDialect;
@@ -559,29 +600,53 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
     for st in statements(text, origen) {
         match st {
             Statement::CreateTable(ct) => {
-                let mut cols: Vec<Column> = ct
-                    .columns
-                    .iter()
-                    .map(|c| Column {
-                        name: ident(&c.name),
-                        ty: tipo_sql(&c.data_type),
-                        pk: c
-                            .options
-                            .iter()
-                            .any(|o| matches!(o.option, ColumnOption::PrimaryKey(_))),
+                let mut uniques: Vec<Vec<String>> = Vec::new();
+                let mut cols: Vec<Column> = Vec::new();
+                for c in &ct.columns {
+                    let n = ident(&c.name);
+                    let t = tipo_sql(&c.data_type);
+                    let pk = c
+                        .options
+                        .iter()
+                        .any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)));
+                    // UNIQUE y PRIMARY KEY a nivel de columna son unicidades
+                    // de una sola columna
+                    let uniq = c
+                        .options
+                        .iter()
+                        .any(|o| matches!(o.option, ColumnOption::Unique { .. }));
+                    if pk || uniq {
+                        uniques.push(vec![n.clone()]);
+                    }
+                    cols.push(Column {
+                        // `serial` y `bigserial` son azucar de Postgres para una
+                        // secuencia, y `GENERATED AS IDENTITY` tambien
+                        serial: t.contains("serial")
+                            || c.options
+                                .iter()
+                                .any(|o| matches!(o.option, ColumnOption::Generated { .. })),
+                        name: n,
+                        ty: t,
+                        pk,
                         fk: c.options.iter().find_map(|o| match &o.option {
                             ColumnOption::ForeignKey(f) => Some(nombre_tabla(&f.foreign_table)),
                             _ => None,
                         }),
-                    })
-                    .collect();
+                    });
+                }
                 // las mismas restricciones, declaradas a nivel de tabla
                 for c in &ct.constraints {
                     match c {
                         TableConstraint::PrimaryKey(pk) => {
-                            for k in &pk.columns {
-                                marcar(&mut cols, &k.to_string().to_lowercase(), |c| c.pk = true);
+                            let cs: Vec<String> = pk
+                                .columns
+                                .iter()
+                                .map(|k| k.to_string().trim_matches('"').to_lowercase())
+                                .collect();
+                            for k in &cs {
+                                marcar(&mut cols, k, |c| c.pk = true);
                             }
+                            uniques.push(cs);
                         }
                         TableConstraint::ForeignKey(fk) => {
                             let t = nombre_tabla(&fk.foreign_table);
@@ -592,19 +657,41 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                                 });
                             }
                         }
+                        TableConstraint::Unique(u) => {
+                            uniques.push(
+                                u.columns
+                                    .iter()
+                                    .map(|k| k.to_string().trim_matches('"').to_lowercase())
+                                    .collect(),
+                            );
+                        }
                         _ => {}
                     }
                 }
-                into.insert(nombre_tabla(&ct.name), cols);
+                into.insert(nombre_tabla(&ct.name), Tabla { cols, uniques });
             }
             Statement::AlterTable(at) => {
                 let tabla = nombre_tabla(&at.name);
                 for op in at.operations {
                     match op {
                         AlterTableOperation::AddColumn { column_def, .. } => {
-                            into.entry(tabla.clone()).or_default().push(Column {
-                                name: ident(&column_def.name),
-                                ty: tipo_sql(&column_def.data_type),
+                            let n = ident(&column_def.name);
+                            let t = tipo_sql(&column_def.data_type);
+                            let uniq = column_def
+                                .options
+                                .iter()
+                                .any(|o| matches!(o.option, ColumnOption::Unique { .. }));
+                            let entrada = into.entry(tabla.clone()).or_default();
+                            if uniq {
+                                entrada.uniques.push(vec![n.clone()]);
+                            }
+                            entrada.cols.push(Column {
+                                serial: t.contains("serial")
+                                    || column_def.options.iter().any(|o| {
+                                        matches!(o.option, ColumnOption::Generated { .. })
+                                    }),
+                                name: n,
+                                ty: t,
                                 pk: false,
                                 fk: column_def.options.iter().find_map(|o| match &o.option {
                                     ColumnOption::ForeignKey(f) => {
@@ -615,9 +702,11 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                             });
                         }
                         AlterTableOperation::DropColumn { column_names, .. } => {
-                            if let Some(cols) = into.get_mut(&tabla) {
+                            if let Some(tb) = into.get_mut(&tabla) {
                                 let fuera: Vec<String> = column_names.iter().map(ident).collect();
-                                cols.retain(|c| !fuera.contains(&c.name));
+                                tb.cols.retain(|c| !fuera.contains(&c.name));
+                                // una unicidad sobre una columna borrada ya no existe
+                                tb.uniques.retain(|u| !u.iter().any(|c| fuera.contains(c)));
                             }
                         }
                         _ => {}

@@ -40,9 +40,43 @@ Ese error apareció sobre los ejemplos de este repo la primera vez que escribí 
 realistas. **El agotamiento de conexiones no se ve con una instancia: se ve el día que
 escala**, y es una multiplicación que nadie hace.
 
-Con `shard_key`, `verify` exige que toda tabla lleve la clave —una tabla sin ella no se
-puede repartir— y bloquea toda FK entre una tabla repartida y una que no lo esté, porque
-esa FK cruza nodos.
+## Repartir: las reglas que nadie más impone
+
+Con `shard_key`, `verify` bloquea cinco cosas que **no dan error, solo datos mal**. Y
+esto no lo comprueba nadie: el validador de esquema de PgDog está en su roadmap sin
+empezar, y Citus solo falla en tiempo de ejecución al distribuir la tabla.
+
+| | |
+| --- | --- |
+| Tabla sin la clave de reparto | no se puede repartir |
+| `UNIQUE` que no incluye la clave | **cada nodo la cumple por separado y el conjunto no**: dos nodos aceptan el mismo valor sin error |
+| Columna `serial` / `IDENTITY` | cada nodo tiene su propia secuencia, arrancando en 1: los valores colisionan |
+| `tenant_column` ≠ `shard_key` | aislar por una columna y repartir por otra hace que **toda** consulta de un inquilino toque **todos** los nodos |
+| `pitr = true` + `shard_key` | N nodos son N líneas de tiempo: no existe punto de recuperación consistente para el conjunto |
+| FK entre una tabla repartida y una que no | cruza nodos |
+
+Dos excepciones, porque **una regla con falsos positivos se silencia**: una `UNIQUE`
+compuesta que *sí* incluye la clave es segura —cada nodo la garantiza—, y una columna
+`uuid` es única por construcción en todo el mundo, así que una PK uuid no se marca.
+
+## El motor tiene que existir
+
+`state` se valida contra una lista cerrada. Antes era una cadena libre, así que
+`state = "neo4j"` pasaba `verify` sin un error y generaba una instancia de Cloud SQL
+**Postgres**: salida incorrecta, en silencio.
+
+```console
+$ axon verify manifests/
+error  g: `state = "neo4j"` no esta soportado. Motores nativos: postgres. Un motor
+       distinto se resuelve con un plugin `axon-infra-neo4j`, que recibe el plan
+       neutral por stdin
+```
+
+Hoy el único motor nativo es `postgres`. El plan es soportar más familias —series
+temporales, grafos, columnares, documentales— y el orden natural son las **extensiones
+de Postgres** (TimescaleDB, Apache AGE, pgvector), porque reusan el parser SQL, las
+migraciones, la RLS y los cuatro targets que ya existen. Hasta entonces, declarar otro
+motor falla y dice cómo seguir.
 
 Y `database per service` pasó a significar una **instancia** por servicio: con todas en
 la misma, un vecino ruidoso las tira juntas, así que no era aislamiento.
