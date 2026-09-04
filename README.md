@@ -368,7 +368,10 @@ propios — un compilador que solo se verifica a sí mismo produce salida invál
 | --- | --- |
 | El TypeScript generado | `tsc --strict --noEmit` |
 | El Terraform generado | `terraform fmt -check` (gcp y aws) |
-| El workflow generado | parseo YAML y bloques escalares |
+| El workflow generado | parseo YAML, bloques escalares, y que ningún target filtre otro cloud |
+| El testkit generado | `node --test` contra el servicio de ejemplo real |
+| El Go generado | `go vet` |
+| El DDL | `PARTITION BY`, constraints de tabla, y fallo ruidoso ante SQL inválido |
 | Los cuatro targets | despliegan el workload y entregan a alguien |
 
 ```sh
@@ -384,6 +387,9 @@ Saltado a propósito, y cuándo agregarlo:
 
 - **Un generador nativo (TS)** — los demás por plugin, hasta que haya un segundo
   servicio real en otro lenguaje que justifique traerlo al core.
+- **Un solo dialecto SQL (PostgreSQL)** — el esquema se lee con `sqlparser`, no con
+  una regex, así que aguanta `PARTITION BY`, restricciones a nivel de tabla y lo que
+  genere cualquier ORM. Un archivo que no parsea es un error, nunca un silencio.
 - **Un solo modelo de ejecución (`container`)** — cualquier otro valor de `runtime` es
   un error de `verify`, no un campo ignorado en silencio. Otro modelo entra por un
   `axon-infra-*`.

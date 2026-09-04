@@ -109,6 +109,10 @@ image          = "${{ vars.REGISTRY }}/{service}:${{ github.sha }}"
 
 Todos emiten Mermaid. GitHub los renderiza en un bloque ` ```mermaid `.
 
+El esquema para `er` y para el chequeo de FK entre servicios se lee con un parser
+SQL de PostgreSQL, no con expresiones regulares. Un archivo que no parsea aborta el
+comando con el archivo y el error: axon prefiere fallar a adivinar columnas.
+
 ## Debug
 
 ### `axon trace [log] [--correlation <id>] [--seq]`

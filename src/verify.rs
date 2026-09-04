@@ -1,7 +1,6 @@
 //! Drift: lo que convierte al manifiesto en algo mas que documentacion.
 use crate::manifest::*;
 use indexmap::IndexMap;
-use regex::Regex;
 
 /// Gobernanza: reglas del equipo, versionadas junto al codigo.
 /// Sin `axon.policy.toml` aplican estos valores por defecto.
@@ -290,7 +289,6 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     }
 
     // migraciones: expand -> migrate -> contract, y orden determinista
-    let numbered = Regex::new(r"^\d{3,}_").unwrap();
     for m in ms {
         for f in migrations_of(m) {
             let name = f
@@ -299,14 +297,20 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 .to_string_lossy()
                 .to_string();
             let text = std::fs::read_to_string(&f).unwrap_or_default();
-            if destructive(&text) && !name.contains(".contract.") {
+            if destructive(&text, &f.display().to_string()) && !name.contains(".contract.") {
                 errors.push(format!(
                     "{}/{name}: migracion destructiva sin marcar como `.contract.sql` \
                      (expand -> migrate -> contract)",
                     m.service
                 ));
             }
-            if !numbered.is_match(&name) {
+            // `001_x.sql`: tres digitos y un guion bajo. Una regex para esto
+            // seria una dependencia entera por tres caracteres.
+            let numerado = {
+                let b = name.as_bytes();
+                b.len() > 3 && b[..3].iter().all(u8::is_ascii_digit) && b[3] == b'_'
+            };
+            if !numerado {
                 warnings.push(format!(
                     "{}/{name}: sin prefijo numerico, el orden no es determinista",
                     m.service

@@ -49,6 +49,95 @@ fn migraciones_plegadas_en_el_er() {
     assert!(!er.contains("currency"), "DROP COLUMN no se plego");
 }
 
+/// El esquema se lee con un parser SQL, no con una regex. Lo que sigue es
+/// exactamente lo que la regex no podia, y su peor propiedad era romperse en
+/// silencio: devolver columnas mal sin que nadie se enterara.
+#[test]
+fn el_ddl_se_parsea_de_verdad() {
+    let dir = std::env::temp_dir().join("axon-ddl");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(
+        dir.join("sql/001_duro.expand.sql"),
+        r#"
+CREATE TABLE "ledger_entry" (
+  id            uuid NOT NULL DEFAULT gen_random_uuid(),
+  account_id    uuid NOT NULL,
+  posted_at     timestamptz NOT NULL DEFAULT now(),
+  amount_cents  numeric(20, 4) NOT NULL,
+  meta          jsonb NOT NULL DEFAULT '{}'::jsonb,
+  CONSTRAINT ledger_entry_pkey PRIMARY KEY (id),
+  CONSTRAINT ledger_entry_account_fkey FOREIGN KEY (account_id) REFERENCES account (id) ON DELETE RESTRICT
+) PARTITION BY RANGE (posted_at);
+
+CREATE TABLE account (
+  id      uuid PRIMARY KEY,
+  handle  varchar(64) NOT NULL UNIQUE
+);
+
+CREATE INDEX ledger_entry_account_idx ON "ledger_entry" (account_id, posted_at DESC);
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("l.toml"),
+        "service = \"ledger\"\nowner = \"x\"\ntier = \"0\"\n[infra]\nstate = \"postgres\"\nmigrations = \"sql/\"\n",
+    )
+    .unwrap();
+
+    let (er, err, ok) = axon(&["er", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    // PRIMARY KEY y FOREIGN KEY declaradas a nivel de tabla, no en la columna
+    assert!(er.contains("uuid id PK"), "PK de tabla no resuelta:\n{er}");
+    assert!(
+        er.contains("uuid account_id FK"),
+        "FK de tabla no resuelta:\n{er}"
+    );
+    assert!(
+        er.contains("ACCOUNT ||--o{ LEDGER_ENTRY : account_id"),
+        "{er}"
+    );
+    // un tipo tiene que caber en un token o rompe el ER de mermaid
+    assert!(
+        er.contains("numeric(20,4) amount_cents") || er.contains("numeric(20,_4) amount_cents"),
+        "{er}"
+    );
+    assert!(er.contains("varchar(64) handle"), "{er}");
+    // CREATE INDEX no es una tabla
+    assert!(
+        !er.to_uppercase().contains("LEDGER_ENTRY_ACCOUNT_IDX"),
+        "{er}"
+    );
+
+    // un DROP dentro de un comentario no es destructivo; uno de verdad si
+    std::fs::write(
+        dir.join("sql/002_no_es_drop.expand.sql"),
+        "-- ojo: no hacer DROP TABLE account aqui\nALTER TABLE account ADD COLUMN nota text;\n",
+    )
+    .unwrap();
+    let (_, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "un DROP en un comentario se conto como destructivo");
+
+    std::fs::write(
+        dir.join("sql/003_si_es_drop.expand.sql"),
+        "ALTER TABLE account DROP COLUMN nota;\n",
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("destructiva sin marcar"), "{err}");
+
+    // y el SQL que no se puede parsear falla ruidosamente, nunca en silencio
+    std::fs::write(
+        dir.join("sql/004_roto.expand.sql"),
+        "CREATE TABL account (;\n",
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["er", dir.to_str().unwrap()]);
+    assert!(!ok, "el SQL invalido se ignoro en silencio");
+    assert!(err.contains("no se pudo parsear"), "{err}");
+}
+
 #[test]
 fn el_mismo_plan_en_cuatro_targets() {
     for (target, marca) in [

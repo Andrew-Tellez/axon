@@ -1,9 +1,7 @@
 //! Carga, descubrimiento y esquema derivado de migraciones.
 use indexmap::IndexMap;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 pub type Fields = IndexMap<String, String>;
 
@@ -257,106 +255,144 @@ pub struct Column {
 
 pub type Tables = IndexMap<String, Vec<Column>>;
 
-// ponytail: regex, no parser SQL. Aguanta CREATE TABLE / ALTER TABLE normales.
-// Si se rompe: `pg_dump --schema-only` es mas regular, e information_schema
-// es la salida definitiva (cuesta una dependencia de driver).
-static CREATE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?is)create\s+table\s+(?:if\s+not\s+exists\s+)?"?([\w.]+)"?\s*\((.*?)\n\s*\)\s*;"#,
-    )
-    .unwrap()
-});
-static ADD_COL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)alter\s+table\s+"?([\w.]+)"?\s+add\s+column\s+(?:if\s+not\s+exists\s+)?"?(\w+)"?\s+(\w+)"#).unwrap()
-});
-static DROP_COL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?is)alter\s+table\s+"?([\w.]+)"?\s+drop\s+column\s+(?:if\s+exists\s+)?"?(\w+)"?"#,
-    )
-    .unwrap()
-});
-static DROP_TABLE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?is)drop\s+table\s+(?:if\s+exists\s+)?"?([\w.]+)"?"#).unwrap());
-static REFS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?is)references\s+"?([\w.]+)"?"#).unwrap());
+use sqlparser::ast::{AlterTableOperation, ColumnOption, ObjectType, Statement, TableConstraint};
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::Parser;
 
-const SKIP: [&str; 6] = [
-    "primary key",
-    "foreign key",
-    "constraint",
-    "unique",
-    "check",
-    "--",
-];
+/// El esquema se lee con un parser SQL de verdad. Una regex se rompe con
+/// `PARTITION BY`, tipos compuestos o lo que genere cualquier ORM, y lo peor
+/// es que se rompe en silencio: devuelve columnas mal y nadie se entera.
+/// Esto falla ruidosamente, que es lo unico aceptable para el ER y para el
+/// chequeo de FK entre servicios.
+fn statements(text: &str, origen: &str) -> Vec<Statement> {
+    match Parser::parse_sql(&PostgreSqlDialect {}, text) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "axon: {origen}: no se pudo parsear el SQL: {e}\n      \
+                 axon lee las migraciones para el ER y para bloquear FK entre \
+                 servicios; preferir fallar a adivinar columnas"
+            );
+            std::process::exit(1);
+        }
+    }
+}
 
-fn split_cols(body: &str) -> Vec<String> {
-    let (mut depth, mut cur, mut out) = (0i32, String::new(), Vec::new());
-    for ch in body.chars() {
-        match ch {
-            '(' => depth += 1,
-            ')' => depth -= 1,
+fn nombre_tabla(o: &sqlparser::ast::ObjectName) -> String {
+    o.0.last()
+        .map(|p| p.to_string().trim_matches('"').to_string())
+        .unwrap_or_default()
+}
+
+/// Un tipo tiene que caber en un token: el ER de mermaid es `<tipo> <columna>`.
+fn tipo_sql(t: &sqlparser::ast::DataType) -> String {
+    t.to_string().to_lowercase().replace(' ', "_")
+}
+
+pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
+    for st in statements(text, origen) {
+        match st {
+            Statement::CreateTable(ct) => {
+                let mut cols: Vec<Column> = ct
+                    .columns
+                    .iter()
+                    .map(|c| Column {
+                        name: c.name.value.clone(),
+                        ty: tipo_sql(&c.data_type),
+                        pk: c
+                            .options
+                            .iter()
+                            .any(|o| matches!(o.option, ColumnOption::PrimaryKey(_))),
+                        fk: c.options.iter().find_map(|o| match &o.option {
+                            ColumnOption::ForeignKey(f) => Some(nombre_tabla(&f.foreign_table)),
+                            _ => None,
+                        }),
+                    })
+                    .collect();
+                // las mismas restricciones, declaradas a nivel de tabla
+                for c in &ct.constraints {
+                    match c {
+                        TableConstraint::PrimaryKey(pk) => {
+                            for k in &pk.columns {
+                                marcar(&mut cols, &k.to_string(), |c| c.pk = true);
+                            }
+                        }
+                        TableConstraint::ForeignKey(fk) => {
+                            let t = nombre_tabla(&fk.foreign_table);
+                            for k in &fk.columns {
+                                let t = t.clone();
+                                marcar(&mut cols, &k.to_string(), move |c| c.fk = Some(t.clone()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                into.insert(nombre_tabla(&ct.name), cols);
+            }
+            Statement::AlterTable(at) => {
+                let tabla = nombre_tabla(&at.name);
+                for op in at.operations {
+                    match op {
+                        AlterTableOperation::AddColumn { column_def, .. } => {
+                            into.entry(tabla.clone()).or_default().push(Column {
+                                name: column_def.name.value.clone(),
+                                ty: tipo_sql(&column_def.data_type),
+                                pk: false,
+                                fk: column_def.options.iter().find_map(|o| match &o.option {
+                                    ColumnOption::ForeignKey(f) => {
+                                        Some(nombre_tabla(&f.foreign_table))
+                                    }
+                                    _ => None,
+                                }),
+                            });
+                        }
+                        AlterTableOperation::DropColumn { column_names, .. } => {
+                            if let Some(cols) = into.get_mut(&tabla) {
+                                let fuera: Vec<String> =
+                                    column_names.iter().map(|c| c.value.clone()).collect();
+                                cols.retain(|c| !fuera.contains(&c.name));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Statement::Drop {
+                object_type: ObjectType::Table,
+                names,
+                ..
+            } => {
+                for n in names {
+                    into.shift_remove(&nombre_tabla(&n));
+                }
+            }
             _ => {}
         }
-        if ch == ',' && depth == 0 {
-            out.push(std::mem::take(&mut cur));
-        } else {
-            cur.push(ch);
-        }
-    }
-    out.push(cur);
-    out
-}
-
-pub fn parse_ddl(text: &str, into: &mut Tables) {
-    for cap in CREATE.captures_iter(text) {
-        let name = cap[1].trim_matches('"').to_string();
-        let mut cols = Vec::new();
-        for raw in split_cols(&cap[2]) {
-            let line = raw.trim();
-            let lower = line.to_lowercase();
-            if line.is_empty() || SKIP.iter().any(|s| lower.starts_with(s)) {
-                continue;
-            }
-            let mut parts = line.split_whitespace();
-            let (Some(col), Some(ty)) = (parts.next(), parts.next()) else {
-                continue;
-            };
-            cols.push(Column {
-                name: col.trim_matches('"').to_string(),
-                ty: ty.trim_end_matches(',').to_string(),
-                pk: lower.contains("primary key"),
-                fk: REFS
-                    .captures(line)
-                    .map(|c| c[1].trim_matches('"').to_string()),
-            });
-        }
-        into.insert(name, cols);
-    }
-    for cap in ADD_COL.captures_iter(text) {
-        into.entry(cap[1].trim_matches('"').to_string())
-            .or_default()
-            .push(Column {
-                name: cap[2].to_string(),
-                ty: cap[3].to_string(),
-                pk: false,
-                fk: None,
-            });
-    }
-    for cap in DROP_COL.captures_iter(text) {
-        if let Some(cols) = into.get_mut(cap[1].trim_matches('"')) {
-            cols.retain(|c| c.name != cap[2]);
-        }
-    }
-    for cap in DROP_TABLE.captures_iter(text) {
-        into.shift_remove(cap[1].trim_matches('"'));
     }
 }
 
-pub fn destructive(text: &str) -> bool {
-    DROP_COL.is_match(text) || DROP_TABLE.is_match(text)
+fn marcar(cols: &mut [Column], nombre: &str, f: impl Fn(&mut Column)) {
+    let nombre = nombre.trim_matches('"');
+    if let Some(c) = cols.iter_mut().find(|c| c.name == nombre) {
+        f(c);
+    }
 }
 
-/// Archivos de migracion de un servicio, en orden.
+/// Destructivo de verdad, no "contiene la palabra DROP en un comentario".
+pub fn destructive(text: &str, origen: &str) -> bool {
+    statements(text, origen).iter().any(|st| match st {
+        Statement::Drop {
+            object_type: ObjectType::Table,
+            ..
+        } => true,
+        Statement::AlterTable(at) => at
+            .operations
+            .iter()
+            .any(|o| matches!(o, AlterTableOperation::DropColumn { .. })),
+        _ => false,
+    })
+}
+
 pub fn migrations_of(m: &Manifest) -> Vec<PathBuf> {
     let Some(path) = &m.infra.migrations else {
         return vec![];
@@ -395,7 +431,7 @@ pub fn schemas(manifests: &[Manifest]) -> IndexMap<String, Tables> {
         let mut tables = Tables::new();
         for f in files {
             if let Ok(text) = std::fs::read_to_string(&f) {
-                parse_ddl(&text, &mut tables);
+                parse_ddl(&text, &f.display().to_string(), &mut tables);
             }
         }
         out.insert(m.service.clone(), tables);
