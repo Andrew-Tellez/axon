@@ -27,6 +27,8 @@ enum Cmd {
     /// manifiesto -> contratos y clase base
     Build {
         manifest: PathBuf,
+        /// Los demas manifiestos: de ahi sale el tipo de lo que este servicio consume.
+        sources: Vec<String>,
         #[arg(long, default_value = "ts")]
         lang: String,
     },
@@ -91,10 +93,19 @@ fn main() -> ExitCode {
 fn run() -> Result<ExitCode, String> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Build { manifest, lang } => {
+        Cmd::Build {
+            manifest,
+            sources,
+            lang,
+        } => {
             let m = manifest::load(&manifest)?;
+            let all = if sources.is_empty() {
+                vec![]
+            } else {
+                manifest::discover(&sources)?
+            };
             if lang == "ts" {
-                println!("{}", emit::build_ts(&m));
+                println!("{}", emit::build_ts(&m, &all)?);
             } else {
                 // un target nativo; el resto por plugin
                 let bin = format!("axon-gen-{lang}");

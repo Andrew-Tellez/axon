@@ -51,7 +51,10 @@ fn iface(name: &str, fields: &Fields) -> String {
     format!("export interface {name} {{\n{body}}}\n")
 }
 
-pub fn build_ts(m: &Manifest) -> String {
+/// `all` son los demas manifiestos: el tipo de un evento consumido lo declara
+/// su EMISOR, no quien lo recibe. Es la misma razon por la que las fixtures de
+/// prueba salen del emisor — ahi es donde aparece el drift.
+pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     let svc = &m.service;
     let mut out = vec![
         format!(
@@ -65,6 +68,28 @@ pub fn build_ts(m: &Manifest) -> String {
     ];
     for (ev, fields) in &m.emits {
         out.push(iface(&pascal(ev), fields));
+    }
+    for ev in m.consumes.keys() {
+        if m.emits.contains_key(ev) {
+            continue;
+        }
+        match all
+            .iter()
+            .find_map(|o| o.emits.get(ev).map(|f| (&o.service, f)))
+        {
+            Some((owner, fields)) => {
+                out.push(format!("// {ev}: esquema declarado por {owner}, su dueno"));
+                out.push(iface(&pascal(ev), fields));
+            }
+            None => {
+                return Err(format!(
+                    "{}: consume `{ev}` y no se encontro quien lo emite. Pasa los demas \
+                     manifiestos: `axon build {} manifests/`",
+                    m.service,
+                    m.origin.display()
+                ))
+            }
+        }
     }
     for (meth, spec) in &m.methods {
         out.push(iface(&format!("{}In", pascal(meth)), &spec.input));
@@ -142,7 +167,7 @@ pub fn build_ts(m: &Manifest) -> String {
     if !m.machine.is_empty() {
         out.push(machines_ts(m));
     }
-    out.join("\n")
+    Ok(out.join("\n"))
 }
 
 // ---------- CI/CD ----------
@@ -191,8 +216,13 @@ jobs:
       # el gate que importa: el manifiesto contra TODOS los demas, no solo el propio
       - run: curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
       - run: axon verify manifests/
-      - run: axon build manifests/{svc}.toml --lang ts > /tmp/gen.ts && git diff --exit-code || \
-             (echo "codigo generado desactualizado: corre axon build" && exit 1)
+      - name: codigo generado al dia
+        run: |
+          axon build manifests/{svc}.toml manifests/ --lang ts > services/{svc}/src/contracts.ts
+          git diff --exit-code || {{
+            echo "::error::codigo generado desactualizado; corre axon build"
+            exit 1
+          }}
 {steps}
   test:
     runs-on: ubuntu-latest

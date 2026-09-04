@@ -10,8 +10,13 @@ configuración de la herramienta). Una URL sin `.json` se resuelve a
 
 ## Código y contratos
 
-### `axon build <manifiesto> [--lang ts]`
-Contratos tipados, el envelope y la clase base abstracta. Con `[patterns] outbox`
+### `axon build <manifiesto> [fuentes...] [--lang ts]`
+Contratos tipados, el envelope y la clase base abstracta.
+
+Las `fuentes` son los demás manifiestos, y hacen falta en cuanto el servicio
+consume algo: **el tipo de un evento consumido lo declara su emisor**, no quien lo
+recibe. Sin ellas, `build` falla diciendo qué pasar en vez de generar código que no
+compila. Con `[patterns] outbox`
 los emisores escriben en el outbox y `bus.publish` desaparece del archivo. Si hay
 `consumes`, genera `dispatch()` con deduplicación por id.
 

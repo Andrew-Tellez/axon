@@ -1,6 +1,13 @@
 //! Un solo archivo de checks: si algo de esto se rompe, la herramienta miente.
 use std::process::Command;
 
+fn tiene(bin: &str) -> bool {
+    Command::new(bin)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 fn axon(args: &[&str]) -> (String, String, bool) {
     let out = Command::new(env!("CARGO_BIN_EXE_axon"))
         .args(args)
@@ -22,7 +29,7 @@ fn ejemplos_limpios() {
 
 #[test]
 fn trazabilidad_no_es_opcional() {
-    let (ts, _, _) = axon(&["build", "examples/payments.toml"]);
+    let (ts, _, _) = axon(&["build", "examples/payments.toml", "examples"]);
     for f in ["traceparent", "correlationId", "causationId"] {
         assert!(ts.contains(f), "falta {f}");
     }
@@ -166,9 +173,96 @@ method = "charge"
     }
 }
 
+/// Lo que el README promete y solo una herramienta externa puede confirmar.
+/// Sin la herramienta, el test se salta en vez de mentir.
+#[test]
+fn el_typescript_generado_typechequea() {
+    if !tiene("node") {
+        eprintln!("salteado: node no esta instalado");
+        return;
+    }
+    let dir = std::env::temp_dir().join("axon-tsc");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (ts, err, ok) = axon(&["build", "examples/payments.toml", "examples"]);
+    assert!(ok, "{err}");
+    std::fs::write(dir.join("contracts.ts"), ts).unwrap();
+    let out = Command::new("npx")
+        .args([
+            "-y",
+            "-p",
+            "typescript@5",
+            "tsc",
+            "--noEmit",
+            "--strict",
+            "--target",
+            "es2022",
+            "--lib",
+            "es2022,dom",
+            "contracts.ts",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("npx");
+    assert!(
+        out.status.success(),
+        "tsc fallo:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// El tipo de un evento consumido lo declara su emisor. Sin los demas
+/// manifiestos, `build` tiene que fallar con un mensaje util, no generar
+/// codigo que no compila.
+#[test]
+fn build_sin_fuentes_falla_claro() {
+    let (_, err, ok) = axon(&["build", "examples/payments.toml"]);
+    assert!(!ok);
+    assert!(err.contains("no se encontro quien lo emite"), "{err}");
+    assert!(err.contains("Pasa los demas manifiestos"), "{err}");
+}
+
+#[test]
+fn el_hcl_generado_parsea() {
+    if !tiene("terraform") {
+        eprintln!("salteado: terraform no esta instalado");
+        return;
+    }
+    for target in ["gcp", "aws"] {
+        let dir = std::env::temp_dir().join(format!("axon-tf-{target}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tf, _, _) = axon(&["infra", "examples", "--target", target]);
+        std::fs::write(dir.join("main.tf"), tf).unwrap();
+        let out = Command::new("terraform")
+            .args(["fmt", "-check", dir.to_str().unwrap()])
+            .output()
+            .expect("terraform");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.to_lowercase().contains("error"), "{target}:\n{err}");
+    }
+}
+
+#[test]
+fn el_ci_generado_es_yaml_valido() {
+    let (yml, _, _) = axon(&["ci", "examples/payments.toml"]);
+    // el fallo real que tuvo: un `: ` dentro de un escalar plano multilinea
+    for linea in yml.lines() {
+        let t = linea.trim_start();
+        if t.starts_with("- run:") || t.starts_with("run:") {
+            assert!(!t.ends_with('\\'), "run multilinea sin bloque escalar: {t}");
+        }
+    }
+    assert!(
+        yml.contains("run: |"),
+        "los comandos multilinea necesitan bloque escalar"
+    );
+    assert!(yml.contains("id-token: write"), "sin OIDC");
+}
+
 #[test]
 fn maquinas_de_estado() {
-    let (ts, _, _) = axon(&["build", "examples/payments.toml"]);
+    let (ts, _, _) = axon(&["build", "examples/payments.toml", "examples"]);
     assert!(
         ts.contains(r#"export type PaymentState = "pending" | "captured" | "failed" | "refunded""#),
         "{ts}"

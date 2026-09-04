@@ -167,13 +167,13 @@ fn gcp(p: &Plan) -> String {
         if w.db {
             env.push_str(&format!(
                 "        env {{\n          name = \"DATABASE_URL\"\n          value_source {{\n            \
-                 secret_key_ref {{ secret = google_secret_manager_secret.{s}_database_url.secret_id, version = \"latest\" }}\n          }}\n        }}\n"
+                 secret_key_ref {{\n              secret  = google_secret_manager_secret.{s}_database_url.secret_id\n              version = \"latest\"\n            }}\n          }}\n        }}\n"
             ));
         }
         for sec in &w.secrets {
             env.push_str(&format!(
                 "        env {{\n          name = \"{sec}\"\n          value_source {{\n            \
-                 secret_key_ref {{ secret = google_secret_manager_secret.{s}_{}.secret_id, version = \"latest\" }}\n          }}\n        }}\n",
+                 secret_key_ref {{\n              secret  = google_secret_manager_secret.{s}_{}.secret_id\n              version = \"latest\"\n            }}\n          }}\n        }}\n",
                 tfname(sec)
             ));
         }
@@ -181,7 +181,7 @@ fn gcp(p: &Plan) -> String {
             "resource \"google_cloud_run_v2_service\" \"{s}\" {{\n  name     = \"{svc}\"\n  \
              location = var.region\n  template {{\n    service_account = google_service_account.{s}.email\n    \
              scaling {{\n      min_instance_count = {min}\n      max_instance_count = {max}\n    }}\n    \
-             containers {{\n      image = var.{img}\n      ports {{ container_port = {port} }}\n\
+             containers {{\n      image = var.{img}\n      ports {{\n        container_port = {port}\n      }}\n\
 {env}    }}\n  }}\n}}\n",
             svc = w.service, min = w.min_instances, max = w.max_instances,
             img = w.image_var, port = w.port
@@ -194,7 +194,7 @@ fn gcp(p: &Plan) -> String {
             "resource \"google_pubsub_subscription\" \"{sv}_{n}\" {{\n  name  = \"{}\"\n  \
              topic = google_pubsub_topic.{n}.name\n  push_config {{\n    \
              push_endpoint = google_cloud_run_v2_service.{sv}.uri\n    \
-             oidc_token {{ service_account_email = google_service_account.{sv}.email }}\n  }}\n  \
+             oidc_token {{\n      service_account_email = google_service_account.{sv}.email\n    }}\n  }}\n  \
              dead_letter_policy {{\n    dead_letter_topic     = google_pubsub_topic.{n}_dlq.id\n    \
              max_delivery_attempts = {}\n  }}\n}}\n",
             s.name, s.max_attempts
@@ -208,7 +208,7 @@ fn gcp(p: &Plan) -> String {
         ));
         o.push(format!(
             "resource \"google_secret_manager_secret\" \"{sv}_database_url\" {{\n  \
-             secret_id = \"{}-database-url\"\n  replication {{ auto {{}} }}\n}}\n",
+             secret_id = \"{}-database-url\"\n  replication {{\n    auto {{}}\n  }}\n}}\n",
             s.service
         ));
         if s.outbox {
@@ -220,7 +220,7 @@ fn gcp(p: &Plan) -> String {
     }
     for s in &p.secrets {
         o.push(format!(
-            "resource \"google_secret_manager_secret\" \"{}_{}\" {{\n  secret_id = \"{}\"\n  replication {{ auto {{}} }}\n}}\n",
+            "resource \"google_secret_manager_secret\" \"{}_{}\" {{\n  secret_id = \"{}\"\n  replication {{\n    auto {{}}\n  }}\n}}\n",
             tfname(&s.service), tfname(&s.key), s.name
         ));
     }

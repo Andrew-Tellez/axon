@@ -269,6 +269,22 @@ Bloquea el pipeline exactamente igual que una regla nativa. Un `axon-gen-<lang>`
 la forma soportada de agregar un lenguaje: axon trae TS nativo y no pretende traer
 los demás.
 
+## Qué comprueba el suite
+
+Los generadores se validan con la herramienta real del ecosistema, no con asserts
+propios — un compilador que solo se verifica a sí mismo produce salida inválida:
+
+| | |
+| --- | --- |
+| El TypeScript generado | `tsc --strict --noEmit` |
+| El Terraform generado | `terraform fmt -check` (gcp y aws) |
+| El workflow generado | parseo YAML y bloques escalares |
+| Los cuatro targets | despliegan el workload y entregan a alguien |
+
+```sh
+cargo test --release      # 15 checks de conformidad
+```
+
 ## Estado
 
 Preview. La superficie de comandos es estable; el formato del manifiesto todavía puede
@@ -290,7 +306,7 @@ Saltado a propósito, y cuándo agregarlo:
 ## Desarrollo
 
 ```sh
-cargo test --release      # 8 checks de conformidad
+cargo test --release      # 15 checks (los de tsc y terraform se saltan si no están)
 cargo run -- verify examples
 ```
 
