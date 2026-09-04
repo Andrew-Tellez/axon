@@ -3,7 +3,12 @@ on:
   push:
     branches: [main]
     paths: ["docs/**", ".github/workflows/pages.yml", "CHANGELOG.md"]
-    tags: ["v*"]
+  # Un tag no puede desplegar: el entorno `github-pages` solo admite la rama
+  # por defecto. `workflow_run` corre en el contexto de main, asi que la
+  # version nueva se publica en cuanto termina el release.
+  workflow_run:
+    workflows: [release]
+    types: [completed]
   workflow_dispatch:
 permissions:
   contents: read
