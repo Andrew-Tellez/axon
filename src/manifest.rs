@@ -74,6 +74,57 @@ impl Depend {
     }
 }
 
+/// El lado del teorema CAP que elige este servicio.
+///
+/// La tolerancia a particiones no se elige: en un sistema distribuido la red
+/// se parte y punto. Lo que se elige es que hacer mientras esta partida, y esa
+/// decision cambia el nivel de aislamiento, la topologia de lectura y si el
+/// codigo generado te obliga a escribir un camino degradado.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Cap {
+    /// "strong" (CP): antes de servir un dato viejo, no sirve nada.
+    /// "eventual" (AP): sirve algo viejo antes que no servir nada.
+    pub consistency: String,
+    /// "reject" falla cerrado; "degrade" obliga a declarar que se sirve.
+    pub on_partition: String,
+    /// Presupuesto de obsolescencia. Sin un numero, "eventual" no significa nada.
+    pub max_staleness_ms: Option<u32>,
+    /// `true` cuando la eleccion la hizo alguien; `false` cuando es el default.
+    #[serde(skip)]
+    pub declarado: bool,
+}
+
+impl Default for Cap {
+    fn default() -> Self {
+        // El par seguro: falla cerrado. Es un default, no una decision, y
+        // `verify` avisa de que nadie la tomo.
+        Self {
+            consistency: "strong".into(),
+            on_partition: "reject".into(),
+            max_staleness_ms: None,
+            declarado: false,
+        }
+    }
+}
+
+impl Cap {
+    pub fn eventual(&self) -> bool {
+        self.consistency == "eventual"
+    }
+    pub fn degrada(&self) -> bool {
+        self.on_partition == "degrade"
+    }
+    /// Aislamiento acorde: pagar dos veces sale mas caro que reintentar.
+    pub fn aislamiento(&self) -> &str {
+        if self.eventual() {
+            "READ COMMITTED"
+        } else {
+            "SERIALIZABLE"
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Patterns {
     #[serde(default)]
@@ -184,6 +235,9 @@ pub struct Manifest {
     pub depends: Vec<Depend>,
     #[serde(default)]
     pub patterns: Patterns,
+    /// Lado del teorema CAP. Ver `Cap`.
+    #[serde(default)]
+    pub cap: Cap,
     /// Maquinas de estado del dominio: la unica logica de negocio que vale
     /// la pena declarar, porque es la misma en todos los lenguajes.
     #[serde(default)]
@@ -239,6 +293,8 @@ pub fn for_env(m: &Manifest, env: &str) -> Manifest {
 pub fn load(path: &Path) -> Result<Manifest, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut m: Manifest = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    // serde no distingue "ausente" de "igual al default"; el texto si
+    m.cap.declarado = text.contains("[cap]");
     m.origin = path.to_path_buf();
     Ok(m)
 }

@@ -20,6 +20,11 @@ compila. Con `[patterns] outbox`
 los emisores escriben en el outbox y `bus.publish` desaparece del archivo. Si hay
 `consumes`, genera `dispatch()` con deduplicación por id.
 
+Además del contrato emite: la tabla de transiciones de cada `[machine]`, el
+`nivelAislamiento` que sale del lado CAP declarado, los clientes de cada `[[depends]]`
+con su política ejecutándose (timeout, backoff con jitter, circuito), y —si hay campos
+`pii`— la lista y un `redactar()` recursivo.
+
 `--lang` distinto de `ts` busca `axon-gen-<lang>` en el `PATH` y le pasa
 `{"manifest": ..., "peers": [...]}` por stdin. `plugins/axon-gen-go` es el
 generador de referencia.

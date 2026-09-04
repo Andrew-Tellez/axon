@@ -169,6 +169,24 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     if !m.machine.is_empty() {
         out.push(machines_ts(m));
     }
+    out.push(format!(
+        "\n/** Lado del teorema CAP declarado en el manifiesto: {c}/{p}.\n \
+         *  De ahi sale el nivel de aislamiento: pagar dos veces sale mas caro\n \
+         *  que reintentar, y servir un dato viejo cuesta menos que no servir. */\n\
+         export const nivelAislamiento = \"{a}\" as const;\n{st}",
+        c = m.cap.consistency,
+        p = m.cap.on_partition,
+        a = m.cap.aislamiento(),
+        st = m
+            .cap
+            .max_staleness_ms
+            .map(|v| format!(
+                "/** Presupuesto de obsolescencia: un dato mas viejo que esto no se sirve. */\n\
+                 export const obsolescenciaMaximaMs = {v};\n"
+            ))
+            .unwrap_or_default(),
+    ));
+    out.push(clientes_ts(m, all)?);
     if !m.pii.is_empty() {
         // [A09] Un dato personal se filtra por un log, no por un exploit.
         // El generador da la lista y la funcion; usarla es de la persona,
@@ -622,4 +640,179 @@ pub fn build_states(ms: &[Manifest]) -> String {
         }
     }
     o.join("\n")
+}
+
+// ---------- clientes resilientes ----------
+
+const RESILIENCIA_TS: &str = r#"
+/** Todo lo que hace falta para alcanzar a otro servicio. Lo implementa quien
+ *  despliega: HTTP, gRPC, un SDK. El framework no elige transporte. */
+export interface Transporte {
+  invocar(destino: string, metodo: string, cuerpo: unknown, cabeceras: Record<string, string>): Promise<unknown>;
+}
+
+export class ErrorAgotado extends Error {}
+export class ErrorCircuitoAbierto extends Error {}
+
+/** Politica declarada en el manifiesto. El generador la emite; nadie la teclea. */
+export interface Politica {
+  timeoutMs: number;
+  reintentos: number;
+  breaker: boolean;
+}
+
+/** Circuito por destino: cuando el otro lado se cae, deja de golpearlo.
+ *  Tras el enfriamiento pasa a medio abierto y prueba una sola vez. */
+class Circuito {
+  #fallos = 0;
+  #abiertoHasta = 0;
+  // campos explicitos: las parameter properties son TS puro y no sobreviven
+  // al type-stripping de Node
+  readonly umbral: number;
+  readonly enfriamientoMs: number;
+  constructor(umbral = 5, enfriamientoMs = 10_000) {
+    this.umbral = umbral;
+    this.enfriamientoMs = enfriamientoMs;
+  }
+
+  permite(ahora: number) {
+    return this.#abiertoHasta === 0 || ahora >= this.#abiertoHasta;
+  }
+  exito() {
+    this.#fallos = 0;
+    this.#abiertoHasta = 0;
+  }
+  fallo(ahora: number) {
+    this.#fallos++;
+    if (this.#fallos >= this.umbral) this.#abiertoHasta = ahora + this.enfriamientoMs;
+  }
+}
+
+const circuitos = new Map<string, Circuito>();
+
+const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function conTiempo<T>(p: Promise<T>, ms: number, quien: string): Promise<T> {
+  let t: ReturnType<typeof setTimeout>;
+  const limite = new Promise<never>((_, rechaza) => {
+    t = setTimeout(() => rechaza(new ErrorAgotado(`${quien}: agotado tras ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([p, limite]);
+  } finally {
+    clearTimeout(t!);
+  }
+}
+
+/** Aplica la politica declarada. Los reintentos solo los emite el generador
+ *  para metodos idempotentes: `axon verify` bloquea el resto. */
+export async function conPolitica<T>(quien: string, pol: Politica, hacer: () => Promise<T>): Promise<T> {
+  const circuito = pol.breaker
+    ? (circuitos.get(quien) ?? circuitos.set(quien, new Circuito()).get(quien)!)
+    : null;
+  if (circuito && !circuito.permite(Date.now())) {
+    throw new ErrorCircuitoAbierto(`${quien}: circuito abierto`);
+  }
+  let ultimo: unknown;
+  for (let intento = 0; intento <= pol.reintentos; intento++) {
+    try {
+      const r = await conTiempo(hacer(), pol.timeoutMs, quien);
+      circuito?.exito();
+      return r;
+    } catch (err) {
+      ultimo = err;
+      circuito?.fallo(Date.now());
+      if (intento === pol.reintentos) break;
+      // exponencial con jitter completo: sin jitter, todos los clientes
+      // reintentan a la vez y el otro lado nunca se levanta
+      const techo = Math.min(1000 * 2 ** intento, 10_000);
+      await dormir(Math.random() * techo);
+    }
+  }
+  throw ultimo;
+}
+
+/** Cabeceras de una llamada saliente: la traza sigue siendo la misma. */
+export function cabeceras(e: Envelope<unknown>, idempotente: boolean): Record<string, string> {
+  const h: Record<string, string> = {
+    traceparent: e.traceparent,
+    "x-correlation-id": e.correlationId,
+    "x-causation-id": e.id,
+  };
+  // reintentar sin llave duplicaria el efecto en el otro lado
+  if (idempotente) h["idempotency-key"] = e.id;
+  return h;
+}
+"#;
+
+fn clientes_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
+    if m.depends.is_empty() {
+        return Ok(String::new());
+    }
+    let mut tipos = Vec::new();
+    let mut metodos = Vec::new();
+    for d in &m.depends {
+        let tgt = d.target();
+        let otro = all
+            .iter()
+            .find(|o| o.service == tgt)
+            .ok_or_else(|| format!("{}: depende de {tgt}, sin manifiesto", m.service))?;
+        let firma = otro
+            .methods
+            .get(&d.method)
+            .ok_or_else(|| format!("{}: {tgt} no expone `{}`", m.service, d.method))?;
+        // prefijado con el servicio: los tipos de otro no pueden chocar con los propios
+        let base = format!("{}{}", pascal(tgt), pascal(&d.method));
+        tipos.push(iface(&format!("{base}In"), &firma.input));
+        tipos.push(iface(&format!("{base}Out"), &firma.output));
+
+        let pol = format!(
+            "{{ timeoutMs: {}, reintentos: {}, breaker: {} }}",
+            d.timeout_ms.unwrap_or(10_000),
+            d.retries,
+            d.breaker
+        );
+        // `on_partition = "degrade"` obliga a pasar el camino degradado: no se
+        // puede llamar al cliente sin decir que se sirve cuando el otro no esta.
+        let (param, cuerpo) = if m.cap.degrada() {
+            (
+                format!(", respaldo: () => Promise<{base}Out>"),
+                concat!(
+                    "    try {\n",
+                    "      return await hacer();\n",
+                    "    } catch {\n",
+                    "      // declarado `degrade`: se sirve algo viejo antes que nada\n",
+                    "      return respaldo();\n",
+                    "    }"
+                )
+                .to_string(),
+            )
+        } else {
+            (String::new(), "    return hacer();".to_string())
+        };
+        metodos.push(format!(
+            "  /** {tgt}.{met} · timeout {t}ms · {r} reintentos · breaker {b} */\n  \
+             async {nombre}(input: {base}In, e: Envelope<unknown>{param}): Promise<{base}Out> {{\n    \
+               const hacer = () => conPolitica(\"{tgt}.{met}\", {pol}, async () =>\n      \
+                 (await this.transporte.invocar(\"{tgt}\", \"{met}\", input, cabeceras(e, {idem}))) as {base}Out);\n\
+{cuerpo}\n  \
+             }}",
+            met = d.method,
+            t = d.timeout_ms.unwrap_or(10_000),
+            r = d.retries,
+            b = d.breaker,
+            nombre = camel(&format!("{tgt}.{}", d.method)),
+            idem = firma.is_idempotent(),
+        ));
+    }
+    Ok(format!(
+        "{}\n{}\n\n/** Clientes de las dependencias declaradas en el manifiesto. */\n\
+         export class Clientes {{\n  \
+           protected readonly transporte: Transporte;\n  \
+           constructor(transporte: Transporte) {{\n    this.transporte = transporte;\n  }}\n\
+         {}\n}}\n",
+        RESILIENCIA_TS,
+        tipos.join("\n"),
+        metodos.join("\n")
+    ))
 }

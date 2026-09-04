@@ -1149,6 +1149,167 @@ fn una_version_publicada_es_inmutable() {
     assert!(out.contains("sin axon.baseline.json"), "{out}");
 }
 
+/// La resiliencia declarada tiene que ejecutarse, no solo validarse: era la
+/// unica promesa del manifiesto que no llegaba al codigo.
+#[test]
+fn la_politica_declarada_se_ejecuta() {
+    if !tiene("node") || !std::path::Path::new("examples/services/node_modules").exists() {
+        eprintln!("salteado: falta node o `npm i` en examples/services");
+        return;
+    }
+    let (ts, err, ok) = axon(&["build", "examples/payments.toml", "examples"]);
+    assert!(ok, "{err}");
+    // los numeros del manifiesto llegan literales al codigo
+    assert!(
+        ts.contains(
+            r#"conPolitica("orders.getOrder", { timeoutMs: 1000, reintentos: 3, breaker: true }"#
+        ),
+        "la politica no salio del manifiesto:\n{ts}"
+    );
+    // reintentar sin llave de idempotencia duplica el efecto del otro lado
+    assert!(ts.contains(r#"cabeceras(e, true)"#));
+    // CAP: el lado declarado decide el aislamiento
+    assert!(
+        ts.contains(r#"export const nivelAislamiento = "SERIALIZABLE""#),
+        "{ts}"
+    );
+    let (o, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
+    assert!(
+        o.contains(r#"export const nivelAislamiento = "READ COMMITTED""#),
+        "{o}"
+    );
+    assert!(
+        o.contains("export const obsolescenciaMaximaMs = 3000"),
+        "{o}"
+    );
+    // `degrade` obliga a pasar el camino degradado; `reject` no lo admite
+    assert!(
+        o.contains("respaldo: () => Promise<PaymentsCapturePaymentOut>"),
+        "declarar degrade no obligo a un respaldo:\n{o}"
+    );
+    assert!(
+        !ts.contains("respaldo: () =>"),
+        "un servicio `reject` no degrada"
+    );
+
+    // y la politica se comporta: se ejecuta contra el codigo generado
+    let dir = std::path::Path::new("examples/services/payments");
+    let prueba = dir.join("axon.politica.test.ts");
+    std::fs::write(
+        &prueba,
+        r#"
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { conPolitica, cabeceras, newEnvelope, ErrorAgotado, ErrorCircuitoAbierto } from "./contracts.ts";
+
+test("el timeout corta", async () => {
+  await assert.rejects(
+    () => conPolitica("x.lento", { timeoutMs: 50, reintentos: 0, breaker: false },
+      () => new Promise((r) => setTimeout(r, 5000))),
+    ErrorAgotado,
+  );
+});
+
+test("reintenta hasta que sale bien", async () => {
+  let n = 0;
+  const r = await conPolitica("x.flaky", { timeoutMs: 500, reintentos: 3, breaker: false }, async () => {
+    if (++n < 3) throw new Error("boom");
+    return "ok";
+  });
+  assert.equal(r, "ok");
+  assert.equal(n, 3);
+});
+
+test("el circuito se abre y deja de golpear", async () => {
+  let llamadas = 0;
+  const caer = () => conPolitica("x.caido", { timeoutMs: 100, reintentos: 0, breaker: true },
+    async () => { llamadas++; throw new Error("caido"); });
+  for (let i = 0; i < 5; i++) await assert.rejects(caer);
+  assert.equal(llamadas, 5);
+  await assert.rejects(caer, ErrorCircuitoAbierto);
+  assert.equal(llamadas, 5, "siguio golpeando con el circuito abierto");
+});
+
+test("la traza y la llave de idempotencia viajan en la llamada", () => {
+  const e = newEnvelope("x@v1", "prueba", {});
+  const h = cabeceras(e, true);
+  assert.equal(h.traceparent, e.traceparent);
+  assert.equal(h["x-correlation-id"], e.correlationId);
+  assert.equal(h["x-causation-id"], e.id);
+  assert.equal(h["idempotency-key"], e.id);
+  assert.equal(cabeceras(e, false)["idempotency-key"], undefined);
+});
+"#,
+    )
+    .unwrap();
+    let out = Command::new("node")
+        .args(["--test", "axon.politica.test.ts"])
+        .current_dir(dir)
+        .output()
+        .expect("node --test");
+    let _ = std::fs::remove_file(&prueba);
+    let salida = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "la politica generada no se comporta:\n{salida}"
+    );
+    assert!(salida.contains("pass 4"), "{salida}");
+}
+
+/// CAP: la particion no se elige, que hacer mientras dura si.
+#[test]
+fn el_lado_cap_se_verifica() {
+    let dir = std::env::temp_dir().join("axon-cap");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("c.toml"),
+        r#"
+service = "c"
+owner = "x"
+tier = "1"
+[cap]
+consistency = "eventual"
+on_partition = "reject"
+"#,
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("sin `max_staleness_ms`"), "{err}");
+
+    // la contradiccion del teorema: CP que sirve algo viejo
+    std::fs::write(
+        dir.join("c.toml"),
+        "service = \"c\"\nowner = \"x\"\ntier = \"1\"\n[cap]\nconsistency = \"strong\"\non_partition = \"degrade\"\n",
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("se contradice"), "{err}");
+
+    // sin declararlo, se asume el par que falla cerrado, y se avisa
+    std::fs::write(
+        dir.join("c.toml"),
+        "service = \"c\"\nowner = \"x\"\ntier = \"1\"\n",
+    )
+    .unwrap();
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok);
+    assert!(out.contains("sin `[cap]`; asumido CP"), "{out}");
+
+    // la garantia de una ruta sincrona es la del eslabon mas debil
+    let (out, _, _) = axon(&["verify", "examples"]);
+    assert!(
+        out.contains("es `strong` y llama a orders que es `eventual`"),
+        "{out}"
+    );
+}
+
 #[test]
 fn openapi_exige_idempotency_key() {
     let (json, _, _) = axon(&["openapi", "examples"]);

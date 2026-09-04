@@ -75,6 +75,7 @@ export const manifest = {
   "version": "1.2.0",
   "owner": "equipo-pagos",
   "tier": "0",
+  "pii": [],
   "external": false,
   "emits": {
     "payment.captured@v1": {
@@ -99,6 +100,9 @@ export const manifest = {
       },
       "http": "POST /v1/payments",
       "idempotent": true,
+      "auth": "required",
+      "rate_limit": null,
+      "timeout_ms": 8000,
       "paginated": false
     },
     "refundPayment": {
@@ -111,6 +115,9 @@ export const manifest = {
       },
       "http": "POST /v1/payments/{paymentId}/refunds",
       "idempotent": true,
+      "auth": "required",
+      "rate_limit": null,
+      "timeout_ms": 8000,
       "paginated": false
     }
   },
@@ -136,6 +143,11 @@ export const manifest = {
   ],
   "patterns": {
     "outbox": true
+  },
+  "cap": {
+    "consistency": "strong",
+    "on_partition": "reject",
+    "max_staleness_ms": null
   },
   "machine": {
     "payment": {
@@ -184,7 +196,21 @@ export const manifest = {
     ],
     "min_instances": 1,
     "max_instances": null,
-    "port": null
+    "port": null,
+    "buckets": {
+      "recibos": {
+        "public": false,
+        "retention_days": 2555,
+        "cache_ttl": null
+      },
+      "assets": {
+        "public": true,
+        "retention_days": 365,
+        "cache_ttl": 86400
+      }
+    },
+    "tenant_column": "tenant_id",
+    "tenant_exempt": []
   },
   "env": {
     "staging": {
@@ -194,7 +220,10 @@ export const manifest = {
       "secrets": [],
       "min_instances": 0,
       "max_instances": null,
-      "port": null
+      "port": null,
+      "buckets": {},
+      "tenant_column": null,
+      "tenant_exempt": []
     },
     "prod": {
       "state": null,
@@ -202,8 +231,11 @@ export const manifest = {
       "migrations": null,
       "secrets": [],
       "min_instances": 3,
-      "max_instances": null,
-      "port": null
+      "max_instances": 40,
+      "port": null,
+      "buckets": {},
+      "tenant_column": null,
+      "tenant_exempt": []
     }
   }
 } as const;
@@ -251,3 +283,151 @@ export function paymentNext(state: PaymentState, action: PaymentAction): Payment
   return t.to;
 }
 export const paymentCan = (state: PaymentState, action: PaymentAction) => paymentTransitions[action].from.includes(state);
+
+/** Lado del teorema CAP declarado en el manifiesto: strong/reject.
+ *  De ahi sale el nivel de aislamiento: pagar dos veces sale mas caro
+ *  que reintentar, y servir un dato viejo cuesta menos que no servir. */
+export const nivelAislamiento = "SERIALIZABLE" as const;
+
+
+/** Todo lo que hace falta para alcanzar a otro servicio. Lo implementa quien
+ *  despliega: HTTP, gRPC, un SDK. El framework no elige transporte. */
+export interface Transporte {
+  invocar(destino: string, metodo: string, cuerpo: unknown, cabeceras: Record<string, string>): Promise<unknown>;
+}
+
+export class ErrorAgotado extends Error {}
+export class ErrorCircuitoAbierto extends Error {}
+
+/** Politica declarada en el manifiesto. El generador la emite; nadie la teclea. */
+export interface Politica {
+  timeoutMs: number;
+  reintentos: number;
+  breaker: boolean;
+}
+
+/** Circuito por destino: cuando el otro lado se cae, deja de golpearlo.
+ *  Tras el enfriamiento pasa a medio abierto y prueba una sola vez. */
+class Circuito {
+  #fallos = 0;
+  #abiertoHasta = 0;
+  // campos explicitos: las parameter properties son TS puro y no sobreviven
+  // al type-stripping de Node
+  readonly umbral: number;
+  readonly enfriamientoMs: number;
+  constructor(umbral = 5, enfriamientoMs = 10_000) {
+    this.umbral = umbral;
+    this.enfriamientoMs = enfriamientoMs;
+  }
+
+  permite(ahora: number) {
+    return this.#abiertoHasta === 0 || ahora >= this.#abiertoHasta;
+  }
+  exito() {
+    this.#fallos = 0;
+    this.#abiertoHasta = 0;
+  }
+  fallo(ahora: number) {
+    this.#fallos++;
+    if (this.#fallos >= this.umbral) this.#abiertoHasta = ahora + this.enfriamientoMs;
+  }
+}
+
+const circuitos = new Map<string, Circuito>();
+
+const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function conTiempo<T>(p: Promise<T>, ms: number, quien: string): Promise<T> {
+  let t: ReturnType<typeof setTimeout>;
+  const limite = new Promise<never>((_, rechaza) => {
+    t = setTimeout(() => rechaza(new ErrorAgotado(`${quien}: agotado tras ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([p, limite]);
+  } finally {
+    clearTimeout(t!);
+  }
+}
+
+/** Aplica la politica declarada. Los reintentos solo los emite el generador
+ *  para metodos idempotentes: `axon verify` bloquea el resto. */
+export async function conPolitica<T>(quien: string, pol: Politica, hacer: () => Promise<T>): Promise<T> {
+  const circuito = pol.breaker
+    ? (circuitos.get(quien) ?? circuitos.set(quien, new Circuito()).get(quien)!)
+    : null;
+  if (circuito && !circuito.permite(Date.now())) {
+    throw new ErrorCircuitoAbierto(`${quien}: circuito abierto`);
+  }
+  let ultimo: unknown;
+  for (let intento = 0; intento <= pol.reintentos; intento++) {
+    try {
+      const r = await conTiempo(hacer(), pol.timeoutMs, quien);
+      circuito?.exito();
+      return r;
+    } catch (err) {
+      ultimo = err;
+      circuito?.fallo(Date.now());
+      if (intento === pol.reintentos) break;
+      // exponencial con jitter completo: sin jitter, todos los clientes
+      // reintentan a la vez y el otro lado nunca se levanta
+      const techo = Math.min(1000 * 2 ** intento, 10_000);
+      await dormir(Math.random() * techo);
+    }
+  }
+  throw ultimo;
+}
+
+/** Cabeceras de una llamada saliente: la traza sigue siendo la misma. */
+export function cabeceras(e: Envelope<unknown>, idempotente: boolean): Record<string, string> {
+  const h: Record<string, string> = {
+    traceparent: e.traceparent,
+    "x-correlation-id": e.correlationId,
+    "x-causation-id": e.id,
+  };
+  // reintentar sin llave duplicaria el efecto en el otro lado
+  if (idempotente) h["idempotency-key"] = e.id;
+  return h;
+}
+
+export interface OrdersGetOrderIn {
+  orderId: string;
+}
+
+export interface OrdersGetOrderOut {
+  orderId: string;
+  status: string;
+  total: { amount: number; currency: string };
+}
+
+export interface StripeChargesCreateIn {
+  amount: number;
+  currency: string;
+  source: string;
+}
+
+export interface StripeChargesCreateOut {
+  id: string;
+  status: string;
+}
+
+
+/** Clientes de las dependencias declaradas en el manifiesto. */
+export class Clientes {
+  protected readonly transporte: Transporte;
+  constructor(transporte: Transporte) {
+    this.transporte = transporte;
+  }
+  /** orders.getOrder · timeout 1000ms · 3 reintentos · breaker true */
+  async ordersGetOrder(input: OrdersGetOrderIn, e: Envelope<unknown>): Promise<OrdersGetOrderOut> {
+    const hacer = () => conPolitica("orders.getOrder", { timeoutMs: 1000, reintentos: 3, breaker: true }, async () =>
+      (await this.transporte.invocar("orders", "getOrder", input, cabeceras(e, true))) as OrdersGetOrderOut);
+    return hacer();
+  }
+  /** stripe.charges.create · timeout 8000ms · 0 reintentos · breaker true */
+  async stripeChargesCreate(input: StripeChargesCreateIn, e: Envelope<unknown>): Promise<StripeChargesCreateOut> {
+    const hacer = () => conPolitica("stripe.charges.create", { timeoutMs: 8000, reintentos: 0, breaker: true }, async () =>
+      (await this.transporte.invocar("stripe", "charges.create", input, cabeceras(e, true))) as StripeChargesCreateOut);
+    return hacer();
+  }
+}
+

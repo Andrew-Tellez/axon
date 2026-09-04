@@ -238,6 +238,67 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // ---- CAP: la particion no se elige, que hacer mientras dura si ----
+    let lado: IndexMap<&str, &Cap> = ms.iter().map(|m| (m.service.as_str(), &m.cap)).collect();
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        let cap = &m.cap;
+        if !cap.declarado {
+            warnings.push(format!(
+                "{svc}: sin `[cap]`; asumido CP (strong/reject), que falla cerrado. \
+                 Declaralo para que la eleccion sea de alguien y no del default"
+            ));
+        }
+        match cap.consistency.as_str() {
+            "strong" | "eventual" => {}
+            otro => errors.push(format!(
+                "{svc}: `consistency = \"{otro}\"` no existe; usa \"strong\" o \"eventual\""
+            )),
+        }
+        match cap.on_partition.as_str() {
+            "reject" | "degrade" => {}
+            otro => errors.push(format!(
+                "{svc}: `on_partition = \"{otro}\"` no existe; usa \"reject\" o \"degrade\""
+            )),
+        }
+        // "eventual" sin un numero es una palabra, no una garantia
+        if cap.eventual() && cap.max_staleness_ms.is_none() {
+            errors.push(format!(
+                "{svc}: `consistency = \"eventual\"` sin `max_staleness_ms`; sin un presupuesto \
+                 de obsolescencia nadie puede decir si el dato que sirvio era aceptable"
+            ));
+        }
+        // no se puede ser CP y servir algo viejo: es la contradiccion del teorema
+        if !cap.eventual() && cap.degrada() {
+            errors.push(format!(
+                "{svc}: `strong` con `on_partition = \"degrade\"` se contradice; servir un dato \
+                 viejo ES elegir disponibilidad sobre consistencia"
+            ));
+        }
+        // tu garantia es la del eslabon mas debil de la ruta sincrona
+        for d in &m.depends {
+            if !cap.eventual() && lado.get(d.target()).is_some_and(|c| c.eventual()) {
+                warnings.push(format!(
+                    "{svc} es `strong` y llama a {} que es `eventual`: la garantia de la ruta \
+                     es la del mas debil, no la tuya",
+                    d.target()
+                ));
+            }
+        }
+        // decidir con consistencia fuerte a partir de una entrada que no la tiene
+        for (nombre, mac) in &m.machine {
+            for (act, t) in &mac.transitions {
+                if !cap.eventual() && m.consumes.contains_key(&t.on) {
+                    warnings.push(format!(
+                        "{svc}.{nombre}.{act}: transicion `strong` disparada por el evento `{}`, \
+                         que llega eventualmente; el estado puede haber cambiado antes",
+                        t.on
+                    ));
+                }
+            }
+        }
+    }
+
     // A08: fallos de integridad. Una etiqueta es mutable: lo que se despliega
     // hoy no es lo que se auditó ayer.
     if pol.ci.image.contains(":latest") || !pol.ci.image.contains('@') {
