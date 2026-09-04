@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>axon — compilador manifiesto-primero para microservicios event-driven</title>
+<meta name="description" content="Un manifiesto es la fuente de verdad. El codigo, la infraestructura y los diagramas son proyecciones. axon verify falla cuando dejan de coincidir.">
+<style>
+  :root {
+    --fondo: #fbfbfa; --papel: #fff; --texto: #16161d; --suave: #5c5c68;
+    --linea: #e3e3df; --acento: #2f6f4e; --codigo: #f4f4f1; --marca: #16161d;
+    --error: #a8371f; --aviso: #8a6d1a;
+  }
+  :root:not([data-theme="light"]) { }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --fondo: #14151a; --papel: #191b21; --texto: #e8e8ea; --suave: #9a9aa6;
+      --linea: #2a2c34; --acento: #6fbf94; --codigo: #1f2129; --marca: #e8e8ea;
+      --error: #e8917c; --aviso: #d9bd6a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --fondo: #14151a; --papel: #191b21; --texto: #e8e8ea; --suave: #9a9aa6;
+    --linea: #2a2c34; --acento: #6fbf94; --codigo: #1f2129; --marca: #e8e8ea;
+    --error: #e8917c; --aviso: #d9bd6a;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 1.5rem; }
+  body {
+    margin: 0; background: var(--fondo); color: var(--texto);
+    font: 16px/1.65 ui-sans-serif, -apple-system, "Segoe UI", Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  code, pre, .mono { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; }
+  .envoltura { max-width: 1120px; margin: 0 auto; padding: 0 1.25rem; }
+  header.tope {
+    border-bottom: 1px solid var(--linea); background: var(--papel);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header.tope .envoltura { display: flex; align-items: center; gap: 1.25rem; height: 56px; }
+  .marca { font-weight: 650; letter-spacing: -.02em; color: var(--marca); text-decoration: none; font-size: 1.05rem; }
+  .marca span { color: var(--acento); }
+  header.tope nav { margin-left: auto; display: flex; gap: 1.1rem; flex-wrap: wrap; }
+  header.tope nav a { color: var(--suave); text-decoration: none; font-size: .88rem; }
+  header.tope nav a:hover { color: var(--texto); }
+
+  .heroe { padding: 4.5rem 0 3rem; border-bottom: 1px solid var(--linea); }
+  .heroe h1 { font-size: clamp(2rem, 5vw, 3.1rem); line-height: 1.1; margin: 0 0 1rem; letter-spacing: -.03em; }
+  .heroe p.tesis { font-size: 1.2rem; color: var(--suave); max-width: 62ch; margin: 0 0 2rem; }
+  .heroe p.tesis strong { color: var(--texto); font-weight: 600; }
+  .insignias { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 2rem; }
+  .insignia {
+    font-size: .74rem; padding: .2rem .55rem; border: 1px solid var(--linea);
+    border-radius: 999px; color: var(--suave); background: var(--papel);
+  }
+
+  main { padding: 3rem 0 5rem; }
+  section { margin-bottom: 4rem; scroll-margin-top: 5rem; }
+  h2 { font-size: 1.5rem; letter-spacing: -.02em; margin: 0 0 .35rem; }
+  h2 + .sub { color: var(--suave); margin: 0 0 1.5rem; max-width: 68ch; }
+  h3 { font-size: 1.05rem; margin: 2rem 0 .6rem; letter-spacing: -.01em; }
+  p { max-width: 72ch; }
+  a { color: var(--acento); }
+
+  pre {
+    background: var(--codigo); border: 1px solid var(--linea); border-radius: 8px;
+    padding: 1rem 1.1rem; overflow-x: auto; font-size: .855rem; line-height: 1.6; margin: 1rem 0;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  code { background: var(--codigo); padding: .1em .35em; border-radius: 4px; font-size: .89em; }
+  .com { color: var(--suave); }
+  .cad { color: var(--acento); }
+  .err { color: var(--error); }
+  .avi { color: var(--aviso); }
+
+  .tabla { overflow-x: auto; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; min-width: 30rem; }
+  th, td { text-align: left; padding: .6rem .8rem; border-bottom: 1px solid var(--linea); vertical-align: top; }
+  th { font-weight: 600; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--suave); }
+  td code { font-size: .85em; white-space: nowrap; }
+
+  .rejilla { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin: 1.25rem 0; }
+  .tarjeta { background: var(--papel); border: 1px solid var(--linea); border-radius: 10px; padding: 1.1rem 1.2rem; }
+  .tarjeta h4 { margin: 0 0 .4rem; font-size: .95rem; }
+  .tarjeta p { margin: 0; font-size: .88rem; color: var(--suave); }
+
+  .flujo { font-size: .8rem; line-height: 1.75; white-space: pre; }
+  .nota {
+    border-left: 3px solid var(--acento); padding: .1rem 0 .1rem 1rem;
+    margin: 1.25rem 0; color: var(--suave); max-width: 70ch;
+  }
+  .nota strong { color: var(--texto); }
+  footer { border-top: 1px solid var(--linea); padding: 2rem 0; color: var(--suave); font-size: .86rem; }
+  footer a { color: var(--suave); }
+  @media (max-width: 700px) { header.tope nav { display: none; } .heroe { padding: 3rem 0 2rem; } }
+</style>
+</head>
+<body>
+
+<header class="tope">
+  <div class="envoltura">
+    <a class="marca" href="#">a<span>x</span>on</a>
+    <nav>
+      <a href="#instalar">Instalar</a>
+      <a href="#manifiesto">Manifiesto</a>
+      <a href="#comandos">Comandos</a>
+      <a href="#patrones">Patrones</a>
+      <a href="#verify">Verify</a>
+      <a href="#seguridad">Seguridad</a>
+      <a href="#plugins">Plugins</a>
+      <a href="https://github.com/Andrew-Tellez/axon">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="heroe">
+  <div class="envoltura">
+    <div class="insignias">
+      <span class="insignia">Rust · un binario</span>
+      <span class="insignia">sin runtime</span>
+      <span class="insignia">local · gcp · aws · k8s</span>
+      <span class="insignia">MIT</span>
+    </div>
+    <h1>El manifiesto es la fuente de verdad.</h1>
+    <p class="tesis">
+      El código, la infraestructura, las pruebas y los diagramas son
+      <strong>proyecciones</strong>. <code>axon verify</code> falla en CI cuando
+      dejan de coincidir.
+    </p>
+<pre><code>curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh</code></pre>
+  </div>
+</div>
+
+<main class="envoltura">
+
+<section id="problema">
+  <h2>El problema</h2>
+  <p class="sub">
+    Preguntá en cualquier equipo con veinte microservicios: <em>¿quién consume este
+    evento y qué se rompe si le cambio un campo?</em>
+  </p>
+  <p>
+    La respuesta honesta es «hay que leer cinco repos». Los frameworks actuales no
+    ayudan porque viven dentro de un lenguaje (NestJS, Spring, Micronaut) o son un
+    runtime que hay que desplegar y operar (Dapr). Ninguno sabe que el
+    <code>order.placed@v1</code> que emite un servicio en Go es el mismo que consume
+    un servicio en Kotlin. Esa relación existe solo en la cabeza del equipo, hasta que
+    alguien renuncia.
+  </p>
+  <div class="nota">
+    <strong>La idea.</strong> El manifiesto es diseño de alto nivel —límites de
+    servicio, topología, qué garantiza cada uno. El compilador lo baja a diseño de
+    bajo nivel: nivel de aislamiento, política de reintentos, firmas de método,
+    recursos de infraestructura. Y verifica que sigan de acuerdo.
+  </div>
+<pre class="flujo"><code>                     ┌─ axon build      código: contratos, clase base, clientes resilientes
+  asyncapi.yaml ─────┤                     (axon import)
+                     ├─ axon test       testkit: contrato, idempotencia, máquinas
+                     ├─ axon openapi    OpenAPI 3.1 de toda la plataforma
+manifiesto.toml ─────┼─ axon infra      IaC: local · gcp · aws · k8s
+                     ├─ axon rls        RLS por fila y vistas enmascaradas
+   fuente de verdad  ├─ axon ci         pipeline: gates de axon, deploy del target
+                     ├─ axon graph      topología de eventos
+                     ├─ axon classes    diagrama de clases
+                     ├─ axon er         entidad-relación (de las migraciones)
+                     ├─ axon states     máquinas de estado del dominio
+                     ├─ axon seq        flujo causal esperado
+                     ├─ axon trace      flujo causal REAL (debug local)
+                     ├─ axon discover   registro de servicios y métodos
+                     └─ axon verify     drift: falla en CI</code></pre>
+</section>
+
+<section id="instalar">
+  <h2>Instalar</h2>
+  <p class="sub">Un binario. Sin Node, sin Python, sin JVM. Corre igual en tu laptop y en un contenedor de CI vacío.</p>
+<pre><code><span class="com"># macOS y Linux, arm64 y x86_64</span>
+curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
+
+<span class="com"># o desde el código</span>
+cargo install --git https://github.com/Andrew-Tellez/axon</code></pre>
+  <p>
+    El instalador acepta <code>AXON_INSTALL_DIR</code> y <code>AXON_VERSION</code>.
+  </p>
+</section>
+
+<section id="manifiesto">
+  <h2>El manifiesto</h2>
+  <p class="sub">Un archivo TOML por servicio. Todo lo demás se deriva de acá.</p>
+<pre><code><span class="cad">service</span> = <span class="cad">"payments"</span>
+<span class="cad">version</span> = <span class="cad">"1.2.0"</span>
+<span class="cad">owner</span>   = <span class="cad">"equipo-pagos"</span>   <span class="com"># gobernanza: nada sin dueño</span>
+<span class="cad">tier</span>    = <span class="cad">"0"</span>              <span class="com"># criticidad: decide SLO y alertas</span>
+<span class="cad">pii</span>     = [<span class="cad">"customer_email"</span>] <span class="com"># se redacta en logs, se enmascara en la base</span>
+
+[emits.<span class="cad">"payment.captured@v1"</span>]     <span class="com"># dominio.hecho@versión, siempre</span>
+<span class="cad">paymentId</span> = <span class="cad">"uuid"</span>
+<span class="cad">amount</span>    = <span class="cad">"money"</span>            <span class="com"># un float para dinero es un bug esperando su turno</span>
+
+[consumes.<span class="cad">"order.placed@v1"</span>]
+<span class="cad">handler</span> = <span class="cad">"onOrderPlaced"</span>
+
+[methods.<span class="cad">capturePayment</span>]
+<span class="cad">http</span>       = <span class="cad">"POST /v1/payments"</span>
+<span class="cad">auth</span>       = <span class="cad">"required"</span>        <span class="com"># obligatorio: el edge falla cerrado</span>
+<span class="cad">idempotent</span> = true               <span class="com"># obligatorio si muta</span>
+<span class="cad">timeout_ms</span> = 8000
+<span class="cad">in</span>  = { <span class="cad">orderId</span> = <span class="cad">"uuid"</span>, <span class="cad">amount</span> = <span class="cad">"money"</span> }
+<span class="cad">out</span> = { <span class="cad">paymentId</span> = <span class="cad">"uuid"</span> }
+
+[[depends]]
+<span class="cad">service</span>    = <span class="cad">"orders"</span>
+<span class="cad">method</span>     = <span class="cad">"getOrder"</span>
+<span class="cad">timeout_ms</span> = 1000              <span class="com"># obligatorio: sin presupuesto, no hay llamada</span>
+<span class="cad">retries</span>    = 3                 <span class="com"># solo si el otro método es idempotente</span>
+<span class="cad">breaker</span>    = true
+
+[patterns]
+<span class="cad">outbox</span> = true                  <span class="com"># bus.publish desaparece del código generado</span>
+
+[cap]
+<span class="cad">consistency</span>  = <span class="cad">"strong"</span>       <span class="com"># el dinero no admite un saldo viejo</span>
+<span class="cad">on_partition</span> = <span class="cad">"reject"</span>       <span class="com"># antes de servir algo viejo, no sirve nada</span>
+
+[machine.<span class="cad">payment</span>]
+<span class="cad">initial</span> = <span class="cad">"pending"</span>
+<span class="cad">final</span>   = [<span class="cad">"refunded"</span>, <span class="cad">"failed"</span>]
+
+[machine.payment.transitions.<span class="cad">capture</span>]
+<span class="cad">from</span>  = [<span class="cad">"pending"</span>]
+<span class="cad">to</span>    = <span class="cad">"captured"</span>
+<span class="cad">on</span>    = <span class="cad">"capturePayment"</span>
+<span class="cad">emits</span> = <span class="cad">"payment.captured@v1"</span>
+
+[infra]
+<span class="cad">state</span>         = <span class="cad">"postgres"</span>
+<span class="cad">migrations</span>    = <span class="cad">"sql/payments/"</span>
+<span class="cad">tenant_column</span> = <span class="cad">"tenant_id"</span>    <span class="com"># toda tabla la necesita; axon rls la aplica</span>
+<span class="cad">secrets</span>       = [<span class="cad">"STRIPE_API_KEY"</span>]
+
+[infra.buckets.<span class="cad">assets</span>]
+<span class="cad">public</span>    = true               <span class="com"># público ⇒ CDN, y sin él no lo es</span>
+<span class="cad">cache_ttl</span> = 86400
+
+[env.prod]                        <span class="com"># los entornos son deltas, no copias</span>
+<span class="cad">min_instances</span> = 3</code></pre>
+  <p>
+    Tipos: <code>string</code> <code>int</code> <code>float</code> <code>bool</code>
+    <code>timestamp</code> <code>uuid</code> <code>json</code> <code>money</code>.
+    <strong>Todo campo es obligatorio</strong> — no hay opcionales, así que agregar uno
+    a una versión publicada rompe igual que quitarlo.
+  </p>
+</section>
+
+<section id="comandos">
+  <h2>Comandos</h2>
+  <p class="sub">
+    Todos escriben a stdout y ninguno toca el disco. <code>&lt;fuentes&gt;</code> son
+    directorios, archivos <code>.toml</code> o URLs de servicios vivos.
+  </p>
+  <div class="tabla">
+  <table>
+    <thead><tr><th>Comando</th><th>Qué produce</th></tr></thead>
+    <tbody>
+      <tr><td><code>axon build &lt;m&gt; &lt;fuentes&gt;</code></td><td>Contratos tipados, envelope, clase base, <code>dispatch()</code> idempotente, tabla de transiciones y clientes resilientes.</td></tr>
+      <tr><td><code>axon test &lt;m&gt; &lt;fuentes&gt;</code></td><td>Testkit autocontenido: dobles en memoria, fixtures del esquema del <em>emisor</em> y dos suites exportadas.</td></tr>
+      <tr><td><code>axon openapi &lt;fuentes&gt;</code></td><td>OpenAPI 3.1 con <code>Idempotency-Key</code> obligatorio y errores RFC 7807.</td></tr>
+      <tr><td><code>axon infra &lt;fuentes&gt;</code></td><td>Plan neutral renderizado a <code>local</code>, <code>gcp</code>, <code>aws</code>, <code>k8s</code> o <code>plan</code> (JSON).</td></tr>
+      <tr><td><code>axon rls &lt;fuentes&gt;</code></td><td>Políticas RLS por fila y vistas enmascaradas por columna, como una migración más.</td></tr>
+      <tr><td><code>axon ci &lt;m&gt;</code></td><td>Pipeline: los gates los sabe axon, el deploy sale del <code>--target</code>.</td></tr>
+      <tr><td><code>axon baseline &lt;fuentes&gt;</code></td><td>Snapshot de los contratos publicados. Se regenera <em>al publicar</em>.</td></tr>
+      <tr><td><code>axon import asyncapi &lt;f&gt;</code></td><td>AsyncAPI 2.x o 3.x → manifiesto. Entrar sin reescribir nada.</td></tr>
+      <tr><td><code>axon discover &lt;fuentes&gt;</code></td><td>Registro de servicios y métodos, de disco y de servicios corriendo.</td></tr>
+      <tr><td><code>axon trace [log]</code></td><td>La cadena causal <em>real</em>, desde el <code>causationId</code> de los envelopes.</td></tr>
+      <tr><td><code>axon verify &lt;fuentes&gt;</code></td><td>Todas las reglas. Sale con 1 si hay errores.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <h3>Diagramas</h3>
+  <p>
+    <code>graph</code> (topología de eventos), <code>classes</code>,
+    <code>er</code> (de las migraciones), <code>states</code> y <code>seq</code>.
+    Todos emiten Mermaid; GitHub los renderiza en un bloque <code>```mermaid</code>.
+    Ninguno se dibuja a mano y ninguno introduce una fuente de verdad nueva.
+  </p>
+</section>
+
+<section id="patrones">
+  <h2>Patrones: declarados, no recordados</h2>
+  <p class="sub">
+    Un patrón que hay que acordarse de aplicar no es un patrón: es una convención que
+    alguien va a romper a las 3am. Acá se declara y el compilador lo emite.
+  </p>
+  <div class="tabla">
+  <table>
+    <thead><tr><th>Patrón</th><th>Se declara</th><th>Qué produce</th></tr></thead>
+    <tbody>
+      <tr><td>Transactional outbox</td><td><code>[patterns] outbox</code></td><td>Los emisores escriben en el outbox; <code>bus.publish</code> <strong>desaparece</strong> del código.</td></tr>
+      <tr><td>Consumidor idempotente</td><td>siempre</td><td><code>dispatch()</code> deduplica por id de envelope antes de rutear.</td></tr>
+      <tr><td>Cadena causal</td><td>siempre</td><td><code>traceparent</code> + <code>correlationId</code> + <code>causationId</code>, propagados por el emisor.</td></tr>
+      <tr><td>Dead letter</td><td>siempre</td><td>DLQ en los cuatro targets. No hay forma de declarar un consumidor sin ella.</td></tr>
+      <tr><td>Database per service</td><td><code>[infra] state</code></td><td>Una base por servicio, y <code>verify</code> bloquea toda FK que cruce el límite.</td></tr>
+      <tr><td>Circuit breaker</td><td><code>[[depends]]</code></td><td>Cliente con timeout, backoff con jitter y circuito medio abierto.</td></tr>
+      <tr><td>Idempotency-Key</td><td><code>idempotent</code></td><td>Header obligatorio en el OpenAPI y en toda llamada reintentable.</td></tr>
+      <tr><td>Expand / contract</td><td>nombre del archivo</td><td>Un <code>DROP</code> fuera de un <code>.contract.sql</code> es un error.</td></tr>
+      <tr><td>State pattern</td><td><code>[machine.*]</code></td><td>Tabla exhaustiva y tipada; una transición ilegal revienta.</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="nota">
+    Los patrones GoF viven un nivel abajo, en el código que escribe el equipo — para eso
+    está <a href="https://github.com/Andrew-Tellez/patterns">gof-patterns</a>, en seis
+    lenguajes. axon se ocupa de los <strong>arquitectónicos</strong>: los que cruzan
+    procesos y que ninguna librería dentro de un lenguaje puede garantizar sola.
+  </div>
+
+  <h3>El lado del teorema CAP que sí se elige</h3>
+  <p>
+    La tolerancia a particiones no es una opción: la red se parte. Lo que se elige es
+    qué hacer mientras está partida, y esa decisión cambia el código.
+  </p>
+  <div class="tabla">
+  <table>
+    <thead><tr><th></th><th><code>strong</code> / <code>reject</code> (CP)</th><th><code>eventual</code> / <code>degrade</code> (AP)</th></tr></thead>
+    <tbody>
+      <tr><td>Aislamiento</td><td><code>SERIALIZABLE</code></td><td><code>READ COMMITTED</code></td></tr>
+      <tr><td>Obsolescencia</td><td>—</td><td><code>max_staleness_ms</code>, obligatoria</td></tr>
+      <tr><td>Firma del cliente</td><td><code>(input, e)</code></td><td><code>(input, e, respaldo)</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    La última fila es la que importa: si declarás <code>degrade</code>, el cliente
+    generado <strong>exige</strong> un parámetro <code>respaldo</code>. No podés decir
+    «elijo disponibilidad» y después no escribir qué se sirve cuando el otro lado no
+    está. No es una convención — no compila.
+  </p>
+</section>
+
+<section id="verify">
+  <h2>Verificación de drift</h2>
+  <p class="sub">Lo que convierte al manifiesto en algo más que documentación.</p>
+<pre><code>$ axon verify manifests/
+<span class="err">error: billing consume payment.refunded@v1 pero nadie lo emite</span>
+<span class="err">error: payments.payment.stuck no es final y no tiene salida; es un deadlock</span>
+<span class="err">error: orders.payment.order_id -> payment: FK cruza el limite de servicio</span>
+<span class="err">error: order.placed@v1.total: cambio de `money` a `int` en una version publicada;
+       publica `order.placed@v2` en su lugar</span>
+<span class="avi">warn: payments es `strong` y llama a orders que es `eventual`: la garantia de
+      la ruta es la del mas debil, no la tuya</span></code></pre>
+  <div class="rejilla">
+    <div class="tarjeta"><h4>Contratos</h4><p>Evento consumido que nadie emite. Dos emisores con esquemas distintos. Un método que el otro servicio no expone.</p></div>
+    <div class="tarjeta"><h4>Versiones publicadas</h4><p>Contra <code>axon.baseline.json</code>: un campo que cambia, aparece o desaparece; un evento que cambia de dueño; una ruta que se mueve.</p></div>
+    <div class="tarjeta"><h4>Resiliencia</h4><p>Dependencia sin <code>timeout_ms</code>. Reintentos sobre un método no idempotente. Reintentos sin breaker.</p></div>
+    <div class="tarjeta"><h4>Datos</h4><p>FK que cruza el límite de un servicio. Tabla sin la columna del inquilino. Migración destructiva sin <code>.contract.sql</code>.</p></div>
+    <div class="tarjeta"><h4>Máquinas de estado</h4><p>Estados inalcanzables, deadlocks, disparadores fantasma y compensaciones rotas.</p></div>
+    <div class="tarjeta"><h4>Gobernanza</h4><p>Servicio sin dueño o sin criticidad. Prefijos de dominio fuera del catálogo. Demasiadas dependencias síncronas.</p></div>
+  </div>
+  <div class="nota">
+    Una versión publicada es <strong>inmutable</strong>. Si de verdad querés retirar
+    una, la quitás del <code>axon.baseline.json</code> en el mismo PR: ese diff
+    <em>es</em> la vía de escape, y se revisa como cualquier otro cambio. No hay
+    <code>--force</code> que se pueda copiar sin pensar.
+  </div>
+</section>
+
+<section id="seguridad">
+  <h2>Seguridad</h2>
+  <p class="sub">
+    Cada regla cita su categoría del <a href="https://owasp.org/Top10/">OWASP Top 10
+    (2021)</a>, porque un error que no dice <em>por qué</em> importa se silencia con un
+    allow.
+  </p>
+  <div class="tabla">
+  <table>
+    <thead><tr><th></th><th>Regla</th><th></th></tr></thead>
+    <tbody>
+      <tr><td><strong>A01</strong></td><td>Ruta pública que muta en un servicio <code>tier = "0"</code></td><td>error</td></tr>
+      <tr><td><strong>A01</strong></td><td>Tabla sin la columna del inquilino cuando hay <code>tenant_column</code></td><td>error</td></tr>
+      <tr><td><strong>A02</strong></td><td>Un secreto literal donde va su nombre</td><td>error</td></tr>
+      <tr><td><strong>A04</strong></td><td>Ruta pública sin <code>timeout_ms</code></td><td>error</td></tr>
+      <tr><td><strong>A05</strong></td><td>Bucket público sin <code>retention_days</code></td><td>aviso</td></tr>
+      <tr><td><strong>A08</strong></td><td><code>[ci].image</code> sin digest — una etiqueta es mutable</td><td>aviso</td></tr>
+      <tr><td><strong>A09</strong></td><td>Un campo <code>pii</code> devuelto por una ruta pública</td><td>error</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Y lo que no se avisa, se <strong>genera endurecido</strong>:</p>
+  <div class="rejilla">
+    <div class="tarjeta"><h4>A05 · el pod</h4><p><code>runAsNonRoot</code>, <code>readOnlyRootFilesystem</code>, <code>drop ALL</code>, <code>seccompProfile</code>, sin token de service account, y una <code>NetworkPolicy</code> de denegación por defecto.</p></div>
+    <div class="tarjeta"><h4>A01 · el ingreso</h4><p>Un servicio sin ninguna ruta pública se despliega con ingreso interno: no tiene puerta a internet aunque alguien se equivoque en el gateway.</p></div>
+    <div class="tarjeta"><h4>A08 · el deploy</h4><p>El pipeline construye, toma el digest y despliega <em>por digest</em>, con <code>provenance</code>.</p></div>
+    <div class="tarjeta"><h4>A09 · los logs</h4><p><code>axon build</code> emite <code>camposPII</code> y un <code>redactar()</code> recursivo. Un dato personal se filtra por un log, no por un exploit.</p></div>
+  </div>
+
+  <h3>RLS y enmascarado</h3>
+  <p>
+    <code>axon rls</code> cruza dos cosas que axon ya sabe —el esquema real, leído de
+    las migraciones con un parser SQL, y los campos <code>pii</code>— y emite una
+    migración más:
+  </p>
+<pre><code>ALTER TABLE <span class="cad">"order"</span> ENABLE ROW LEVEL SECURITY;
+ALTER TABLE <span class="cad">"order"</span> FORCE ROW LEVEL SECURITY;   <span class="com">-- también al dueño de la tabla</span>
+CREATE POLICY <span class="cad">"order_inquilino"</span> ON <span class="cad">"order"</span>
+  USING (<span class="cad">"tenant_id"</span> = current_setting(<span class="cad">'axon.tenant'</span>, true)::uuid)
+  WITH CHECK (<span class="cad">"tenant_id"</span> = current_setting(<span class="cad">'axon.tenant'</span>, true)::uuid);
+
+CREATE OR REPLACE VIEW <span class="cad">"order_enmascarada"</span> AS SELECT
+  id, total_cents, status, <span class="cad">'[redactado]'</span>::text AS <span class="cad">"customer_email"</span>
+FROM <span class="cad">"order"</span>;
+REVOKE ALL ON <span class="cad">"order"</span> FROM axon_lectura;</code></pre>
+  <div class="nota">
+    La regla que importa es la de <code>verify</code>: <strong>una tabla que se olvida
+    de la columna del inquilino no recibe política, y una tabla sin política no falla —
+    devuelve las filas de todos.</strong> Ese es el modo de fallo silencioso que la
+    declaración elimina.
+  </div>
+</section>
+
+<section id="local">
+  <h2>Local no es un subsistema aparte</h2>
+  <p class="sub">Es otro target del mismo plan. Por eso local y producción no pueden divergir.</p>
+<pre><code>$ axon infra manifests/ --target local &gt; axon.local.yml
+$ docker compose -f axon.local.yml up -d --wait
+<span class="com"># broker, Postgres por servicio, migraciones aplicadas, MinIO, el edge y tus servicios</span>
+
+$ curl -X POST localhost:8080/v1/orders -d '{...}'
+$ axon trace .axon/local.ndjson
+flujo fce36b59-36c7-4d88-81d1-25d90988e204
+└─ POST /v1/orders &lt;- http
+   └─ order.placed@v1 &lt;- orders
+      └─ payment.captured@v1 &lt;- payments</code></pre>
+  <p>
+    <code>axon seq --events</code> da el flujo <em>esperado</em>;
+    <code>axon trace --seq</code> da el <em>real</em>. Diferenciarlos es un
+    <code>diff</code>, y es la prueba de extremo a extremo que corre en CI del propio
+    repo.
+  </p>
+</section>
+
+<section id="plugins">
+  <h2>Plugins</h2>
+  <p class="sub">
+    Un plugin es cualquier ejecutable en el <code>PATH</code> llamado
+    <code>axon-*</code>. Recibe JSON por stdin, escribe por stdout. Sin ABI, sin
+    cargar librerías, sin versiones que casen: el modelo de <code>git</code> y de
+    <code>protoc</code>.
+  </p>
+  <div class="tabla">
+  <table>
+    <thead><tr><th>Clase</th><th>Se invoca con</th><th>Recibe</th><th>Devuelve</th></tr></thead>
+    <tbody>
+      <tr><td><code>axon-gen-&lt;lang&gt;</code></td><td><code>axon build --lang go</code></td><td><code>{manifest, peers}</code></td><td>código fuente</td></tr>
+      <tr><td><code>axon-infra-&lt;target&gt;</code></td><td><code>axon infra --target pulumi</code></td><td>el plan neutral</td><td>IaC</td></tr>
+      <tr><td><code>axon-check-&lt;regla&gt;</code></td><td><code>axon verify</code> (todos, siempre)</td><td>todos los manifiestos</td><td><code>[{level, message}]</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Una regla de gobernanza propia, completa:</p>
+<pre><code><span class="com">#!/bin/sh
+# axon-check-nombres — ningún servicio se llama "service" o "api"</span>
+jq -c <span class="cad">'[.[] | select(.service|test("^(service|api)$"))
+        | {level:"error", message:("\(.service): nombre genérico prohibido")}]'</span></code></pre>
+<pre><code>$ axon verify manifests/
+<span class="err">error: [axon-check-nombres] api: nombre generico prohibido</span></code></pre>
+  <p>
+    Bloquea el pipeline exactamente igual que una regla nativa.
+    <a href="https://github.com/Andrew-Tellez/axon/tree/main/plugins/axon-gen-go">axon-gen-go</a>
+    es el generador de referencia — escrito en Go, no importa nada de axon, y produce
+    Go idiomático: interfaz de handlers en vez de herencia, <code>ctx</code> primero,
+    <code>OrderID</code> y no <code>OrderId</code>.
+  </p>
+</section>
+
+<section id="estado">
+  <h2>Estado</h2>
+  <p class="sub">Preview. La superficie de comandos es estable; el formato del manifiesto todavía puede cambiar antes de <code>v1</code>.</p>
+  <p>
+    Los generadores no se validan con asserts propios: se validan con la herramienta
+    real de su ecosistema. Un compilador que solo se verifica a sí mismo produce salida
+    inválida —lo comprobé, los tres primeros la producían.
+  </p>
+  <div class="tabla">
+  <table>
+    <thead><tr><th>Lo que se genera</th><th>Cómo se comprueba</th></tr></thead>
+    <tbody>
+      <tr><td>El TypeScript</td><td><code>tsc --strict --noEmit</code></td></tr>
+      <tr><td>El Go</td><td><code>go vet</code></td></tr>
+      <tr><td>El Terraform</td><td><code>terraform validate</code> con providers reales, sin advertencias</td></tr>
+      <tr><td>El testkit</td><td><code>node --test</code> contra el servicio de ejemplo real</td></tr>
+      <tr><td>La RLS</td><td>se aplica a un Postgres real y se comprueba que aísla</td></tr>
+      <tr><td>El sistema completo</td><td><code>./demo.sh</code>: levanta, dispara un flujo y diffea la traza contra el manifiesto</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <h3>Saltado a propósito</h3>
+  <p>
+    Un generador nativo (TS) y el resto por plugin. Un solo modelo de ejecución
+    (<code>container</code>) y un solo dialecto SQL (PostgreSQL). Sin runtime propio:
+    <code>Bus</code>, <code>Inbox</code> y <code>Outbox</code> son interfaces de una
+    línea. Y <code>verify</code> compara declaraciones, todavía no el cloud desplegado.
+  </p>
+</section>
+
+</main>
+
+<footer>
+  <div class="envoltura">
+    <a href="https://github.com/Andrew-Tellez/axon">GitHub</a> ·
+    <a href="https://github.com/Andrew-Tellez/axon/blob/main/DESIGN.md">Diseño y decisiones</a> ·
+    <a href="https://github.com/Andrew-Tellez/axon/blob/main/docs/cli.md">Referencia de comandos</a> ·
+    <a href="https://github.com/Andrew-Tellez/patterns">gof-patterns</a> ·
+    MIT
+  </div>
+</footer>
+
+</body>
+</html>

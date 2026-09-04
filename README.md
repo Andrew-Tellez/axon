@@ -6,6 +6,10 @@
 </p>
 
 <p align="center">
+  <a href="https://andrew-tellez.github.io/axon/"><strong>Documentación</strong></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/Andrew-Tellez/axon/actions/workflows/ci.yml"><img src="https://github.com/Andrew-Tellez/axon/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
   <img src="https://img.shields.io/badge/dependencias%20en%20runtime-0-brightgreen" alt="cero dependencias">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
@@ -549,4 +553,4 @@ cargo test --release      # 15 checks (los de tsc y terraform se saltan si no es
 cargo run -- verify examples
 ```
 
-[Diseño y decisiones](DESIGN.md) · [Referencia de comandos](docs/cli.md) · MIT
+[Documentación](https://andrew-tellez.github.io/axon/) · [Diseño y decisiones](DESIGN.md) · [Referencia de comandos](docs/cli.md) · MIT
