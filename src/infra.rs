@@ -38,6 +38,11 @@ pub struct Store {
     /// Replicas de las que SI se lee, con el retraso que eso implica.
     pub read_replicas: u32,
     pub pool_size: Option<u32>,
+    /// El tope del motor. `verify` hace la aritmetica contra este numero, asi
+    /// que el numero tiene que APLICARSE: una regla que compara contra un tope
+    /// que nadie fija esta comparando contra el default del motor, que suele
+    /// ser mucho mas bajo.
+    pub max_connections: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,6 +152,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 pitr: m.infra.pitr.unwrap_or(false),
                 read_replicas: m.infra.read_replicas.unwrap_or(0),
                 pool_size: m.infra.pool_size,
+                max_connections: m.infra.max_connections,
             });
         }
         for (_, me) in m.methods.iter() {
@@ -396,9 +402,17 @@ fn gcp(p: &Plan) -> String {
              settings {{\n    \
                tier              = var.db_tier\n    \
                # REGIONAL es el standby con failover; del standby no se lee\n    \
-               availability_type = \"{disp}\"\n{respaldo}  }}\n}}\n",
+               availability_type = \"{disp}\"\n{conexiones}{respaldo}  }}\n}}\n",
             svc = s.service,
             disp = if s.ha { "REGIONAL" } else { "ZONAL" },
+            conexiones = s
+                .max_connections
+                .map(|n| format!(
+                    "    # el tope contra el que `axon verify` hace la aritmetica, aplicado\n    \
+                     database_flags {{\n      name  = \"max_connections\"\n      \
+                     value = \"{n}\"\n    }}\n"
+                ))
+                .unwrap_or_default(),
             respaldo = if s.backup_retention_days > 0 {
                 format!(
                     "    backup_configuration {{\n      enabled                        = true\n      \
@@ -610,6 +624,18 @@ fn aws(p: &Plan) -> String {
     }
     for s in &p.stores {
         let sv = tfname(&s.service);
+        if let Some(n) = s.max_connections {
+            // en RDS el tope no es un atributo de la instancia: va en un
+            // parameter group, y sin el la instancia usa el default del motor
+            o.push(format!(
+                "resource \"aws_db_parameter_group\" \"{sv}\" {{\n  \
+                 name   = \"{}-axon\"\n  family = \"postgres16\"\n  \
+                 # el tope contra el que `axon verify` hace la aritmetica, aplicado\n  \
+                 parameter {{\n    name  = \"max_connections\"\n    value = \"{n}\"\n    \
+                 apply_method = \"pending-reboot\"\n  }}\n}}\n",
+                s.service
+            ));
+        }
         o.push(format!(
             "resource \"aws_db_instance\" \"{sv}\" {{\n  \
              identifier        = \"{svc}\"\n  \
@@ -622,11 +648,16 @@ fn aws(p: &Plan) -> String {
              # tiempo: no hay un atributo `pitr` aparte\n  \
              backup_retention_period = {ret}\n  \
              deletion_protection     = true\n  \
-             skip_final_snapshot     = false\n}}\n",
+             skip_final_snapshot     = false\n{grupo}}}\n",
             svc = s.service,
             eng = s.engine,
             ha = s.ha,
-            ret = s.backup_retention_days
+            ret = s.backup_retention_days,
+            grupo = if s.max_connections.is_some() {
+                format!("  parameter_group_name    = aws_db_parameter_group.{sv}.name\n")
+            } else {
+                String::new()
+            },
         ));
         for i in 1..=s.read_replicas {
             o.push(format!(
@@ -924,9 +955,13 @@ services:
         let svc = &s.service;
         let port = 15432 + i;
         let v = tfname(&s.service);
+        let conexiones = s.max_connections.unwrap_or(100);
         o.push_str(&format!(
             "  db-{svc}:
     image: postgres:16-alpine
+    # el mismo tope que en produccion: agotar conexiones en local es la unica
+    # forma de descubrirlo antes de que escale
+    command: [\"postgres\", \"-c\", \"max_connections={conexiones}\"]
     environment: {{ POSTGRES_DB: {svc}, POSTGRES_PASSWORD: local }}
     ports: [\"${{AXON_DB_PORT_{v}:-{port}}}:5432\"]
     healthcheck:

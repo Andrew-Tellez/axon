@@ -2343,6 +2343,35 @@ fn las_reglas_de_reparto_bloquean() {
 /// El motor tiene que existir. Antes `state = "neo4j"` pasaba `verify` sin un
 /// error y generaba una instancia de Cloud SQL Postgres: salida incorrecta,
 /// en silencio, que es el peor modo de fallo que hay.
+/// `verify` hace la aritmetica de conexiones contra `max_connections`, asi que
+/// ese numero tiene que APLICARSE. Una regla que compara contra un tope que
+/// nadie fija esta comparando contra el default del motor, que es mas bajo.
+#[test]
+fn el_tope_de_conexiones_se_aplica() {
+    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    assert!(
+        g.contains("name  = \"max_connections\""),
+        "gcp no aplica el tope:\n{g}"
+    );
+    assert!(
+        g.contains("value = \"200\""),
+        "el valor de payments no llego:\n{g}"
+    );
+    let (a, _, _) = axon(&["infra", "examples", "--target", "aws"]);
+    // en RDS el tope va en un parameter group, no en la instancia
+    assert!(a.contains("resource \"aws_db_parameter_group\""), "{a}");
+    assert!(
+        a.contains("parameter_group_name    = aws_db_parameter_group.payments.name"),
+        "{a}"
+    );
+    let (l, _, _) = axon(&["infra", "examples", "--target", "local"]);
+    assert!(
+        l.contains("\"max_connections=200\""),
+        "local no aplica el tope: agotar conexiones ahi es la unica forma de \
+         descubrirlo antes de que escale:\n{l}"
+    );
+}
+
 #[test]
 fn un_motor_desconocido_no_genera_postgres() {
     let dir = std::env::temp_dir().join("axon-motor");
