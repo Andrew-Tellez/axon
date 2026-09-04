@@ -89,7 +89,8 @@ enum Cmd {
     /// esquemas de bodega y vistas de embudo, derivados de los eventos
     Analytics {
         sources: Vec<String>,
-        #[arg(long, default_value = "bigquery", value_parser = ["bigquery", "plan"])]
+        #[arg(long, default_value = "bigquery",
+              value_parser = ["bigquery", "snowflake", "clickhouse", "plan"])]
         target: String,
     },
     /// reconcilia el lado CAP declarado con los patrones en uso
@@ -322,7 +323,11 @@ fn run() -> Result<ExitCode, String> {
                     "{}",
                     serde_json::to_string_pretty(&bi::build_plan(&ms)).map_err(|e| e.to_string())?
                 ),
-                _ => print!("{}", bi::build_bigquery(&ms)),
+                otro => {
+                    let d =
+                        bi::dialecto(otro).ok_or_else(|| format!("bodega `{otro}` desconocida"))?;
+                    print!("{}", bi::build(&ms, &d));
+                }
             }
         }
         Cmd::Cap { sources, services } => {

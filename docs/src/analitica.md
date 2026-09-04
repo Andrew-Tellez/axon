@@ -114,18 +114,44 @@ también lleva DLQ**: un mensaje que no encaja en el esquema no puede desaparece
 silencio — que es justo lo que pasa cuando alguien cambia un campo y nadie mira la
 tabla.
 
-## Para otra bodega
+## Tres bodegas, un esquema
 
 ```sh
-axon analytics manifests/ --target plan
+axon analytics manifests/ --target bigquery|snowflake|clickhouse|plan
 ```
 
-El plan neutral en JSON —tablas, columnas, tipos, partición, clustering y el modo de
-PII— para renderizarlo a Snowflake, Redshift, ClickHouse o lo que uses.
+El esquema y los embudos son **los mismos** —salen del mismo manifiesto—; lo que cambia
+es el dialecto. Y las diferencias no son cosméticas:
+
+| | BigQuery | Snowflake | ClickHouse |
+| --- | --- | --- | --- |
+| Cadena | `STRING` | `VARCHAR` | `Nullable(String)` |
+| Entero | `INT64` | `NUMBER(38,0)` | `Nullable(Int64)` |
+| Marca de tiempo | `TIMESTAMP` | `TIMESTAMP_TZ` | `Nullable(DateTime64(3))` |
+| JSON | `JSON` | `VARIANT` | `String` |
+| Particionado | `PARTITION BY DATE(...)` | automático | `PARTITION BY toYYYYMM(...)` |
+| Agrupado | `CLUSTER BY` | `CLUSTER BY (...)` | `ORDER BY (...)` en `MergeTree` |
+| Latencia | `TIMESTAMP_DIFF` | `TIMESTAMPDIFF` | `dateDiff` |
+
+- En **Snowflake** declarar `PARTITION BY` sería un error, no una optimización: sus
+  micro-particiones son automáticas.
+- En **ClickHouse** la nulabilidad va en el tipo, y el `ORDER BY` de `MergeTree` decide
+  qué consultas son rápidas — va primero el flujo, porque un embudo agrupa por él.
+- Los embudos usan `CASE WHEN` y no `IF()`/`IFF()`: es lo único que las tres entienden
+  igual.
+
+Para cualquier otra, `--target plan` da el plan neutral en JSON —tablas, columnas, tipos
+de axon, partición, clustering y el modo de PII— y lo renderizás vos.
 
 ## Verificado
 
-El suite **parsea el DDL generado con el dialecto de BigQuery de `sqlparser`**, no lo
-compara contra un texto esperado. Eso encontró un bug real: un comentario al final de una
-columna se come la coma que la separa de la siguiente, y el DDL queda inválido — el mismo
-error que ya había cometido en una migración.
+El suite **parsea el DDL de cada bodega con su propio dialecto** de `sqlparser`, no lo
+compara contra un texto esperado. Comparar contra texto no habría encontrado ninguno de
+los tres bugs que esto encontró:
+
+- Un comentario al final de una columna **se come la coma** que la separa de la siguiente
+  — el mismo error que ya había cometido en una migración.
+- Desenvolver `Nullable(DateTime64(3))` quitando todos los paréntesis del final dejaba
+  `DateTime64(3,` y rompía el tipo parametrizado.
+- ClickHouse espera `ORDER BY` justo después del motor: con `PARTITION BY` en medio, el
+  DDL no parsea.

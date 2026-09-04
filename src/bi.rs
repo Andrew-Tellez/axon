@@ -11,16 +11,42 @@ use indexmap::IndexMap;
 /// Columnas del envelope, iguales en toda tabla. Son las que permiten
 /// reconstruir un flujo: sin `correlation_id` no hay embudo posible.
 const ENVELOPE: [(&str, &str); 7] = [
-    ("event_id", "STRING"),
-    ("event_type", "STRING"),
-    ("source", "STRING"),
-    ("event_time", "TIMESTAMP"),
-    ("trace_id", "STRING"),
-    ("correlation_id", "STRING"),
-    ("causation_id", "STRING"),
+    ("event_id", "string"),
+    ("event_type", "string"),
+    ("source", "string"),
+    ("event_time", "timestamp"),
+    ("trace_id", "string"),
+    ("correlation_id", "string"),
+    ("causation_id", "string"),
 ];
 
-fn tipo_bq(t: &str) -> &'static str {
+/// Lo que cambia entre bodegas. Nada mas que esto: el esquema y los embudos
+/// son los mismos, porque salen del mismo manifiesto.
+///
+/// Las diferencias no son cosmeticas. BigQuery necesita `PARTITION BY`
+/// explicito o cada consulta escanea el historico; Snowflake particiona solo y
+/// solo acepta `CLUSTER BY`; ClickHouse necesita un motor y una clave de orden,
+/// y sin `Nullable` una columna vacia guarda un cero en vez de nada.
+pub struct Dialecto {
+    pub nombre: &'static str,
+    /// Cita un identificador.
+    pub cita: fn(&str) -> String,
+    /// Tipo de columna para un tipo de axon.
+    pub tipo: fn(&str) -> String,
+    /// Lo que va despues del parentesis de columnas.
+    pub cola: fn() -> String,
+    /// Diferencia en milisegundos entre dos expresiones.
+    pub diff_ms: fn(&str, &str) -> String,
+}
+
+fn cita_backtick(s: &str) -> String {
+    format!("`{s}`")
+}
+fn cita_doble(s: &str) -> String {
+    format!("\"{s}\"")
+}
+
+fn tipo_bigquery(t: &str) -> String {
     match t {
         "int" => "INT64",
         "float" => "FLOAT64",
@@ -29,6 +55,88 @@ fn tipo_bq(t: &str) -> &'static str {
         "json" => "JSON",
         _ => "STRING",
     }
+    .into()
+}
+
+fn tipo_snowflake(t: &str) -> String {
+    match t {
+        "int" => "NUMBER(38,0)",
+        "float" => "FLOAT",
+        "bool" => "BOOLEAN",
+        "timestamp" => "TIMESTAMP_TZ",
+        "json" => "VARIANT",
+        _ => "VARCHAR",
+    }
+    .into()
+}
+
+/// `Nullable(DateTime64(3))` -> `DateTime64(3)`. Quitar todos los parentesis
+/// del final rompe los tipos parametrizados: hay que sacar exactamente uno.
+fn sin_nullable(t: &str) -> String {
+    match t
+        .strip_prefix("Nullable(")
+        .and_then(|r| r.strip_suffix(')'))
+    {
+        Some(dentro) => dentro.to_string(),
+        None => t.to_string(),
+    }
+}
+
+fn tipo_clickhouse(t: &str) -> String {
+    match t {
+        "int" => "Nullable(Int64)",
+        "float" => "Nullable(Float64)",
+        "bool" => "Nullable(Bool)",
+        // milisegundos: un evento por segundo no ordena bien un embudo
+        "timestamp" => "Nullable(DateTime64(3))",
+        "json" => "Nullable(String)",
+        _ => "Nullable(String)",
+    }
+    .into()
+}
+
+pub fn dialecto(nombre: &str) -> Option<Dialecto> {
+    Some(match nombre {
+        "bigquery" => Dialecto {
+            nombre: "bigquery",
+            cita: cita_backtick,
+            tipo: tipo_bigquery,
+            cola: || {
+                "-- particionar no es opcional: sin esto cada consulta escanea la\n\
+                 -- tabla entera y la factura crece con el historico\n\
+                 PARTITION BY DATE(event_time)\n\
+                 CLUSTER BY correlation_id, source"
+                    .into()
+            },
+            diff_ms: |a, b| format!("TIMESTAMP_DIFF(\n{a},\n{b},\n    MILLISECOND\n  )"),
+        },
+        "snowflake" => Dialecto {
+            nombre: "snowflake",
+            cita: cita_doble,
+            tipo: tipo_snowflake,
+            // Snowflake particiona solo con sus micro-particiones: declarar
+            // PARTITION BY seria un error, no una optimizacion.
+            cola: || "CLUSTER BY (TO_DATE(event_time), correlation_id)".into(),
+            diff_ms: |a, b| format!("TIMESTAMPDIFF(\n    MILLISECOND,\n{b},\n{a}\n  )"),
+        },
+        "clickhouse" => Dialecto {
+            nombre: "clickhouse",
+            cita: cita_doble,
+            tipo: tipo_clickhouse,
+            cola: || {
+                // El orden de las clausulas importa: ClickHouse espera ORDER BY
+                // justo despues del motor. Y la clave de orden decide que
+                // consultas son rapidas: primero el flujo, porque un embudo
+                // agrupa por el.
+                "ENGINE = MergeTree\n\
+                 ORDER BY (correlation_id, event_time)\n\
+                 PARTITION BY toYYYYMM(event_time)"
+                    .into()
+            },
+            diff_ms: |a, b| format!("dateDiff(\n    'millisecond',\n{b},\n{a}\n  )"),
+        },
+        _ => return None,
+    })
 }
 
 /// Nombre de tabla a partir del evento: `order.placed@v1` -> `order_placed_v1`.
@@ -56,7 +164,7 @@ fn snake(s: &str) -> String {
 
 /// Un campo del evento a columnas. `money` se aplana en dos, que es lo que
 /// hace utilizable un importe en una bodega: sumar un objeto no se puede.
-fn columnas(nombre: &str, tipo: &str) -> Vec<(String, &'static str)> {
+fn columnas(d: &Dialecto, nombre: &str, tipo: &str) -> Vec<(String, String)> {
     let n = snake(nombre);
     if tipo == "money" {
         // `amount` ya dice que es un importe: `amount_amount` no aporta nada
@@ -65,9 +173,12 @@ fn columnas(nombre: &str, tipo: &str) -> Vec<(String, &'static str)> {
         } else {
             format!("{n}_amount")
         };
-        vec![(importe, "INT64"), (format!("{n}_currency"), "STRING")]
+        vec![
+            (importe, (d.tipo)("int")),
+            (format!("{n}_currency"), (d.tipo)("string")),
+        ]
     } else {
-        vec![(n, tipo_bq(tipo))]
+        vec![(n, (d.tipo)(tipo))]
     }
 }
 
@@ -97,11 +208,14 @@ fn eventos<'a>(ms: &'a [Manifest]) -> Vec<Evento<'a>> {
 }
 
 /// DDL de BigQuery: una tabla por evento, mas las vistas de embudo.
-pub fn build_bigquery(ms: &[Manifest]) -> String {
+pub fn build(ms: &[Manifest], d: &Dialecto) -> String {
     let evs = eventos(ms);
     let mut o = vec![
         "-- generado por axon — no editar.".to_string(),
-        "--   axon analytics manifests/ --target bigquery > bodega.sql".to_string(),
+        format!(
+            "--   axon analytics manifests/ --target {} > bodega.sql",
+            d.nombre
+        ),
         "--".to_string(),
         "-- Una tabla por evento, con las columnas del envelope que permiten".to_string(),
         "-- reconstruir un flujo, y las vistas de embudo que salen de la cadena".to_string(),
@@ -123,7 +237,14 @@ pub fn build_bigquery(ms: &[Manifest]) -> String {
             .iter()
             .map(|(n, t)| {
                 let nulo = matches!(*n, "trace_id" | "causation_id");
-                format!("  {n} {t}{}", if nulo { "" } else { " NOT NULL" })
+                let tipo = (d.tipo)(t);
+                // en ClickHouse la nulabilidad va en el tipo, no en un sufijo
+                if d.nombre == "clickhouse" {
+                    let tipo = if nulo { tipo } else { sin_nullable(&tipo) };
+                    format!("  {n} {tipo}")
+                } else {
+                    format!("  {n} {tipo}{}", if nulo { "" } else { " NOT NULL" })
+                }
             })
             .collect();
         let mut excluidos = Vec::new();
@@ -133,12 +254,13 @@ pub fn build_bigquery(ms: &[Manifest]) -> String {
                 excluidos.push(campo.clone());
                 continue;
             }
-            for (n, t) in columnas(campo, tipo) {
+            for (n, t) in columnas(d, campo, tipo) {
                 if sensible {
                     // hash con salt, no el valor: una bodega es donde un dato
                     // personal vive mas tiempo y lo lee mas gente
                     cols.push(format!(
-                        "  -- SHA-256 de `{campo}` con salt: se puede contar sin guardar\n  {n}_hash STRING"
+                        "  -- SHA-256 de `{campo}` con salt: se puede contar sin guardar\n  {n}_hash {}",
+                        (d.tipo)("string")
                     ));
                 } else {
                     cols.push(format!("  {n} {t}"));
@@ -154,17 +276,14 @@ pub fn build_bigquery(ms: &[Manifest]) -> String {
             ));
         }
         o.push(format!(
-            "CREATE TABLE IF NOT EXISTS `@dataset.{}` (\n{}\n)\n\
-             -- particionar no es opcional: sin esto cada consulta escanea la\n\
-             -- tabla entera y la factura crece con el historico\n\
-             PARTITION BY DATE(event_time)\n\
-             CLUSTER BY correlation_id, source;",
-            tabla(e.nombre),
-            cols.join(",\n")
+            "CREATE TABLE IF NOT EXISTS {} (\n{}\n)\n{};",
+            (d.cita)(&format!("@dataset.{}", tabla(e.nombre))),
+            cols.join(",\n"),
+            (d.cola)()
         ));
     }
 
-    o.extend(embudos(ms, &evs));
+    o.extend(embudos(ms, &evs, d));
     o.push(String::new());
     o.join("\n")
 }
@@ -174,7 +293,7 @@ pub fn build_bigquery(ms: &[Manifest]) -> String {
 ///
 /// Los pasos salen de la cadena causal declarada, la misma que dibuja
 /// `axon seq`. Eso es lo que hace que el embudo no sea una suposicion.
-fn embudos(ms: &[Manifest], evs: &[Evento]) -> Vec<String> {
+fn embudos(ms: &[Manifest], evs: &[Evento], d: &Dialecto) -> Vec<String> {
     let emisor: IndexMap<&str, &str> = evs.iter().map(|e| (e.nombre, e.duenio)).collect();
     let mut o = Vec::new();
 
@@ -219,8 +338,8 @@ fn embudos(ms: &[Manifest], evs: &[Evento]) -> Vec<String> {
             .iter()
             .map(|e| {
                 format!(
-                    "    SELECT correlation_id, event_type, event_time FROM `@dataset.{}`",
-                    tabla(e)
+                    "    SELECT correlation_id, event_type, event_time FROM {}",
+                    (d.cita)(&format!("@dataset.{}", tabla(e)))
                 )
             })
             .collect();
@@ -228,8 +347,10 @@ fn embudos(ms: &[Manifest], evs: &[Evento]) -> Vec<String> {
             .iter()
             .enumerate()
             .map(|(n, e)| {
+                // CASE WHEN y no IF()/IFF(): es lo unico que las tres bodegas
+                // entienden igual
                 format!(
-                    "  MIN(IF(event_type = '{e}', event_time, NULL)) AS paso_{}_{}",
+                    "  MIN(CASE WHEN event_type = '{e}' THEN event_time END) AS paso_{}_{}",
                     n + 1,
                     tabla(e)
                 )
@@ -241,12 +362,12 @@ fn embudos(ms: &[Manifest], evs: &[Evento]) -> Vec<String> {
             .iter()
             .skip(1)
             .map(|e| {
-                format!(
-                    "  TIMESTAMP_DIFF(\n    MIN(IF(event_type = '{e}', event_time, NULL)),\n    \
-                     MIN(IF(event_type = '{}', event_time, NULL)),\n    MILLISECOND\n  ) AS ms_hasta_{}",
-                    cadena[0],
-                    tabla(e)
-                )
+                let hasta = format!("    MIN(CASE WHEN event_type = '{e}' THEN event_time END)");
+                let desde = format!(
+                    "    MIN(CASE WHEN event_type = '{}' THEN event_time END)",
+                    cadena[0]
+                );
+                format!("  {} AS ms_hasta_{}", (d.diff_ms)(&hasta, &desde), tabla(e))
             })
             .collect();
 
@@ -256,9 +377,9 @@ fn embudos(ms: &[Manifest], evs: &[Evento]) -> Vec<String> {
              -- misma que dibuja `axon seq`. Un paso en NULL es un flujo que no llego\n\
              -- ahi: eso es la conversion, y el TIMESTAMP_DIFF es la latencia de\n\
              -- negocio —no la de una peticion.\n\
-             CREATE OR REPLACE VIEW `@dataset.embudo_{}` AS\n\
+             CREATE OR REPLACE VIEW {} AS\n\
              SELECT\n  correlation_id,\n{},\n{}\nFROM (\n{}\n)\nGROUP BY correlation_id;",
-            tabla(raiz),
+            (d.cita)(&format!("@dataset.embudo_{}", tabla(raiz))),
             pasos.join(",\n"),
             saltos.join(",\n"),
             union.join("\n    UNION ALL\n")
@@ -270,6 +391,15 @@ fn embudos(ms: &[Manifest], evs: &[Evento]) -> Vec<String> {
 /// El plan neutral de la exportacion, para quien no use BigQuery.
 pub fn build_plan(ms: &[Manifest]) -> serde_json::Value {
     let evs = eventos(ms);
+    // el plan lleva los tipos de axon, no los de una bodega: quien lo consuma
+    // los traduce a la suya
+    let neutral = Dialecto {
+        nombre: "plan",
+        cita: |s| s.to_string(),
+        tipo: |t| t.to_string(),
+        cola: String::new,
+        diff_ms: |a, b| format!("{a} - {b}"),
+    };
     serde_json::json!({
         "envelope": ENVELOPE.iter().map(|(n, t)| serde_json::json!({"name": n, "type": t})).collect::<Vec<_>>(),
         "tables": evs.iter().map(|e| serde_json::json!({
@@ -281,7 +411,7 @@ pub fn build_plan(ms: &[Manifest]) -> serde_json::Value {
             "pii_mode": e.modo_pii,
             "columns": e.campos.iter().flat_map(|(n, t)| {
                 let sensible = es_pii(&e.pii, n);
-                columnas(n, t).into_iter().filter_map(move |(cn, ct)| {
+                columnas(&neutral, n, t).into_iter().filter_map(move |(cn, ct)| {
                     match (sensible, e.modo_pii) {
                         (true, "exclude") => None,
                         (true, _) => Some(serde_json::json!({"name": format!("{cn}_hash"), "type": "STRING", "pii": true})),
