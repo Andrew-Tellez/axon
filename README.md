@@ -468,6 +468,34 @@ El suite no lee ese SQL: lo aplica a un Postgres real y comprueba que sin inquil
 ven 0 filas, que cada inquilino ve solo la suya, que escribir para otro se rechaza, y
 que la vista devuelve `[redactado]`.
 
+### Una copia enmascarada, con `pg_anon`
+
+Las vistas protegen la **consulta viva**: un rol de analítica nunca ve el dato crudo.
+Para el otro problema —darle datos realistas a staging, a soporte o a un tercero que no
+debe ver los de verdad— hace falta una **copia** enmascarada, y eso lo hace
+[`pg_anon`](https://github.com/TantorLabs/pg_anon) (que no es una extensión de Postgres,
+sino un CLI que clona la base reemplazando los campos en el camino).
+
+Su mayor friccón es mantener el diccionario de campos sensibles, y su `create-dict` lo
+detecta **por heurística**. axon lo emite declarado:
+
+```sh
+axon rls manifests/ --target pg_anon > sens_dict.py
+pg_anon --mode=dump --prepared-sens-dict-file=sens_dict.py ...
+```
+
+La regla sale del **tipo** de cada columna, nunca de su nombre: adivinar porque una
+columna se llama `email` falla con `correo` y se equivoca con `email_template`. Lo que
+axon garantiza es la **cobertura** —ningún campo declarado `pii` se queda sin regla—; la
+regla en sí es tuya y se edita, por ejemplo para preservar la forma de un correo.
+
+Las tablas del propio framework se excluyen del dump: el `outbox` lleva el payload de
+cada evento en un `jsonb`, que es el último lugar donde uno buscaría una fuga.
+
+El suite aplica cada regla generada a una columna de su tipo en un Postgres real —un
+cast que falta hace fallar el dump a mitad de camino— y comprueba que el dato original
+no sobreviva a ninguna.
+
 ## Gobernanza
 
 `axon.policy.toml`, versionado junto al código:

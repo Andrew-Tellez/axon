@@ -28,6 +28,14 @@ async function traza(e: Envelope<unknown>) {
   await appendFile(TRACE, JSON.stringify(e) + "\n").catch(() => {});
 }
 
+// Un rechazo sin manejar mata el proceso en silencio. Que al menos deje rastro.
+process.on("unhandledRejection", (r) =>
+  console.error(`[${process.env.AXON_SERVICE}] rechazo sin manejar:`, r),
+);
+process.on("uncaughtException", (e) =>
+  console.error(`[${process.env.AXON_SERVICE}] excepcion sin capturar:`, e),
+);
+
 export async function conectar(): Promise<NatsConnection> {
   const servers = process.env.AXON_BROKER_URL ?? "nats://localhost:4222";
   for (let i = 0; ; i++) {
@@ -191,12 +199,17 @@ export function servir(port: number, rutas: Record<string, Ruta>) {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify(out));
         } catch (err) {
+          // No se re-lanza: el handler de createServer es async, asi que un
+          // throw aca sale como rechazo no manejado y Node mata el proceso
+          // en medio de la respuesta. El cliente ve una conexion cortada y el
+          // servicio se cae por una peticion mala.
+          console.error(`[${process.env.AXON_SERVICE}] ${clave} fallo:`, err);
+          anotar({ "error.type": String(err) });
           res.writeHead(500, { "content-type": "application/problem+json" });
           res.end(JSON.stringify({
             type: "about:blank", title: String(err), status: 500,
             traceId: traceparent.split("-")[1],
           }));
-          throw err;
         }
       });
   }).listen(port, () => console.log(`[${process.env.AXON_SERVICE}] escuchando en :${port}`));

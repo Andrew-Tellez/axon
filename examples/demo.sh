@@ -20,6 +20,13 @@ diagnostico() {
     echo
     echo "--- logs de $s (ultimas 40) ---"
     docker compose -f axon.local.yml logs --tail 40 "$s" 2>&1 || true
+    # En Actions el log del run no es publico, pero las anotaciones si: las
+    # ultimas lineas de cada servicio salen tambien como ::error::
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+      docker compose -f axon.local.yml logs --tail 8 --no-log-prefix "$s" 2>&1 \
+        | tr '\n' '|' | sed "s/^/::error title=$s::/" || true
+      echo
+    fi
   done
   echo
   echo "--- envelopes registrados ---"

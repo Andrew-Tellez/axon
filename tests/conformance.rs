@@ -1417,6 +1417,181 @@ fn otel_en_los_cuatro_targets() {
     assert!(!ts.contains("${hex(8)}-01`"), "el envelope fija los flags");
 }
 
+/// El diccionario de pg_anon: cada campo `pii` recibe una regla, y cada regla
+/// se aplica de verdad a una columna de su tipo. Una funcion que no existe
+/// —o un cast que falta— hace fallar el dump a mitad de camino.
+#[test]
+fn el_diccionario_pg_anon_funciona() {
+    let dir = std::env::temp_dir().join("axon-pganon");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    let ddl = "CREATE TABLE persona (\n  \
+               id uuid PRIMARY KEY,\n  tenant_id uuid NOT NULL,\n  correo text NOT NULL,\n  \
+               nacimiento timestamptz,\n  ingreso bigint,\n  preferencias jsonb,\n  \
+               verificado boolean\n);\n";
+    std::fs::write(dir.join("sql/001.expand.sql"), ddl).unwrap();
+    std::fs::write(
+        dir.join("p.toml"),
+        "service = \"gente\"\nowner = \"equipo\"\ntier = \"1\"\n\
+         pii = [\"id\", \"correo\", \"nacimiento\", \"ingreso\", \"preferencias\", \"verificado\"]\n\
+         [infra]\nstate = \"postgres\"\nmigrations = \"sql/\"\ntenant_column = \"tenant_id\"\n",
+    )
+    .unwrap();
+
+    let (dic, err, ok) = axon(&["rls", dir.to_str().unwrap(), "--target", "pg_anon"]);
+    assert!(ok, "{err}");
+    // cobertura: ningun campo declarado se queda sin regla
+    for campo in [
+        "id",
+        "correo",
+        "nacimiento",
+        "ingreso",
+        "preferencias",
+        "verificado",
+    ] {
+        assert!(
+            dic.contains(&format!("\"{campo}\":")),
+            "sin regla para {campo}:\n{dic}"
+        );
+    }
+    // md5(uuid) no existe: el cast interno es obligatorio
+    assert!(dic.contains(r#"md5(\"id\"::text)::uuid"#), "{dic}");
+    // la regla sale del tipo, no del nombre: `correo` no lleva "mail" y aun asi
+    // recibe la regla de texto
+    assert!(dic.contains("anon_funcs.digest(\\\"correo\\\""), "{dic}");
+    // las tablas del propio framework se excluyen: el outbox lleva payloads
+    let (dic2, _, _) = axon(&["rls", "examples", "--target", "pg_anon"]);
+    assert!(
+        dic2.contains("\"table\": \"outbox\"") && dic2.contains("dictionary_exclude"),
+        "{dic2}"
+    );
+
+    if !tiene("docker") {
+        eprintln!("salteado el resto: docker no esta instalado");
+        return;
+    }
+
+    // cada regla, aplicada a una columna de su tipo
+    let nombre = "axon-test-pganon";
+    let _ = Command::new("docker").args(["rm", "-f", nombre]).output();
+    let arranque = Command::new("docker")
+        .args([
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            nombre,
+            "-e",
+            "POSTGRES_PASSWORD=x",
+            "-e",
+            "POSTGRES_DB=t",
+            "postgres:16-alpine",
+        ])
+        .output()
+        .expect("docker run");
+    if !arranque.status.success() {
+        eprintln!("salteado: no arranco postgres");
+        return;
+    }
+    struct Limpieza(&'static str);
+    impl Drop for Limpieza {
+        fn drop(&mut self) {
+            let _ = Command::new("docker").args(["rm", "-f", self.0]).output();
+        }
+    }
+    let _l = Limpieza(nombre);
+    let mut listo = false;
+    for _ in 0..60 {
+        if Command::new("docker")
+            .args([
+                "exec", nombre, "psql", "-U", "postgres", "-d", "t", "-c", "select 1",
+            ])
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            listo = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert!(listo, "postgres no arranco");
+
+    let mut sql = String::from(ddl);
+    sql.push_str(
+        "INSERT INTO persona VALUES ('11111111-1111-4111-8111-111111111111',\n  \
+         '22222222-2222-4222-8222-222222222222','ana@gmail.com','2026-03-14 10:30:00+00',\n  \
+         25000,'{\"a\":1}'::jsonb,true);\n\
+         -- doble de anon_funcs.digest, solo para comprobar la FORMA de la llamada:\n\
+         -- la funcion real la instala pg_anon en el destino.\n\
+         CREATE SCHEMA anon_funcs;\n\
+         CREATE FUNCTION anon_funcs.digest(t text, salt text, algo text) RETURNS text\n  \
+           AS $$ SELECT encode(sha256((t || salt)::bytea), 'hex') $$ LANGUAGE sql IMMUTABLE;\n",
+    );
+    // cada regla del diccionario, tal cual, contra su columna
+    for linea in dic.lines() {
+        let l = linea.trim();
+        if !l.starts_with('"') || !l.contains("\": \"") {
+            continue;
+        }
+        let Some((campo, resto)) = l.split_once("\": \"") else {
+            continue;
+        };
+        let campo = campo.trim_start_matches('"');
+        if ["schema", "table"].contains(&campo) {
+            continue;
+        }
+        // el valor viene escapado para Python: aca se desescapa para SQL
+        let regla = resto
+            .trim_end_matches(&[',', '"'][..])
+            .replace("\\\"", "\"");
+        sql.push_str(&format!("SELECT {regla} FROM persona;\n"));
+    }
+
+    let out = Command::new("docker")
+        .args([
+            "exec",
+            "-i",
+            nombre,
+            "psql",
+            "-q",
+            "-tA",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-U",
+            "postgres",
+            "-d",
+            "t",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            c.stdin.take().unwrap().write_all(sql.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("docker exec psql");
+    let salida = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "una regla generada no corre en Postgres:\n{salida}"
+    );
+    // el dato original no sobrevive a ninguna regla
+    assert!(
+        !salida.contains("ana@gmail.com"),
+        "el correo no se enmascaro:\n{salida}"
+    );
+    assert!(
+        salida.contains("2026-01-01"),
+        "la fecha no se trunco:\n{salida}"
+    );
+}
+
 #[test]
 fn openapi_exige_idempotency_key() {
     let (json, _, _) = axon(&["openapi", "examples"]);

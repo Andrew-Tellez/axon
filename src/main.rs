@@ -85,7 +85,13 @@ enum Cmd {
     /// snapshot de los contratos publicados, para detectar cambios incompatibles
     Baseline { sources: Vec<String> },
     /// politicas de acceso a datos: RLS por fila y vistas enmascaradas
-    Rls { sources: Vec<String> },
+    Rls {
+        sources: Vec<String>,
+        /// `sql` protege la consulta viva; `pg_anon` genera el diccionario para
+        /// hacer una copia enmascarada.
+        #[arg(long, default_value = "sql", value_parser = ["sql", "pg_anon"])]
+        target: String,
+    },
     /// manifiestos -> OpenAPI 3.1 (un catalogo para toda la plataforma)
     Openapi { sources: Vec<String> },
     /// manifiesto -> andamiaje de pruebas (unitarias, integracion, e2e)
@@ -280,8 +286,15 @@ fn run() -> Result<ExitCode, String> {
                 serde_json::to_string_pretty(&b).map_err(|e| e.to_string())?
             );
         }
-        Cmd::Rls { sources } => {
-            print!("{}", dbsec::build(&manifest::discover(&sources)?))
+        Cmd::Rls { sources, target } => {
+            let ms = manifest::discover(&sources)?;
+            print!(
+                "{}",
+                match target.as_str() {
+                    "pg_anon" => dbsec::build_pg_anon(&ms),
+                    _ => dbsec::build(&ms),
+                }
+            )
         }
         Cmd::Openapi { sources } => println!(
             "{}",

@@ -71,7 +71,7 @@ lean (lo que **emite**). axon lo traduce; es la confusión número uno al leer 2
 
 Lo que AsyncAPI no declara sale como `TODO` y `verify` lo trata como ausente.
 
-### `axon rls <fuentes>`
+### `axon rls <fuentes> [--target sql|pg_anon]`
 Políticas de acceso a datos: RLS por fila y vistas enmascaradas por columna. Sale del
 cruce del esquema real (leído de las migraciones) con los campos `pii` del manifiesto.
 
@@ -85,6 +85,12 @@ superusuario** (un superusuario salta RLS siempre) y fijar el inquilino en la se
 ```sql
 SET axon.tenant = '<uuid del inquilino>';
 ```
+
+Con `--target pg_anon` emite el diccionario sensible de
+[pg_anon](https://github.com/TantorLabs/pg_anon) en vez del SQL: eso sirve para hacer
+una **copia** enmascarada (staging, soporte, terceros), no para proteger la consulta
+viva. La regla sale del tipo de la columna, y las tablas del framework se excluyen del
+dump porque el `outbox` lleva payloads.
 
 ## Infraestructura
 
