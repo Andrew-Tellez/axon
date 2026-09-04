@@ -22,4 +22,5 @@ lto = true
 opt-level = "z"
 
 [dev-dependencies]
+sqlparser = "0.62"
 serde_yaml_ng = "0.10.0"

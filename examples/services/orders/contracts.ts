@@ -46,11 +46,13 @@ export interface Inbox { once(id: string, fn: () => Promise<void>): Promise<void
 export interface OrderPlacedV1 {
   orderId: string;
   customerId: string;
+  customerEmail: string;
   total: { amount: number; currency: string };
 }
 
 export interface PlaceOrderIn {
   customerId: string;
+  customerEmail: string;
   total: { amount: number; currency: string };
 }
 
@@ -81,6 +83,7 @@ export const manifest = {
     "order.placed@v1": {
       "orderId": "uuid",
       "customerId": "uuid",
+      "customerEmail": "string",
       "total": "money"
     }
   },
@@ -89,6 +92,7 @@ export const manifest = {
     "placeOrder": {
       "in": {
         "customerId": "uuid",
+        "customerEmail": "string",
         "total": "money"
       },
       "out": {
@@ -138,6 +142,10 @@ export const manifest = {
     "max_staleness_ms": 3000
   },
   "flags": {},
+  "analytics": {
+    "export": true,
+    "pii": "hash"
+  },
   "machine": {},
   "infra": {
     "state": "postgres",
@@ -363,13 +371,20 @@ export class Clientes {
 export const camposPII = ["customer_email"] as const;
 
 /** Reemplaza todo campo PII por "[redactado]", a cualquier profundidad.
- *  Pasa por aqui cualquier objeto antes de mandarlo a un log. */
+ *  Pasa por aqui cualquier objeto antes de mandarlo a un log.
+ *
+ *  La comparacion normaliza: `customer_email` declarado en el manifiesto
+ *  cubre `customerEmail` en el contrato y `customer-email` en una
+ *  cabecera. El mismo concepto se declara una vez. */
+const normalizarPII = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+const pii = new Set((camposPII as readonly string[]).map(normalizarPII));
+
 export function redactar<T>(valor: T): T {
   if (Array.isArray(valor)) return valor.map(redactar) as T;
   if (valor === null || typeof valor !== "object") return valor;
   const salida: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(valor)) {
-    salida[k] = (camposPII as readonly string[]).includes(k) ? "[redactado]" : redactar(v);
+    salida[k] = pii.has(normalizarPII(k)) ? "[redactado]" : redactar(v);
   }
   return salida as T;
 }

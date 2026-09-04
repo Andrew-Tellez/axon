@@ -8,6 +8,7 @@ transport = "pubsub"
 [emits."order.placed@v1"]
 orderId = "uuid"
 customerId = "uuid"
+customerEmail = "string"
 total = "money"
 
 [methods.placeOrder]
@@ -16,7 +17,7 @@ auth = "public"          # la puerta de entrada del sistema
 rate_limit = 60          # por minuto: publica sin freno es una invitacion
 timeout_ms = 5000
 idempotent = true
-in = { customerId = "uuid", total = "money" }
+in = { customerId = "uuid", customerEmail = "string", total = "money" }
 out = { orderId = "uuid" }
 
 [methods.getOrder]
@@ -32,6 +33,12 @@ method = "capturePayment"
 timeout_ms = 3000
 retries = 2
 breaker = true
+
+# Una bodega es donde un dato personal vive mas tiempo y lo lee mas gente, asi
+# que el default es no exportarlo. Aca se elige hashearlo para poder contar
+# clientes unicos sin guardar el correo.
+[analytics]
+pii = "hash"
 
 [infra]
 state = "postgres"

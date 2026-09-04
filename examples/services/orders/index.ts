@@ -15,12 +15,20 @@ class Orders extends OrdersService {
   async placeOrder(input: PlaceOrderIn, e: Envelope<unknown>): Promise<PlaceOrderOut> {
     const orderId = crypto.randomUUID();
     await this.#db.query(
-      `INSERT INTO "order" (id, customer_id, total_cents, status) VALUES ($1,$2,$3,'placed')`,
-      [orderId, input.customerId, input.total.amount],
+      `INSERT INTO "order" (id, customer_id, customer_email, total_cents, status)
+       VALUES ($1,$2,$3,$4,'placed')`,
+      [orderId, input.customerId, input.customerEmail, input.total.amount],
     );
     // `e` es la causa: el emisor generado propaga traceparent y correlationId.
     await this.emitOrderPlacedV1(
-      { orderId, customerId: input.customerId, total: input.total },
+      {
+        orderId,
+        customerId: input.customerId,
+        // declarado `pii`: se redacta en logs con `redactar()`, se excluye o
+        // hashea en la bodega, y se enmascara en la vista de analitica
+        customerEmail: input.customerEmail,
+        total: input.total,
+      },
       e,
     );
     return { orderId };

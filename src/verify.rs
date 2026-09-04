@@ -158,7 +158,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     // porque un error que no dice por que importa se silencia con un allow.
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
-        let pii: Vec<String> = m.pii.iter().map(|p| p.to_lowercase()).collect();
+        let pii = &m.pii;
 
         for (name, meth) in &m.methods {
             let publico = meth.auth.as_deref() == Some("public");
@@ -182,7 +182,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // publica termina en un log, una cache y un CDN.
             if publico {
                 for campo in meth.output.keys() {
-                    if pii.contains(&campo.to_lowercase()) {
+                    if es_pii(pii, campo) {
                         errors.push(format!(
                             "[A09] {svc}.{name}: devuelve `{campo}`, declarado PII, por una ruta publica"
                         ));
@@ -235,6 +235,28 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     m.service
                 ));
             }
+        }
+    }
+
+    // ---- exportacion a la bodega ----
+    for m in ms.iter().filter(|m| !m.external) {
+        match m.analytics.pii.as_str() {
+            "exclude" | "hash" => {}
+            otro => errors.push(format!(
+                "{}: `[analytics] pii = \"{otro}\"` no existe; usa \"exclude\" o \"hash\"",
+                m.service
+            )),
+        }
+        // Exportar un dato personal hasheado sigue siendo exportarlo: el hash
+        // de un correo identifica a la misma persona en dos tablas distintas.
+        if m.analytics.pii == "hash" && m.analytics.export && !m.pii.is_empty() {
+            warnings.push(format!(
+                "{}: exporta {} campos personales hasheados a la bodega. Un hash no es \
+                 anonimizacion: identifica a la misma persona entre tablas, asi que sirve \
+                 para contar y tambien para cruzar",
+                m.service,
+                m.pii.len()
+            ));
         }
     }
 

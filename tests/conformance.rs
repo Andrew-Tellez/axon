@@ -942,6 +942,25 @@ public = true
         "{ts}"
     );
     assert!(ts.contains("export function redactar"), "{ts}");
+    // El mismo concepto se declara UNA vez: `customer_email` en el manifiesto
+    // cubre `customerEmail` en el contrato y `customer-email` en una cabecera.
+    // Antes hacia falta declararlo dos veces, que es absurdo.
+    assert!(
+        ts.contains("const normalizarPII"),
+        "el redactor compara claves exactas:\n{ts}"
+    );
+    assert!(ts.contains("pii.has(normalizarPII(k))"), "{ts}");
+    // y la normalizacion llega a las tres capas desde una sola declaracion
+    let (bodega, _, _) = axon(&["analytics", "examples"]);
+    assert!(
+        bodega.contains("customer_email_hash"),
+        "la bodega no reconocio el campo del evento:\n{bodega}"
+    );
+    let (rls, _, _) = axon(&["rls", "examples"]);
+    assert!(
+        rls.contains(r#"'[redactado]'::text AS "customer_email""#),
+        "la vista no enmascaro la columna:\n{rls}"
+    );
 }
 
 /// RLS y enmascarado no se comprueban leyendo el SQL: se aplican a un Postgres
@@ -2089,6 +2108,101 @@ fn los_ejemplos_de_la_documentacion_validan() {
     );
     assert!(revisados >= 10, "solo se revisaron {revisados} ejemplos");
     eprintln!("{revisados} ejemplos de manifiesto en {paginas} paginas");
+}
+
+/// Bodega de datos: una tabla por evento y las vistas de embudo, que salen de
+/// la cadena causal DECLARADA. Eso ultimo es lo que ninguna bodega tiene: un
+/// embudo se arma normalmente adivinando como se relacionan los eventos.
+#[test]
+fn los_esquemas_de_bodega_son_sql_valido() {
+    let (ddl, err, ok) = axon(&["analytics", "examples", "--target", "bigquery"]);
+    assert!(ok, "{err}");
+
+    // el envelope: sin correlation_id no hay embudo posible
+    for col in [
+        "event_id",
+        "event_time TIMESTAMP",
+        "correlation_id",
+        "causation_id",
+    ] {
+        assert!(ddl.contains(col), "falta la columna {col}:\n{ddl}");
+    }
+    // particionar no es opcional: sin esto cada consulta escanea el historico
+    assert!(ddl.contains("PARTITION BY DATE(event_time)"), "{ddl}");
+    assert!(ddl.contains("CLUSTER BY correlation_id, source"), "{ddl}");
+    // convencion de bodega: snake_case, no el camelCase del contrato
+    assert!(
+        ddl.contains("customer_id STRING") && !ddl.contains("customerId STRING"),
+        "{ddl}"
+    );
+    // `money` se aplana, porque sumar un objeto no se puede; y `amount_amount`
+    // no aporta nada
+    assert!(
+        ddl.contains("total_amount INT64") && ddl.contains("total_currency STRING"),
+        "{ddl}"
+    );
+    assert!(
+        ddl.contains("\n  amount INT64"),
+        "amount_amount no se colapso:\n{ddl}"
+    );
+    // el modo hash del ejemplo: se exporta el hash, no el valor
+    assert!(ddl.contains("customer_email_hash STRING"), "{ddl}");
+    assert!(
+        !ddl.contains("customer_email STRING"),
+        "se exporto el correo en claro:\n{ddl}"
+    );
+
+    // el embudo sale de la cadena declarada, con la latencia de negocio
+    assert!(
+        ddl.contains("CREATE OR REPLACE VIEW `@dataset.embudo_order_placed_v1`"),
+        "{ddl}"
+    );
+    assert!(ddl.contains("AS paso_1_order_placed_v1"), "{ddl}");
+    assert!(ddl.contains("AS paso_2_payment_captured_v1"), "{ddl}");
+    assert!(
+        ddl.contains("AS ms_hasta_payment_captured_v1"),
+        "sin latencia de negocio:\n{ddl}"
+    );
+
+    // Y lo que importa: que sea SQL valido. El comentario al final de una
+    // columna se come la coma que la separa de la siguiente, y el DDL queda
+    // roto — ya me habia pasado en una migracion, y aca volvio a pasar.
+    let sql = ddl.replace("@dataset", "ds");
+    let sentencias =
+        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::BigQueryDialect {}, &sql);
+    assert!(
+        sentencias.is_ok(),
+        "el DDL de bodega no es SQL valido: {}",
+        sentencias.unwrap_err()
+    );
+    assert!(sentencias.unwrap().len() >= 3, "faltan sentencias");
+
+    // el plan neutral, para quien no use BigQuery
+    let (plan, _, _) = axon(&["analytics", "examples", "--target", "plan"]);
+    let v: serde_json::Value = serde_json::from_str(&plan).expect("plan json");
+    assert_eq!(v["tables"][0]["partition_by"], "DATE(event_time)");
+    assert!(
+        v["tables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["event"] == "order.placed@v1"),
+        "{plan}"
+    );
+
+    // y el sink nativo: Pub/Sub escribe directo, sin un proceso intermedio
+    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    assert!(g.contains("bigquery_config"), "{g}");
+    assert!(g.contains("use_table_schema = true"), "{g}");
+    // la bodega tambien necesita DLQ: un mensaje que no encaja no desaparece
+    let bodega = g
+        .split("_bodega\" {")
+        .nth(1)
+        .expect("suscripcion de bodega");
+    assert!(
+        bodega.contains("dead_letter_policy"),
+        "el sink de bodega sin DLQ:\n{bodega}"
+    );
 }
 
 #[test]

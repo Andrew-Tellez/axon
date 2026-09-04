@@ -53,6 +53,7 @@ export interface PaymentCapturedV1 {
 export interface OrderPlacedV1 {
   orderId: string;
   customerId: string;
+  customerEmail: string;
   total: { amount: number; currency: string };
 }
 
@@ -200,6 +201,10 @@ export const manifest = {
       "sticky_by": null,
       "kill_switch": true
     }
+  },
+  "analytics": {
+    "export": true,
+    "pii": "exclude"
   },
   "machine": {
     "payment": {

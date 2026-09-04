@@ -21,6 +21,7 @@
 - [Trazabilidad](./trazabilidad.md)
 - [Escalado y carga](./escalado.md)
 - [Seguridad](./seguridad.md)
+- [Bodega y métricas](./analitica.md)
 
 # Verificación
 

@@ -1,6 +1,7 @@
 //! axon — el manifiesto es la fuente de verdad; el resto son proyecciones.
 mod api;
 mod baseline;
+mod bi;
 mod cap;
 mod carga;
 mod color;
@@ -84,6 +85,12 @@ enum Cmd {
         /// nombre del servicio, si no hay que deducirlo de info.title
         #[arg(long)]
         service: Option<String>,
+    },
+    /// esquemas de bodega y vistas de embudo, derivados de los eventos
+    Analytics {
+        sources: Vec<String>,
+        #[arg(long, default_value = "bigquery", value_parser = ["bigquery", "plan"])]
+        target: String,
     },
     /// reconcilia el lado CAP declarado con los patrones en uso
     Cap {
@@ -307,6 +314,16 @@ fn run() -> Result<ExitCode, String> {
                 std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?
             };
             print!("{}", import::asyncapi(&text, service.as_deref())?);
+        }
+        Cmd::Analytics { sources, target } => {
+            let ms = manifest::discover(&sources)?;
+            match target.as_str() {
+                "plan" => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&bi::build_plan(&ms)).map_err(|e| e.to_string())?
+                ),
+                _ => print!("{}", bi::build_bigquery(&ms)),
+            }
         }
         Cmd::Cap { sources, services } => {
             println!(

@@ -6,6 +6,7 @@
       "fields": {
         "orderId": "uuid",
         "customerId": "uuid",
+        "customerEmail": "string",
         "total": "money"
       }
     },
@@ -33,6 +34,7 @@
     "orders.placeOrder": {
       "in": {
         "customerId": "uuid",
+        "customerEmail": "string",
         "total": "money"
       },
       "out": {

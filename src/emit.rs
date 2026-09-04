@@ -216,13 +216,19 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         out.push(format!(
             "\n/** Campos declarados PII en el manifiesto. */\nexport const camposPII = [{}] as const;\n\n\
              /** Reemplaza todo campo PII por \"[redactado]\", a cualquier profundidad.\n \
-             *  Pasa por aqui cualquier objeto antes de mandarlo a un log. */\n\
+             *  Pasa por aqui cualquier objeto antes de mandarlo a un log.\n \
+             *\n \
+             *  La comparacion normaliza: `customer_email` declarado en el manifiesto\n \
+             *  cubre `customerEmail` en el contrato y `customer-email` en una\n \
+             *  cabecera. El mismo concepto se declara una vez. */\n\
+             const normalizarPII = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, \"\");\n\
+             const pii = new Set((camposPII as readonly string[]).map(normalizarPII));\n\n\
              export function redactar<T>(valor: T): T {{\n  \
                if (Array.isArray(valor)) return valor.map(redactar) as T;\n  \
                if (valor === null || typeof valor !== \"object\") return valor;\n  \
                const salida: Record<string, unknown> = {{}};\n  \
                for (const [k, v] of Object.entries(valor)) {{\n    \
-                 salida[k] = (camposPII as readonly string[]).includes(k) ? \"[redactado]\" : redactar(v);\n  \
+                 salida[k] = pii.has(normalizarPII(k)) ? \"[redactado]\" : redactar(v);\n  \
                }}\n  return salida as T;\n}}\n",
             m.pii.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(", ")
         ));

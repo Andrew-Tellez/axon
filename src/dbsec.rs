@@ -77,7 +77,7 @@ pub fn build_pg_anon(ms: &[Manifest]) -> String {
         let Some(tablas) = esquemas.get(&m.service) else {
             continue;
         };
-        let pii: Vec<String> = m.pii.iter().map(|p| p.to_lowercase()).collect();
+        let pii = &m.pii;
         for (t, cols) in tablas {
             if PROPIAS.contains(&t.as_str()) {
                 // El outbox lleva el payload de cada evento en un jsonb: es el
@@ -88,10 +88,7 @@ pub fn build_pg_anon(ms: &[Manifest]) -> String {
                 ));
                 continue;
             }
-            let sensibles: Vec<&Column> = cols
-                .iter()
-                .filter(|c| pii.contains(&c.name.to_lowercase()))
-                .collect();
+            let sensibles: Vec<&Column> = cols.iter().filter(|c| es_pii(pii, &c.name)).collect();
             if sensibles.is_empty() {
                 continue;
             }
@@ -150,7 +147,7 @@ pub fn build(ms: &[Manifest]) -> String {
         let Some(tablas) = esquemas.get(&m.service) else {
             continue;
         };
-        let pii: Vec<String> = m.pii.iter().map(|p| p.to_lowercase()).collect();
+        let pii = &m.pii;
 
         for (t, cols) in tablas {
             if PROPIAS.contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
@@ -176,10 +173,7 @@ pub fn build(ms: &[Manifest]) -> String {
                 }
             }
             // ---- enmascarado por columna ----
-            let sensibles: Vec<&Column> = cols
-                .iter()
-                .filter(|c| pii.contains(&c.name.to_lowercase()))
-                .collect();
+            let sensibles: Vec<&Column> = cols.iter().filter(|c| es_pii(pii, &c.name)).collect();
             if !sensibles.is_empty() {
                 let proyeccion: Vec<String> = cols
                     .iter()

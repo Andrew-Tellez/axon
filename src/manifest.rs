@@ -125,6 +125,30 @@ impl Cap {
     }
 }
 
+/// Que pasa con los eventos de este servicio cuando llegan a la bodega.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Analytics {
+    /// `false` deja el servicio fuera de la exportacion.
+    pub export: bool,
+    /// Que hacer con los campos declarados `pii` al exportarlos:
+    /// `"exclude"` no los manda, `"hash"` manda un SHA-256 con salt.
+    ///
+    /// El default es excluir. Una bodega es el lugar donde un dato personal
+    /// vive mas tiempo, se copia mas veces y lo lee mas gente, asi que el
+    /// valor seguro tiene que ser el que no lo manda.
+    pub pii: String,
+}
+
+impl Default for Analytics {
+    fn default() -> Self {
+        Self {
+            export: true,
+            pii: "exclude".into(),
+        }
+    }
+}
+
 /// Un feature flag.
 ///
 /// Lo que aporta declararlos no es el SDK —OpenFeature y flagd ya existen—
@@ -340,6 +364,9 @@ pub struct Manifest {
     /// Feature flags del servicio.
     #[serde(default)]
     pub flags: IndexMap<String, Flag>,
+    /// Exportacion a la bodega de datos.
+    #[serde(default)]
+    pub analytics: Analytics,
     /// Maquinas de estado del dominio: la unica logica de negocio que vale
     /// la pena declarar, porque es la misma en todos los lenguajes.
     #[serde(default)]
@@ -733,6 +760,46 @@ pub fn ts_type(t: &str) -> &str {
         "bool" => "boolean",
         "money" => "{ amount: number; currency: string }",
         _ => "unknown",
+    }
+}
+
+/// Normaliza un nombre de campo para comparar: minusculas y sin separadores.
+///
+/// El mismo concepto se escribe distinto en cada capa —`customerEmail` en el
+/// contrato, `customer_email` en la base, `customer-email` en una cabecera— y
+/// declararlo tres veces en `pii` seria absurdo. Se declara una y se compara
+/// normalizado.
+pub fn normalizar(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// Si un campo esta declarado como personal, comparando normalizado.
+pub fn es_pii(declarados: &[String], campo: &str) -> bool {
+    let c = normalizar(campo);
+    declarados.iter().any(|d| normalizar(d) == c)
+}
+
+#[cfg(test)]
+mod pii {
+    use super::*;
+
+    #[test]
+    fn el_mismo_concepto_se_declara_una_vez() {
+        let d = vec!["customer_email".to_string()];
+        for campo in [
+            "customerEmail",
+            "customer_email",
+            "CustomerEmail",
+            "customer-email",
+        ] {
+            assert!(es_pii(&d, campo), "{campo} deberia coincidir");
+        }
+        for campo in ["customer_id", "email_template", "customer"] {
+            assert!(!es_pii(&d, campo), "{campo} no deberia coincidir");
+        }
     }
 }
 

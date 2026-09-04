@@ -10,6 +10,11 @@ pub struct Topic {
     pub event: String,
     pub name: String,
     pub dlq: String,
+    /// El evento se exporta a la bodega: lleva su propia suscripcion de
+    /// escritura directa, aparte de las de los consumidores.
+    pub analytics: bool,
+    /// Nombre de la tabla destino.
+    pub table: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +113,10 @@ pub fn plan(ms: &[Manifest]) -> Plan {
             event: ev.to_string(),
             name: topic(ev),
             dlq: format!("{}.dlq", topic(ev)),
+            analytics: ms
+                .iter()
+                .any(|m| m.analytics.export && !m.external && m.emits.contains_key(ev.as_str())),
+            table: tfname(ev),
         })
         .collect();
 
@@ -243,6 +252,13 @@ fn gcp(p: &Plan) -> String {
                 .to_string(),
         );
     }
+    if p.topics.iter().any(|t| t.analytics) {
+        o.push(
+            "variable \"dataset\" {\n  type        = string\n  \
+             description = \"Dataset de BigQuery donde caen los eventos\"\n}\n"
+                .to_string(),
+        );
+    }
     for t in &p.topics {
         let n = tfname(&t.event);
         o.push(format!(
@@ -333,6 +349,25 @@ fn gcp(p: &Plan) -> String {
              path_matcher {{\n    name            = \"axon\"\n    \
              default_service = google_compute_backend_service.{}.id\n{reglas}  }}\n}}\n",
             tfname(&p.routes[0].service), tfname(&p.routes[0].service)
+        ));
+    }
+    for t in p.topics.iter().filter(|t| t.analytics) {
+        let n = tfname(&t.event);
+        // Pub/Sub escribe directo en BigQuery: no hay un proceso intermedio
+        // que mantener, ni uno mas donde el evento pueda perderse.
+        o.push(format!(
+            "resource \"google_pubsub_subscription\" \"{n}_bodega\" {{\n  \
+             name  = \"bodega--{}\"\n  topic = google_pubsub_topic.{n}.name\n  \
+             bigquery_config {{\n    \
+               table            = \"${{var.project}}.${{var.dataset}}.{}\"\n    \
+               use_table_schema = true\n    \
+               write_metadata   = true\n  }}\n  \
+             # la bodega tambien necesita DLQ: un mensaje que no encaja en el\n  \
+             # esquema no puede desaparecer en silencio\n  \
+             dead_letter_policy {{\n    \
+               dead_letter_topic     = google_pubsub_topic.{n}_dlq.id\n    \
+               max_delivery_attempts = 5\n  }}\n}}\n",
+            t.name, t.table
         ));
     }
     for s in &p.subs {

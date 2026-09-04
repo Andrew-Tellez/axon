@@ -53,6 +53,7 @@ export class OutboxFalso implements Outbox {
 export const fixtureOrderPlacedV1: OrderPlacedV1 = {
   orderId: "00000000-0000-4000-8000-000000000000",
   customerId: "00000000-0000-4000-8000-000000000000",
+  customerEmail: "customerEmail",
   total: { amount: 100, currency: "MXN" },
 };
 
