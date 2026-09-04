@@ -107,6 +107,12 @@ pub struct Infra {
     /// Almacenamiento de objetos del servicio, por nombre logico.
     #[serde(default)]
     pub buckets: IndexMap<String, Bucket>,
+    /// Columna que identifica al inquilino. Si esta, toda tabla la necesita y
+    /// `axon rls` genera la politica que la aplica.
+    pub tenant_column: Option<String>,
+    /// Tablas que no son de negocio y no llevan inquilino.
+    #[serde(default)]
+    pub tenant_exempt: Vec<String>,
 }
 
 /// Una transicion. El QUE es portable a cualquier lenguaje; el COMO
@@ -161,6 +167,11 @@ pub struct Manifest {
     /// Gobernanza: todo servicio tiene dueno humano y criticidad declarada.
     pub owner: Option<String>,
     pub tier: Option<String>,
+    /// Nombres de campo que llevan datos personales, en cualquier evento o
+    /// metodo de este servicio. Lo usa el generador para redactar logs y
+    /// `verify` para bloquear que salgan por una ruta publica.
+    #[serde(default)]
+    pub pii: Vec<String>,
     #[serde(default)]
     pub external: bool,
     #[serde(default)]
@@ -205,6 +216,21 @@ pub fn for_env(m: &Manifest, env: &str) -> Manifest {
         }
         if !o.secrets.is_empty() {
             out.infra.secrets = o.secrets.clone();
+        }
+        if o.max_instances.is_some() {
+            out.infra.max_instances = o.max_instances;
+        }
+        if o.port.is_some() {
+            out.infra.port = o.port;
+        }
+        if !o.buckets.is_empty() {
+            out.infra.buckets = o.buckets.clone();
+        }
+        if o.tenant_column.is_some() {
+            out.infra.tenant_column = o.tenant_column.clone();
+        }
+        if !o.tenant_exempt.is_empty() {
+            out.infra.tenant_exempt = o.tenant_exempt.clone();
         }
     }
     out
@@ -300,9 +326,24 @@ fn statements(text: &str, origen: &str) -> Vec<Statement> {
     }
 }
 
+/// Postgres pliega a minusculas todo identificador sin comillas. Guardar el
+/// casing del archivo y despues citarlo produce una columna que no existe.
+fn ident(i: &sqlparser::ast::Ident) -> String {
+    match i.quote_style {
+        Some(_) => i.value.clone(),
+        None => i.value.to_lowercase(),
+    }
+}
+
 fn nombre_tabla(o: &sqlparser::ast::ObjectName) -> String {
     o.0.last()
-        .map(|p| p.to_string().trim_matches('"').to_string())
+        .map(|p| {
+            let t = p.to_string();
+            match t.starts_with('"') {
+                true => t.trim_matches('"').to_string(),
+                false => t.to_lowercase(),
+            }
+        })
         .unwrap_or_default()
 }
 
@@ -319,7 +360,7 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                     .columns
                     .iter()
                     .map(|c| Column {
-                        name: c.name.value.clone(),
+                        name: ident(&c.name),
                         ty: tipo_sql(&c.data_type),
                         pk: c
                             .options
@@ -336,14 +377,16 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                     match c {
                         TableConstraint::PrimaryKey(pk) => {
                             for k in &pk.columns {
-                                marcar(&mut cols, &k.to_string(), |c| c.pk = true);
+                                marcar(&mut cols, &k.to_string().to_lowercase(), |c| c.pk = true);
                             }
                         }
                         TableConstraint::ForeignKey(fk) => {
                             let t = nombre_tabla(&fk.foreign_table);
                             for k in &fk.columns {
                                 let t = t.clone();
-                                marcar(&mut cols, &k.to_string(), move |c| c.fk = Some(t.clone()));
+                                marcar(&mut cols, &k.to_string().to_lowercase(), move |c| {
+                                    c.fk = Some(t.clone())
+                                });
                             }
                         }
                         _ => {}
@@ -357,7 +400,7 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                     match op {
                         AlterTableOperation::AddColumn { column_def, .. } => {
                             into.entry(tabla.clone()).or_default().push(Column {
-                                name: column_def.name.value.clone(),
+                                name: ident(&column_def.name),
                                 ty: tipo_sql(&column_def.data_type),
                                 pk: false,
                                 fk: column_def.options.iter().find_map(|o| match &o.option {
@@ -370,8 +413,7 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                         }
                         AlterTableOperation::DropColumn { column_names, .. } => {
                             if let Some(cols) = into.get_mut(&tabla) {
-                                let fuera: Vec<String> =
-                                    column_names.iter().map(|c| c.value.clone()).collect();
+                                let fuera: Vec<String> = column_names.iter().map(ident).collect();
                                 cols.retain(|c| !fuera.contains(&c.name));
                             }
                         }

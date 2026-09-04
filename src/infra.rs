@@ -243,12 +243,19 @@ fn gcp(p: &Plan) -> String {
         }
         o.push(format!(
             "resource \"google_cloud_run_v2_service\" \"{s}\" {{\n  name     = \"{svc}\"\n  \
-             location = var.region\n  template {{\n    service_account = google_service_account.{s}.email\n    \
+             location = var.region\n  \
+             # [A01] sin ruta publica no hay puerta a internet\n  \
+             ingress  = \"{ingress}\"\n  template {{\n    service_account = google_service_account.{s}.email\n    \
              scaling {{\n      min_instance_count = {min}\n      max_instance_count = {max}\n    }}\n    \
              containers {{\n      image = var.{img}\n      ports {{\n        container_port = {port}\n      }}\n\
 {env}    }}\n  }}\n}}\n",
             svc = w.service, min = w.min_instances, max = w.max_instances,
-            img = w.image_var, port = w.port
+            img = w.image_var, port = w.port,
+            ingress = if p.routes.iter().any(|r| r.service == w.service && r.public) {
+                "INGRESS_TRAFFIC_ALL"
+            } else {
+                "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+            }
         ));
     }
     if !p.routes.is_empty() {
@@ -578,9 +585,20 @@ spec:
     metadata:
       labels: {{ app: {svc} }}
     spec:
+      # [A05] endurecido por generacion, no por acordarse
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: {{ type: RuntimeDefault }}
+      automountServiceAccountToken: false
       containers:
         - name: {svc}
           image: IMAGE_{up}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {{ drop: [\"ALL\"] }}
           ports:
             - containerPort: {port}
           readinessProbe:
@@ -671,6 +689,22 @@ spec:
                 svc = r.service,
             ));
         }
+    }
+    for w in &p.workloads {
+        // [A01/A05] denegar por defecto: al pod solo entra el edge, y solo si
+        // el servicio expone rutas. Un servicio sin ruta no es alcanzable
+        // desde fuera, aunque alguien se equivoque en el gateway.
+        let desde_edge = p.routes.iter().any(|r| r.service == w.service);
+        let reglas = if desde_edge {
+            "\n    - from:\n        - namespaceSelector:\n            matchLabels: { axon.dev/edge: \"true\" }"
+        } else {
+            " []   # nadie: este servicio solo reacciona a eventos"
+        };
+        o.push(format!(
+            "---\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: {svc}\nspec:\n  \
+             podSelector:\n    matchLabels: {{ app: {svc} }}\n  policyTypes: [Ingress]\n  ingress:{reglas}",
+            svc = w.service
+        ));
     }
     for s in &p.subs {
         o.push(format!(

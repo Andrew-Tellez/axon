@@ -66,6 +66,21 @@ lean (lo que **emite**). axon lo traduce; es la confusión número uno al leer 2
 
 Lo que AsyncAPI no declara sale como `TODO` y `verify` lo trata como ausente.
 
+### `axon rls <fuentes>`
+Políticas de acceso a datos: RLS por fila y vistas enmascaradas por columna. Sale del
+cruce del esquema real (leído de las migraciones) con los campos `pii` del manifiesto.
+
+La salida es **una migración más** — guardala como `sql/<servicio>/090_rls.expand.sql`
+y aplicala con tu runner. No es un comando que se corre a mano: el esquema lo gobiernan
+las migraciones.
+
+Para que la política haga algo, la aplicación tiene que conectarse con un rol **no
+superusuario** (un superusuario salta RLS siempre) y fijar el inquilino en la sesión:
+
+```sql
+SET axon.tenant = '<uuid del inquilino>';
+```
+
 ## Infraestructura
 
 ### `axon infra <fuentes> [--target local|gcp|aws|k8s|plan] [--env <nombre>]`

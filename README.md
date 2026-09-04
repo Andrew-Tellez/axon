@@ -310,6 +310,71 @@ uno público no queda sin cache. El nombre del bucket cambia en cada entorno, as
 viaja al contenedor como `BUCKET_<NOMBRE>` — la misma variable en los cuatro targets,
 apuntando a MinIO en local.
 
+## Seguridad
+
+Cada regla cita su categoría del [OWASP Top 10 (2021)](https://owasp.org/Top10/),
+porque un error que no dice *por qué* importa se silencia con un allow:
+
+| | Regla | |
+| --- | --- | --- |
+| **A01** | Ruta pública que muta en un servicio `tier = "0"` | error |
+| **A01** | Tabla sin la columna del inquilino cuando hay `tenant_column` | error |
+| **A02** | Un secreto literal donde va su nombre | error |
+| **A04** | Ruta pública sin `timeout_ms` | error |
+| **A05** | Bucket público sin `retention_days` | aviso |
+| **A08** | `[ci].image` sin digest — una etiqueta es mutable | aviso |
+| **A09** | Un campo declarado `pii` devuelto por una ruta pública | error |
+
+Y lo que no se avisa, se **genera endurecido**:
+
+- **A05** — el `Deployment` de k8s sale con `runAsNonRoot`, `readOnlyRootFilesystem`,
+  `capabilities: drop ALL`, `seccompProfile: RuntimeDefault` y sin token de service
+  account montado. Más una `NetworkPolicy` de denegación por defecto: al pod solo entra
+  el edge.
+- **A01** — un servicio sin ninguna ruta pública se despliega con
+  `ingress = INTERNAL_LOAD_BALANCER`: no tiene puerta a internet aunque alguien se
+  equivoque en el gateway.
+- **A08** — el pipeline construye la imagen, toma su digest y **despliega por digest**,
+  con `provenance: true`.
+- **A09** — `axon build` emite `camposPII` y un `redactar()` recursivo. Un dato personal
+  se filtra por un log, no por un exploit.
+
+### RLS y enmascarado
+
+```toml
+pii = ["customer_email"]
+
+[infra]
+tenant_column = "tenant_id"
+tenant_exempt = ["auditoria"]   # lo que no es de negocio
+```
+
+`axon rls` cruza dos cosas que axon ya sabe — el esquema real (leído de las migraciones
+con un parser SQL) y los campos `pii` — y emite una migración más:
+
+```sql
+ALTER TABLE "order" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "order" FORCE ROW LEVEL SECURITY;   -- también al dueño de la tabla
+CREATE POLICY "order_inquilino" ON "order"
+  USING ("tenant_id" = current_setting('axon.tenant', true)::uuid)
+  WITH CHECK ("tenant_id" = current_setting('axon.tenant', true)::uuid);
+
+CREATE OR REPLACE VIEW "order_enmascarada" AS SELECT
+  id, customer_id, total_cents, status, tenant_id,
+  '[redactado]'::text AS "customer_email"
+FROM "order";
+REVOKE ALL ON "order" FROM axon_lectura;
+GRANT SELECT ON "order_enmascarada" TO axon_lectura;
+```
+
+La regla de `verify` es la que importa: **una tabla que se olvida de la columna del
+inquilino no recibe política, y una tabla sin política no falla — devuelve las filas de
+todos.** Ese es el modo de fallo silencioso que la declaración elimina.
+
+El suite no lee ese SQL: lo aplica a un Postgres real y comprueba que sin inquilino se
+ven 0 filas, que cada inquilino ve solo la suya, que escribir para otro se rechaza, y
+que la vista devuelve `[redactado]`.
+
 ## Gobernanza
 
 `axon.policy.toml`, versionado junto al código:
@@ -403,6 +468,7 @@ propios — un compilador que solo se verifica a sí mismo produce salida invál
 | El testkit generado | `node --test` contra el servicio de ejemplo real |
 | El Go generado | `go vet` |
 | El DDL | `PARTITION BY`, constraints de tabla, y fallo ruidoso ante SQL inválido |
+| La RLS generada | se aplica a un Postgres real y se comprueba que aísla |
 | Los cuatro targets | despliegan el workload y entregan a alguien |
 
 ```sh

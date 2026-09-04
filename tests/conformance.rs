@@ -783,6 +783,226 @@ out = { b = "int" }
     assert!(err.contains("publica y sin `rate_limit`"), "{err}");
 }
 
+/// Las reglas de seguridad citan su categoria del OWASP Top 10, porque un
+/// error que no dice por que importa se silencia con un allow.
+#[test]
+fn las_reglas_owasp_disparan() {
+    let dir = std::env::temp_dir().join("axon-owasp");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("mal.toml"),
+        r#"
+service = "mal"
+owner = "equipo"
+tier = "0"
+pii = ["email"]
+[methods.pagar]
+http = "POST /v1/pagar"
+auth = "public"
+rate_limit = 10
+idempotent = true
+in = { email = "string" }
+out = { ok = "bool" }
+[methods.perfil]
+http = "GET /v1/perfil"
+auth = "public"
+rate_limit = 10
+timeout_ms = 1000
+in = { id = "uuid" }
+out = { email = "string" }
+[infra]
+secrets = ["sk_ESTO_NO_ES_UNA_LLAVE"]
+[infra.buckets.abierto]
+public = true
+"#,
+    )
+    .unwrap();
+    let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    let todo = format!("{out}{err}");
+    for regla in [
+        "[A01] mal.pagar: ruta publica que muta en un servicio tier 0",
+        "[A04] mal.pagar: ruta publica sin `timeout_ms`",
+        "[A09] mal.perfil: devuelve `email`, declarado PII",
+        "[A02] mal: `sk_ESTO_NO_ES_UNA_LLAVE`",
+        "[A05] mal: bucket `abierto` publico y sin `retention_days`",
+    ] {
+        assert!(todo.contains(regla), "falto `{regla}`:\n{todo}");
+    }
+
+    // A05: el endurecimiento va generado, no recordado
+    let (k, _, _) = axon(&["infra", "examples", "--target", "k8s"]);
+    for marca in [
+        "runAsNonRoot: true",
+        "readOnlyRootFilesystem: true",
+        "capabilities: { drop: [\"ALL\"] }",
+        "automountServiceAccountToken: false",
+        "kind: NetworkPolicy",
+    ] {
+        assert!(k.contains(marca), "k8s sin `{marca}`");
+    }
+    // A01: sin ruta publica no hay puerta a internet
+    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    assert!(
+        g.contains("ingress  = \"INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER\""),
+        "un servicio sin ruta publica quedo expuesto"
+    );
+    // A08: se despliega por digest, no por etiqueta
+    let (ci, _, _) = axon(&["ci", "examples/payments.toml", "--target", "gcp"]);
+    assert!(
+        ci.contains("@${{ steps.imagen.outputs.digest }}"),
+        "deploy por etiqueta mutable"
+    );
+    // A09: la lista de PII y su redactor llegan al codigo
+    let (ts, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
+    assert!(
+        ts.contains("export const camposPII = [\"customer_email\"]"),
+        "{ts}"
+    );
+    assert!(ts.contains("export function redactar"), "{ts}");
+}
+
+/// RLS y enmascarado no se comprueban leyendo el SQL: se aplican a un Postgres
+/// de verdad y se mira si aislan.
+#[test]
+fn la_rls_generada_aisla_de_verdad() {
+    if !tiene("docker") {
+        eprintln!("salteado: docker no esta instalado");
+        return;
+    }
+    let (sql, err, ok) = axon(&["rls", "examples"]);
+    assert!(ok, "{err}");
+    assert!(
+        sql.contains(r#"ALTER TABLE "order" FORCE ROW LEVEL SECURITY"#),
+        "{sql}"
+    );
+    // `order` es palabra reservada: sin comillas el SQL no corre
+    assert!(
+        !sql.contains("ALTER TABLE order "),
+        "identificador sin citar"
+    );
+    // el rol se crea una vez, no una por servicio
+    assert_eq!(sql.matches("CREATE ROLE axon_lectura").count(), 1);
+
+    let dir = std::env::temp_dir().join("axon-rls-sql");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut todo = String::new();
+    for f in ["001_order.expand.sql", "003_tenant.expand.sql"] {
+        todo.push_str(&std::fs::read_to_string(format!("examples/sql/orders/{f}")).unwrap());
+    }
+    todo.push_str(&sql);
+    todo.push_str(
+        r#"
+CREATE ROLE app LOGIN PASSWORD 'x';
+GRANT ALL ON ALL TABLES IN SCHEMA public TO app;
+GRANT SELECT ON "order_enmascarada" TO app;
+INSERT INTO "order" (id, customer_id, total_cents, status, tenant_id, customer_email)
+VALUES ('11111111-1111-4111-8111-111111111111','cccccccc-0000-4000-8000-000000000001',100,'placed','aaaaaaaa-0000-4000-8000-000000000001','ana@ejemplo.mx'),
+       ('22222222-2222-4222-8222-222222222222','cccccccc-0000-4000-8000-000000000002',200,'placed','bbbbbbbb-0000-4000-8000-000000000002','beto@ejemplo.mx');
+SET ROLE app;
+SELECT 'SIN_INQUILINO=' || count(*) FROM "order";
+SET axon.tenant = 'aaaaaaaa-0000-4000-8000-000000000001';
+SELECT 'INQUILINO_A=' || count(*) || ':' || min(customer_email) FROM "order";
+SET axon.tenant = 'bbbbbbbb-0000-4000-8000-000000000002';
+SELECT 'INQUILINO_B=' || count(*) || ':' || min(customer_email) FROM "order";
+SELECT 'ENMASCARADA=' || min(customer_email) FROM "order_enmascarada";
+"#,
+    );
+    std::fs::write(dir.join("todo.sql"), &todo).unwrap();
+
+    let nombre = "axon-test-rls";
+    let _ = Command::new("docker").args(["rm", "-f", nombre]).output();
+    let arranque = Command::new("docker")
+        .args([
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            nombre,
+            "-e",
+            "POSTGRES_PASSWORD=x",
+            "-e",
+            "POSTGRES_DB=t",
+            "postgres:16-alpine",
+        ])
+        .output()
+        .expect("docker run");
+    if !arranque.status.success() {
+        eprintln!(
+            "salteado: no se pudo arrancar postgres: {}",
+            String::from_utf8_lossy(&arranque.stderr)
+        );
+        return;
+    }
+    // se limpia pase lo que pase, incluso si un assert revienta
+    struct Limpieza(&'static str);
+    impl Drop for Limpieza {
+        fn drop(&mut self) {
+            let _ = Command::new("docker").args(["rm", "-f", self.0]).output();
+        }
+    }
+    let _limpieza = Limpieza(nombre);
+
+    let mut listo = false;
+    for _ in 0..60 {
+        // pg_isready responde antes de que el init cree la base: postgres
+        // reinicia a mitad de su inicializacion. Se espera la base real.
+        let r = Command::new("docker")
+            .args([
+                "exec", nombre, "psql", "-U", "postgres", "-d", "t", "-c", "select 1",
+            ])
+            .output();
+        if r.is_ok_and(|o| o.status.success()) {
+            listo = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert!(listo, "postgres no arranco");
+
+    let out = Command::new("docker")
+        .args([
+            "exec", "-i", nombre, "psql", "-q", "-tA", "-U", "postgres", "-d", "t",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            c.stdin.take().unwrap().write_all(todo.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("docker exec psql");
+    let salida = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        salida.contains("SIN_INQUILINO=0"),
+        "RLS no aplica sin inquilino:\n{salida}"
+    );
+    assert!(
+        salida.contains("INQUILINO_A=1:ana@ejemplo.mx"),
+        "el inquilino A no ve su fila:\n{salida}"
+    );
+    assert!(
+        salida.contains("INQUILINO_B=1:beto@ejemplo.mx"),
+        "el inquilino B no ve su fila:\n{salida}"
+    );
+    assert!(
+        !salida.contains("INQUILINO_A=2") && !salida.contains("INQUILINO_B=2"),
+        "fuga entre inquilinos:\n{salida}"
+    );
+    assert!(
+        salida.contains("ENMASCARADA=[redactado]"),
+        "la vista no enmascara:\n{salida}"
+    );
+}
+
 #[test]
 fn openapi_exige_idempotency_key() {
     let (json, _, _) = axon(&["openapi", "examples"]);

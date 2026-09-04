@@ -1,5 +1,6 @@
 //! axon — el manifiesto es la fuente de verdad; el resto son proyecciones.
 mod api;
+mod dbsec;
 mod emit;
 mod import;
 mod infra;
@@ -80,6 +81,8 @@ enum Cmd {
         #[arg(long)]
         service: Option<String>,
     },
+    /// politicas de acceso a datos: RLS por fila y vistas enmascaradas
+    Rls { sources: Vec<String> },
     /// manifiestos -> OpenAPI 3.1 (un catalogo para toda la plataforma)
     Openapi { sources: Vec<String> },
     /// manifiesto -> andamiaje de pruebas (unitarias, integracion, e2e)
@@ -254,6 +257,9 @@ fn run() -> Result<ExitCode, String> {
                 std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?
             };
             print!("{}", import::asyncapi(&text, service.as_deref())?);
+        }
+        Cmd::Rls { sources } => {
+            print!("{}", dbsec::build(&manifest::discover(&sources)?))
         }
         Cmd::Openapi { sources } => println!(
             "{}",

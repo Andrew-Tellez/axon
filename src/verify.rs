@@ -34,7 +34,7 @@ impl Default for Ci {
             service_dir: "services/{service}".into(),
             test_cmd: "make -C services/{service} test".into(),
             contracts_path: "services/{service}/src/contracts.ts".into(),
-            image: "${{ vars.REGISTRY }}/{service}:${{ github.sha }}".into(),
+            image: "${{ vars.REGISTRY }}/{service}@${{ steps.imagen.outputs.digest }}".into(),
         }
     }
 }
@@ -68,6 +68,17 @@ pub fn load_policy(dir: &std::path::Path) -> Policy {
 pub struct Report {
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+/// Heuristica corta y deliberadamente conservadora: solo formas que no pueden
+/// ser el nombre de una variable de entorno.
+fn parece_secreto(v: &str) -> bool {
+    let t = v.trim();
+    t.starts_with("sk_")
+        || t.starts_with("AKIA")
+        || t.starts_with("ghp_")
+        || t.starts_with("-----BEGIN")
+        || (t.len() > 32 && t.chars().any(|c| c.is_lowercase()) && t.contains(['/', '+', '=']))
 }
 
 /// Un placeholder no es un valor. Sin esto, `axon import` produciria
@@ -141,6 +152,100 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
             emitters.insert(ev, (&m.service, fields));
         }
+    }
+
+    // ---- seguridad. Cada regla cita su categoria del OWASP Top 10 (2021),
+    // porque un error que no dice por que importa se silencia con un allow.
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        let pii: Vec<String> = m.pii.iter().map(|p| p.to_lowercase()).collect();
+
+        for (name, meth) in &m.methods {
+            let publico = meth.auth.as_deref() == Some("public");
+            // A01: control de acceso roto. Una ruta publica que muta en un
+            // servicio critico no es una decision que se toma sin pensarla.
+            if publico && meth.mutating() && m.tier.as_deref() == Some("0") {
+                errors.push(format!(
+                    "[A01] {svc}.{name}: ruta publica que muta en un servicio tier 0; \
+                     ponla detras de `auth = \"required\"` o baja el tier con criterio"
+                ));
+            }
+            // A04: diseno inseguro. Sin presupuesto de tiempo, una ruta
+            // publica es un agotamiento de recursos gratis.
+            if publico && meth.timeout_ms.is_none() {
+                errors.push(format!(
+                    "[A04] {svc}.{name}: ruta publica sin `timeout_ms`; una peticion sin \
+                     limite de tiempo es agotamiento de recursos"
+                ));
+            }
+            // A09: fallos de registro. Un dato personal que sale por una ruta
+            // publica termina en un log, una cache y un CDN.
+            if publico {
+                for campo in meth.output.keys() {
+                    if pii.contains(&campo.to_lowercase()) {
+                        errors.push(format!(
+                            "[A09] {svc}.{name}: devuelve `{campo}`, declarado PII, por una ruta publica"
+                        ));
+                    }
+                }
+            }
+        }
+
+        // A02: fallos criptograficos. Un secreto en el manifiesto ya esta en
+        // el historial de git; declarar su nombre es lo unico que corresponde.
+        for k in &m.infra.secrets {
+            if parece_secreto(k) {
+                errors.push(format!(
+                    "[A02] {svc}: `{k}` en `secrets` parece el valor y no el nombre; \
+                     ahi va la referencia, el valor vive en el vault"
+                ));
+            }
+        }
+
+        // A05: mala configuracion. Un bucket publico sin retencion crece para
+        // siempre y nadie sabe que hay dentro.
+        for (nombre, b) in &m.infra.buckets {
+            if b.public && b.retention_days.is_none() {
+                warnings.push(format!(
+                    "[A05] {svc}: bucket `{nombre}` publico y sin `retention_days`; \
+                     nadie va a saber que quedo expuesto"
+                ));
+            }
+        }
+    }
+
+    // A01: la tabla que se olvida de la columna del inquilino no recibe
+    // politica, y una tabla sin politica no falla: devuelve las filas de todos.
+    let esquemas = schemas(ms);
+    for m in ms.iter().filter(|m| !m.external) {
+        let Some(tenant) = &m.infra.tenant_column else {
+            continue;
+        };
+        let Some(tablas) = esquemas.get(&m.service) else {
+            continue;
+        };
+        for (t, cols) in tablas {
+            if ["outbox", "inbox_seen"].contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
+                continue;
+            }
+            if !cols.iter().any(|c| &c.name == tenant) {
+                errors.push(format!(
+                    "[A01] {}.{t}: sin la columna `{tenant}`; se queda sin politica RLS y \
+                     devuelve filas de todos los inquilinos. Agregala o ponla en `tenant_exempt`",
+                    m.service
+                ));
+            }
+        }
+    }
+
+    // A08: fallos de integridad. Una etiqueta es mutable: lo que se despliega
+    // hoy no es lo que se auditó ayer.
+    if pol.ci.image.contains(":latest") || !pol.ci.image.contains('@') {
+        warnings.push(format!(
+            "[A08] [ci].image `{}` no fija un digest; una etiqueta es mutable y \
+             el deploy deja de ser reproducible",
+            pol.ci.image
+        ));
     }
 
     // patrones de API: lo que separa un endpoint de uno que aguanta produccion

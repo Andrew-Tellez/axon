@@ -169,6 +169,24 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     if !m.machine.is_empty() {
         out.push(machines_ts(m));
     }
+    if !m.pii.is_empty() {
+        // [A09] Un dato personal se filtra por un log, no por un exploit.
+        // El generador da la lista y la funcion; usarla es de la persona,
+        // pero no puede alegar que no sabia cuales son.
+        out.push(format!(
+            "\n/** Campos declarados PII en el manifiesto. */\nexport const camposPII = [{}] as const;\n\n\
+             /** Reemplaza todo campo PII por \"[redactado]\", a cualquier profundidad.\n \
+             *  Pasa por aqui cualquier objeto antes de mandarlo a un log. */\n\
+             export function redactar<T>(valor: T): T {{\n  \
+               if (Array.isArray(valor)) return valor.map(redactar) as T;\n  \
+               if (valor === null || typeof valor !== \"object\") return valor;\n  \
+               const salida: Record<string, unknown> = {{}};\n  \
+               for (const [k, v] of Object.entries(valor)) {{\n    \
+                 salida[k] = (camposPII as readonly string[]).includes(k) ? \"[redactado]\" : redactar(v);\n  \
+               }}\n  return salida as T;\n}}\n",
+            m.pii.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(", ")
+        ));
+    }
     Ok(out.join("\n"))
 }
 
@@ -292,6 +310,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
+      # se despliega por digest, no por etiqueta: una etiqueta es mutable y el
+      # deploy deja de ser reproducible y auditable
+      - uses: docker/build-push-action@v6
+        id: imagen
+        with:
+          context: {dir}
+          push: true
+          tags: ${{{{ vars.REGISTRY }}}}/{svc}:${{{{ github.sha }}}}
+          provenance: true
 {despliegue}      # verificacion contra lo desplegado, no contra el repo
       - run: axon verify https://{svc}.internal
 "#

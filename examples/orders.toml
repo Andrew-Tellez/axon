@@ -1,6 +1,7 @@
 service = "orders"
 owner = "equipo-comercio"
 tier = "1"
+pii = ["customer_email"]
 version = "1.0.0"
 transport = "pubsub"
 
@@ -34,6 +35,7 @@ breaker = true
 
 [infra]
 state = "postgres"
+tenant_column = "tenant_id"
 migrations = "sql/orders/"
 runtime = "container"
 
