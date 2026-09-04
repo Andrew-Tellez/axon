@@ -286,7 +286,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
-      # el gate que importa: este manifiesto contra TODOS los demas
+      # el gate que importa: este manifiesto contra TODOS los demas, y contra
+      # los contratos que ya estan publicados
       - run: axon verify {manifests}/
       - name: codigo generado al dia
         run: |

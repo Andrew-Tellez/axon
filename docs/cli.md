@@ -138,6 +138,15 @@ Sin `--seq` imprime el árbol; con `--seq`, Mermaid para diffear contra `axon se
 
 ## Verificación
 
+### `axon baseline <fuentes>`
+Snapshot JSON de los contratos publicados: esquema de cada evento con su dueño, y la
+firma de cada método. Guardalo como `axon.baseline.json` junto a los manifiestos y
+commiteálo. Se regenera **al publicar**, no en cada cambio.
+
 ### `axon verify <fuentes>`
 Todas las reglas del README, más `axon.policy.toml` si existe junto a la primera
-fuente, más todos los `axon-check-*` del `PATH`. Sale con 1 si hay errores.
+fuente, más `axon.baseline.json` si está, más todos los `axon-check-*` del `PATH`.
+Sale con 1 si hay errores.
+
+Sin baseline no puede detectar un cambio incompatible en una versión ya publicada, y
+lo dice como aviso en vez de callarse.

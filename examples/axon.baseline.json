@@ -1,0 +1,64 @@
+{
+  "nota": "Contratos publicados. Generado por `axon baseline`. Un cambio aqui es un cambio incompatible: se revisa en el PR como cualquier otro.",
+  "events": {
+    "order.placed@v1": {
+      "owner": "orders",
+      "fields": {
+        "orderId": "uuid",
+        "customerId": "uuid",
+        "total": "money"
+      }
+    },
+    "payment.captured@v1": {
+      "owner": "payments",
+      "fields": {
+        "paymentId": "uuid",
+        "orderId": "uuid",
+        "amount": "money"
+      }
+    }
+  },
+  "methods": {
+    "orders.getOrder": {
+      "in": {
+        "orderId": "uuid"
+      },
+      "out": {
+        "orderId": "uuid",
+        "status": "string",
+        "total": "money"
+      },
+      "http": "GET /v1/orders/{orderId}"
+    },
+    "orders.placeOrder": {
+      "in": {
+        "customerId": "uuid",
+        "total": "money"
+      },
+      "out": {
+        "orderId": "uuid"
+      },
+      "http": "POST /v1/orders"
+    },
+    "payments.capturePayment": {
+      "in": {
+        "orderId": "uuid",
+        "amount": "money"
+      },
+      "out": {
+        "paymentId": "uuid"
+      },
+      "http": "POST /v1/payments"
+    },
+    "payments.refundPayment": {
+      "in": {
+        "paymentId": "uuid"
+      },
+      "out": {
+        "paymentId": "uuid",
+        "status": "string"
+      },
+      "http": "POST /v1/payments/{paymentId}/refunds"
+    }
+  }
+}

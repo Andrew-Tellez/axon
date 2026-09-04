@@ -1,5 +1,6 @@
 //! axon — el manifiesto es la fuente de verdad; el resto son proyecciones.
 mod api;
+mod baseline;
 mod dbsec;
 mod emit;
 mod import;
@@ -81,6 +82,8 @@ enum Cmd {
         #[arg(long)]
         service: Option<String>,
     },
+    /// snapshot de los contratos publicados, para detectar cambios incompatibles
+    Baseline { sources: Vec<String> },
     /// politicas de acceso a datos: RLS por fila y vistas enmascaradas
     Rls { sources: Vec<String> },
     /// manifiestos -> OpenAPI 3.1 (un catalogo para toda la plataforma)
@@ -211,6 +214,18 @@ fn run() -> Result<ExitCode, String> {
                 dir.parent().unwrap_or(std::path::Path::new("."))
             };
             let mut r = verify::verify(&ms, &verify::load_policy(root));
+            // los contratos publicados, si el repo los registra
+            if let Some(b) = baseline::cargar(root) {
+                let (errores, avisos) = baseline::comparar(&ms, &b);
+                r.errors.extend(errores);
+                r.warnings.extend(avisos);
+            } else {
+                r.warnings.push(format!(
+                    "sin {}: `verify` no puede detectar un cambio incompatible en una \
+                     version ya publicada. Generalo con `axon baseline`",
+                    baseline::ARCHIVO
+                ));
+            }
             let payload = serde_json::to_string(&ms).unwrap_or_default();
             for bin in plugin::checks() {
                 match plugin::run(&bin, &payload) {
@@ -257,6 +272,13 @@ fn run() -> Result<ExitCode, String> {
                 std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?
             };
             print!("{}", import::asyncapi(&text, service.as_deref())?);
+        }
+        Cmd::Baseline { sources } => {
+            let b = baseline::tomar(&manifest::discover(&sources)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&b).map_err(|e| e.to_string())?
+            );
         }
         Cmd::Rls { sources } => {
             print!("{}", dbsec::build(&manifest::discover(&sources)?))

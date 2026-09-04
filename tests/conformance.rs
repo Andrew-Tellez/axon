@@ -1003,6 +1003,152 @@ SELECT 'ENMASCARADA=' || min(customer_email) FROM "order_enmascarada";
     );
 }
 
+/// El hueco mas grave que tuvo la herramienta: se le podia cambiar un campo a
+/// una version ya publicada y `verify` salia limpio.
+#[test]
+fn una_version_publicada_es_inmutable() {
+    let base = std::env::temp_dir().join("axon-baseline");
+
+    // prepara una copia de los ejemplos con su baseline, sin migraciones
+    // (aqui solo se prueban contratos)
+    let preparar = |sufijo: &str| -> std::path::PathBuf {
+        let dir = base.join(sufijo);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["orders.toml", "payments.toml", "stripe.external.toml"] {
+            let t = std::fs::read_to_string(format!("examples/{f}")).unwrap();
+            let t: String = t
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("migrations ="))
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(dir.join(f), t).unwrap();
+        }
+        let (b, err, ok) = axon(&["baseline", dir.to_str().unwrap()]);
+        assert!(ok, "{err}");
+        std::fs::write(dir.join("axon.baseline.json"), b).unwrap();
+        dir
+    };
+
+    // el punto de partida esta limpio
+    let dir = preparar("limpio");
+    let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    assert!(out.contains("0 errores"), "{out}");
+    assert!(
+        !out.contains("sin registrar"),
+        "el baseline recien tomado ya tiene huecos"
+    );
+
+    let cambiar = |sufijo: &str, archivo: &str, de: &str, a: &str| -> String {
+        let dir = preparar(sufijo);
+        let p = dir.join(archivo);
+        let t = std::fs::read_to_string(&p).unwrap();
+        assert!(t.contains(de), "el fixture no contiene `{de}`");
+        std::fs::write(&p, t.replace(de, a)).unwrap();
+        let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        assert!(!ok, "el cambio `{de}` -> `{a}` paso limpio");
+        err
+    };
+
+    // tipo cambiado
+    let err = cambiar(
+        "tipo",
+        "orders.toml",
+        "total = \"money\"",
+        "total = \"int\"",
+    );
+    assert!(
+        err.contains("cambio de `money` a `int` en una version publicada"),
+        "{err}"
+    );
+    assert!(
+        err.contains("publica `order.placed@v2`"),
+        "no dice que hacer:\n{err}"
+    );
+
+    // campo agregado: en axon todo campo es obligatorio, asi que rompe igual
+    let err = cambiar(
+        "agregado",
+        "orders.toml",
+        "\ntotal = \"money\"\n",
+        "\ntotal = \"money\"\nchannel = \"string\"\n",
+    );
+    assert!(
+        err.contains("campo nuevo `channel` en una version publicada"),
+        "{err}"
+    );
+
+    // ruta movida
+    let err = cambiar(
+        "ruta",
+        "orders.toml",
+        "http = \"POST /v1/orders\"",
+        "http = \"POST /v1/pedidos\"",
+    );
+    assert!(err.contains("la ruta cambio de `POST /v1/orders`"), "{err}");
+    assert!(
+        !err.contains("Some("),
+        "el mensaje filtra el Debug de Option:\n{err}"
+    );
+
+    // retirar una version publicada
+    let err = cambiar(
+        "retiro",
+        "orders.toml",
+        "[emits.\"order.placed@v1\"]",
+        "[emits.\"order.placed@v2\"]",
+    );
+    assert!(
+        err.contains("estaba publicado por orders y ya nadie lo emite"),
+        "{err}"
+    );
+
+    // la via de escape: retirarlo tambien del baseline, visible en el PR
+    let dir = preparar("retiro_deliberado");
+    for (f, de, a) in [
+        (
+            "orders.toml",
+            "[emits.\"order.placed@v1\"]",
+            "[emits.\"order.placed@v2\"]",
+        ),
+        ("payments.toml", "order.placed@v1", "order.placed@v2"),
+    ] {
+        let p = dir.join(f);
+        let t = std::fs::read_to_string(&p).unwrap();
+        std::fs::write(&p, t.replace(de, a)).unwrap();
+    }
+    let bl = dir.join("axon.baseline.json");
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&bl).unwrap()).unwrap();
+    v["events"]
+        .as_object_mut()
+        .unwrap()
+        .remove("order.placed@v1");
+    std::fs::write(&bl, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "un retiro deliberado no deberia bloquear:\n{err}");
+
+    // un contrato nuevo sin registrar no esta protegido, y hay que avisarlo
+    let dir = preparar("nuevo");
+    let p = dir.join("orders.toml");
+    let t = std::fs::read_to_string(&p).unwrap();
+    std::fs::write(
+        &p,
+        format!("{t}\n[emits.\"order.cancelled@v1\"]\norderId = \"uuid\"\n"),
+    )
+    .unwrap();
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "un contrato nuevo no es un error");
+    assert!(out.contains("sin registrar"), "{out}");
+
+    // y sin baseline, `verify` tiene que decir que no puede ver esto
+    let dir = preparar("sin_baseline");
+    std::fs::remove_file(dir.join("axon.baseline.json")).unwrap();
+    let (out, _, _) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(out.contains("sin axon.baseline.json"), "{out}");
+}
+
 #[test]
 fn openapi_exige_idempotency_key() {
     let (json, _, _) = axon(&["openapi", "examples"]);
