@@ -41,6 +41,12 @@ services:
       -sqlMigrationPrefix= -sqlMigrationSeparator=_
       -validateMigrationNaming=true
       migrate
+  flags:
+    image: ghcr.io/open-feature/flagd:v0.12.9
+    command: ["start", "--uri", "file:/etc/flags/flags.json"]
+    # 8016 es OFREP, el protocolo REST estandar de OpenFeature
+    ports: ["${AXON_FLAGS_PORT:-8016}:8016"]
+    volumes: ["./.axon/flags.json:/etc/flags/flags.json:ro"]
   traza:
     image: jaegertracing/all-in-one:1.76.0
     environment: { COLLECTOR_OTLP_ENABLED: "true" }
@@ -79,6 +85,7 @@ services:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/local.ndjson
       DATABASE_URL: postgres://postgres:local@db-orders:5432/orders
+      AXON_FLAGS_URL: http://flags:8016
       OTEL_SERVICE_NAME: "orders"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://traza:4318"
       OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
@@ -104,6 +111,7 @@ services:
       AWS_ENDPOINT_URL: http://objetos:9000
       BUCKET_RECIBOS: local-payments-recibos
       BUCKET_ASSETS: local-payments-assets
+      AXON_FLAGS_URL: http://flags:8016
       OTEL_SERVICE_NAME: "payments"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://traza:4318"
       OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"

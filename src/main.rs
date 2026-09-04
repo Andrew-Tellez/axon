@@ -83,6 +83,8 @@ enum Cmd {
         #[arg(long)]
         service: Option<String>,
     },
+    /// configuracion de flagd derivada de los `[flags.*]` declarados
+    Flags { sources: Vec<String> },
     /// prueba de carga derivada del manifiesto, y su veredicto
     Load {
         manifest: PathBuf,
@@ -287,6 +289,9 @@ fn run() -> Result<ExitCode, String> {
                 std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?
             };
             print!("{}", import::asyncapi(&text, service.as_deref())?);
+        }
+        Cmd::Flags { sources } => {
+            print!("{}", emit::build_flagd(&manifest::discover(&sources)?))
         }
         Cmd::Load { manifest, check } => {
             let m = manifest::load(&manifest)?;

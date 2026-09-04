@@ -104,3 +104,16 @@ retention_days = 365
 [cap]
 consistency = "strong"
 on_partition = "reject"
+
+# Rollout gradual del cobro nuevo, fijado por inquilino: por peticion, el mismo
+# pago tomaria un camino y despues el otro.
+[flags.cobro_v2]
+owner = "equipo-pagos"
+expires = "2026-12-31"
+rollout = 10
+sticky_by = "tenant_id"
+
+# Interruptor de emergencia: vive mientras exista Stripe.
+[flags.cortar_stripe]
+owner = "equipo-pagos"
+kill_switch = true

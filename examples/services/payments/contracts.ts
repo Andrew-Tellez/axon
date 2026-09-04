@@ -153,6 +153,24 @@ export const manifest = {
     "on_partition": "reject",
     "max_staleness_ms": null
   },
+  "flags": {
+    "cobro_v2": {
+      "owner": "equipo-pagos",
+      "expires": "2026-12-31",
+      "default": false,
+      "rollout": 10,
+      "sticky_by": "tenant_id",
+      "kill_switch": false
+    },
+    "cortar_stripe": {
+      "owner": "equipo-pagos",
+      "expires": null,
+      "default": false,
+      "rollout": null,
+      "sticky_by": null,
+      "kill_switch": true
+    }
+  },
   "machine": {
     "payment": {
       "initial": "pending",
@@ -318,6 +336,23 @@ export const rutasHttp = ["POST /v1/payments", "POST /v1/payments/{paymentId}/re
  *  De ahi sale el nivel de aislamiento: pagar dos veces sale mas caro
  *  que reintentar, y servir un dato viejo cuesta menos que no servir. */
 export const nivelAislamiento = "SERIALIZABLE" as const;
+
+
+/** Proveedor de flags. La forma es la de OpenFeature: `evaluar` recibe
+ *  el nombre, el valor por defecto y el contexto por el que se fija. */
+export interface Flags {
+  evaluar(nombre: string, porDefecto: boolean, contexto: Record<string, string>): Promise<boolean>;
+}
+
+/** Se fija por `tenant_id`: la misma entidad toma siempre el mismo camino. */
+export const flagCobroV2 = (flags: Flags, tenant_id: string) =>
+  flags.evaluar("cobro_v2", false, { targetingKey: tenant_id, tenant_id });
+
+export const flagCortarStripe = (flags: Flags) =>
+  flags.evaluar("cortar_stripe", false, {});
+
+/** Los flags que declara el manifiesto. Un flag que no esta aca no existe. */
+export const flagsDeclarados = ["cobro_v2", "cortar_stripe"] as const;
 
 
 /** Todo lo que hace falta para alcanzar a otro servicio. Lo implementa quien

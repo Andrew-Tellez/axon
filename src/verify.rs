@@ -238,6 +238,86 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // ---- feature flags: lo que nadie impone ----
+    let ahora = hoy();
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        for (nombre, f) in &m.flags {
+            if f.owner.is_none() {
+                errors.push(format!(
+                    "{svc}.{nombre}: flag sin `owner`. El que lo prendio es el que lo apaga"
+                ));
+            }
+            // Un codigo con doscientos flags viejos no tiene doscientas
+            // features: tiene doscientas ramas que nadie prueba.
+            match (&f.expires, f.kill_switch) {
+                (None, false) => errors.push(format!(
+                    "{svc}.{nombre}: flag sin `expires`. Un flag sin fecha de muerte no muere; \
+                     si de verdad es permanente, declaralo `kill_switch = true`"
+                )),
+                (Some(_), true) => warnings.push(format!(
+                    "{svc}.{nombre}: `kill_switch` con `expires`; un interruptor de emergencia \
+                     vive mientras exista lo que apaga"
+                )),
+                (Some(e), false) => match fecha(e) {
+                    None => errors.push(format!(
+                        "{svc}.{nombre}: `expires = \"{e}\"` no tiene la forma YYYY-MM-DD"
+                    )),
+                    Some(f) if f < ahora => errors.push(format!(
+                        "{svc}.{nombre}: vencio el {e}. O se limpia la rama muerta, o se renueva \
+                         la fecha con una decision explicita: dejarlo vencido no es ninguna de las dos"
+                    )),
+                    _ => {}
+                },
+                _ => {}
+            }
+
+            // Un rollout por peticion hace que la MISMA entidad tome un camino
+            // en una llamada y el otro en la siguiente. Con estado de por
+            // medio, eso deja datos a medio migrar.
+            // el orden importa: un kill switch con rollout es un error propio,
+            // no un caso del sticky que falta
+            match f.rollout {
+                Some(_) if f.kill_switch => errors.push(format!(
+                    "{svc}.{nombre}: `kill_switch` con `rollout`. Un interruptor de emergencia se \
+                     apaga entero o no sirve de nada"
+                )),
+                Some(p) if p > 100 => errors.push(format!(
+                    "{svc}.{nombre}: `rollout = {p}` no es un porcentaje"
+                )),
+                Some(p) if p > 0 && p < 100 && f.sticky_by.is_none() => errors.push(format!(
+                    "{svc}.{nombre}: rollout al {p}% sin `sticky_by`. Evaluado por peticion, la \
+                     misma entidad toma un camino y despues el otro, y queda a medio migrar"
+                )),
+                _ => {}
+            }
+            if f.default && !f.kill_switch {
+                warnings.push(format!(
+                    "{svc}.{nombre}: `default = true` en un flag que no es kill switch. Un flag \
+                     nuevo prendido por defecto no es un rollout gradual: es un despliegue"
+                ));
+            }
+            // El campo por el que se fija tiene que existir en algun contrato,
+            // o la decision se fija por un dato que el servicio no recibe.
+            if let Some(campo) = &f.sticky_by {
+                let conocido = m.infra.tenant_column.as_deref() == Some(campo.as_str())
+                    || m.methods.values().any(|me| me.input.contains_key(campo))
+                    || m.emits.values().any(|fs| fs.contains_key(campo))
+                    || ms.iter().any(|o| {
+                        m.consumes
+                            .keys()
+                            .any(|ev| o.emits.get(ev).is_some_and(|fs| fs.contains_key(campo)))
+                    });
+                if !conocido {
+                    errors.push(format!(
+                        "{svc}.{nombre}: se fija por `{campo}`, que no aparece en ningun contrato \
+                         ni es la columna del inquilino; el servicio no lo recibe"
+                    ));
+                }
+            }
+        }
+    }
+
     // ---- escalado de la base: aritmetica sobre lo declarado ----
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;

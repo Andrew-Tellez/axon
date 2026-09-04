@@ -137,6 +137,7 @@ export const manifest = {
     "on_partition": "degrade",
     "max_staleness_ms": 3000
   },
+  "flags": {},
   "machine": {},
   "infra": {
     "state": "postgres",
@@ -226,6 +227,7 @@ export const rutasHttp = ["POST /v1/orders", "GET /v1/orders/{orderId}"] as cons
 export const nivelAislamiento = "READ COMMITTED" as const;
 /** Presupuesto de obsolescencia: un dato mas viejo que esto no se sirve. */
 export const obsolescenciaMaximaMs = 3000;
+
 
 
 /** Todo lo que hace falta para alcanzar a otro servicio. Lo implementa quien

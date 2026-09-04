@@ -1,9 +1,10 @@
 // La logica de negocio. La maquina de estados la impone el codigo generado.
-import { PaymentsService, rutasHttp, paymentNext, paymentCan,
+import { PaymentsService, rutasHttp, paymentNext, paymentCan, flagCobroV2, flagCortarStripe,
          type CapturePaymentIn, type CapturePaymentOut,
          type RefundPaymentIn, type RefundPaymentOut,
          type OrderPlacedV1, type Envelope, type PaymentState } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
+import { arrancarFlags, flags } from "../flags.ts";
 import { bus, conectar, esperarDb, inbox, outbox, relay, servir, suscribir } from "../runtime.ts";
 import type pg from "pg";
 
@@ -20,12 +21,24 @@ export class Payments extends PaymentsService {
   }
 
   async capturePayment(input: CapturePaymentIn, e: Envelope<unknown>): Promise<CapturePaymentOut> {
+    // El accesor generado exige el campo por el que se fija: no se puede
+    // evaluar este flag por peticion aunque uno quiera.
+    const inquilino = process.env.AXON_TENANT ?? "inquilino-demo";
+    const cobroNuevo = await flagCobroV2(flags, inquilino);
+    if (await flagCortarStripe(flags)) {
+      throw new Error("cobro cortado por el interruptor de emergencia");
+    }
     const paymentId = crypto.randomUUID();
     const cliente = await this.#db.connect();
     try {
       await cliente.query("BEGIN");
       // paymentNext revienta si la transicion no esta declarada en el manifiesto
+      // Las dos ramas del rollout terminan en el mismo estado declarado: el
+      // flag cambia el camino, no la maquina de estados.
       const estado: PaymentState = paymentNext("pending", "capture");
+      if (cobroNuevo) {
+        // camino nuevo, detras del rollout del 10%
+      }
       await cliente.query(
         `INSERT INTO payment (id, order_id, amount_cents, status) VALUES ($1,$2,$3,$4)`,
         [paymentId, input.orderId, input.amount.amount, estado],
@@ -58,6 +71,7 @@ if (process.env.NODE_TEST_CONTEXT === undefined) await main();
 
 async function main() {
 arrancarTelemetria();
+await arrancarFlags();
 const db = await esperarDb();
 const nc = await conectar();
 const b = bus(nc);

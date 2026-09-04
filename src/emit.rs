@@ -207,6 +207,7 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
             ))
             .unwrap_or_default(),
     ));
+    out.push(flags_ts(m));
     out.push(clientes_ts(m, all)?);
     if !m.pii.is_empty() {
         // [A09] Un dato personal se filtra por un log, no por un exploit.
@@ -836,4 +837,89 @@ fn clientes_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         tipos.join("\n"),
         metodos.join("\n")
     ))
+}
+
+// ---------- feature flags ----------
+
+/// Accesores tipados y la interfaz del proveedor.
+///
+/// La interfaz tiene la forma de OpenFeature a proposito: axon no trae un SDK
+/// de flags ni inventa un protocolo, igual que no trae uno de trazas. Lo que
+/// aporta es que el nombre del flag, su valor seguro y el campo por el que se
+/// fija salgan del manifiesto y no de una cadena suelta en el codigo.
+fn flags_ts(m: &Manifest) -> String {
+    if m.flags.is_empty() {
+        return String::new();
+    }
+    let mut o = vec![
+        "\n/** Proveedor de flags. La forma es la de OpenFeature: `evaluar` recibe\n \
+         *  el nombre, el valor por defecto y el contexto por el que se fija. */\n\
+         export interface Flags {\n  \
+           evaluar(nombre: string, porDefecto: boolean, contexto: Record<string, string>): Promise<boolean>;\n\
+         }\n"
+            .to_string(),
+    ];
+    let mut nombres = Vec::new();
+    for (nombre, f) in &m.flags {
+        nombres.push(format!("\"{nombre}\""));
+        let ctx = f
+            .sticky_by
+            .as_ref()
+            .map(|c| {
+                format!(
+                    "/** Se fija por `{c}`: la misma entidad toma siempre el mismo camino. */\n"
+                )
+            })
+            .unwrap_or_default();
+        let firma = match &f.sticky_by {
+            Some(c) => format!("(flags: Flags, {c}: string)"),
+            None => "(flags: Flags)".to_string(),
+        };
+        let contexto = match &f.sticky_by {
+            Some(c) => format!("{{ targetingKey: {c}, {c} }}"),
+            None => "{}".to_string(),
+        };
+        o.push(format!(
+            "{ctx}export const {} = {firma} =>\n  \
+               flags.evaluar(\"{nombre}\", {}, {contexto});\n",
+            camel(&format!("flag.{nombre}")),
+            f.default,
+        ));
+    }
+    o.push(format!(
+        "/** Los flags que declara el manifiesto. Un flag que no esta aca no existe. */\n\
+         export const flagsDeclarados = [{}] as const;\n",
+        nombres.join(", ")
+    ));
+    o.join("\n")
+}
+
+/// Configuracion de flagd, que es la implementacion de referencia de
+/// OpenFeature y lee exactamente este JSON. El rollout gradual se expresa con
+/// su `fractional`, fijado por el campo declarado en `sticky_by`.
+pub fn build_flagd(ms: &[Manifest]) -> String {
+    let mut flags = Vec::new();
+    for m in ms.iter().filter(|m| !m.external) {
+        for (nombre, f) in &m.flags {
+            let variantes = "{ \"on\": true, \"off\": false }";
+            let por_defecto = if f.default { "on" } else { "off" };
+            let objetivo = match (f.rollout, &f.sticky_by) {
+                (Some(p), Some(campo)) if p > 0 && p < 100 => format!(
+                    ",\n      \"targeting\": {{\n        \"fractional\": [\n          \
+                     {{ \"var\": \"{campo}\" }},\n          [\"on\", {p}],\n          [\"off\", {}]\n        ]\n      }}",
+                    100 - p
+                ),
+                _ => String::new(),
+            };
+            flags.push(format!(
+                "    \"{}\": {{\n      \"state\": \"ENABLED\",\n      \
+                 \"variants\": {variantes},\n      \"defaultVariant\": \"{por_defecto}\"{objetivo}\n    }}",
+                nombre
+            ));
+        }
+    }
+    format!(
+        "{{\n  \"$schema\": \"https://flagd.dev/schema/v0/flags.json\",\n  \"flags\": {{\n{}\n  }}\n}}\n",
+        flags.join(",\n")
+    )
 }

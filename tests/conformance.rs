@@ -1760,6 +1760,94 @@ fn las_rutas_declaradas_llegan_al_codigo() {
     );
 }
 
+/// Feature flags: lo que aporta declararlos no es el SDK, sino que el
+/// compilador imponga lo que nadie impone.
+#[test]
+fn los_flags_se_verifican() {
+    let dir = std::env::temp_dir().join("axon-flags");
+    let probar = |cuerpo: &str| {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.toml"), cuerpo).unwrap();
+        let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        (format!("{out}{err}"), ok)
+    };
+    let base = "service = \"f\"\nowner = \"e\"\ntier = \"2\"\n";
+
+    // un flag sin fecha de muerte no muere
+    let (msg, ok) = probar(&format!("{base}[flags.eterno]\nowner = \"e\"\n"));
+    assert!(!ok);
+    assert!(msg.contains("sin `expires`"), "{msg}");
+
+    // uno vencido no se ignora: se limpia o se renueva
+    let (msg, ok) = probar(&format!(
+        "{base}[flags.viejo]\nowner = \"e\"\nexpires = \"2024-01-15\"\n"
+    ));
+    assert!(!ok);
+    assert!(msg.contains("vencio el 2024-01-15"), "{msg}");
+
+    // sin dueno, nadie lo apaga
+    let (msg, ok) = probar(&format!(
+        "{base}[flags.huerfano]\nexpires = \"2099-01-01\"\n"
+    ));
+    assert!(!ok);
+    assert!(msg.contains("flag sin `owner`"), "{msg}");
+
+    // un rollout por peticion deja la misma entidad a medio migrar
+    let (msg, ok) = probar(&format!(
+        "{base}[flags.parcial]\nowner = \"e\"\nexpires = \"2099-01-01\"\nrollout = 25\n"
+    ));
+    assert!(!ok);
+    assert!(msg.contains("rollout al 25% sin `sticky_by`"), "{msg}");
+
+    // un kill switch se apaga entero: el error es propio, no el del sticky
+    let (msg, ok) = probar(&format!(
+        "{base}[flags.cortar]\nowner = \"e\"\nkill_switch = true\nrollout = 50\n"
+    ));
+    assert!(!ok);
+    assert!(msg.contains("`kill_switch` con `rollout`"), "{msg}");
+
+    // fijarse por un campo que el servicio no recibe no fija nada
+    let (msg, ok) = probar(&format!(
+        "{base}[flags.malo]\nowner = \"e\"\nexpires = \"2099-01-01\"\nrollout = 50\n\
+         sticky_by = \"no_existe\"\n"
+    ));
+    assert!(!ok);
+    assert!(msg.contains("no aparece en ningun contrato"), "{msg}");
+
+    // un kill switch sin expires es lo correcto, y no molesta
+    let (_, ok) = probar(&format!(
+        "{base}[flags.corte]\nowner = \"e\"\nkill_switch = true\n"
+    ));
+    assert!(ok, "un kill switch legitimo no deberia fallar");
+
+    // el codigo: el accesor exige el campo por el que se fija
+    let (ts, _, _) = axon(&["build", "examples/payments.toml", "examples"]);
+    assert!(
+        ts.contains("export const flagCobroV2 = (flags: Flags, tenant_id: string) =>"),
+        "{ts}"
+    );
+    assert!(
+        ts.contains(r#"flags.evaluar("cobro_v2", false, { targetingKey: tenant_id, tenant_id })"#),
+        "{ts}"
+    );
+    assert!(
+        ts.contains(r#"export const flagsDeclarados = ["cobro_v2", "cortar_stripe"]"#),
+        "{ts}"
+    );
+
+    // y la config de flagd: el rollout se expresa con su `fractional`
+    let (cfg, _, _) = axon(&["flags", "examples"]);
+    let v: serde_json::Value = serde_json::from_str(&cfg).expect("flagd json");
+    let f = &v["flags"]["cobro_v2"];
+    assert_eq!(f["defaultVariant"], "off");
+    assert_eq!(f["targeting"]["fractional"][0]["var"], "tenant_id");
+    assert_eq!(f["targeting"]["fractional"][1][1], 10);
+    assert_eq!(f["targeting"]["fractional"][2][1], 90);
+    // un kill switch no lleva targeting
+    assert!(v["flags"]["cortar_stripe"]["targeting"].is_null());
+}
+
 #[test]
 fn openapi_exige_idempotency_key() {
     let (json, _, _) = axon(&["openapi", "examples"]);

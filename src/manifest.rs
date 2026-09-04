@@ -125,6 +125,32 @@ impl Cap {
     }
 }
 
+/// Un feature flag.
+///
+/// Lo que aporta declararlos no es el SDK —OpenFeature y flagd ya existen—
+/// sino que el compilador pueda imponer lo que nadie impone: que cada flag
+/// tenga dueno y fecha de muerte. Un codigo con doscientos flags viejos no
+/// tiene doscientas features: tiene doscientas ramas que nadie prueba.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Flag {
+    pub owner: Option<String>,
+    /// `YYYY-MM-DD`. Pasada esa fecha, `verify` falla: el flag se limpia o se
+    /// renueva con una decision explicita.
+    pub expires: Option<String>,
+    /// El valor seguro. Un flag nuevo prendido por defecto no es un rollout.
+    #[serde(default)]
+    pub default: bool,
+    /// Porcentaje del rollout gradual, 0..=100.
+    pub rollout: Option<u32>,
+    /// Campo por el que se fija la decision. Sin esto la evaluacion es por
+    /// peticion, y la MISMA entidad cambia de camino a mitad de un flujo.
+    pub sticky_by: Option<String>,
+    /// Interruptor de emergencia: vive indefinidamente y no tiene rollout
+    /// gradual, porque se apaga entero o no sirve.
+    #[serde(default)]
+    pub kill_switch: bool,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Patterns {
     #[serde(default)]
@@ -264,6 +290,9 @@ pub struct Manifest {
     /// Lado del teorema CAP. Ver `Cap`.
     #[serde(default)]
     pub cap: Cap,
+    /// Feature flags del servicio.
+    #[serde(default)]
+    pub flags: IndexMap<String, Flag>,
     /// Maquinas de estado del dominio: la unica logica de negocio que vale
     /// la pena declarar, porque es la misma en todos los lenguajes.
     #[serde(default)]
@@ -657,5 +686,76 @@ pub fn ts_type(t: &str) -> &str {
         "bool" => "boolean",
         "money" => "{ amount: number; currency: string }",
         _ => "unknown",
+    }
+}
+
+/// Fecha de hoy como (ano, mes, dia), sin dependencias.
+///
+/// Es el algoritmo civil_from_days de Howard Hinnant: los dias desde la epoca
+/// se corren a una era que empieza en marzo, y ahi el patron de meses es
+/// regular. Una dependencia entera para comparar dos fechas seria mucho.
+pub fn hoy() -> (i64, i64, i64) {
+    let dias = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 / 86_400)
+        .unwrap_or(0);
+    civil(dias)
+}
+
+fn civil(dias_epoca: i64) -> (i64, i64, i64) {
+    let z = dias_epoca + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// `YYYY-MM-DD` a una tupla comparable. `None` si no tiene esa forma.
+pub fn fecha(s: &str) -> Option<(i64, i64, i64)> {
+    let mut p = s.trim().split('-');
+    let a = p.next()?.parse().ok()?;
+    let m = p.next()?.parse().ok()?;
+    let d = p.next()?.parse().ok()?;
+    if p.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some((a, m, d))
+}
+
+#[cfg(test)]
+mod fechas {
+    use super::*;
+
+    #[test]
+    fn el_calendario_civil_es_correcto() {
+        // dias conocidos desde la epoca, incluidos bisiestos y siglos
+        assert_eq!(civil(0), (1970, 1, 1));
+        assert_eq!(civil(1), (1970, 1, 2));
+        assert_eq!(civil(-1), (1969, 12, 31));
+        assert_eq!(civil(11_016), (2000, 2, 29)); // bisiesto de un siglo divisible por 400
+        assert_eq!(civil(19_723), (2024, 1, 1));
+        assert_eq!(civil(20_608), (2026, 6, 4));
+    }
+
+    #[test]
+    fn hoy_es_una_fecha_razonable() {
+        let (a, m, d) = hoy();
+        assert!((2025..2100).contains(&a), "ano fuera de rango: {a}");
+        assert!((1..=12).contains(&m));
+        assert!((1..=31).contains(&d));
+    }
+
+    #[test]
+    fn parsear_fechas() {
+        assert_eq!(fecha("2026-12-31"), Some((2026, 12, 31)));
+        assert_eq!(fecha(" 2026-01-02 "), Some((2026, 1, 2)));
+        assert_eq!(fecha("2026-13-01"), None);
+        assert_eq!(fecha("2026-12"), None);
+        assert_eq!(fecha("manana"), None);
     }
 }

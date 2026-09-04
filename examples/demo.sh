@@ -53,6 +53,10 @@ trap diagnostico EXIT
 paso "generando la infraestructura local desde los manifiestos"
 "$AXON" infra . --target local > axon.local.yml
 
+mkdir -p .axon
+# flagd lee este JSON: los flags tambien salen del manifiesto
+"$AXON" flags . > .axon/flags.json
+
 paso "levantando broker, bases, migraciones y servicios"
 docker compose -f axon.local.yml up -d --build --wait
 
@@ -109,6 +113,9 @@ else
   exit 1
 fi
 
+
+paso "rollout declarado vs aplicado"
+python3 verificar-flags.py "localhost:${AXON_FLAGS_PORT:-8016}" cobro_v2 10
 
 paso "capacidad declarada vs medida"
 if command -v k6 >/dev/null 2>&1; then

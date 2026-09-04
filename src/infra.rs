@@ -89,6 +89,8 @@ pub struct Store2 {
 /// Plan neutral. Sin una sola palabra de ningun proveedor.
 #[derive(Debug, Serialize)]
 pub struct Plan {
+    /// Hay flags declarados: el target local levanta flagd con su config.
+    pub flags: bool,
     pub buckets: Vec<Store2>,
     pub routes: Vec<Route>,
     pub topics: Vec<Topic>,
@@ -187,6 +189,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
     }
     routes.sort_by(|a, b| (&a.path, &a.method).cmp(&(&b.path, &b.method)));
     Plan {
+        flags: ms.iter().any(|m| !m.flags.is_empty()),
         buckets,
         routes,
         topics,
@@ -910,6 +913,17 @@ services:
     // los servicios tuyos, no solo sus dependencias
     // Jaeger all-in-one acepta OTLP directo, asi que el backend de trazas es
     // un contenedor y no un colector mas un almacen.
+    if p.flags {
+        o.push_str(
+            "  flags:
+    image: ghcr.io/open-feature/flagd:v0.12.9
+    command: [\"start\", \"--uri\", \"file:/etc/flags/flags.json\"]
+    # 8016 es OFREP, el protocolo REST estandar de OpenFeature
+    ports: [\"${AXON_FLAGS_PORT:-8016}:8016\"]
+    volumes: [\"./.axon/flags.json:/etc/flags/flags.json:ro\"]
+",
+        );
+    }
     o.push_str(
         "  traza:
     image: jaegertracing/all-in-one:1.76.0
@@ -985,6 +999,9 @@ services:
         }
         for (k, v) in env_buckets(p, &w.service, PROY) {
             secrets.push_str(&format!("      {k}: {}\n", v));
+        }
+        if p.flags {
+            secrets.push_str("      AXON_FLAGS_URL: http://flags:8016\n");
         }
         for (k, v) in env_otel_con(w, "http://traza:4318", true) {
             secrets.push_str(&format!("      {k}: \"{v}\"\n"));
