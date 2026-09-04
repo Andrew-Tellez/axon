@@ -1,6 +1,7 @@
 // La logica de negocio. Lo unico que escribe una persona.
 import { OrdersService, type PlaceOrderIn, type PlaceOrderOut,
          type GetOrderIn, type GetOrderOut, type Envelope } from "./contracts.ts";
+import { arrancarTelemetria } from "../telemetria.ts";
 import { bus, conectar, esperarDb, inbox, servir } from "../runtime.ts";
 import type pg from "pg";
 
@@ -36,6 +37,7 @@ class Orders extends OrdersService {
   }
 }
 
+arrancarTelemetria();
 const db = await esperarDb();
 const svc = new Orders(bus(await conectar()), inbox(db), db);
 servir(Number(process.env.PORT ?? 8080), {

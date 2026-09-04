@@ -41,6 +41,13 @@ services:
       -sqlMigrationPrefix= -sqlMigrationSeparator=_
       -validateMigrationNaming=true
       migrate
+  traza:
+    image: jaegertracing/all-in-one:1.76.0
+    environment: { COLLECTOR_OTLP_ENABLED: "true" }
+    ports: ["${AXON_OTLP_PORT:-4318}:4318", "${AXON_TRAZA_UI_PORT:-16686}:16686"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:14269/"]
+      interval: 2s
   objetos:
     image: minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
@@ -65,13 +72,18 @@ services:
     build:
       context: .
       dockerfile: services/orders/Dockerfile
-    depends_on: { broker: { condition: service_healthy }, db-orders: { condition: service_healthy }, migrate-orders: { condition: service_completed_successfully } }
+    depends_on: { broker: { condition: service_healthy }, traza: { condition: service_healthy }, db-orders: { condition: service_healthy }, migrate-orders: { condition: service_completed_successfully } }
     ports: ["${AXON_PORT_orders:-8080}:8080"]
     env_file: [.env.local]
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/local.ndjson
       DATABASE_URL: postgres://postgres:local@db-orders:5432/orders
+      OTEL_SERVICE_NAME: "orders"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://traza:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=orders,axon.owner=equipo-comercio,axon.tier=1,service.version=1.0.0"
+      OTEL_TRACES_SAMPLER: "parentbased_always_on"
     volumes: ["./.axon:/out"]
     labels:
       - traefik.enable=true
@@ -81,7 +93,7 @@ services:
     build:
       context: .
       dockerfile: services/payments/Dockerfile
-    depends_on: { broker: { condition: service_healthy }, crear-buckets: { condition: service_completed_successfully }, db-payments: { condition: service_healthy }, migrate-payments: { condition: service_completed_successfully } }
+    depends_on: { broker: { condition: service_healthy }, traza: { condition: service_healthy }, crear-buckets: { condition: service_completed_successfully }, db-payments: { condition: service_healthy }, migrate-payments: { condition: service_completed_successfully } }
     ports: ["${AXON_PORT_payments:-8081}:8080"]
     env_file: [.env.local]
     environment:
@@ -92,6 +104,11 @@ services:
       AWS_ENDPOINT_URL: http://objetos:9000
       BUCKET_RECIBOS: local-payments-recibos
       BUCKET_ASSETS: local-payments-assets
+      OTEL_SERVICE_NAME: "payments"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://traza:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=payments,axon.owner=equipo-pagos,axon.tier=0,service.version=1.2.0"
+      OTEL_TRACES_SAMPLER: "parentbased_always_on"
     volumes: ["./.axon:/out"]
     labels:
       - traefik.enable=true

@@ -1348,6 +1348,75 @@ on_partition = "reject"
     );
 }
 
+/// OpenTelemetry: axon no trae un SDK ni inventa un formato. El envelope ya
+/// propaga `traceparent`, que es el contexto W3C que usa OTel, asi que solo
+/// levanta el backend en local y pone las variables estandar en los cuatro
+/// targets — el destino cambia, los atributos no.
+#[test]
+fn otel_en_los_cuatro_targets() {
+    let esperado = [
+        "OTEL_SERVICE_NAME",
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_PROTOCOL",
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "OTEL_TRACES_SAMPLER",
+    ];
+    for target in ["local", "gcp", "aws", "k8s"] {
+        let (out, err, ok) = axon(&["infra", "examples", "--target", target]);
+        assert!(ok, "{target}: {err}");
+        for v in esperado {
+            assert!(out.contains(v), "{target} no inyecta {v}");
+        }
+        // los atributos de recurso salen del manifiesto, no de una convencion
+        assert!(
+            out.contains("axon.owner=equipo-pagos") && out.contains("axon.tier=0"),
+            "{target}: los atributos no salen del manifiesto"
+        );
+    }
+
+    // el destino es lo unico que cambia entre targets
+    let (l, _, _) = axon(&["infra", "examples", "--target", "local"]);
+    assert!(l.contains("http://traza:4318"));
+    assert!(
+        l.contains("image: jaegertracing/all-in-one"),
+        "local sin backend de trazas"
+    );
+    for (target, endpoint) in [
+        ("gcp", "${var.otlp_endpoint}"),
+        ("aws", "${var.otlp_endpoint}"),
+        ("k8s", "${OTLP_ENDPOINT}"),
+    ] {
+        let (o, _, _) = axon(&["infra", "examples", "--target", target]);
+        assert!(
+            o.contains(endpoint),
+            "{target} sin destino OTLP configurable"
+        );
+    }
+
+    // el muestreo sale del tier: un tier 0 se traza entero, porque cuando se
+    // cae la traza que falta es justo la que hacia falta
+    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    assert!(
+        g.contains("parentbased_always_on"),
+        "tier 0 sin muestreo completo"
+    );
+    assert!(
+        g.contains("parentbased_traceidratio"),
+        "tier 1 sin muestreo parcial"
+    );
+    // pero en local se traza todo: descartar el 90% mientras depuras no sirve
+    assert!(
+        !l.contains("parentbased_traceidratio"),
+        "local muestrea parcialmente"
+    );
+
+    // los flags del traceparent se heredan, no se inventan: declarar
+    // "muestreado" sobre una traza que no lo esta parte el arbol en fragmentos
+    let (ts, _, _) = axon(&["build", "examples/payments.toml", "examples"]);
+    assert!(ts.contains(r#"const flags = partes?.[3] ?? "01""#), "{ts}");
+    assert!(!ts.contains("${hex(8)}-01`"), "el envelope fija los flags");
+}
+
 #[test]
 fn openapi_exige_idempotency_key() {
     let (json, _, _) = axon(&["openapi", "examples"]);

@@ -47,6 +47,11 @@ pub struct Workload {
     pub db: bool,
     pub secrets: Vec<String>,
     pub subscribes: Vec<String>,
+    /// Para los atributos de recurso de OpenTelemetry: una traza sin dueño ni
+    /// criticidad no sirve a las 3am.
+    pub owner: String,
+    pub tier: String,
+    pub version: String,
 }
 
 /// Una ruta del edge. El gateway no es una fuente de verdad nueva: sale de
@@ -163,6 +168,9 @@ pub fn plan(ms: &[Manifest]) -> Plan {
             db: m.infra.state.is_some(),
             secrets: m.infra.secrets.clone(),
             subscribes: m.consumes.keys().cloned().collect(),
+            owner: m.owner.clone().unwrap_or_default(),
+            tier: m.tier.clone().unwrap_or_default(),
+            version: m.version.clone().unwrap_or_default(),
         });
     }
     routes.sort_by(|a, b| (&a.path, &a.method).cmp(&(&b.path, &b.method)));
@@ -205,6 +213,14 @@ fn gcp(p: &Plan) -> String {
             w.image_var
         ));
     }
+    if !p.workloads.is_empty() {
+        // el backend de trazas no lo elige axon: solo dice donde exportar
+        o.push(
+            "variable \"otlp_endpoint\" {\n  type        = string\n  \
+             description = \"Colector OTLP: Cloud Trace via OpenTelemetry Collector, o el que uses\"\n}\n"
+                .to_string(),
+        );
+    }
     for t in &p.topics {
         let n = tfname(&t.event);
         o.push(format!(
@@ -229,7 +245,10 @@ fn gcp(p: &Plan) -> String {
                  secret_key_ref {{\n              secret  = google_secret_manager_secret.{s}_database_url.secret_id\n              version = \"latest\"\n            }}\n          }}\n        }}\n"
             ));
         }
-        for (k, v) in env_buckets(p, &w.service, PROY) {
+        for (k, v) in env_buckets(p, &w.service, PROY)
+            .into_iter()
+            .chain(env_otel(w, "${var.otlp_endpoint}"))
+        {
             env.push_str(&format!(
                 "        env {{\n          name  = \"{k}\"\n          value = \"{v}\"\n        }}\n"
             ));
@@ -371,6 +390,13 @@ fn aws(p: &Plan) -> String {
             w.image_var
         ));
     }
+    if !p.workloads.is_empty() {
+        o.push(
+            "variable \"otlp_endpoint\" {\n  type        = string\n  \
+             description = \"Colector OTLP: el ADOT Collector hacia X-Ray, o el que uses\"\n}\n"
+                .to_string(),
+        );
+    }
     for t in &p.topics {
         o.push(format!(
             "resource \"aws_sns_topic\" \"{}\" {{\n  name = \"{}\"\n}}\n",
@@ -426,7 +452,8 @@ fn aws(p: &Plan) -> String {
             port = w.port,
             sec = secrets.join(", "),
             env = env_buckets(p, &w.service, PROY)
-                .iter()
+                .into_iter()
+                .chain(env_otel(w, "${var.otlp_endpoint}"))
                 .map(|(k, v)| format!("{{ name = \"{k}\", value = \"{v}\" }}"))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -559,7 +586,10 @@ fn k8s(p: &Plan) -> String {
                  secretKeyRef: {{ name: {svc}, key: DATABASE_URL }}\n"
             ));
         }
-        for (k, v) in env_buckets(p, &w.service, PROY) {
+        for (k, v) in env_buckets(p, &w.service, PROY)
+            .into_iter()
+            .chain(env_otel(w, "${OTLP_ENDPOINT}"))
+        {
             env.push_str(&format!(
                 "            - name: {k}\n              value: \"{v}\"\n"
             ));
@@ -791,6 +821,18 @@ services:
         ));
     }
     // los servicios tuyos, no solo sus dependencias
+    // Jaeger all-in-one acepta OTLP directo, asi que el backend de trazas es
+    // un contenedor y no un colector mas un almacen.
+    o.push_str(
+        "  traza:
+    image: jaegertracing/all-in-one:1.76.0
+    environment: { COLLECTOR_OTLP_ENABLED: \"true\" }
+    ports: [\"${AXON_OTLP_PORT:-4318}:4318\", \"${AXON_TRAZA_UI_PORT:-16686}:16686\"]
+    healthcheck:
+      test: [\"CMD\", \"wget\", \"-qO-\", \"http://localhost:14269/\"]
+      interval: 2s
+",
+    );
     if !p.buckets.is_empty() {
         o.push_str(
             "  objetos:
@@ -826,7 +868,10 @@ services:
     }
     for (i, w) in p.workloads.iter().enumerate() {
         let svc = &w.service;
-        let mut deps = vec!["broker: { condition: service_healthy }".to_string()];
+        let mut deps = vec![
+            "broker: { condition: service_healthy }".to_string(),
+            "traza: { condition: service_healthy }".to_string(),
+        ];
         // No arrancar la app antes de que existan sus buckets. Y sin esto,
         // `up --wait` cuenta el job de creacion como un contenedor caido.
         if !env_buckets(p, &w.service, PROY).is_empty() {
@@ -853,6 +898,9 @@ services:
         }
         for (k, v) in env_buckets(p, &w.service, PROY) {
             secrets.push_str(&format!("      {k}: {}\n", v));
+        }
+        for (k, v) in env_otel_con(w, "http://traza:4318", true) {
+            secrets.push_str(&format!("      {k}: \"{v}\"\n"));
         }
         o.push_str(&format!(
             "  {svc}:
@@ -930,4 +978,44 @@ fn env_buckets(p: &Plan, svc: &str, proyecto: &str) -> Vec<(String, String)> {
             )
         })
         .collect()
+}
+
+/// Variables estandar de OpenTelemetry. axon no trae un SDK ni inventa un
+/// formato: el envelope ya propaga `traceparent`, que es el contexto W3C que
+/// usa OTel, asi que basta con levantar el backend y decirle al SDK del equipo
+/// donde exportar. Los atributos de recurso salen del manifiesto.
+fn env_otel(w: &Workload, endpoint: &str) -> Vec<(String, String)> {
+    env_otel_con(w, endpoint, false)
+}
+
+/// `todo` fuerza el muestreo completo: el muestreo existe para controlar
+/// volumen en produccion, no para esconderte el 90% de las trazas mientras
+/// depuras en tu laptop.
+fn env_otel_con(w: &Workload, endpoint: &str, todo: bool) -> Vec<(String, String)> {
+    let mut atributos = vec![
+        format!("service.name={}", w.service),
+        format!("axon.owner={}", w.owner),
+        format!("axon.tier={}", w.tier),
+    ];
+    if !w.version.is_empty() {
+        atributos.push(format!("service.version={}", w.version));
+    }
+    let mut v = vec![
+        ("OTEL_SERVICE_NAME".into(), w.service.clone()),
+        ("OTEL_EXPORTER_OTLP_ENDPOINT".into(), endpoint.to_string()),
+        ("OTEL_EXPORTER_OTLP_PROTOCOL".into(), "http/protobuf".into()),
+        ("OTEL_RESOURCE_ATTRIBUTES".into(), atributos.join(",")),
+    ];
+    // Un servicio tier 0 se muestrea entero: cuando se cae, la traza que falta
+    // es justo la que hacia falta.
+    if todo || w.tier == "0" {
+        v.push(("OTEL_TRACES_SAMPLER".into(), "parentbased_always_on".into()));
+    } else {
+        v.push((
+            "OTEL_TRACES_SAMPLER".into(),
+            "parentbased_traceidratio".into(),
+        ));
+        v.push(("OTEL_TRACES_SAMPLER_ARG".into(), "0.1".into()));
+    }
+    v
 }

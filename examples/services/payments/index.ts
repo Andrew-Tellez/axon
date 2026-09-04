@@ -3,6 +3,7 @@ import { PaymentsService, paymentNext, paymentCan,
          type CapturePaymentIn, type CapturePaymentOut,
          type RefundPaymentIn, type RefundPaymentOut,
          type OrderPlacedV1, type Envelope, type PaymentState } from "./contracts.ts";
+import { arrancarTelemetria } from "../telemetria.ts";
 import { bus, conectar, esperarDb, inbox, outbox, relay, servir, suscribir } from "../runtime.ts";
 import type pg from "pg";
 
@@ -56,6 +57,7 @@ export class Payments extends PaymentsService {
 if (process.env.NODE_TEST_CONTEXT === undefined) await main();
 
 async function main() {
+arrancarTelemetria();
 const db = await esperarDb();
 const nc = await conectar();
 const b = bus(nc);

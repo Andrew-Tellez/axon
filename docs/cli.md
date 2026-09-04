@@ -91,7 +91,11 @@ SET axon.tenant = '<uuid del inquilino>';
 ### `axon infra <fuentes> [--target local|gcp|aws|k8s|plan] [--env <nombre>]`
 Produce el plan neutral y lo renderiza. El plan cubre el edge (rutas, auth, rate
 limit, timeouts), la mensajería (topics, suscripciones, DLQ), el cómputo, el estado,
-los buckets con su CDN, y los secretos. `--env` aplica los deltas de `[env.<nombre>]`
+los buckets con su CDN, los secretos y las variables de OpenTelemetry.
+
+Los atributos de recurso de OTel salen del manifiesto (`owner`, `tier`, `version`) y el
+muestreo del `tier`: tier 0 se traza entero. `local` levanta el backend y traza todo sin
+importar el tier; los demás targets exportan al endpoint que declares. `--env` aplica los deltas de `[env.<nombre>]`
 sobre `[infra]`. Un `--target` no nativo busca `axon-infra-<target>` en el `PATH`.
 
 `--target plan` imprime el plan en JSON: la salida de emergencia para cualquier

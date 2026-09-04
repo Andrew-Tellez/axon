@@ -258,6 +258,49 @@ flujo c1
 `axon seq` da el flujo **esperado**; `axon trace --seq` da el **real**. Diferenciarlos
 es un test de e2e de una línea.
 
+## OpenTelemetry sin pegamento
+
+axon **no trae un SDK de observabilidad ni inventa un formato**. No hace falta: el
+`traceparent` del envelope *es* el contexto W3C que propaga OTel, así que un span
+creado a partir de un mensaje continúa la misma traza aunque el otro extremo esté en
+otro lenguaje.
+
+Lo que axon aporta es lo que sí es suyo — levantar el backend en local y poner las
+variables estándar en los cuatro targets, con los atributos de recurso **derivados del
+manifiesto**:
+
+```yaml
+OTEL_SERVICE_NAME:            payments
+OTEL_EXPORTER_OTLP_ENDPOINT:  http://traza:4318    # local; en cloud, una variable
+OTEL_RESOURCE_ATTRIBUTES:     service.name=payments,axon.owner=equipo-pagos,axon.tier=0,service.version=1.2.0
+OTEL_TRACES_SAMPLER:          parentbased_always_on
+```
+
+Las mismas variables suben a `gcp`, `aws` y `k8s`: solo cambia el destino, que es una
+variable del IaC para que apunte a Cloud Trace, X-Ray, Datadog o lo que uses. **El
+muestreo sale del `tier`** — un servicio tier 0 se traza entero, porque cuando se cae
+la traza que falta es justo la que hacía falta. En `local` se traza todo sin importar
+el tier: descartar el 90% de las trazas mientras depurás no sirve para nada.
+
+El target `local` levanta el backend (Jaeger, que acepta OTLP directo, así que es un
+contenedor y no un colector más un almacén) y el `demo.sh` verifica la forma del árbol
+en CI:
+
+```console
+==> la traza en OpenTelemetry
+  orders/POST /v1/orders
+      orders/publish order.placed@v1
+          payments/process order.placed@v1
+              payments/stage payment.captured@v1
+                  payments/publish payment.captured@v1
+  OK: 5 spans, un raiz, sin huerfanos, cruzando ['orders', 'payments']
+```
+
+Cinco spans, un solo raíz, cero huérfanos, cruzando dos procesos y pasando por el relay
+del outbox. Lo que se rompe en cuanto alguien inventa un `traceparent` no es que falte
+la traza: es que aparece **partida en fragmentos que cuelgan de padres que nunca
+existieron**, y en la UI eso se ve como varias trazas cortas en vez de una.
+
 ## Agnóstico del cloud
 
 El manifiesto no menciona ningún proveedor. `axon infra` produce primero un **plan
@@ -265,7 +308,7 @@ neutral** y después lo renderiza:
 
 | Target | Edge | Mensajería | Cómputo | Estado, objetos y secretos |
 | --- | --- | --- | --- | --- |
-| `local` | Traefik | NATS JetStream | tus servicios con `build:` | Postgres + MinIO + migraciones aplicadas |
+| `local` | Traefik | NATS JetStream | tus servicios con `build:` | Postgres + MinIO + Jaeger + migraciones aplicadas |
 | `gcp` | url_map + backends | Pub/Sub con push y DLQ | Cloud Run + service account | Cloud SQL, GCS + Cloud CDN, Secret Manager |
 | `aws` | API Gateway v2 | SNS → SQS con redrive | ECS Fargate + autoscaling | RDS, S3 + CloudFront, Secrets Manager |
 | `k8s` | Gateway API HTTPRoute | Knative Broker/Trigger | Deployment + Service + HPA | External Secrets |

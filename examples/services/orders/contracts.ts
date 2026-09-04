@@ -18,12 +18,16 @@ const hex = (n: number) =>
   Array.from(crypto.getRandomValues(new Uint8Array(n)), b => b.toString(16).padStart(2, "0")).join("");
 
 export function newEnvelope<T>(type: string, source: string, data: T, cause?: Envelope<unknown>): Envelope<T> {
-  const trace = cause ? cause.traceparent.split("-")[1] : hex(16);
+  const partes = cause?.traceparent.split("-");
+  const trace = partes?.[1] ?? hex(16);
+  // Los flags se heredan, no se inventan: declarar "muestreado" sobre una traza
+  // que no lo esta deja fragmentos colgando de un padre que nunca se exporto.
+  const flags = partes?.[3] ?? "01";
   return {
     id: crypto.randomUUID(),
     type, source, data,
     time: new Date().toISOString(),
-    traceparent: `00-${trace}-${hex(8)}-01`,
+    traceparent: `00-${trace}-${hex(8)}-${flags}`,
     correlationId: cause ? cause.correlationId : crypto.randomUUID(),
     causationId: cause ? cause.id : null,
   };

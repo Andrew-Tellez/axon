@@ -9,6 +9,30 @@ perderlas.
 
 ## [No liberado]
 
+### Añadido
+
+- **OpenTelemetry en los cuatro targets.** axon no trae un SDK ni inventa un formato:
+  el `traceparent` del envelope ya es el contexto W3C que propaga OTel. Lo que aporta
+  es levantar el backend en `local` (Jaeger) e inyectar las variables estándar en los
+  cuatro targets, con los atributos de recurso derivados del manifiesto (`owner`,
+  `tier`, `version`) y el muestreo derivado del `tier` — tier 0 se traza entero, y en
+  `local` se traza todo sin importar el tier.
+- `demo.sh` verifica la forma del árbol de spans en CI: un solo raíz, cero huérfanos y
+  la traza cruzando los dos servicios.
+
+### Corregido
+
+- El envelope generado fijaba los flags del `traceparent` en `01` en vez de heredarlos
+  de su causa. Declarar «muestreado» sobre una traza que no lo está deja fragmentos
+  colgando de un padre que nunca se exportó, y en la UI se ve como varias trazas
+  cortas en vez de una.
+- `pages` no podía desplegar desde un tag: el entorno `github-pages` solo admite la
+  rama por defecto. Ahora se encadena al release con `workflow_run`.
+- `release` quedaba en cola para siempre: los runners `macos-13` están retirados. El
+  binario de macOS Intel se compila cruzado desde el runner arm64.
+- Un test valida que los workflows del propio repo parseen: antes solo se validaba el
+  YAML que axon genera.
+
 ## [0.1.0] — 2026-09-04
 
 Primera versión pública. Preview.

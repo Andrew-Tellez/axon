@@ -35,6 +35,16 @@ echo
 echo "==> cadena causal real"
 "$AXON" trace .axon/local.ndjson
 echo
+echo "==> la traza en OpenTelemetry"
+UI="localhost:${AXON_TRAZA_UI_PORT:-16686}"
+i=0
+until curl -fsS "http://$UI/api/services" 2>/dev/null | grep -q payments; do
+  i=$((i + 1))
+  [ "$i" -gt 25 ] && { echo "no llego ninguna traza al colector"; exit 1; }
+  sleep 1
+done
+python3 verificar-traza.py "$UI"
+
 
 echo "==> esperado (manifiesto) vs real (log de envelopes)"
 tmp=$(mktemp -d)
