@@ -160,6 +160,27 @@ comando con el archivo y el error: axon prefiere fallar a adivinar columnas.
 Lee NDJSON de envelopes (`-` o nada = stdin) y reconstruye la cadena causal real.
 Sin `--seq` imprime el árbol; con `--seq`, Mermaid para diffear contra `axon seq`.
 
+### `axon cap <fuentes> [-s <servicio>]`
+Reconcilia el lado CAP declarado con los patrones en uso. No repite lo que bloquea
+`verify`: explica las consecuencias. `x` contradice y `verify` lo bloquea, `!` es un
+costo que se paga, `i` es una consecuencia que conviene conocer.
+
+`-s` acota el informe a ciertos servicios; el análisis igual mira a todos, porque sin
+los demás no se puede saber que una dependencia es AP.
+
+### `axon flags <fuentes>`
+Configuración de [flagd](https://flagd.dev) derivada de los `[flags.*]` declarados. El
+rollout gradual se expresa con su `fractional`, fijado por el campo de `sticky_by`.
+
+El target `local` levanta flagd con esta configuración, y el código generado emite
+accesores tipados más una interfaz con la forma de OpenFeature — para que el SDK real
+encaje sin una capa de traducción.
+
+## Colores
+
+Azul informa, amarillo advierte, rojo bloquea. Se apagan solos cuando la salida no es
+una terminal; `NO_COLOR` los desactiva y `CLICOLOR_FORCE` los fuerza.
+
 ## Verificación
 
 ### `axon baseline <fuentes>`

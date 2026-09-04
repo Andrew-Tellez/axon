@@ -1848,6 +1848,79 @@ fn los_flags_se_verifican() {
     assert!(v["flags"]["cortar_stripe"]["targeting"].is_null());
 }
 
+/// `axon cap` no repite lo que bloquea `verify`: explica las consecuencias.
+/// Hay combinaciones que no son un error y aun asi cambian lo que el servicio
+/// puede prometer, y eso conviene tenerlo escrito antes de un incidente.
+#[test]
+fn el_informe_cap_reconcilia_los_patrones() {
+    let (out, err, ok) = axon(&["cap", "examples"]);
+    assert!(ok, "{err}");
+    // contradice: verify ya lo bloquea, y aca se explica por que
+    assert!(out.contains("contradice"), "{out}");
+    assert!(
+        out.contains("la garantia de la ruta es la del mas debil"),
+        "{out}"
+    );
+    // cuesta: una compensacion es consistencia eventual por construccion
+    assert!(out.contains("el estado propio es CP, el FLUJO no"), "{out}");
+    // implica: el outbox no rompe tu garantia, rompe la del flujo
+    assert!(out.contains("los consumidores lo ven tarde"), "{out}");
+    // y el standby es lo unico que da disponibilidad sin costo en consistencia
+    assert!(out.contains("sin costo en la C"), "{out}");
+    assert!(out.contains("[CP]") && out.contains("[AP]"), "{out}");
+
+    // el filtro por servicio, con el analisis mirando igual a todos: sin
+    // `orders` cargado no se podria saber que la dependencia es AP
+    let (solo, _, _) = axon(&["cap", "examples", "-s", "payments"]);
+    assert!(solo.contains("payments"), "{solo}");
+    assert!(!solo.contains("\norders "), "el filtro no acoto:\n{solo}");
+    assert!(solo.contains("se llama a `orders`, que es AP"), "{solo}");
+
+    let (nada, _, _) = axon(&["cap", "examples", "-s", "inexistente"]);
+    assert!(nada.contains("ningun servicio con ese nombre"), "{nada}");
+}
+
+/// Colores: azul informa, amarillo advierte, rojo bloquea. Y se apagan solos
+/// cuando la salida no es una terminal, porque ahi las secuencias son basura
+/// que ensucia un diff o un log de CI.
+#[test]
+fn los_colores_respetan_el_destino() {
+    // el suite captura la salida, asi que nunca es una terminal
+    let (out, err, _) = axon(&["verify", "examples"]);
+    let todo = format!("{out}{err}");
+    assert!(
+        !todo.contains('\x1b'),
+        "coloreo una salida que no es terminal"
+    );
+
+    // y con CLICOLOR_FORCE si colorea
+    let forzado = Command::new(env!("CARGO_BIN_EXE_axon"))
+        .args(["verify", "examples"])
+        .env("CLICOLOR_FORCE", "1")
+        .output()
+        .expect("axon");
+    let todo = format!(
+        "{}{}",
+        String::from_utf8_lossy(&forzado.stdout),
+        String::from_utf8_lossy(&forzado.stderr)
+    );
+    assert!(todo.contains("\x1b[1;33m"), "no coloreo con CLICOLOR_FORCE");
+
+    // NO_COLOR gana sobre el forzado, que es la convencion
+    let sin = Command::new(env!("CARGO_BIN_EXE_axon"))
+        .args(["verify", "examples"])
+        .env("CLICOLOR_FORCE", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("axon");
+    let todo = format!(
+        "{}{}",
+        String::from_utf8_lossy(&sin.stdout),
+        String::from_utf8_lossy(&sin.stderr)
+    );
+    assert!(!todo.contains('\x1b'), "NO_COLOR no se respeto");
+}
+
 #[test]
 fn openapi_exige_idempotency_key() {
     let (json, _, _) = axon(&["openapi", "examples"]);

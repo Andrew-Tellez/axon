@@ -1,7 +1,9 @@
 //! axon — el manifiesto es la fuente de verdad; el resto son proyecciones.
 mod api;
 mod baseline;
+mod cap;
 mod carga;
+mod color;
 mod dbsec;
 mod emit;
 mod import;
@@ -82,6 +84,13 @@ enum Cmd {
         /// nombre del servicio, si no hay que deducirlo de info.title
         #[arg(long)]
         service: Option<String>,
+    },
+    /// reconcilia el lado CAP declarado con los patrones en uso
+    Cap {
+        sources: Vec<String>,
+        /// limita el informe a estos servicios; el analisis igual mira a todos
+        #[arg(long = "service", short = 's')]
+        services: Vec<String>,
     },
     /// configuracion de flagd derivada de los `[flags.*]` declarados
     Flags { sources: Vec<String> },
@@ -262,18 +271,27 @@ fn run() -> Result<ExitCode, String> {
                     Err(e) => r.warnings.push(format!("[{bin}] no corrio: {e}")),
                 }
             }
-            for w in &r.warnings {
-                println!("warn: {w}");
-            }
+            // Los errores primero: son lo que hay que arreglar, y en una lista
+            // larga lo importante no puede quedar debajo.
             for e in &r.errors {
-                eprintln!("error: {e}");
+                eprintln!("{} {}", color::rojo("error"), realzar(e));
             }
-            println!(
-                "axon: {} servicios, {} errores, {} avisos",
+            for w in &r.warnings {
+                println!("{}  {}", color::amarillo("aviso"), realzar(w));
+            }
+            let resumen = format!(
+                "{} servicios, {} errores, {} avisos",
                 ms.len(),
                 r.errors.len(),
                 r.warnings.len()
             );
+            if r.errors.is_empty() && r.warnings.is_empty() {
+                println!("{} {}", color::verde("ok"), color::gris(&resumen));
+            } else if r.errors.is_empty() {
+                println!("{}  {}", color::amarillo("casi"), color::gris(&resumen));
+            } else {
+                println!("{} {}", color::rojo("falla"), color::gris(&resumen));
+            }
             if !r.errors.is_empty() {
                 return Ok(ExitCode::FAILURE);
             }
@@ -289,6 +307,12 @@ fn run() -> Result<ExitCode, String> {
                 std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?
             };
             print!("{}", import::asyncapi(&text, service.as_deref())?);
+        }
+        Cmd::Cap { sources, services } => {
+            println!(
+                "{}",
+                cap::informe(&manifest::discover(&sources)?, &services)
+            )
         }
         Cmd::Flags { sources } => {
             print!("{}", emit::build_flagd(&manifest::discover(&sources)?))
@@ -376,6 +400,23 @@ fn run() -> Result<ExitCode, String> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Resalta lo que va entre acentos graves. Los mensajes ya se escriben con
+/// `` `asi` `` para nombrar campos y valores; esto lo aprovecha en vez de
+/// pedir un formato nuevo.
+fn realzar(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let mut dentro = false;
+    for parte in msg.split('`') {
+        if dentro {
+            out.push_str(&color::fuerte(parte));
+        } else {
+            out.push_str(parte);
+        }
+        dentro = !dentro;
+    }
+    out
 }
 
 fn registry(ms: &[manifest::Manifest]) -> serde_json::Value {

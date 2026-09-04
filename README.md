@@ -212,6 +212,32 @@ tras el enfriamiento. Los reintentos solo se emiten para métodos idempotentes �
 bloquea el resto — y la llamada lleva `traceparent`, `x-correlation-id`,
 `x-causation-id` e `idempotency-key`.
 
+### `axon cap`: reconciliar lo declarado con lo que usás
+
+`verify` bloquea las contradicciones. `axon cap` explica las **consecuencias**, que es
+distinto: hay combinaciones que no son un error y aun así cambian lo que el servicio
+puede prometer.
+
+```console
+$ axon cap manifests/ -s payments
+payments  [CP]  consistency = strong, on_partition = reject
+  x dependencia        contradice  se llama a `orders`, que es AP, en una ruta
+                                   sincrona: la garantia de la ruta es la del mas debil
+  ! saga               cuesta      `refund` compensa un paso anterior. Una compensacion
+                                   es consistencia eventual por construccion: el estado
+                                   propio es CP, el FLUJO no
+  i outbox             implica     el estado propio queda consistente, pero los
+                                   consumidores lo ven tarde
+  i standby HA         implica     no rompe la consistencia: del standby no se lee. Es
+                                   lo unico de esta lista que mejora la disponibilidad
+                                   sin costo en la C
+```
+
+**`x` lo bloquea `verify`, `!` es un costo que pagás, `i` es una consecuencia que
+conviene conocer antes de un incidente.** El filtro `-s` acota el informe, pero el
+análisis sigue mirando a todos los servicios: sin `orders` cargado no se podría saber
+que esa dependencia es AP.
+
 ### El lado del teorema que sí se elige
 
 La tolerancia a particiones no es una opción: la red se parte. Lo que se elige es qué
