@@ -1,0 +1,35 @@
+{
+  "asyncapi": "2.6.0",
+  "info": { "title": "Inventory", "version": "1.0.0" },
+  "channels": {
+    "order.placed": {
+      "publish": {
+        "message": { "$ref": "#/components/messages/OrderPlaced" }
+      }
+    },
+    "inventory.reserved": {
+      "subscribe": {
+        "message": {
+          "payload": {
+            "type": "object",
+            "properties": {
+              "sku": { "type": "string" },
+              "qty": { "type": "integer" },
+              "reserved": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "messages": {
+      "OrderPlaced": {
+        "payload": {
+          "type": "object",
+          "properties": { "orderId": { "type": "string", "format": "uuid" } }
+        }
+      }
+    }
+  }
+}

@@ -300,6 +300,72 @@ on = "fantasma"
 }
 
 #[test]
+fn import_asyncapi_3_y_2() {
+    // 3.x: send -> emits, receive -> consumes
+    let (t3, err, ok) = axon(&[
+        "import",
+        "asyncapi",
+        "examples/import/shipping.asyncapi.yaml",
+    ]);
+    assert!(ok, "{err}");
+    assert!(t3.contains(r#"service = "shipping-service""#), "{t3}");
+    assert!(t3.contains(r#"[emits."shipment.dispatched@v1"]"#), "{t3}");
+    assert!(t3.contains(r#"[consumes."order.placed@v1"]"#), "{t3}");
+    assert!(t3.contains(r#"handler = "onOrderPlaced""#));
+    assert!(
+        t3.contains(r#"dispatchedAt = "timestamp""#),
+        "format date-time no mapeado"
+    );
+    assert!(
+        t3.contains(r#"cost = "money""#),
+        "{{amount,currency}} no se reconocio como money"
+    );
+    // el consumidor no declara campos: el esquema lo posee el emisor, asi que
+    // el bloque de un evento consumido solo lleva su handler
+    let consumido: Vec<&str> = t3
+        .lines()
+        .skip_while(|l| !l.starts_with("[consumes."))
+        .skip(1)
+        .take_while(|l| !l.trim().is_empty())
+        .collect();
+    assert_eq!(
+        consumido,
+        vec![r#"handler = "onOrderPlaced""#],
+        "el import copio el esquema de un evento ajeno"
+    );
+
+    // 2.x: publish es lo que la app RECIBE, subscribe lo que EMITE. Invertido.
+    let (t2, err, ok) = axon(&[
+        "import",
+        "asyncapi",
+        "examples/import/inventory.asyncapi.json",
+    ]);
+    assert!(ok, "{err}");
+    assert!(
+        t2.contains(r#"[consumes."order.placed@v1"]"#),
+        "publish 2.x mal mapeado:\n{t2}"
+    );
+    assert!(
+        t2.contains(r#"[emits."inventory.reserved@v1"]"#),
+        "subscribe 2.x mal mapeado:\n{t2}"
+    );
+
+    // lo importado tiene que ser inmediatamente verificable, y decir que falta
+    let dir = std::env::temp_dir().join("axon-import");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("s.toml"), &t3).unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    // un placeholder no es un valor: si esto pasa, el import produce mentiras
+    assert!(
+        err.contains("sin `owner`"),
+        "TODO se acepto como owner:\n{err}"
+    );
+    assert!(err.contains("sin `tier`"), "{err}");
+}
+
+#[test]
 fn openapi_exige_idempotency_key() {
     let (json, _, _) = axon(&["openapi", "examples"]);
     assert!(json.contains("Idempotency-Key"));

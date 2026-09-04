@@ -38,18 +38,30 @@ pub struct Report {
     pub warnings: Vec<String>,
 }
 
+/// Un placeholder no es un valor. Sin esto, `axon import` produciria
+/// manifiestos que pasan verify sin que nadie los haya revisado.
+fn pendiente(v: &Option<String>) -> bool {
+    match v {
+        None => true,
+        Some(s) => {
+            let s = s.trim().to_uppercase();
+            s.is_empty() || s == "TODO" || s == "FIXME" || s == "TBD"
+        }
+    }
+}
+
 pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     let (mut errors, mut warnings) = (Vec::new(), Vec::new());
 
     // gobernanza: nada sin dueno, nada sin criticidad, nombres bajo control
     for m in ms.iter().filter(|m| !m.external) {
-        if pol.require_owner && m.owner.is_none() {
+        if pol.require_owner && pendiente(&m.owner) {
             errors.push(format!(
                 "{}: sin `owner`; un servicio sin dueno no se despliega",
                 m.service
             ));
         }
-        if pol.require_tier && m.tier.is_none() {
+        if pol.require_tier && pendiente(&m.tier) {
             errors.push(format!(
                 "{}: sin `tier`; la criticidad decide alertas y SLO",
                 m.service

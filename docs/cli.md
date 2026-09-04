@@ -36,6 +36,16 @@ métodos mutantes y `application/problem+json` (RFC 7807) como error uniforme.
 Registro JSON: versión, dueño, métodos con entradas y salidas, eventos emitidos y
 consumidos. Funciona contra disco y contra servicios corriendo.
 
+### `axon import asyncapi <archivo|-> [--service <nombre>]`
+AsyncAPI 2.x o 3.x, JSON o YAML, a un manifiesto en stdout. El nombre del servicio
+sale de `info.title` salvo que se pase `--service`.
+
+En 2.x la dirección es desde fuera de la app: `publish` es lo que otros publican
+hacia ella (lo que la app **consume**) y `subscribe` lo que expone para que otros
+lean (lo que **emite**). axon lo traduce; es la confusión número uno al leer 2.x.
+
+Lo que AsyncAPI no declara sale como `TODO` y `verify` lo trata como ausente.
+
 ## Infraestructura
 
 ### `axon infra <fuentes> [--target local|gcp|aws|k8s|plan] [--env <nombre>]`

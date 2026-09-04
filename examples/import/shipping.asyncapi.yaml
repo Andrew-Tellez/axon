@@ -1,0 +1,50 @@
+asyncapi: 3.0.0
+info:
+  title: Shipping Service
+  version: 2.1.0
+channels:
+  orderPlaced:
+    address: order.placed
+    messages:
+      OrderPlaced:
+        $ref: '#/components/messages/OrderPlaced'
+  shipmentDispatched:
+    address: shipment.dispatched
+    messages:
+      ShipmentDispatched:
+        $ref: '#/components/messages/ShipmentDispatched'
+operations:
+  onOrderPlaced:
+    action: receive
+    channel:
+      $ref: '#/channels/orderPlaced'
+  sendShipmentDispatched:
+    action: send
+    channel:
+      $ref: '#/channels/shipmentDispatched'
+components:
+  messages:
+    OrderPlaced:
+      payload:
+        type: object
+        properties:
+          orderId: { type: string, format: uuid }
+          total:
+            type: object
+            properties:
+              amount: { type: integer }
+              currency: { type: string }
+    ShipmentDispatched:
+      payload:
+        type: object
+        properties:
+          shipmentId: { type: string, format: uuid }
+          orderId: { type: string, format: uuid }
+          carrier: { type: string }
+          dispatchedAt: { type: string, format: date-time }
+          packages: { type: integer }
+          cost:
+            type: object
+            properties:
+              amount: { type: integer }
+              currency: { type: string }

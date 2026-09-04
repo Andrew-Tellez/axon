@@ -1,6 +1,7 @@
 //! axon — el manifiesto es la fuente de verdad; el resto son proyecciones.
 mod api;
 mod emit;
+mod import;
 mod infra;
 mod manifest;
 mod plugin;
@@ -63,6 +64,17 @@ enum Cmd {
     Discover { sources: Vec<String> },
     /// drift entre manifiestos, migraciones e infraestructura
     Verify { sources: Vec<String> },
+    /// AsyncAPI (2.x o 3.x, JSON o YAML) -> manifiesto axon
+    Import {
+        /// formato de origen
+        #[arg(value_parser = ["asyncapi"])]
+        formato: String,
+        /// archivo, o `-` para stdin
+        file: String,
+        /// nombre del servicio, si no hay que deducirlo de info.title
+        #[arg(long)]
+        service: Option<String>,
+    },
     /// manifiestos -> OpenAPI 3.1 (un catalogo para toda la plataforma)
     Openapi { sources: Vec<String> },
     /// manifiesto -> andamiaje de pruebas (unitarias, integracion, e2e)
@@ -216,6 +228,18 @@ fn run() -> Result<ExitCode, String> {
             if !r.errors.is_empty() {
                 return Ok(ExitCode::FAILURE);
             }
+        }
+        Cmd::Import {
+            formato: _,
+            file,
+            service,
+        } => {
+            let text = if file == "-" {
+                std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?
+            } else {
+                std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?
+            };
+            print!("{}", import::asyncapi(&text, service.as_deref())?);
         }
         Cmd::Openapi { sources } => println!(
             "{}",
