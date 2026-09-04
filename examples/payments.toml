@@ -133,3 +133,4 @@ owner = "equipo-pagos"
 kill_switch = true
 default_variant = "normal"
 variants = { normal = 3, degradado = 0 }
+

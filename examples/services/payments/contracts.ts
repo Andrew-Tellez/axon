@@ -206,6 +206,15 @@ export const manifest = {
     "export": true,
     "pii": "exclude"
   },
+  "pooler": {
+    "engine": "none",
+    "mode": "session",
+    "shards": 1,
+    "max_client_conn": null,
+    "pool_size": null,
+    "cross_shard_disabled": true,
+    "tenant_binding": null
+  },
   "machine": {
     "payment": {
       "initial": "pending",

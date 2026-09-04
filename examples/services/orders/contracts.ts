@@ -146,6 +146,15 @@ export const manifest = {
     "export": true,
     "pii": "hash"
   },
+  "pooler": {
+    "engine": "pgdog",
+    "mode": "transaction",
+    "shards": 4,
+    "max_client_conn": 500,
+    "pool_size": 40,
+    "cross_shard_disabled": true,
+    "tenant_binding": "set_local"
+  },
   "machine": {},
   "infra": {
     "state": "postgres",
@@ -162,7 +171,7 @@ export const manifest = {
     "backup_retention_days": 14,
     "pitr": null,
     "read_replicas": 2,
-    "shard_key": null,
+    "shard_key": "tenant_id",
     "tenant_column": "tenant_id",
     "tenant_exempt": []
   },

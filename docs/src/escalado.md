@@ -59,6 +59,80 @@ Dos excepciones, porque **una regla con falsos positivos se silencia**: una `UNI
 compuesta que *sí* incluye la clave es segura —cada nodo la garantiza—, y una columna
 `uuid` es única por construcción en todo el mundo, así que una PK uuid no se marca.
 
+## El pooler y el reparto
+
+```toml
+[pooler]
+engine          = "pgdog"
+mode            = "transaction"
+tenant_binding  = "set_local"   # obligatorio en `transaction` con inquilinos
+shards          = 4
+max_client_conn = 500
+pool_size       = 40
+```
+
+```sh
+axon pooler manifests/ > pgdog.toml
+```
+
+Sale la configuración de [pgdog](https://pgdog.dev) con los nodos, y **el reparto
+derivado del esquema real**: qué tablas llevan la clave y de qué tipo es, leído de las
+migraciones. Los datos de conexión salen como variables — un archivo generado no es
+lugar para una contraseña.
+
+Dos decisiones que el generador toma solo, y por qué:
+
+- **`cross_shard_disabled = true`.** Sin `JOIN` entre nodos ni unicidad global, una
+  consulta que cruza se responde *mal*. Rechazarla convierte cada limitación del sharder
+  en un error ruidoso.
+- **`query_parser = "on"`, no `"auto"`.** En `auto` el parser no se activa con un solo
+  nodo primario — que es exactamente el caso donde una variable de sesión se cuela sin
+  ser interceptada. Y el síntoma **desaparece al agregar una réplica**, así que no se
+  reproduce en un staging que la tenga.
+
+### La regla que importa
+
+```console
+$ axon verify manifests/
+error  p: `mode = "transaction"` con `tenant_column` y sin `tenant_binding = "set_local"`.
+       La conexion vuelve al pool en cada COMMIT y se le entrega a otro inquilino: una
+       GUC de sesion sobrevive y la siguiente peticion lee las filas del anterior, sin
+       un error. `SET LOCAL` muere con la transaccion
+```
+
+En modo transacción la conexión física se recicla entre inquilinos. Si el inquilino se
+fija con un `SET` de sesión, el valor sobrevive y **la siguiente petición lee las filas
+del anterior**. Eso no falla: devuelve datos del cliente equivocado.
+
+Las demás reglas del pooler cambian el **sujeto** de la aritmética, que es la parte que
+se pasa por alto:
+
+| | |
+| --- | --- |
+| `pool_size` × `max_instances` > `max_client_conn` | con un pooler en medio, las instancias compiten por *sus* clientes, no por las conexiones del motor |
+| `pooler.pool_size` + reservadas > `max_connections` | **por motor**: los nodos y las réplicas son motores distintos, cada uno con su tope |
+| `mode = "session"` con más clientes que conexiones | en modo sesión no hay multiplexado: una conexión de cliente ata una de servidor |
+| `shards > 1` con `consistency = "strong"` | la confirmación en dos fases deja ver estados parciales: la garantía real es eventual |
+| `shards > 1` sin `shard_key` | el sharder necesita la columna, y `verify` necesita comprobar que toda tabla la lleve |
+| Campos de `[pooler]` con `engine = "none"` | configuración que no se aplica en ninguna parte |
+
+### Verificado contra su propio esquema
+
+pgdog publica el **JSON Schema oficial** de su configuración, generado desde sus tipos
+de Rust y comprobado por su CI. El suite valida el `pgdog.toml` generado contra ese
+archivo: eso es validar contra el parser real que lo va a leer, no contra nuestra idea de
+cómo debería ser.
+
+### Lo que falta, y es lo que decide
+
+Wirear pgdog al target `local`, delante de N Postgres, y **comprobar en el demo que la
+RLS generada sigue aislando a través del pooler en modo transacción**. Hoy eso está
+declarado y verificado en el manifiesto, pero no medido de punta a punta.
+
+Es el experimento que importa, porque el único test de RLS multi-inquilino que existe en
+el repositorio de pgdog es el que un contribuyente externo escribió para demostrar una
+fuga de `set_config()`, y está en rojo mientras su corrección no esté integrada.
+
 ## El motor tiene que existir
 
 `state` se valida contra una lista cerrada. Antes era una cadena libre, así que

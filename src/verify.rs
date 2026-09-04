@@ -370,6 +370,132 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // ---- el pooler: cambia el sujeto de las reglas, y puede romper el
+    // aislamiento por inquilino sin dar un error ----
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        let pl = &m.pooler;
+        if !pl.activo() {
+            // declarar campos de pooler sin pooler es una configuracion que no
+            // se aplica en ningun lado
+            if pl.shards > 1 || pl.max_client_conn.is_some() || pl.tenant_binding.is_some() {
+                errors.push(format!(
+                    "{svc}: hay campos de `[pooler]` declarados con `engine = \"none\"`; no se \
+                     aplican en ninguna parte"
+                ));
+            }
+            continue;
+        }
+        match pl.engine.as_str() {
+            "pgdog" => {}
+            otro => errors.push(format!(
+                "{svc}: `[pooler] engine = \"{otro}\"` no esta soportado. Nativo: pgdog"
+            )),
+        }
+        match pl.mode.as_str() {
+            "transaction" | "session" | "statement" => {}
+            otro => errors.push(format!(
+                "{svc}: `[pooler] mode = \"{otro}\"` no existe; usa transaction, session o statement"
+            )),
+        }
+
+        // LA REGLA. En modo transaccion la conexion vuelve al pool en cada
+        // COMMIT y se le entrega a otro inquilino. Si el inquilino se fija con
+        // un `SET` de sesion, el valor sobrevive y la siguiente peticion lee
+        // las filas del anterior. Sin error.
+        if m.infra.tenant_column.is_some() && pl.mode != "session" {
+            match pl.tenant_binding.as_deref() {
+                Some("set_local") => {}
+                _ => errors.push(format!(
+                    "{svc}: `mode = \"{}\"` con `tenant_column` y sin `tenant_binding = \
+                     \"set_local\"`. La conexion vuelve al pool en cada COMMIT y se le entrega a \
+                     otro inquilino: una GUC de sesion sobrevive y la siguiente peticion lee las \
+                     filas del anterior, sin un error. `SET LOCAL` muere con la transaccion",
+                    pl.mode
+                )),
+            }
+        }
+        if let Some(b) = &pl.tenant_binding {
+            if b != "set_local" {
+                errors.push(format!(
+                    "{svc}: `tenant_binding = \"{b}\"` no existe; el unico seguro es \"set_local\""
+                ));
+            }
+        }
+
+        // Repartir sin declarar por que columna no se puede.
+        if pl.shards > 1 && m.infra.shard_key.is_none() {
+            errors.push(format!(
+                "{svc}: `shards = {}` sin `shard_key`. El sharder necesita saber por que columna \
+                 reparte, y `verify` necesita comprobar que toda tabla la lleve",
+                pl.shards
+            ));
+        }
+
+        // El 2PC de un sharder da consistencia eventual con lecturas parciales
+        // visibles, no atomicidad. Prometer CP encima es la misma clase de
+        // contradiccion que leer de una replica y prometer CP.
+        if pl.shards > 1 && !m.cap.eventual() {
+            errors.push(format!(
+                "{svc}: {} nodos de reparto con `consistency = \"strong\"`. Una transaccion que \
+                 cruza nodos se confirma en dos fases y deja ver estados parciales: la garantia \
+                 real es eventual, y declararla fuerte no la cambia",
+                pl.shards
+            ));
+        }
+
+        // Con el pooler delante, el sujeto de la aritmetica cambia dos veces.
+        let techo = m.infra.max_instances.unwrap_or(10);
+        if let (Some(pool), Some(clientes)) = (m.infra.pool_size, pl.max_client_conn) {
+            let pico = pool * techo;
+            if pico > clientes {
+                errors.push(format!(
+                    "{svc}: {pool} conexiones x {techo} instancias = {pico} clientes, y el pooler \
+                     acepta {clientes}. Con un pooler en medio la aritmetica va contra su tope de \
+                     clientes, no contra el del motor"
+                ));
+            }
+        }
+        if let (Some(ppool), Some(tope)) = (pl.pool_size, m.infra.max_connections) {
+            // el pooler abre ESTE tanto a CADA motor, y los nodos y las
+            // replicas son motores distintos, cada uno con su propio tope
+            let reservado = if m.patterns.outbox { 5 } else { 2 };
+            if ppool + reservado > tope {
+                errors.push(format!(
+                    "{svc}: el pooler abre {ppool} conexiones a cada motor, mas {reservado} \
+                     reservadas, contra un tope de {tope} POR MOTOR"
+                ));
+            }
+        }
+        // En modo sesion una conexion de cliente ata una de servidor: no hay
+        // multiplexado, asi que declarar mas clientes que conexiones al motor
+        // es prometer algo que el pooler no hace.
+        if pl.mode == "session" {
+            if let (Some(pool), Some(ppool)) = (m.infra.pool_size, pl.pool_size) {
+                if pool * techo > ppool {
+                    errors.push(format!(
+                        "{svc}: `mode = \"session\"` no multiplexa —una conexion de cliente ata \
+                         una de servidor—, y {pool} x {techo} = {} clientes contra {ppool} \
+                         conexiones al motor",
+                        pool * techo
+                    ));
+                }
+            }
+        }
+
+        // Una consulta que cruza nodos, ejecutada, puede devolver un resultado
+        // incompleto en silencio: sin JOIN entre nodos, sin unicidad global.
+        if pl.shards > 1 && !pl.cross_shard_disabled {
+            warnings.push(format!(
+                "{svc}: `cross_shard_disabled = false` con {} nodos. Una consulta que cruza \
+                 nodos se ejecuta igual, y las que el sharder no sabe resolver —JOIN entre \
+                 nodos, funciones de ventana, agregados que no estan en su lista— pueden \
+                 devolver un resultado incompleto en vez de un error",
+                pl.shards
+            ));
+        }
+    }
+
     // ---- el motor tiene que existir ----
     for m in ms.iter().filter(|m| !m.external) {
         let Some(motor) = &m.infra.state else {
@@ -403,7 +529,13 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         // El agotamiento de conexiones no aparece cuando lo probas con una
         // instancia: aparece el dia que escala. Es una multiplicacion, y nadie
         // la hace.
-        if let (Some(pool), Some(tope)) = (inf.pool_size, inf.max_connections) {
+        // Con un pooler en medio las instancias no abren conexiones al motor:
+        // las abre el pooler. El sujeto de la multiplicacion cambia, y esa
+        // aritmetica la hacen las reglas de [pooler]. Sin esta excepcion las
+        // dos reglas se contradicen, y una aconseja poner un pooler que ya esta.
+        if let (Some(pool), Some(tope), false) =
+            (inf.pool_size, inf.max_connections, m.pooler.activo())
+        {
             let techo = inf.max_instances.unwrap_or(10);
             let pico = pool * techo;
             // el relay del outbox y las migraciones tambien abren conexiones

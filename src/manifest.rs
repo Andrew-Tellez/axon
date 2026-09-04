@@ -149,6 +149,64 @@ impl Default for Analytics {
     }
 }
 
+/// El pooler o sharder delante de la base.
+///
+/// Poner un proxy en el camino de datos cambia el sujeto de casi todas las
+/// reglas de conexiones, y —lo mas importante— **rompe el aislamiento por
+/// inquilino si nadie lo declara**: en modo transaccion la misma conexion
+/// fisica se le entrega a otro inquilino, y una GUC de sesion que sobrevive
+/// devuelve las filas del anterior sin un error.
+///
+/// De ahi que casi todo lo de aca sea obligatorio en vez de tener un default
+/// comodo: la eleccion tiene que ser de alguien.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Pooler {
+    /// `"none"` (sin pooler), o `"pgdog"`.
+    pub engine: String,
+    /// `transaction`, `session` o `statement`. En `transaction` la conexion se
+    /// devuelve al pool en cada COMMIT, que es lo que rompe el aislamiento por
+    /// sesion.
+    pub mode: String,
+    /// Nodos de reparto. `1` es solo pooler, sin sharding.
+    pub shards: u32,
+    /// Tope de conexiones de CLIENTE que acepta el pooler. Con un pooler en
+    /// medio, la aritmetica de las instancias se compara contra esto y no
+    /// contra el tope del motor.
+    pub max_client_conn: Option<u32>,
+    /// Conexiones que el pooler abre a CADA motor.
+    pub pool_size: Option<u32>,
+    /// Rechazar toda consulta que toque mas de un nodo, en vez de ejecutarla.
+    /// Convierte cada limitacion del sharder en un error ruidoso.
+    pub cross_shard_disabled: bool,
+    /// Como se fija el inquilino: `"set_local"` es lo unico seguro en modo
+    /// transaccion. Ver el encabezado que genera `axon rls`.
+    pub tenant_binding: Option<String>,
+}
+
+impl Default for Pooler {
+    fn default() -> Self {
+        Self {
+            engine: "none".into(),
+            // el mas seguro de los tres, no el mas rapido
+            mode: "session".into(),
+            shards: 1,
+            max_client_conn: None,
+            pool_size: None,
+            // fallar ruidosamente antes que ejecutar algo que el sharder no
+            // sabe resolver bien
+            cross_shard_disabled: true,
+            tenant_binding: None,
+        }
+    }
+}
+
+impl Pooler {
+    pub fn activo(&self) -> bool {
+        self.engine != "none"
+    }
+}
+
 /// Un feature flag.
 ///
 /// Lo que aporta declararlos no es el SDK —OpenFeature y flagd ya existen—
@@ -381,6 +439,9 @@ pub struct Manifest {
     /// Exportacion a la bodega de datos.
     #[serde(default)]
     pub analytics: Analytics,
+    /// Pooler o sharder delante de la base. Ver `Pooler`.
+    #[serde(default)]
+    pub pooler: Pooler,
     /// Maquinas de estado del dominio: la unica logica de negocio que vale
     /// la pena declarar, porque es la misma en todos los lenguajes.
     #[serde(default)]

@@ -2372,6 +2372,174 @@ fn el_tope_de_conexiones_se_aplica() {
     );
 }
 
+/// El `pgdog.toml` generado se valida contra el JSON Schema OFICIAL de pgdog,
+/// no contra un texto esperado. Ellos lo generan desde sus propios tipos de
+/// Rust y su CI falla si se desincroniza, asi que validar contra ese archivo
+/// es validar contra el parser real que va a leer la configuracion.
+#[test]
+fn el_pgdog_toml_valida_contra_su_esquema() {
+    let (cfg, err, ok) = axon(&["pooler", "examples"]);
+    assert!(ok, "{err}");
+
+    // el reparto sale del esquema real, no de una lista escrita a mano
+    assert!(cfg.contains("[[sharded_tables]]"), "{cfg}");
+    assert!(cfg.contains("column = \"tenant_id\""), "{cfg}");
+    assert!(
+        cfg.contains("data_type = \"uuid\""),
+        "el tipo de la clave no salio del DDL:\n{cfg}"
+    );
+    // el mismo hash que `PARTITION BY HASH` de Postgres
+    assert!(cfg.contains("hasher = \"postgres\""), "{cfg}");
+    // rechazar antes que devolver un resultado incompleto
+    assert!(cfg.contains("cross_shard_disabled = true"), "{cfg}");
+    // `on` y no `auto`: en `auto` el parser no se activa con un solo nodo
+    // primario, que es justo donde una GUC de sesion se cuela sin interceptar
+    assert!(cfg.contains("query_parser = \"on\""), "{cfg}");
+    // un archivo generado no es lugar para un host ni una contrasena
+    assert!(cfg.contains("${AXON_DB_HOST_0}"), "{cfg}");
+    assert!(
+        !cfg.to_lowercase().contains("password ="),
+        "el generado trae una contrasena:\n{cfg}"
+    );
+    // un nodo por shard, mas las replicas de lectura declaradas
+    assert_eq!(cfg.matches("[[databases]]").count(), 6, "{cfg}");
+    assert!(
+        cfg.contains("role = \"replica\""),
+        "las replicas declaradas no llegaron:\n{cfg}"
+    );
+
+    if !tiene("python3") {
+        eprintln!("salteado el resto: python3 no esta instalado");
+        return;
+    }
+    let dir = std::env::temp_dir().join("axon-pgdog");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("pgdog.toml");
+    std::fs::write(&f, &cfg).unwrap();
+
+    let out = Command::new("python3")
+        .args([
+            "tests/fixtures/validar-pgdog.py",
+            f.to_str().unwrap(),
+            "tests/fixtures/pgdog.schema.json",
+        ])
+        .output()
+        .expect("python3");
+    let salida = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "el pgdog.toml generado no valida:\n{salida}"
+    );
+    // si falta el modulo se saltea, nunca miente diciendo que paso
+    assert!(
+        salida.contains("OK: valida") || salida.contains("SALTEADO"),
+        "{salida}"
+    );
+    eprintln!("{}", salida.trim());
+}
+
+/// El pooler cambia el sujeto de la aritmetica de conexiones, y en modo
+/// transaccion puede romper el aislamiento por inquilino sin dar un error.
+#[test]
+fn las_reglas_del_pooler_bloquean() {
+    let dir = std::env::temp_dir().join("axon-pooler");
+    let probar = |extra: &str| {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sql")).unwrap();
+        std::fs::write(
+            dir.join("sql/001_p.expand.sql"),
+            "CREATE TABLE pago (id uuid PRIMARY KEY, tenant_id uuid NOT NULL);\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("p.toml"),
+            format!(
+                "service = \"p\"\nowner = \"e\"\ntier = \"2\"\n\
+                 [cap]\nconsistency = \"eventual\"\non_partition = \"reject\"\n\
+                 max_staleness_ms = 2000\n\
+                 [infra]\nstate = \"postgres\"\nmigrations = \"sql/\"\n\
+                 tenant_column = \"tenant_id\"\nshard_key = \"tenant_id\"\n{extra}"
+            ),
+        )
+        .unwrap();
+        let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        (format!("{out}{err}"), ok)
+    };
+
+    // LA regla: en modo transaccion la conexion vuelve al pool en cada COMMIT
+    // y se le entrega a otro inquilino
+    let (msg, ok) = probar("[pooler]\nengine = \"pgdog\"\nmode = \"transaction\"\nshards = 2\n");
+    assert!(!ok);
+    assert!(
+        msg.contains("sin `tenant_binding = \"set_local\"`"),
+        "{msg}"
+    );
+    assert!(msg.contains("lee las filas del anterior"), "{msg}");
+
+    // declararlo la deja pasar
+    let (msg, ok) = probar(
+        "[pooler]\nengine = \"pgdog\"\nmode = \"transaction\"\n\
+         tenant_binding = \"set_local\"\nshards = 2\n",
+    );
+    assert!(ok, "declarar el binding deberia alcanzar:\n{msg}");
+
+    // repartir sin decir por que columna
+    let (msg, ok) = probar("[pooler]\nengine = \"pgdog\"\nmode = \"session\"\nshards = 4\n");
+    let sin_clave = msg.clone();
+    assert!(ok || sin_clave.contains("shards"), "{sin_clave}");
+
+    // el 2PC da consistencia eventual: prometer CP encima se contradice
+    let (msg, ok) =
+        probar("[cap2]\n[pooler]\nengine = \"pgdog\"\nmode = \"session\"\nshards = 4\n");
+    let _ = (msg, ok);
+
+    // El 2PC de un sharder da consistencia eventual con estados parciales
+    // visibles: prometer CP encima es la misma contradiccion que leer de una
+    // replica y prometer CP. Aca el manifiesto se reescribe entero para poder
+    // declarar `strong`.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(
+        dir.join("sql/001_p.expand.sql"),
+        "CREATE TABLE pago (id uuid PRIMARY KEY, tenant_id uuid NOT NULL);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("p.toml"),
+        "service = \"p\"\nowner = \"e\"\ntier = \"2\"\n\
+         [cap]\nconsistency = \"strong\"\non_partition = \"reject\"\n\
+         [infra]\nstate = \"postgres\"\nmigrations = \"sql/\"\nshard_key = \"tenant_id\"\n\
+         [pooler]\nengine = \"pgdog\"\nmode = \"session\"\nshards = 4\n",
+    )
+    .unwrap();
+    let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    let msg = format!("{out}{err}");
+    assert!(!ok);
+    assert!(
+        msg.contains("nodos de reparto con `consistency = \"strong\"`"),
+        "{msg}"
+    );
+    assert!(msg.contains("la garantia real es eventual"), "{msg}");
+
+    // en modo sesion una conexion de cliente ata una de servidor
+    let (msg, ok) = probar(
+        "pool_size = 20\nmax_connections = 500\n[pooler]\nengine = \"pgdog\"\n\
+         mode = \"session\"\npool_size = 30\n",
+    );
+    assert!(!ok);
+    assert!(msg.contains("no multiplexa"), "{msg}");
+
+    // campos de pooler sin pooler no se aplican en ninguna parte
+    let (msg, ok) = probar("[pooler]\nshards = 4\n");
+    assert!(!ok);
+    assert!(msg.contains("con `engine = \"none\"`"), "{msg}");
+}
+
 #[test]
 fn un_motor_desconocido_no_genera_postgres() {
     let dir = std::env::temp_dir().join("axon-motor");

@@ -49,6 +49,7 @@ max_connections = 100
 # Se lee de las replicas, van con retraso, y por eso este servicio se declara
 # `eventual`: la garantia y la topologia dicen lo mismo.
 read_replicas = 2
+shard_key = "tenant_id"
 migrations = "sql/orders/"
 runtime = "container"
 
@@ -63,3 +64,19 @@ min_instances = 2
 consistency = "eventual"
 on_partition = "degrade"
 max_staleness_ms = 3000
+
+# El sharder va aca y no en payments: repartir con confirmacion en dos fases da
+# consistencia eventual, y payments declara `strong`, tier 0 y PITR —tres
+# razones por las que `verify` lo rechaza ahi. El dinero no se reparte; el
+# catalogo si.
+#
+# `mode = "transaction"` obliga a declarar como se fija el inquilino: en ese
+# modo la conexion vuelve al pool en cada COMMIT y se le entrega a otro, y una
+# GUC de sesion que sobreviva devuelve las filas del anterior sin dar error.
+[pooler]
+engine = "pgdog"
+mode = "transaction"
+tenant_binding = "set_local"
+shards = 4
+max_client_conn = 500
+pool_size = 40

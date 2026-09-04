@@ -89,6 +89,50 @@ $ cd examples && ./demo.sh
 
 Corre en CI en cada push.
 
+## Con qué está hecho, y con qué se verifica
+
+**axon no necesita nada para correr**: un binario en Rust, sin runtime. Las herramientas
+de abajo son las que usa lo que *genera*, y cada una solo para su parte — si falta, se
+salta esa parte y no el resto.
+
+La lista importa por una razón: **un generador no se valida con asserts propios, se
+valida con la herramienta real de su ecosistema.** Los tres primeros generadores de este
+proyecto producían salida inválida y el suite no lo veía, porque axon se verificaba
+únicamente contra sí mismo.
+
+| Herramienta | Para qué | Cómo se verifica lo generado |
+| --- | --- | --- |
+| **Docker** | `--target local`: broker, Postgres por servicio, MinIO, Jaeger, flagd, el edge y tus servicios | `./demo.sh` levanta el sistema y comprueba cuatro cosas contra la realidad |
+| **Terraform** | `--target gcp` y `--target aws` | `terraform validate` con los **providers reales**, y sin advertencias |
+| **`tsc`** | el TypeScript de `axon build` y `axon test` | `tsc --strict --noEmit`, más el typecheck del servicio de ejemplo |
+| **Node 24+** | corre el testkit sin paso de build, con type-stripping | `node --test` contra el servicio de ejemplo real |
+| **Go** | `axon-gen-go`, el generador de referencia de plugins | `go vet` sobre lo emitido, y `go/format` antes de emitirlo |
+| **Postgres** | migraciones, RLS, vistas enmascaradas | la RLS se **aplica a un Postgres real** y se comprueba que aísla |
+| **`kubectl`** | `--target k8s` | parseo de los 16 objetos que emite |
+| **k6** | `axon load`: carga con umbrales del manifiesto | corre en el demo y `--check` diffea lo medido contra lo declarado |
+| **OpenTelemetry** | trazas; el envelope ya propaga `traceparent` | el demo verifica el árbol de spans: un raíz, cero huérfanos, dos servicios |
+| **OpenFeature / flagd** | `axon flags`: evaluación por OFREP | el demo mide el rollout declarado contra el aplicado |
+| **Flyway** | aplica las migraciones; axon las lee, no las ejecuta | `validateMigrationNaming` obligatorio: ignoraba archivos en silencio |
+| **BigQuery / Snowflake / ClickHouse** | `axon analytics` | el DDL se parsea con **el dialecto de cada uno** |
+| **pgdog** | `axon pooler`: pooler y sharder | el `pgdog.toml` se valida contra su **JSON Schema oficial** |
+| **cocogitto** | Conventional Commits y el changelog | el hook rechaza el mensaje antes de crear el commit |
+| **mdBook** | esta documentación | cada bloque `toml` de las páginas pasa por `axon verify` |
+
+### Dentro del binario
+
+Seis dependencias, ninguna accidental:
+
+| | |
+| --- | --- |
+| `clap` | la CLI |
+| `serde` + `toml` + `serde_json` + `serde_yaml_ng` | el manifiesto, y AsyncAPI en JSON o YAML |
+| `indexmap` | orden de inserción: sin él la salida generada cambia entre corridas y `git diff --exit-code` deja de significar algo |
+| `sqlparser` | el esquema sale de las migraciones con un parser SQL de verdad. Una regex se rompe con `PARTITION BY` — y lo peor es que se rompe **en silencio** |
+| `ureq` | `axon discover` contra servicios vivos |
+
+`regex` estuvo y se fue: quedaba para comprobar tres dígitos y un guion bajo en el
+nombre de un archivo.
+
 ## Documentación
 
 **[andrew-tellez.github.io/axon](https://andrew-tellez.github.io/axon/)** — construida

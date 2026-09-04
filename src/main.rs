@@ -11,6 +11,7 @@ mod import;
 mod infra;
 mod manifest;
 mod plugin;
+mod pooler;
 mod trace;
 mod verify;
 
@@ -112,6 +113,8 @@ enum Cmd {
     },
     /// snapshot de los contratos publicados, para detectar cambios incompatibles
     Baseline { sources: Vec<String> },
+    /// configuracion del pooler o sharder, derivada del manifiesto
+    Pooler { sources: Vec<String> },
     /// politicas de acceso a datos: RLS por fila y vistas enmascaradas
     Rls {
         sources: Vec<String>,
@@ -366,6 +369,9 @@ fn run() -> Result<ExitCode, String> {
                 "{}",
                 serde_json::to_string_pretty(&b).map_err(|e| e.to_string())?
             );
+        }
+        Cmd::Pooler { sources } => {
+            print!("{}", pooler::build(&manifest::discover(&sources)?)?)
         }
         Cmd::Rls { sources, target } => {
             let ms = manifest::discover(&sources)?;

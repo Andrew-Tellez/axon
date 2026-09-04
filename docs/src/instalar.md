@@ -33,5 +33,8 @@ cada una solo para su parte:
 | Node 24+ | correr el testkit de `axon test`, sin paso de build |
 | k6 | las pruebas de carga de `axon load` |
 | Flyway o similar | aplicar las migraciones; axon las lee, no las ejecuta |
+| pgdog | `axon pooler`, si declarás un pooler o reparto |
 
-Ninguna es obligatoria: si falta, lo que se salta es esa parte, no el resto.
+Ninguna es obligatoria: si falta, lo que se salta es esa parte, no el resto. La lista
+completa, y **cómo se verifica lo que genera cada una**, está en el
+[README](https://github.com/Andrew-Tellez/axon#con-qué-está-hecho-y-con-qué-se-verifica).
