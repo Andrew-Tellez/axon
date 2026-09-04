@@ -69,7 +69,9 @@ Lo que AsyncAPI no declara sale como `TODO` y `verify` lo trata como ausente.
 ## Infraestructura
 
 ### `axon infra <fuentes> [--target local|gcp|aws|k8s|plan] [--env <nombre>]`
-Produce el plan neutral y lo renderiza. `--env` aplica los deltas de `[env.<nombre>]`
+Produce el plan neutral y lo renderiza. El plan cubre el edge (rutas, auth, rate
+limit, timeouts), la mensajería (topics, suscripciones, DLQ), el cómputo, el estado,
+los buckets con su CDN, y los secretos. `--env` aplica los deltas de `[env.<nombre>]`
 sobre `[infra]`. Un `--target` no nativo busca `axon-infra-<target>` en el `PATH`.
 
 `--target plan` imprime el plan en JSON: la salida de emergencia para cualquier

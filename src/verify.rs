@@ -165,6 +165,26 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     m.service
                 ));
             }
+            // El gateway falla cerrado: una ruta expuesta sin decidir quien
+            // puede llamarla no se despliega. No hay default seguro para esto.
+            match meth.auth.as_deref() {
+                Some("public") | Some("required") => {}
+                Some(otro) => errors.push(format!(
+                    "{}.{name}: `auth = \"{otro}\"` no existe; usa \"public\" o \"required\"",
+                    m.service
+                )),
+                None => errors.push(format!(
+                    "{}.{name}: {http} expuesta sin `auth`; declara \"public\" o \"required\"",
+                    m.service
+                )),
+            }
+            if meth.auth.as_deref() == Some("public") && meth.rate_limit.is_none() {
+                errors.push(format!(
+                    "{}.{name}: {http} es publica y sin `rate_limit`; el edge no tiene \
+                     con que frenar un abuso",
+                    m.service
+                ));
+            }
             if meth.paginated && !meth.output.contains_key("cursor") {
                 errors.push(format!(
                     "{}.{name}: paginada pero no devuelve `cursor`; offset se rompe al crecer",

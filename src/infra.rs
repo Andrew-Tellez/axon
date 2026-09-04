@@ -49,9 +49,36 @@ pub struct Workload {
     pub subscribes: Vec<String>,
 }
 
+/// Una ruta del edge. El gateway no es una fuente de verdad nueva: sale de
+/// los metodos que cada servicio declara con `http`.
+#[derive(Debug, Serialize)]
+pub struct Route {
+    pub method: String,
+    pub path: String,
+    pub service: String,
+    pub port: u16,
+    pub public: bool,
+    pub rate_limit: Option<u32>,
+    pub timeout_ms: u32,
+}
+
+/// Almacenamiento de objetos, y su CDN si es publico.
+#[derive(Debug, Serialize)]
+pub struct Store2 {
+    pub service: String,
+    pub name: String,
+    /// Nombre global: los buckets comparten espacio de nombres en todo el mundo.
+    pub bucket: String,
+    pub public: bool,
+    pub retention_days: Option<u32>,
+    pub cache_ttl: u32,
+}
+
 /// Plan neutral. Sin una sola palabra de ningun proveedor.
 #[derive(Debug, Serialize)]
 pub struct Plan {
+    pub buckets: Vec<Store2>,
+    pub routes: Vec<Route>,
     pub topics: Vec<Topic>,
     pub subs: Vec<Sub>,
     pub stores: Vec<Store>,
@@ -70,6 +97,8 @@ pub fn plan(ms: &[Manifest]) -> Plan {
         })
         .collect();
 
+    let mut routes = Vec::new();
+    let mut buckets = Vec::new();
     let mut subs = Vec::new();
     let mut stores = Vec::new();
     let mut secrets = Vec::new();
@@ -92,6 +121,32 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 outbox: m.patterns.outbox,
             });
         }
+        for (_, me) in m.methods.iter() {
+            let (Some(verbo), Some(ruta)) = (me.verb(), me.path()) else {
+                continue;
+            };
+            routes.push(Route {
+                method: verbo.to_string(),
+                path: ruta.to_string(),
+                service: svc.clone(),
+                port: m.infra.port.unwrap_or(8080),
+                public: me.auth.as_deref() == Some("public"),
+                rate_limit: me.rate_limit,
+                timeout_ms: me.timeout_ms.unwrap_or(10_000),
+            });
+        }
+        for (nombre, b) in &m.infra.buckets {
+            buckets.push(Store2 {
+                service: svc.clone(),
+                name: nombre.clone(),
+                // Plantilla neutral: `{project}` lo sustituye cada target con su
+                // propia sintaxis. El plan no lleva interpolacion de nadie.
+                bucket: format!("{{project}}-{svc}-{nombre}"),
+                public: b.public,
+                retention_days: b.retention_days,
+                cache_ttl: b.cache_ttl.unwrap_or(3600),
+            });
+        }
         for k in &m.infra.secrets {
             secrets.push(Secret {
                 service: svc.clone(),
@@ -110,7 +165,10 @@ pub fn plan(ms: &[Manifest]) -> Plan {
             subscribes: m.consumes.keys().cloned().collect(),
         });
     }
+    routes.sort_by(|a, b| (&a.path, &a.method).cmp(&(&b.path, &b.method)));
     Plan {
+        buckets,
+        routes,
         topics,
         subs,
         stores,
@@ -139,6 +197,7 @@ pub fn render(p: &Plan, target: &str) -> Result<String, String> {
 const HEAD: &str = "# generado por axon — no editar\n";
 
 fn gcp(p: &Plan) -> String {
+    const PROY: &str = "${var.project}";
     let mut o = vec![HEAD.to_string()];
     for w in &p.workloads {
         o.push(format!(
@@ -170,6 +229,11 @@ fn gcp(p: &Plan) -> String {
                  secret_key_ref {{\n              secret  = google_secret_manager_secret.{s}_database_url.secret_id\n              version = \"latest\"\n            }}\n          }}\n        }}\n"
             ));
         }
+        for (k, v) in env_buckets(p, &w.service, PROY) {
+            env.push_str(&format!(
+                "        env {{\n          name  = \"{k}\"\n          value = \"{v}\"\n        }}\n"
+            ));
+        }
         for sec in &w.secrets {
             env.push_str(&format!(
                 "        env {{\n          name = \"{sec}\"\n          value_source {{\n            \
@@ -185,6 +249,42 @@ fn gcp(p: &Plan) -> String {
 {env}    }}\n  }}\n}}\n",
             svc = w.service, min = w.min_instances, max = w.max_instances,
             img = w.image_var, port = w.port
+        ));
+    }
+    if !p.routes.is_empty() {
+        let mut reglas = String::new();
+        for r in &p.routes {
+            let prefijo = match r.path.find('{') {
+                Some(i) => r.path[..i].trim_end_matches('/').to_string(),
+                None => r.path.clone(),
+            };
+            reglas.push_str(&format!(
+                "    path_rule {{\n      paths   = [\"{prefijo}\", \"{prefijo}/*\"]\n      \
+                 service = google_compute_backend_service.{}.id\n    }}\n",
+                tfname(&r.service)
+            ));
+        }
+        let mut vistos: Vec<&str> = p.routes.iter().map(|r| r.service.as_str()).collect();
+        vistos.sort();
+        vistos.dedup();
+        for svc in vistos {
+            o.push(format!(
+                "resource \"google_compute_region_network_endpoint_group\" \"{n}\" {{\n  \
+                 name                  = \"{svc}-neg\"\n  region                = var.region\n  \
+                 network_endpoint_type = \"SERVERLESS\"\n  \
+                 cloud_run {{\n    service = google_cloud_run_v2_service.{n}.name\n  }}\n}}\n\n\
+                 resource \"google_compute_backend_service\" \"{n}\" {{\n  \
+                 name = \"{svc}-backend\"\n  \
+                 backend {{\n    group = google_compute_region_network_endpoint_group.{n}.id\n  }}\n}}\n",
+                n = tfname(svc)
+            ));
+        }
+        o.push(format!(
+            "resource \"google_compute_url_map\" \"edge\" {{\n  name            = \"axon-edge\"\n  \
+             default_service = google_compute_backend_service.{}.id\n\n  \
+             path_matcher {{\n    name            = \"axon\"\n    \
+             default_service = google_compute_backend_service.{}.id\n{reglas}  }}\n}}\n",
+            tfname(&p.routes[0].service), tfname(&p.routes[0].service)
         ));
     }
     for s in &p.subs {
@@ -218,6 +318,34 @@ fn gcp(p: &Plan) -> String {
             ));
         }
     }
+    for b in &p.buckets {
+        let n = tfname(&format!("{}-{}", b.service, b.name));
+        o.push(format!(
+            "resource \"google_storage_bucket\" \"{n}\" {{\n  name          = \"{}\"\n  \
+             location      = var.region\n  uniform_bucket_level_access = true\n  \
+             public_access_prevention    = \"{}\"\n{}}}\n",
+            b.bucket.replace("{project}", "${var.project}"),
+            if b.public { "inherited" } else { "enforced" },
+            b.retention_days
+                .map(|d| format!(
+                    "  lifecycle_rule {{\n    condition {{\n      age = {d}\n    }}\n    \
+                     action {{\n      type = \"Delete\"\n    }}\n  }}\n"
+                ))
+                .unwrap_or_default()
+        ));
+        if b.public {
+            o.push(format!(
+                "resource \"google_storage_bucket_iam_member\" \"{n}_publico\" {{\n  \
+                 bucket = google_storage_bucket.{n}.name\n  role   = \"roles/storage.objectViewer\"\n  \
+                 member = \"allUsers\"\n}}\n\n\
+                 resource \"google_compute_backend_bucket\" \"{n}\" {{\n  \
+                 name        = \"{}-cdn\"\n  bucket_name = google_storage_bucket.{n}.name\n  \
+                 enable_cdn  = true\n  cdn_policy {{\n    cache_mode  = \"CACHE_ALL_STATIC\"\n    \
+                 default_ttl = {}\n  }}\n}}\n",
+                b.bucket.replace("{project}", "${var.project}"), b.cache_ttl
+            ));
+        }
+    }
     for s in &p.secrets {
         o.push(format!(
             "resource \"google_secret_manager_secret\" \"{}_{}\" {{\n  secret_id = \"{}\"\n  replication {{\n    auto {{}}\n  }}\n}}\n",
@@ -228,6 +356,7 @@ fn gcp(p: &Plan) -> String {
 }
 
 fn aws(p: &Plan) -> String {
+    const PROY: &str = "${var.project}";
     let mut o = vec![HEAD.to_string()];
     for w in &p.workloads {
         o.push(format!(
@@ -283,8 +412,17 @@ fn aws(p: &Plan) -> String {
              requires_compatibilities = [\"FARGATE\"]\n  network_mode             = \"awsvpc\"\n  \
              cpu = \"512\"\n  memory = \"1024\"\n  execution_role_arn = var.ecs_execution_role_arn\n  \
              container_definitions = jsonencode([{{\n    name  = \"{svc}\"\n    image = var.{img}\n    \
-             portMappings = [{{ containerPort = {port} }}]\n    secrets = [{sec}]\n  }}])\n}}\n",
-            svc = w.service, img = w.image_var, port = w.port, sec = secrets.join(", ")
+             portMappings = [{{ containerPort = {port} }}]\n    environment = [{env}]\n    \
+             secrets = [{sec}]\n  }}])\n}}\n",
+            svc = w.service,
+            img = w.image_var,
+            port = w.port,
+            sec = secrets.join(", "),
+            env = env_buckets(p, &w.service, PROY)
+                .iter()
+                .map(|(k, v)| format!("{{ name = \"{k}\", value = \"{v}\" }}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
         o.push(format!(
             "resource \"aws_ecs_service\" \"{s}\" {{\n  name            = \"{svc}\"\n  \
@@ -303,6 +441,39 @@ fn aws(p: &Plan) -> String {
             ));
         }
     }
+    if !p.routes.is_empty() {
+        o.push(
+            "resource \"aws_apigatewayv2_api\" \"edge\" {\n  name          = \"axon-edge\"\n  \
+             protocol_type = \"HTTP\"\n}\n"
+                .to_string(),
+        );
+        for r in &p.routes {
+            let n = tfname(&format!("{}-{}", r.method, r.path));
+            o.push(format!(
+                "resource \"aws_apigatewayv2_integration\" \"{n}\" {{\n  \
+                 api_id                 = aws_apigatewayv2_api.edge.id\n  \
+                 integration_type       = \"HTTP_PROXY\"\n  \
+                 integration_method     = \"{m}\"\n  \
+                 integration_uri        = \"http://{svc}.internal:{port}{path}\"\n  \
+                 timeout_milliseconds   = {t}\n}}\n",
+                m = r.method,
+                svc = r.service,
+                port = r.port,
+                path = r.path,
+                t = r.timeout_ms
+            ));
+            o.push(format!(
+                "resource \"aws_apigatewayv2_route\" \"{n}\" {{\n  \
+                 api_id             = aws_apigatewayv2_api.edge.id\n  \
+                 route_key          = \"{m} {path}\"\n  \
+                 target             = \"integrations/${{aws_apigatewayv2_integration.{n}.id}}\"\n  \
+                 authorization_type = \"{auth}\"\n}}\n",
+                m = r.method,
+                path = r.path,
+                auth = if r.public { "NONE" } else { "JWT" }
+            ));
+        }
+    }
     for s in &p.stores {
         let sv = tfname(&s.service);
         o.push(format!(
@@ -314,6 +485,42 @@ fn aws(p: &Plan) -> String {
             "resource \"aws_secretsmanager_secret\" \"{sv}_database_url\" {{\n  name = \"{}-database-url\"\n}}\n",
             s.service
         ));
+    }
+    for b in &p.buckets {
+        let n = tfname(&format!("{}-{}", b.service, b.name));
+        o.push(format!(
+            "resource \"aws_s3_bucket\" \"{n}\" {{\n  bucket = \"{}\"\n}}\n",
+            b.bucket.replace("{project}", "${var.project}")
+        ));
+        o.push(format!(
+            "resource \"aws_s3_bucket_public_access_block\" \"{n}\" {{\n  \
+             bucket                  = aws_s3_bucket.{n}.id\n  \
+             block_public_acls       = true\n  block_public_policy     = {}\n  \
+             ignore_public_acls      = true\n  restrict_public_buckets = {}\n}}\n",
+            !b.public, !b.public
+        ));
+        if let Some(d) = b.retention_days {
+            o.push(format!(
+                "resource \"aws_s3_bucket_lifecycle_configuration\" \"{n}\" {{\n  \
+                 bucket = aws_s3_bucket.{n}.id\n  rule {{\n    id     = \"retencion\"\n    \
+                 status = \"Enabled\"\n    filter {{}}\n    expiration {{\n      days = {d}\n    }}\n  }}\n}}\n"
+            ));
+        }
+        if b.public {
+            o.push(format!(
+                "resource \"aws_cloudfront_distribution\" \"{n}\" {{\n  enabled = true\n  \
+                 origin {{\n    domain_name = aws_s3_bucket.{n}.bucket_regional_domain_name\n    \
+                 origin_id   = \"{n}\"\n  }}\n  \
+                 default_cache_behavior {{\n    target_origin_id       = \"{n}\"\n    \
+                 viewer_protocol_policy = \"redirect-to-https\"\n    \
+                 allowed_methods        = [\"GET\", \"HEAD\"]\n    \
+                 cached_methods         = [\"GET\", \"HEAD\"]\n    \
+                 default_ttl            = {}\n  }}\n  \
+                 restrictions {{\n    geo_restriction {{\n      restriction_type = \"none\"\n    }}\n  }}\n  \
+                 viewer_certificate {{\n    cloudfront_default_certificate = true\n  }}\n}}\n",
+                b.cache_ttl
+            ));
+        }
     }
     for s in &p.secrets {
         o.push(format!(
@@ -329,6 +536,7 @@ fn aws(p: &Plan) -> String {
 /// Knative Eventing: el target realmente portable — el mismo YAML corre en
 /// cualquier Kubernetes, con el broker que tenga detras (Kafka, RabbitMQ, GCP).
 fn k8s(p: &Plan) -> String {
+    const PROY: &str = "${PROJECT}";
     let mut o = vec![
         "# generado por axon — no editar".to_string(),
         "apiVersion: eventing.knative.dev/v1\nkind: Broker\nmetadata:\n  name: axon\nspec:\n  \
@@ -342,6 +550,11 @@ fn k8s(p: &Plan) -> String {
             env.push_str(&format!(
                 "            - name: DATABASE_URL\n              valueFrom:\n                \
                  secretKeyRef: {{ name: {svc}, key: DATABASE_URL }}\n"
+            ));
+        }
+        for (k, v) in env_buckets(p, &w.service, PROY) {
+            env.push_str(&format!(
+                "            - name: {k}\n              value: \"{v}\"\n"
             ));
         }
         for sec in &w.secrets {
@@ -406,6 +619,59 @@ spec:
             ));
         }
     }
+    if !p.routes.is_empty() {
+        o.push(
+            "---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: axon-edge
+spec:
+  gatewayClassName: ${GATEWAY_CLASS}
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443"
+                .to_string(),
+        );
+        for r in &p.routes {
+            // Gateway API no entiende `{param}`: una ruta con parametro se
+            // enruta por prefijo hasta el ultimo segmento fijo.
+            let (tipo, valor) = match r.path.find('{') {
+                Some(i) => ("PathPrefix", r.path[..i].trim_end_matches('/').to_string()),
+                None => ("Exact", r.path.clone()),
+            };
+            o.push(format!(
+                "---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {n}
+  annotations:
+    axon.dev/auth: {auth}{rl}
+spec:
+  parentRefs:
+    - name: axon-edge
+  rules:
+    - matches:
+        - path: {{ type: {tipo}, value: {valor} }}
+          method: {metodo}
+      timeouts: {{ request: {t}s }}
+      backendRefs:
+        - name: {svc}
+          port: 80",
+                n = tfname(&format!("{}-{}", r.method, r.path)),
+                auth = if r.public { "public" } else { "required" },
+                rl = r
+                    .rate_limit
+                    .map(|v| format!("\n    axon.dev/rate-limit: \"{v}\""))
+                    .unwrap_or_default(),
+                metodo = r.method,
+                t = r.timeout_ms / 1000,
+                svc = r.service,
+            ));
+        }
+    }
     for s in &p.subs {
         o.push(format!(
             "---
@@ -452,6 +718,7 @@ spec:
 /// El mismo plan, en tu laptop. Ese es el punto: local y produccion salen de
 /// la misma declaracion, asi que no pueden divergir.
 fn local(p: &Plan) -> String {
+    const PROY: &str = "local";
     let mut o = String::from(
         "# generado por axon — no editar.  docker compose -f axon.local.yml up -d --wait
 services:
@@ -490,9 +757,47 @@ services:
         ));
     }
     // los servicios tuyos, no solo sus dependencias
+    if !p.buckets.is_empty() {
+        o.push_str(
+            "  objetos:
+    image: minio/minio:latest
+    command: [\"server\", \"/data\", \"--console-address\", \":9001\"]
+    environment: { MINIO_ROOT_USER: local, MINIO_ROOT_PASSWORD: locallocal }
+    ports: [\"${AXON_S3_PORT:-9000}:9000\", \"${AXON_S3_CONSOLE_PORT:-9001}:9001\"]
+    healthcheck:
+      test: [\"CMD\", \"mc\", \"ready\", \"local\"]
+      interval: 2s
+",
+        );
+        o.push_str("  crear-buckets:\n    image: minio/mc:latest\n    depends_on: { objetos: { condition: service_healthy } }\n    entrypoint: >\n      /bin/sh -c \"mc alias set local http://objetos:9000 local locallocal");
+        for b in &p.buckets {
+            o.push_str(&format!(
+                " && mc mb -p local/{}",
+                b.bucket.replace("{project}", "local")
+            ));
+        }
+        o.push_str("\"\n");
+    }
+    if !p.routes.is_empty() {
+        o.push_str(
+            "  edge:
+    image: traefik:v3
+    command:
+      - --providers.docker=true
+      - --entrypoints.web.address=:80
+    ports: [\"${AXON_EDGE_PORT:-8000}:80\"]
+    volumes: [\"/var/run/docker.sock:/var/run/docker.sock:ro\"]
+",
+        );
+    }
     for (i, w) in p.workloads.iter().enumerate() {
         let svc = &w.service;
         let mut deps = vec!["broker: { condition: service_healthy }".to_string()];
+        // No arrancar la app antes de que existan sus buckets. Y sin esto,
+        // `up --wait` cuenta el job de creacion como un contenedor caido.
+        if !env_buckets(p, &w.service, PROY).is_empty() {
+            deps.push("crear-buckets: { condition: service_completed_successfully }".into());
+        }
         if w.db {
             deps.push(format!("db-{svc}: {{ condition: service_healthy }}"));
             deps.push(format!(
@@ -504,11 +809,17 @@ services:
         } else {
             String::new()
         };
-        let secrets: String = w
+        let mut secrets: String = w
             .secrets
             .iter()
             .map(|s| format!("      # {s}: viene de .env.local\n"))
             .collect();
+        if !env_buckets(p, &w.service, PROY).is_empty() {
+            secrets.push_str("      AWS_ENDPOINT_URL: http://objetos:9000\n");
+        }
+        for (k, v) in env_buckets(p, &w.service, PROY) {
+            secrets.push_str(&format!("      {k}: {}\n", v));
+        }
         o.push_str(&format!(
             "  {svc}:
     build:
@@ -521,11 +832,12 @@ services:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/local.ndjson
 {db_env}{secrets}    volumes: [\"./.axon:/out\"]
-",
+{labels}",
             deps = deps.join(", "),
             host = 8080 + i,
             port = w.port,
-            v = tfname(&w.service)
+            v = tfname(&w.service),
+            labels = etiquetas_edge(p, &w.service)
         ));
     }
     o.push_str("\n# streams JetStream a crear al arrancar:\n");
@@ -539,4 +851,49 @@ services:
         "# el log de envelopes cae en ./.axon/local.ndjson -> `axon trace .axon/local.ndjson`\n",
     );
     o
+}
+
+/// Las mismas rutas del plan, como reglas de Traefik. Local no es un
+/// subsistema aparte: es otro render del mismo edge.
+fn etiquetas_edge(p: &Plan, svc: &str) -> String {
+    let mias: Vec<&Route> = p.routes.iter().filter(|r| r.service == svc).collect();
+    if mias.is_empty() {
+        return String::new();
+    }
+    let reglas: Vec<String> = mias
+        .iter()
+        .map(|r| {
+            let prefijo = match r.path.find('{') {
+                Some(i) => r.path[..i].trim_end_matches('/').to_string(),
+                None => r.path.clone(),
+            };
+            format!("PathPrefix(`{prefijo}`)")
+        })
+        .collect();
+    let mut u: Vec<String> = reglas;
+    u.sort();
+    u.dedup();
+    format!(
+        "    labels:\n      \
+         - traefik.enable=true\n      \
+         - traefik.http.routers.{svc}.rule={}\n      \
+         - traefik.http.services.{svc}.loadbalancer.server.port={}\n",
+        u.join(" || "),
+        mias[0].port
+    )
+}
+
+/// El nombre del bucket es distinto en cada entorno, asi que la app lo lee de
+/// una variable, no lo construye. Mismo nombre de variable en los cuatro targets.
+fn env_buckets(p: &Plan, svc: &str, proyecto: &str) -> Vec<(String, String)> {
+    p.buckets
+        .iter()
+        .filter(|b| b.service == svc)
+        .map(|b| {
+            (
+                format!("BUCKET_{}", b.name.to_uppercase()),
+                b.bucket.replace("{project}", proyecto),
+            )
+        })
+        .collect()
 }

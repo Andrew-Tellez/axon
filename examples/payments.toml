@@ -14,12 +14,16 @@ handler = "onOrderPlaced"
 
 [methods.capturePayment]
 http = "POST /v1/payments"
+auth = "required"
+timeout_ms = 8000
 idempotent = true
 in = { orderId = "uuid", amount = "money" }
 out = { paymentId = "uuid" }
 
 [methods.refundPayment]
 http = "POST /v1/payments/{paymentId}/refunds"
+auth = "required"
+timeout_ms = 8000
 idempotent = true
 in = { paymentId = "uuid" }
 out = { paymentId = "uuid", status = "string" }
@@ -75,3 +79,12 @@ from = ["captured"]
 to = "refunded"
 on = "refundPayment"
 compensates = "capture"
+
+# Almacenamiento de objetos. `public` decide si lleva CDN y si el bucket
+# admite lectura anonima: las dos cosas van juntas o ninguna.
+[infra.buckets.recibos]
+retention_days = 2555     # 7 anos, requisito fiscal
+
+[infra.buckets.assets]
+public = true
+cache_ttl = 86400

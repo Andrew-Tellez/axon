@@ -11,12 +11,17 @@ total = "money"
 
 [methods.placeOrder]
 http = "POST /v1/orders"
+auth = "public"          # la puerta de entrada del sistema
+rate_limit = 60          # por minuto: publica sin freno es una invitacion
+timeout_ms = 5000
 idempotent = true
 in = { customerId = "uuid", total = "money" }
 out = { orderId = "uuid" }
 
 [methods.getOrder]
 http = "GET /v1/orders/{orderId}"
+auth = "required"
+timeout_ms = 2000
 in = { orderId = "uuid" }
 out = { orderId = "uuid", status = "string", total = "money" }
 

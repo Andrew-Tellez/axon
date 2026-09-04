@@ -41,6 +41,26 @@ services:
       -sqlMigrationPrefix= -sqlMigrationSeparator=_
       -validateMigrationNaming=true
       migrate
+  objetos:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment: { MINIO_ROOT_USER: local, MINIO_ROOT_PASSWORD: locallocal }
+    ports: ["${AXON_S3_PORT:-9000}:9000", "${AXON_S3_CONSOLE_PORT:-9001}:9001"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+  crear-buckets:
+    image: minio/mc:latest
+    depends_on: { objetos: { condition: service_healthy } }
+    entrypoint: >
+      /bin/sh -c "mc alias set local http://objetos:9000 local locallocal && mc mb -p local/local-payments-recibos && mc mb -p local/local-payments-assets"
+  edge:
+    image: traefik:v3
+    command:
+      - --providers.docker=true
+      - --entrypoints.web.address=:80
+    ports: ["${AXON_EDGE_PORT:-8000}:80"]
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
   orders:
     build:
       context: .
@@ -53,11 +73,15 @@ services:
       AXON_TRACE_LOG: /out/local.ndjson
       DATABASE_URL: postgres://postgres:local@db-orders:5432/orders
     volumes: ["./.axon:/out"]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.orders.rule=PathPrefix(`/v1/orders`)
+      - traefik.http.services.orders.loadbalancer.server.port=8080
   payments:
     build:
       context: .
       dockerfile: services/payments/Dockerfile
-    depends_on: { broker: { condition: service_healthy }, db-payments: { condition: service_healthy }, migrate-payments: { condition: service_completed_successfully } }
+    depends_on: { broker: { condition: service_healthy }, crear-buckets: { condition: service_completed_successfully }, db-payments: { condition: service_healthy }, migrate-payments: { condition: service_completed_successfully } }
     ports: ["${AXON_PORT_payments:-8081}:8080"]
     env_file: [.env.local]
     environment:
@@ -65,7 +89,14 @@ services:
       AXON_TRACE_LOG: /out/local.ndjson
       DATABASE_URL: postgres://postgres:local@db-payments:5432/payments
       # STRIPE_API_KEY: viene de .env.local
+      AWS_ENDPOINT_URL: http://objetos:9000
+      BUCKET_RECIBOS: local-payments-recibos
+      BUCKET_ASSETS: local-payments-assets
     volumes: ["./.axon:/out"]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.payments.rule=PathPrefix(`/v1/payments`)
+      - traefik.http.services.payments.loadbalancer.server.port=8080
 
 # streams JetStream a crear al arrancar:
 #   nats stream add order.placed.v1 --subjects order.placed.v1

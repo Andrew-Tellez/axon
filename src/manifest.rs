@@ -21,6 +21,13 @@ pub struct Method {
     /// Reintentable sin efectos duplicados. Obligatorio en metodos mutantes.
     #[serde(default)]
     pub idempotent: bool,
+    /// Quien puede llamarla desde el edge: "public" o "required". No tiene
+    /// default a proposito: una ruta expuesta sin decidir esto es un incidente.
+    pub auth: Option<String>,
+    /// Peticiones por minuto en el gateway.
+    pub rate_limit: Option<u32>,
+    /// Presupuesto de tiempo en el edge.
+    pub timeout_ms: Option<u32>,
     /// Devuelve coleccion: obliga paginacion por cursor.
     #[serde(default)]
     pub paginated: bool,
@@ -73,6 +80,18 @@ pub struct Patterns {
     pub outbox: bool,
 }
 
+/// Un bucket del servicio. `public = true` lo pone detras de un CDN: nada
+/// se sirve publico sin cache, y nada privado la lleva.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Bucket {
+    #[serde(default)]
+    pub public: bool,
+    /// Dias tras los que el objeto se borra. Sin esto un bucket crece para siempre.
+    pub retention_days: Option<u32>,
+    /// TTL del CDN en segundos; solo aplica a buckets publicos.
+    pub cache_ttl: Option<u32>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Infra {
     pub state: Option<String>,
@@ -85,6 +104,9 @@ pub struct Infra {
     pub max_instances: Option<u32>,
     /// Puerto HTTP del contenedor.
     pub port: Option<u16>,
+    /// Almacenamiento de objetos del servicio, por nombre logico.
+    #[serde(default)]
+    pub buckets: IndexMap<String, Bucket>,
 }
 
 /// Una transicion. El QUE es portable a cualquier lenguaje; el COMO

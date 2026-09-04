@@ -311,24 +311,74 @@ fn build_sin_fuentes_falla_claro() {
     assert!(err.contains("Pasa los demas manifiestos"), "{err}");
 }
 
+/// `terraform fmt` solo dice que el HCL parsea. `validate` con los providers
+/// reales dice que los atributos existen — es lo que caza una interpolacion
+/// de una variable inexistente o un bloque al que le falta un campo.
 #[test]
-fn el_hcl_generado_parsea() {
+fn el_hcl_generado_valida() {
     if !tiene("terraform") {
         eprintln!("salteado: terraform no esta instalado");
         return;
     }
-    for target in ["gcp", "aws"] {
+    let casos = [
+        (
+            "gcp",
+            "google = { source = \"hashicorp/google\", version = \"~> 6.0\" }",
+            "variable \"project\" {}\nvariable \"region\" {}\nvariable \"sql_instance\" {}\n",
+        ),
+        (
+            "aws",
+            "aws = { source = \"hashicorp/aws\", version = \"~> 5.0\" }",
+            "variable \"project\" {}\nvariable \"db_instance_class\" {}\nvariable \"ecs_cluster\" {}\n\
+             variable \"ecs_execution_role_arn\" {}\nvariable \"subnets\" { type = list(string) }\n",
+        ),
+    ];
+    for (target, provider, vars) in casos {
         let dir = std::env::temp_dir().join(format!("axon-tf-{target}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (tf, _, _) = axon(&["infra", "examples", "--target", target]);
         std::fs::write(dir.join("main.tf"), tf).unwrap();
-        let out = Command::new("terraform")
-            .args(["fmt", "-check", dir.to_str().unwrap()])
+        std::fs::write(dir.join("vars.tf"), vars).unwrap();
+        std::fs::write(
+            dir.join("prov.tf"),
+            format!("terraform {{\n  required_providers {{ {provider} }}\n}}\n"),
+        )
+        .unwrap();
+
+        // sin red no se pueden bajar los providers: se cae a `fmt`, que al
+        // menos confirma que el HCL parsea
+        let init = Command::new("terraform")
+            .args(["init", "-backend=false", "-input=false"])
+            .current_dir(&dir)
             .output()
-            .expect("terraform");
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(!err.to_lowercase().contains("error"), "{target}:\n{err}");
+            .expect("terraform init");
+        if !init.status.success() {
+            eprintln!("{target}: sin providers, se valida solo el parseo");
+            let fmt = Command::new("terraform")
+                .args(["fmt", "-check", dir.to_str().unwrap()])
+                .output()
+                .expect("terraform fmt");
+            let err = String::from_utf8_lossy(&fmt.stderr);
+            assert!(!err.to_lowercase().contains("error"), "{target}:\n{err}");
+            continue;
+        }
+        let out = Command::new("terraform")
+            .arg("validate")
+            .current_dir(&dir)
+            .output()
+            .expect("terraform validate");
+        let salida = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{target} no valida:\n{salida}");
+        // una advertencia hoy es un error del provider manana
+        assert!(
+            !salida.contains("Warning:"),
+            "{target} valida con advertencias:\n{salida}"
+        );
     }
 }
 
@@ -628,6 +678,109 @@ fn el_testkit_generado_corre() {
     assert!(salida.contains("propaga la cadena causal"), "{salida}");
     assert!(salida.contains("no repite el efecto"), "{salida}");
     assert!(salida.contains("fail 0"), "{salida}");
+}
+
+/// El gateway y el almacenamiento no son fuentes de verdad nuevas: salen de
+/// los metodos con `http` y del bloque `[infra.buckets]`.
+#[test]
+fn el_edge_y_los_buckets_salen_del_plan() {
+    // el edge, en los cuatro targets
+    for (target, marca) in [
+        ("local", "image: traefik:v3"),
+        ("gcp", "google_compute_url_map"),
+        ("aws", "aws_apigatewayv2_route"),
+        ("k8s", "kind: HTTPRoute"),
+    ] {
+        let (out, _, _) = axon(&["infra", "examples", "--target", target]);
+        assert!(out.contains(marca), "{target} no genero el edge ({marca})");
+    }
+    // auth y rate limit llegan a la configuracion, no se quedan en el manifiesto
+    let (k, _, _) = axon(&["infra", "examples", "--target", "k8s"]);
+    assert!(k.contains("axon.dev/auth: public"), "{k}");
+    assert!(k.contains("axon.dev/rate-limit: \"60\""), "{k}");
+    assert!(
+        k.contains("timeouts: { request: 5s }"),
+        "el timeout del edge no llego"
+    );
+    let (a, _, _) = axon(&["infra", "examples", "--target", "aws"]);
+    assert!(
+        a.contains("authorization_type = \"JWT\""),
+        "ruta privada sin authorizer"
+    );
+    assert!(
+        a.contains("authorization_type = \"NONE\""),
+        "ruta publica mal marcada"
+    );
+
+    // publico implica CDN; privado implica que no la lleva
+    let (g, _, _) = axon(&["infra", "examples", "--target", "gcp"]);
+    assert!(g.contains("enable_cdn  = true"), "bucket publico sin CDN");
+    assert!(
+        g.contains("default_ttl = 86400"),
+        "el cache_ttl no llego al CDN"
+    );
+    assert!(
+        g.contains("public_access_prevention    = \"enforced\""),
+        "bucket privado sin candado"
+    );
+    assert!(g.contains("age = 2555"), "la retencion no llego");
+    assert!(
+        !a.contains("cloudfront_distribution\" \"payments_recibos"),
+        "CDN sobre un bucket privado"
+    );
+
+    // el nombre del bucket es una plantilla neutral en el plan
+    let (plan, _, _) = axon(&["infra", "examples", "--target", "plan"]);
+    assert!(plan.contains("{project}-payments-recibos"), "{plan}");
+    assert!(
+        !plan.contains("var.project"),
+        "el plan neutral filtro sintaxis de terraform"
+    );
+    // y cada target la sustituye con la suya
+    assert!(g.contains("${var.project}-payments-recibos"));
+    assert!(
+        a.contains(r#"{ name = "BUCKET_RECIBOS", value = "${var.project}-payments-recibos" }"#),
+        "el nombre del bucket no llego al contenedor en aws"
+    );
+    assert!(k.contains("${PROJECT}-payments-recibos"));
+    let (l, _, _) = axon(&["infra", "examples", "--target", "local"]);
+    assert!(l.contains("BUCKET_RECIBOS: local-payments-recibos"));
+    assert!(
+        l.contains("image: minio/minio:latest"),
+        "local sin almacenamiento de objetos"
+    );
+}
+
+/// Una ruta expuesta sin decidir quien puede llamarla es un incidente, no un
+/// default. El edge falla cerrado.
+#[test]
+fn el_edge_falla_cerrado() {
+    let dir = std::env::temp_dir().join("axon-edge");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("e.toml"),
+        r#"
+service = "e"
+owner = "x"
+tier = "1"
+[methods.abierto]
+http = "POST /v1/abierto"
+idempotent = true
+auth = "public"
+in = { a = "int" }
+out = { b = "int" }
+[methods.sinAuth]
+http = "GET /v1/sin-auth"
+in = { a = "int" }
+out = { b = "int" }
+"#,
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("expuesta sin `auth`"), "{err}");
+    assert!(err.contains("publica y sin `rate_limit`"), "{err}");
 }
 
 #[test]

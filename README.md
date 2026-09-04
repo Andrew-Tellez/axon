@@ -213,13 +213,13 @@ es un test de e2e de una línea.
 El manifiesto no menciona ningún proveedor. `axon infra` produce primero un **plan
 neutral** y después lo renderiza:
 
-| Target | Mensajería | Cómputo | Estado y secretos |
-| --- | --- | --- | --- |
-| `local` | NATS JetStream | tus servicios con `build:` | Postgres por servicio + migraciones aplicadas |
-| `gcp` | Pub/Sub con push y DLQ | Cloud Run + service account | Cloud SQL + Secret Manager |
-| `aws` | SNS → SQS con redrive | ECS Fargate + autoscaling | RDS + Secrets Manager |
-| `k8s` | Knative Broker/Trigger | Deployment + Service + HPA | External Secrets |
-| `plan` | — | — | El plan neutral en JSON, para renderizarlo vos mismo |
+| Target | Edge | Mensajería | Cómputo | Estado, objetos y secretos |
+| --- | --- | --- | --- | --- |
+| `local` | Traefik | NATS JetStream | tus servicios con `build:` | Postgres + MinIO + migraciones aplicadas |
+| `gcp` | url_map + backends | Pub/Sub con push y DLQ | Cloud Run + service account | Cloud SQL, GCS + Cloud CDN, Secret Manager |
+| `aws` | API Gateway v2 | SNS → SQS con redrive | ECS Fargate + autoscaling | RDS, S3 + CloudFront, Secrets Manager |
+| `k8s` | Gateway API HTTPRoute | Knative Broker/Trigger | Deployment + Service + HPA | External Secrets |
+| `plan` | — | — | — | El plan neutral en JSON, para renderizarlo vos mismo |
 
 Cada target despliega el sistema completo: la suscripción entrega a un workload que
 existe, y el secreto llega a la variable de entorno del contenedor. La imagen es lo
@@ -278,6 +278,37 @@ transición de estado la impone `paymentNext()`, que revienta si no está en el
 manifiesto. Los adaptadores de infraestructura son
 [150 líneas](examples/services/runtime.ts) — eso es todo lo que axon deja
 deliberadamente en manos de quien despliega.
+
+## El edge y el almacenamiento
+
+Ninguno de los dos es una fuente de verdad nueva. El **API gateway** sale de los
+métodos que cada servicio ya declara con `http`; los **buckets**, de un bloque que
+decide una sola cosa importante:
+
+```toml
+[methods.placeOrder]
+http       = "POST /v1/orders"
+auth       = "public"      # obligatorio: el edge falla cerrado
+rate_limit = 60            # obligatorio si es pública
+timeout_ms = 5000
+
+[infra.buckets.recibos]
+retention_days = 2555      # 7 años; sin esto un bucket crece para siempre
+
+[infra.buckets.assets]
+public    = true           # público ⇒ CDN, y sin él no lo es
+cache_ttl = 86400
+```
+
+`auth` **no tiene default**: una ruta expuesta sin decidir quién puede llamarla es un
+incidente esperando ocurrir, así que `verify` la bloquea. Y una ruta pública sin
+`rate_limit` también — el edge no tiene con qué frenar un abuso.
+
+`public = true` en un bucket es una sola decisión con dos consecuencias que van
+siempre juntas: lectura anónima **y** CDN delante. Un bucket privado no lleva CDN, y
+uno público no queda sin cache. El nombre del bucket cambia en cada entorno, así que
+viaja al contenedor como `BUCKET_<NOMBRE>` — la misma variable en los cuatro targets,
+apuntando a MinIO en local.
 
 ## Gobernanza
 
@@ -367,7 +398,7 @@ propios — un compilador que solo se verifica a sí mismo produce salida invál
 | | |
 | --- | --- |
 | El TypeScript generado | `tsc --strict --noEmit` |
-| El Terraform generado | `terraform fmt -check` (gcp y aws) |
+| El Terraform generado | `terraform validate` con los providers reales (gcp y aws), sin advertencias |
 | El workflow generado | parseo YAML, bloques escalares, y que ningún target filtre otro cloud |
 | El testkit generado | `node --test` contra el servicio de ejemplo real |
 | El Go generado | `go vet` |
