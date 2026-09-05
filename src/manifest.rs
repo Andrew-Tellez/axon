@@ -454,6 +454,75 @@ impl Saga {
     }
 }
 
+/// Event sourcing: el estado ES el flujo de eventos, y lo que hoy se guarda en
+/// una fila es una proyeccion de ese flujo.
+///
+/// Lo que se puede generar de esto es todo lo mecanico: la tabla append-only, el
+/// `fold` con un caso por evento declarado —asi que agregar un evento rompe la
+/// compilacion— y el append con version optimista. Lo que se puede REFUTAR es lo
+/// que cuesta caro: un evento que el servicio no emite, un `UPDATE` sobre el
+/// flujo, o la falta del UNIQUE que evita que dos escrituras concurrentes se
+/// pisen sin un solo error.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Aggregate {
+    /// Los eventos que componen el estado. Todos tienen que estar declarados en
+    /// `[emits]`: un agregado no puede fundarse en un contrato que no existe.
+    #[serde(default)]
+    pub events: Vec<String>,
+    /// La maquina de estados que gobierna las transiciones, si la hay. Con
+    /// ella, el `fold` generado rechaza el evento que llega fuera de orden en
+    /// vez de aplicarlo.
+    pub machine: Option<String>,
+    /// Cada cuantos eventos se guarda una foto. 0 es sin fotos: reconstruir
+    /// desde el principio siempre.
+    #[serde(default)]
+    pub snapshot_every: u32,
+}
+
+impl Aggregate {
+    /// La tabla del flujo. Append-only: `verify` bloquea cualquier migracion
+    /// que la actualice o borre de ella.
+    pub fn tabla(nombre: &str) -> String {
+        format!("{}_event", nombre.to_lowercase())
+    }
+    /// La tabla de fotos, si se declararon.
+    pub fn fotos(nombre: &str) -> String {
+        format!("{}_snapshot", nombre.to_lowercase())
+    }
+}
+
+/// CQRS: un modelo de lectura construido aplicando eventos ya declarados.
+///
+/// Lo que aporta declararlo no es el codigo —una proyeccion es un `switch`—
+/// sino que el compilador imponga lo que nadie impone: que la vista solo
+/// consuma eventos que alguien emite, que tenga donde anotar hasta donde llego,
+/// y que su obsolescencia quepa en la que el servicio ya prometio.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct View {
+    /// Los eventos que la construyen.
+    #[serde(default)]
+    pub on: Vec<String>,
+    /// La tabla donde vive. Por defecto `vista_<nombre>`.
+    pub table: Option<String>,
+    /// Cuanto puede atrasarse. Tiene que caber en el `max_staleness_ms` del
+    /// servicio: una vista mas vieja que eso hace mentir a la declaracion.
+    pub max_staleness_ms: Option<u32>,
+}
+
+impl View {
+    pub fn tabla(&self, nombre: &str) -> String {
+        self.table
+            .clone()
+            .unwrap_or_else(|| format!("vista_{}", nombre.to_lowercase()))
+    }
+    /// Donde anota hasta donde llego. Sin esto, un reinicio reprocesa desde el
+    /// principio o se salta lo que no alcanzo a aplicar, y las dos cosas dan
+    /// una vista incorrecta sin un error.
+    pub fn checkpoint(nombre: &str) -> String {
+        format!("vista_{}_checkpoint", nombre.to_lowercase())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Manifest {
     pub service: String,
@@ -497,6 +566,12 @@ pub struct Manifest {
     /// Sagas que coordina este servicio. Ver `Saga`.
     #[serde(default)]
     pub saga: IndexMap<String, Saga>,
+    /// Agregados con event sourcing. Ver `Aggregate`.
+    #[serde(default)]
+    pub aggregate: IndexMap<String, Aggregate>,
+    /// Modelos de lectura. Ver `View`.
+    #[serde(default)]
+    pub view: IndexMap<String, View>,
     #[serde(default)]
     pub infra: Infra,
     /// Overrides por entorno: `[env.prod] min_instances = 3`.

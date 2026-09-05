@@ -161,6 +161,8 @@ export const manifest = {
   },
   "machine": {},
   "saga": {},
+  "aggregate": {},
+  "view": {},
   "infra": {
     "state": "postgres",
     "runtime": "container",

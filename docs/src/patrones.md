@@ -15,6 +15,8 @@ Si no está en el código generado, no está.
 | **Idempotency-Key** | `idempotent = true` | Header obligatorio en el OpenAPI de todo método mutante. |
 | **RFC 7807** | siempre | Un solo formato de error en toda la plataforma, con el `traceId` dentro. |
 | **Expand / migrate / contract** | nombre del archivo | Un `DROP` fuera de un `.contract.sql` es un error de `verify`. |
+| **Event sourcing** | `[aggregate.<nombre>]` | La tienda append-only, el `fold` con un caso por evento declarado, y la versión optimista. Un `UPDATE` sobre el flujo es un error de `verify`, sin excepción. Ver [abajo](#event-sourcing). |
+| **CQRS** | `[view.<nombre>]` | La proyección con un caso por evento y su checkpoint. Una vista que promete `strong`, o más atraso que el servicio, es un error. Ver [abajo](#cqrs-el-modelo-de-lectura). |
 | **Saga** | `[saga.<nombre>]` | El coordinador completo: orden, diario, compensación en orden inverso, y el barrido que retoma lo que quedó colgado. Un paso intermedio sin `undo` es un error. Ver [abajo](#saga). |
 
 Los patrones GoF viven un nivel abajo, en el código que escribe el equipo — para eso
@@ -354,3 +356,150 @@ de la infraestructura generada.
 Y el registro de intentos vive en `tenant_exempt` por escrito: es infraestructura de la
 política de reintentos, no dato de inquilino. Sin esa declaración explícita, la regla de
 RLS lo marcaría —correctamente— y dejaría de servir para el resto.
+
+## Event sourcing
+
+El estado **es** el flujo de eventos. Lo que hoy vive en una fila es una proyección de ese
+flujo, no la verdad.
+
+```toml
+[aggregate.cuenta]
+events  = ["cuenta.abierta@v1", "cuenta.depositada@v1", "cuenta.cerrada@v1"]
+machine = "cuenta"        # opcional: gobierna qué evento es legal desde qué estado
+snapshot_every = 0        # 0 = reconstruir desde el principio siempre
+```
+
+```sql
+CREATE TABLE cuenta_event (
+  id         uuid PRIMARY KEY,
+  stream_id  uuid NOT NULL,
+  version    int  NOT NULL,
+  type       text NOT NULL,
+  data       jsonb NOT NULL,
+  en         timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (stream_id, version)
+);
+```
+
+### Ese UNIQUE no es un detalle
+
+Es la versión optimista entera. Sin él, dos escrituras concurrentes sobre el mismo flujo
+**entran las dos con la misma versión**, nadie ve un error, y el estado que se reconstruye
+después depende de en qué orden se lean las filas. `axon verify` lo exige.
+
+```console
+$ axon verify manifests/
+error  libro.cuenta: `cuenta_event` sin UNIQUE sobre (stream_id, version). Dos escrituras
+       concurrentes sobre el mismo flujo entran las dos con la misma version, sin un solo
+       error, y el estado que se reconstruye depende de en que orden se lean
+```
+
+### Append-only, y no como recomendación
+
+```console
+error  libro/002_arreglo.contract.sql: `DELETE` sobre `cuenta_event`, que es el flujo de
+       `cuenta`. Un flujo es append-only: cambiar un evento pasado deja un pasado que no
+       ocurrio, y todo lo que se reconstruya despues va a ser coherente con esa mentira.
+       Para corregir se agrega un evento nuevo, no se edita el viejo
+```
+
+A diferencia del resto de las tablas, aquí **no hay `.contract.sql` que lo habilite**. Una
+migración destructiva sobre una tabla normal es una decisión que se marca y se revisa;
+sobre un flujo de eventos es una contradicción con lo que el flujo significa.
+
+### Qué se genera y qué no
+
+Lo mecánico se genera: `append` con versión esperada, la rehidratación, y el `switch` con
+un caso por evento declarado. Cómo cada evento cambia el estado lo escribe quien lo sabe:
+
+```ts
+export interface CuentaReglas<CuentaEstado> {
+  inicial(streamId: string): CuentaEstado;
+  aplicarCuentaAbiertaV1(estado: CuentaEstado, e: CuentaAbiertaV1): CuentaEstado;
+  aplicarCuentaDepositadaV1(estado: CuentaEstado, e: CuentaDepositadaV1): CuentaEstado;
+  aplicarCuentaCerradaV1(estado: CuentaEstado, e: CuentaCerradaV1): CuentaEstado;
+}
+```
+
+Un evento declarado sin su caso **no compila**. Es la única forma de que agregar un evento
+al manifiesto no deje el `fold` viejo corriendo en silencio, devolviendo un estado
+incompleto que nadie distingue de uno correcto.
+
+Y el `fold` generado no asume el orden: **un hueco en las versiones revienta**. Reconstruir
+salteándose un evento da un estado que nunca existió, y es indistinguible de uno real.
+
+```ts
+if (ev.version !== version + 1) {
+  throw new Error(`cuenta/${streamId}: se esperaba la version ${version + 1} y llego ${ev.version}`);
+}
+```
+
+### La máquina de estados, si la hay
+
+`machine = "cuenta"` conecta el agregado con `[machine.cuenta]`, y entonces `verify` exige
+que **cada evento del agregado sea emitido por alguna transición**. Dos vocabularios para
+el mismo concepto se separan en el primer cambio; con esta regla, no pueden.
+
+## CQRS: el modelo de lectura
+
+```toml
+[view.saldos]
+on = ["cuenta.abierta@v1", "cuenta.depositada@v1"]
+max_staleness_ms = 3000
+```
+
+Lo que aporta declararla no es el código —una proyección es un `switch`— sino que el
+compilador imponga lo que nadie impone:
+
+| | |
+| --- | --- |
+| se construye con un evento que nadie emite | la vista se genera y nunca recibe nada |
+| usa un evento de otro servicio sin `[consumes]` | la suscripción sale de ahí; sin ella, lo mismo |
+| falta su tabla, o la del checkpoint | ver abajo |
+| `consistency = "strong"` | una vista se llena **después** de que el evento ocurrió: lo que sirve es un dato viejo por definición |
+| `max_staleness_ms` mayor que el del servicio | el servicio no puede cumplir lo que prometió sirviendo de una vista más vieja que su propio presupuesto |
+
+### El checkpoint, y por qué la escritura no está en la interfaz
+
+```ts
+export interface Checkpoint {
+  leer(vista: string): Promise<number>;
+}
+
+export interface SaldosProyeccion {
+  /** cuenta.abierta@v1 · guarda `posicion` en la MISMA transaccion que el efecto */
+  aplicarCuentaAbiertaV1(e: Envelope<CuentaAbiertaV1>, posicion: number): Promise<void>;
+  ...
+}
+```
+
+La posición **tiene que guardarse en la misma transacción que el efecto de la vista**, y esa
+transacción es de la proyección, no del framework. Por eso `Checkpoint` sólo sabe leer: la
+posición viaja a cada `aplicar*`, que la guarda junto con el resto.
+
+Si fueran dos transacciones, un corte entre ellas deja la vista adelantada o atrasada
+respecto de lo que dice haber aplicado — y ninguna de las dos cosas da un error. Sin
+checkpoint, directamente, un reinicio reprocesa desde el principio o se salta lo que no
+alcanzó a aplicar.
+
+## El fold, comprobado corriéndolo
+
+El `fold` y la proyección generados se ejecutan con `node --test`. **Seis casos**, y los tres
+que importan son los que un `switch` leído a ojo no distingue:
+
+| | |
+| --- | --- |
+| el estado sale del flujo, no de una fila | |
+| **un hueco en las versiones revienta** | en vez de dar un estado que nunca existió |
+| **un evento que el manifiesto no declara no se ignora** | ignorarlo da un estado incorrecto sin error |
+| desde una foto, el `fold` sigue desde ahí | |
+| los eventos del agregado son los del manifiesto | |
+| **la vista sólo acepta los eventos que declara, y le llega la posición** | un evento de más vendría de una suscripción que nadie pidió |
+
+## Lo que falta de event sourcing
+
+Ni el agregado ni la vista están en `examples/`, así que lo medido es el `fold` y la
+proyección —corriéndolos— pero no un conflicto de versión contra un Postgres real ni el
+atraso de una vista medido contra su presupuesto. Las dos cosas son la continuación
+natural: el UNIQUE se prueba con dos escrituras concurrentes de verdad, y el atraso con el
+demo ya levantado.

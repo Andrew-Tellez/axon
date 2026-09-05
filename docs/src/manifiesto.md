@@ -80,3 +80,21 @@ la dibuja. Y `axon verify` **prueba propiedades sobre ella** antes del merge:
 **El qué es portable; el cómo no.** El cuerpo de `capturePayment` — cobrar en Stripe,
 decidir si falla, escribir la fila — es tuyo, en tu lenguaje, en un `extends` de la
 clase generada. axon se queda con la parte que se puede verificar.
+
+## `[aggregate.<nombre>]` y `[view.<nombre>]`
+
+```toml
+[aggregate.cuenta]
+events  = ["cuenta.abierta@v1", "cuenta.depositada@v1"]
+machine = "cuenta"        # opcional
+snapshot_every = 0
+
+[view.saldos]
+on = ["cuenta.abierta@v1", "cuenta.depositada@v1"]
+table = "vista_saldos"    # por defecto `vista_<nombre>`
+max_staleness_ms = 3000
+```
+
+El estado es el flujo, y la vista se construye aplicándolo. Las tablas —`<nombre>_event`,
+la de la vista y su checkpoint— las exige `verify` contra las migraciones reales. Ver
+[Event sourcing](./patrones.md#event-sourcing).

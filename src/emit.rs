@@ -202,6 +202,12 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     if !m.saga.is_empty() {
         out.push(sagas_ts(m));
     }
+    if !m.aggregate.is_empty() {
+        out.push(agregados_ts(m));
+    }
+    if !m.view.is_empty() {
+        out.push(vistas_ts(m));
+    }
     let rutas: Vec<String> = m
         .methods
         .values()
@@ -534,6 +540,216 @@ fn salida_de(m: &Manifest, r: &str) -> String {
         Some((s, met)) => format!("{}{}Out", pascal(s), pascal(met)),
         None => "unknown".to_string(),
     }
+}
+
+
+/// El agregado: la tienda de eventos y el `fold`.
+///
+/// Lo mecanico se genera —el append con version optimista, la rehidratacion, el
+/// switch con un caso por evento declarado— y lo que decide el negocio no: como
+/// cada evento cambia el estado lo escribe quien lo sabe, en una interfaz. Un
+/// evento declarado sin su caso no compila, que es la unica forma de que
+/// agregar un evento no deje el `fold` viejo funcionando en silencio.
+pub fn agregados_ts(m: &Manifest) -> String {
+    let mut o = vec![
+        "\n/** El flujo de un agregado. Es la fuente de verdad: lo que hoy se\n \
+         *  guarda en una fila es una PROYECCION de esto.\n \
+         *\n \
+         *  `append` recibe la version que el llamador creia vigente. Si otro\n \
+         *  escribio en medio, tiene que fallar: eso es el UNIQUE (stream_id,\n \
+         *  version) haciendo su trabajo, y `axon verify` comprueba que exista\n \
+         *  porque sin el las dos escrituras entran y nadie ve un error. */\n\
+         export interface FlujoEventos {\n  \
+           /** Los eventos de un flujo, en orden. `desde` permite arrancar de una foto. */\n  \
+           leer(streamId: string, desde?: number): Promise<{ version: number; type: string; data: unknown }[]>;\n  \
+           /** Agrega al final. Rechaza si `esperada` ya no es la ultima version. */\n  \
+           append(streamId: string, esperada: number, e: Envelope<unknown>): Promise<number>;\n  \
+           /** La ultima foto, si hay fotos declaradas. */\n  \
+           foto?(streamId: string): Promise<{ version: number; estado: unknown } | null>;\n  \
+           guardarFoto?(streamId: string, version: number, estado: unknown): Promise<void>;\n\
+         }\n\
+         \n\
+         /** Otro escribio primero. No es un error de programa: es la condicion\n \
+         *  normal de dos usuarios sobre el mismo agregado, y quien la recibe\n \
+         *  vuelve a leer y reintenta. */\n\
+         export class VersionEnConflicto extends Error {\n  \
+           readonly streamId: string;\n  \
+           readonly esperada: number;\n  \
+           constructor(streamId: string, esperada: number) {\n    \
+             super(`${streamId}: la version ${esperada} ya no es la ultima`);\n    \
+             this.streamId = streamId;\n    \
+             this.esperada = esperada;\n  \
+           }\n\
+         }\n"
+            .to_string(),
+    ];
+    for (nombre, ag) in &m.aggregate {
+        let p = pascal(nombre);
+        let c = camel(nombre);
+        let mut casos = Vec::new();
+        let mut aplica = Vec::new();
+        for ev in &ag.events {
+            let t = pascal(ev);
+            casos.push(format!("  aplicar{t}(estado: {p}Estado, e: {t}): {p}Estado;"));
+            aplica.push(format!(
+                "      case \"{ev}\":\n        \
+                   return reglas.aplicar{t}(estado, ev.data as {t});"
+            ));
+        }
+        o.push(format!(
+            "/** Los eventos que componen `{nombre}`, declarados en el manifiesto. */\n\
+             export const {c}Eventos = [{}] as const;\n\
+             export type {p}Evento = typeof {c}Eventos[number];\n",
+            ag.events
+                .iter()
+                .map(|e| format!("\"{e}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        // El estado lo define quien lo sabe: el generador no puede inventar la
+        // forma del dominio, solo imponer que haya un caso por evento.
+        o.push(format!(
+            "/** El estado reconstruido. Su forma la define el dominio; lo que\n \
+             *  impone el generador es que haya un caso por cada evento declarado. */\n\
+             export interface {p}Reglas<{p}Estado> {{\n  \
+               /** El estado antes del primer evento. */\n  \
+               inicial(streamId: string): {p}Estado;\n\
+             {}\n}}\n",
+            casos.join("\n")
+        ));
+        let gobierna = match &ag.machine {
+            Some(mac) => format!(
+                "\n *  Gobernado por `[machine.{mac}]`: un evento que no corresponde a\n \
+                 *  una transicion legal desde el estado actual se RECHAZA en vez de\n \
+                 *  aplicarse. Un flujo con un evento imposible dentro no se puede\n \
+                 *  arreglar despues: los eventos no se editan."
+            ),
+            None => String::new(),
+        };
+        o.push(format!(
+            "/** Reconstruye el estado aplicando el flujo en orden.{gobierna} */\n\
+             export function {c}Fold<E>(\n  \
+               reglas: {p}Reglas<E>,\n  \
+               streamId: string,\n  \
+               eventos: {{ version: number; type: string; data: unknown }}[],\n  \
+               desde?: {{ version: number; estado: E }},\n\
+             ): {{ version: number; estado: E }} {{\n  \
+               let estado = desde ? desde.estado : reglas.inicial(streamId);\n  \
+               let version = desde ? desde.version : 0;\n  \
+               for (const ev of eventos) {{\n    \
+                 // El orden no se asume: un hueco en las versiones significa que\n    \
+                 // falta un evento, y reconstruir sin el da un estado que nunca\n    \
+                 // existio.\n    \
+                 if (ev.version !== version + 1) {{\n      \
+                   throw new Error(`{nombre}/${{streamId}}: se esperaba la version ${{version + 1}} y llego ${{ev.version}}`);\n    \
+                 }}\n    \
+                 estado = {c}Aplicar(reglas, estado, ev);\n    \
+                 version = ev.version;\n  \
+               }}\n  \
+               return {{ version, estado }};\n\
+             }}\n\
+             \n\
+             function {c}Aplicar<E>(reglas: {p}Reglas<E>, estado: E, ev: {{ type: string; data: unknown }}): E {{\n  \
+               switch (ev.type) {{\n\
+             {aplica}\n    \
+                 default:\n      \
+                   // Un evento en el flujo que el manifiesto no declara: el estado\n      \
+                   // que saldria de ignorarlo es incorrecto y nadie lo sabria.\n      \
+                   throw new Error(`{nombre}: `+ev.type+` no es un evento declarado del agregado`);\n  \
+               }}\n\
+             }}\n",
+            aplica = aplica.join("\n"),
+        ));
+    }
+    o.join("\n")
+}
+
+/// La proyeccion: un caso por evento declarado, y el punto donde quedo.
+pub fn vistas_ts(m: &Manifest) -> String {
+    let mut o = vec![
+        "\n/** Donde una vista anota hasta donde llego.\n \
+         *\n \
+         *  Sin esto, un reinicio reprocesa desde el principio o se salta lo que no\n \
+         *  alcanzo a aplicar. Las dos cosas dan una vista incorrecta, y ninguna da\n \
+         *  un error: por eso `axon verify` exige la tabla. */\n\
+         export interface Checkpoint {\n  \
+           /** Desde donde retomar. La ESCRITURA no esta aqui a proposito: la\n   \
+            *  posicion tiene que guardarse en la misma transaccion que el efecto\n   \
+            *  de la vista, y esa transaccion es de la proyeccion, no del\n   \
+            *  framework. En dos transacciones, un corte entre ellas deja la vista\n   \
+            *  adelantada o atrasada respecto de lo que dice haber aplicado, y\n   \
+            *  ninguna de las dos da un error.\n   \
+            *\n   \
+            *  Por eso cada `aplicar*` recibe la posicion: la guarda quien puede\n   \
+            *  hacerlo junto con el resto. */\n  \
+           leer(vista: string): Promise<number>;\n\
+         }\n"
+            .to_string(),
+    ];
+    for (nombre, vi) in &m.view {
+        let p = pascal(nombre);
+        let c = camel(nombre);
+        let mut casos = Vec::new();
+        let mut aplica = Vec::new();
+        for ev in &vi.on {
+            let t = pascal(ev);
+            casos.push(format!(
+                "  /** {ev} · guarda `posicion` en la MISMA transaccion que el efecto */\n  \
+                 aplicar{t}(e: Envelope<{t}>, posicion: number): Promise<void>;"
+            ));
+            aplica.push(format!(
+                "      case \"{ev}\":\n        \
+                   return proyeccion.aplicar{t}(e as Envelope<{t}>, posicion);"
+            ));
+        }
+        o.push(format!(
+            "/** La vista `{nombre}`, en `{tabla}`. Un metodo por evento declarado:\n \
+             *  agregar uno al manifiesto rompe la compilacion en vez de dejar la\n \
+             *  proyeccion vieja corriendo sin enterarse. */\n\
+             export interface {p}Proyeccion {{\n{}\n}}\n\
+             \n\
+             export const {c}Tabla = \"{tabla}\" as const;\n\
+             export const {c}Eventos = [{eventos}] as const;\n{atraso}",
+            casos.join("\n"),
+            tabla = vi.tabla(nombre),
+            eventos = vi
+                .on
+                .iter()
+                .map(|e| format!("\"{e}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+            atraso = match vi.max_staleness_ms {
+                Some(ms) => format!(
+                    "/** Presupuesto de atraso declarado. Mas viejo que esto no se sirve. */\n\
+                     export const {c}AtrasoMaximoMs = {ms};\n"
+                ),
+                None => String::new(),
+            }
+        ));
+        o.push(format!(
+            "/** Rutea el evento al metodo de la vista. El `default` no es\n \
+             *  defensivo: un evento que la vista no declara llegaria de una\n \
+             *  suscripcion que nadie pidio. */\n\
+             export async function {c}Aplicar(\n  \
+               proyeccion: {p}Proyeccion,\n  \
+               e: Envelope<unknown>,\n  \
+               posicion: number,\n\
+             ): Promise<void> {{\n  \
+               switch (e.type) {{\n\
+             {aplica}\n    \
+                 default:\n      \
+                   throw new Error(`{nombre}: `+e.type+` no es un evento declarado de la vista`);\n  \
+               }}\n\
+             }}\n\
+             \n\
+             /** Cuanto atraso lleva la vista, para poder medirlo contra lo declarado. */\n\
+             export function {c}Atraso(ultimoEvento: Date, ahora = new Date()): number {{\n  \
+               return ahora.getTime() - ultimoEvento.getTime();\n\
+             }}\n",
+            aplica = aplica.join("\n"),
+        ));
+    }
+    o.join("\n")
 }
 
 /// La saga como diagrama: el camino de ida y, en la misma imagen, la vuelta.

@@ -3314,3 +3314,284 @@ steps = [
     assert!(!ok);
     assert!(err.contains("la garantia real del flujo es eventual"), "{err}");
 }
+
+/// Un manifiesto con event sourcing y una vista. Lo usan el test del `fold` y
+/// el de las reglas.
+fn fixture_es(sufijo: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("axon-es-{sufijo}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(dir.join("sql/001_init.expand.sql"), DDL_ES).unwrap();
+    std::fs::write(dir.join("libro.toml"), MANIFIESTO_ES).unwrap();
+    dir
+}
+
+const DDL_ES: &str = "\
+CREATE TABLE cuenta_event (
+  id         uuid PRIMARY KEY,
+  stream_id  uuid NOT NULL,
+  version    int NOT NULL,
+  type       text NOT NULL,
+  data       jsonb NOT NULL,
+  en         timestamptz NOT NULL DEFAULT now(),
+  -- Sin este UNIQUE, dos escrituras concurrentes sobre el mismo flujo entran
+  -- las dos con la misma version y nadie ve un error.
+  UNIQUE (stream_id, version)
+);
+
+CREATE TABLE vista_saldos (
+  stream_id  uuid PRIMARY KEY,
+  centavos   bigint NOT NULL,
+  posicion   bigint NOT NULL
+);
+
+CREATE TABLE vista_saldos_checkpoint (
+  vista      text PRIMARY KEY,
+  posicion   bigint NOT NULL
+);
+";
+
+const MANIFIESTO_ES: &str = r#"service = "libro"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[cap]
+consistency = "eventual"
+on_partition = "reject"
+max_staleness_ms = 5000
+
+[emits."cuenta.abierta@v1"]
+streamId = "uuid"
+
+[emits."cuenta.depositada@v1"]
+streamId = "uuid"
+centavos = "int"
+
+[emits."cuenta.cerrada@v1"]
+streamId = "uuid"
+
+[aggregate.cuenta]
+events = ["cuenta.abierta@v1", "cuenta.depositada@v1", "cuenta.cerrada@v1"]
+
+[view.saldos]
+on = ["cuenta.abierta@v1", "cuenta.depositada@v1"]
+max_staleness_ms = 3000
+
+[infra]
+state = "postgres"
+migrations = "sql/"
+"#;
+
+/// El `fold` no se valida leyendo el switch: se corre. Lo que tiene que pasar
+/// es que un hueco en las versiones REVIENTE en vez de dar un estado que nunca
+/// existio, y que un evento no declarado no se ignore.
+#[test]
+fn el_fold_generado_reconstruye_y_se_niega() {
+    if !tiene("node") {
+        eprintln!("salteado: falta node");
+        return;
+    }
+    let dir = fixture_es("fold");
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "el fixture no esta limpio:\n{err}");
+
+    let (ts, err, ok) = axon(&[
+        "build",
+        dir.join("libro.toml").to_str().unwrap(),
+        dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "{err}");
+    let destino = dir.join("prueba");
+    std::fs::create_dir_all(&destino).unwrap();
+    std::fs::write(destino.join("contratos.ts"), &ts).unwrap();
+    std::fs::write(
+        destino.join("es.test.ts"),
+        r#"import { test } from "node:test";
+import assert from "node:assert/strict";
+import { cuentaFold, cuentaEventos, saldosAplicar, saldosTabla, saldosAtrasoMaximoMs,
+         newEnvelope, type CuentaReglas, type SaldosProyeccion,
+         type CuentaAbiertaV1, type CuentaDepositadaV1 } from "./contratos.ts";
+
+interface Saldo { abierta: boolean; centavos: number; cerrada: boolean }
+
+const reglas: CuentaReglas<Saldo> = {
+  inicial: () => ({ abierta: false, centavos: 0, cerrada: false }),
+  aplicarCuentaAbiertaV1: (s) => ({ ...s, abierta: true }),
+  aplicarCuentaDepositadaV1: (s, e) => ({ ...s, centavos: s.centavos + e.centavos }),
+  aplicarCuentaCerradaV1: (s) => ({ ...s, cerrada: true }),
+};
+
+const ev = (version: number, type: string, data: unknown) => ({ version, type, data });
+
+test("el estado sale del flujo, no de una fila", () => {
+  const r = cuentaFold(reglas, "c1", [
+    ev(1, "cuenta.abierta@v1", { streamId: "c1" }),
+    ev(2, "cuenta.depositada@v1", { streamId: "c1", centavos: 500 }),
+    ev(3, "cuenta.depositada@v1", { streamId: "c1", centavos: 250 }),
+  ]);
+  assert.equal(r.version, 3);
+  assert.deepEqual(r.estado, { abierta: true, centavos: 750, cerrada: false });
+});
+
+test("un hueco en las versiones revienta en vez de dar un estado que nunca existio", () => {
+  assert.throws(
+    () => cuentaFold(reglas, "c1", [
+      ev(1, "cuenta.abierta@v1", { streamId: "c1" }),
+      ev(3, "cuenta.depositada@v1", { streamId: "c1", centavos: 500 }),
+    ]),
+    /se esperaba la version 2 y llego 3/,
+  );
+});
+
+test("un evento que el manifiesto no declara no se ignora", () => {
+  assert.throws(
+    () => cuentaFold(reglas, "c1", [ev(1, "cuenta.robada@v1", {})]),
+    /no es un evento declarado del agregado/,
+  );
+});
+
+test("desde una foto, el fold sigue desde ahi", () => {
+  const r = cuentaFold(reglas, "c1",
+    [ev(8, "cuenta.depositada@v1", { streamId: "c1", centavos: 100 })],
+    { version: 7, estado: { abierta: true, centavos: 900, cerrada: false } });
+  assert.equal(r.version, 8);
+  assert.equal(r.estado.centavos, 1000);
+});
+
+test("los eventos del agregado son los del manifiesto", () => {
+  assert.deepEqual([...cuentaEventos],
+    ["cuenta.abierta@v1", "cuenta.depositada@v1", "cuenta.cerrada@v1"]);
+});
+
+test("la vista solo acepta los eventos que declara, y le llega la posicion", async () => {
+  const vistas: string[] = [];
+  const proyeccion: SaldosProyeccion = {
+    async aplicarCuentaAbiertaV1(e, posicion) { vistas.push(`abierta:${posicion}`); },
+    async aplicarCuentaDepositadaV1(e, posicion) { vistas.push(`deposito:${e.data.centavos}:${posicion}`); },
+  };
+  await saldosAplicar(proyeccion, newEnvelope("cuenta.abierta@v1", "p", { streamId: "c1" }), 11);
+  await saldosAplicar(proyeccion, newEnvelope("cuenta.depositada@v1", "p", { streamId: "c1", centavos: 300 }), 12);
+  assert.deepEqual(vistas, ["abierta:11", "deposito:300:12"]);
+  // `cuenta.cerrada@v1` NO esta en la vista: llegar aqui seria una suscripcion
+  // que nadie pidio
+  await assert.rejects(
+    () => saldosAplicar(proyeccion, newEnvelope("cuenta.cerrada@v1", "p", {}), 13),
+    /no es un evento declarado de la vista/,
+  );
+  assert.equal(saldosTabla, "vista_saldos");
+  assert.equal(saldosAtrasoMaximoMs, 3000);
+});
+"#,
+    )
+    .unwrap();
+    let out = Command::new("node")
+        .args(["--test", "es.test.ts"])
+        .current_dir(&destino)
+        .output()
+        .expect("node --test");
+    let salida = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "el fold generado no reconstruye como dice:\n{salida}"
+    );
+    assert!(salida.contains("pass 6"), "{salida}");
+}
+
+/// Las reglas de event sourcing y CQRS: cada una bloquea una forma de tener un
+/// flujo que no es un flujo, o una vista que miente.
+#[test]
+fn las_reglas_de_event_sourcing_bloquean() {
+    let dir = std::env::temp_dir().join("axon-es-reglas");
+    let correr = |manifiesto: &str, ddl: &str| -> String {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sql")).unwrap();
+        std::fs::write(dir.join("sql/001_init.expand.sql"), ddl).unwrap();
+        std::fs::write(dir.join("libro.toml"), manifiesto).unwrap();
+        let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        assert!(!ok, "paso limpio");
+        err
+    };
+
+    // el UNIQUE que hace posible la version optimista. Se quita el bloque
+    // entero para no dejar una coma huerfana: un DDL que no parsea haria que
+    // este test pase por el motivo equivocado.
+    let sin_unique = DDL_ES.replace(
+        "  en         timestamptz NOT NULL DEFAULT now(),\n  \
+         -- Sin este UNIQUE, dos escrituras concurrentes sobre el mismo flujo entran\n  \
+         -- las dos con la misma version y nadie ve un error.\n  \
+         UNIQUE (stream_id, version)\n",
+        "  en         timestamptz NOT NULL DEFAULT now()\n",
+    );
+    assert!(!sin_unique.contains("UNIQUE"), "la variante no quito el UNIQUE");
+    let err = correr(MANIFIESTO_ES, &sin_unique);
+    assert!(err.contains("sin UNIQUE sobre (stream_id, version)"), "{err}");
+    assert!(err.contains("depende de en que orden se lean"), "{err}");
+
+    // un agregado fundado en un evento que el servicio no emite
+    let ajeno = MANIFIESTO_ES.replace(
+        r#"events = ["cuenta.abierta@v1", "cuenta.depositada@v1", "cuenta.cerrada@v1"]"#,
+        r#"events = ["cuenta.abierta@v1", "otra.cosa@v1"]"#,
+    );
+    let err = correr(&ajeno, DDL_ES);
+    assert!(err.contains("no declara emitir"), "{err}");
+    assert!(err.contains("esto es una vista, no un agregado"), "{err}");
+
+    // la vista sin donde anotar hasta donde llego
+    let sin_cp = DDL_ES.replace("CREATE TABLE vista_saldos_checkpoint", "CREATE TABLE otra_tabla");
+    let err = correr(MANIFIESTO_ES, &sin_cp);
+    assert!(err.contains("vista_saldos_checkpoint"), "{err}");
+    assert!(err.contains("reprocesa desde el principio"), "{err}");
+
+    // una vista mas vieja que el presupuesto del servicio
+    let vieja = MANIFIESTO_ES.replace("max_staleness_ms = 3000", "max_staleness_ms = 9000");
+    let err = correr(&vieja, DDL_ES);
+    assert!(err.contains("admite 9000ms de atraso"), "{err}");
+    assert!(err.contains("no puede cumplir lo que prometio"), "{err}");
+
+    // y una vista bajo `consistency = "strong"`
+    let fuerte = MANIFIESTO_ES
+        .replace("consistency = \"eventual\"", "consistency = \"strong\"")
+        .replace("max_staleness_ms = 5000\n", "");
+    let err = correr(&fuerte, DDL_ES);
+    assert!(err.contains("un dato viejo por definicion"), "{err}");
+
+    // el flujo es append-only, y no como recomendacion
+    let err = correr(
+        MANIFIESTO_ES,
+        &format!("{DDL_ES}\nUPDATE cuenta_event SET data = '{{}}'::jsonb WHERE version = 1;\n"),
+    );
+    assert!(err.contains("es el flujo de `cuenta`"), "{err}");
+    assert!(err.contains("un pasado que no ocurrio"), "{err}");
+    // y ni siquiera marcado como `.contract.sql`: para eso no hay permiso
+    let dir2 = std::env::temp_dir().join("axon-es-append");
+    let _ = std::fs::remove_dir_all(&dir2);
+    std::fs::create_dir_all(dir2.join("sql")).unwrap();
+    std::fs::write(dir2.join("sql/001_init.expand.sql"), DDL_ES).unwrap();
+    std::fs::write(
+        dir2.join("sql/002_arreglo.contract.sql"),
+        "DELETE FROM cuenta_event WHERE version = 1;\n",
+    )
+    .unwrap();
+    std::fs::write(dir2.join("libro.toml"), MANIFIESTO_ES).unwrap();
+    let (_, err, ok) = axon(&["verify", dir2.to_str().unwrap()]);
+    assert!(!ok, "un DELETE sobre el flujo paso por estar en un .contract.sql");
+    assert!(err.contains("es el flujo de `cuenta`"), "{err}");
+
+    // un evento del agregado que ninguna transicion de la maquina emite
+    let maquina = MANIFIESTO_ES.replace(
+        "[aggregate.cuenta]",
+        "[machine.cuenta]\ninitial = \"nueva\"\nfinal = [\"cerrada\"]\n\n\
+         [machine.cuenta.transitions.abrir]\nfrom = [\"nueva\"]\nto = \"abierta\"\n\
+         on = \"cuenta.abierta@v1\"\nemits = \"cuenta.abierta@v1\"\n\n\
+         [aggregate.cuenta]\nmachine = \"cuenta\"",
+    );
+    let err = correr(&maquina, DDL_ES);
+    assert!(err.contains("ninguna transicion de `cuenta` lo emite"), "{err}");
+    assert!(err.contains("no sabria a que estado llevarlo"), "{err}");
+}
+

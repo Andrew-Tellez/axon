@@ -1054,6 +1054,202 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // event sourcing: el flujo es la verdad, asi que lo que se refuta es todo
+    // lo que lo convierte en algo que no es un flujo
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        for (nombre, ag) in &m.aggregate {
+            if ag.events.is_empty() {
+                errors.push(format!(
+                    "{svc}.{nombre}: un agregado sin eventos no tiene estado que reconstruir"
+                ));
+            }
+            // Un agregado fundado en un evento que el servicio no emite es un
+            // agregado que nadie puede llenar.
+            for ev in &ag.events {
+                if !m.emits.contains_key(ev) {
+                    errors.push(format!(
+                        "{svc}.{nombre}: se funda en `{ev}`, que este servicio no declara emitir. \
+                         El flujo lo escribe su dueno: si el evento es de otro, esto es una vista, \
+                         no un agregado"
+                    ));
+                }
+            }
+            // La maquina, si se declara, tiene que existir y hablar de los
+            // mismos eventos: dos vocabularios para el mismo concepto se
+            // separan en el primer cambio.
+            if let Some(mac) = &ag.machine {
+                match m.machine.get(mac) {
+                    None => errors.push(format!(
+                        "{svc}.{nombre}: gobernado por `[machine.{mac}]`, que no existe"
+                    )),
+                    Some(maq) => {
+                        for ev in &ag.events {
+                            if !maq.transitions.values().any(|t| t.emits.as_ref() == Some(ev)) {
+                                errors.push(format!(
+                                    "{svc}.{nombre}: `{ev}` es del agregado y ninguna transicion \
+                                     de `{mac}` lo emite. El `fold` generado no sabria a que \
+                                     estado llevarlo"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let tabla = Aggregate::tabla(nombre);
+            match esquemas.get(svc).and_then(|t| t.get(&tabla)) {
+                None => errors.push(format!(
+                    "{svc}.{nombre}: falta la tabla `{tabla}`. El estado ES el flujo, y sin la \
+                     tabla no hay donde ponerlo"
+                )),
+                Some(t) => {
+                    for (col, para) in [
+                        ("stream_id", "de que instancia del agregado es este evento"),
+                        ("version", "su posicion en el flujo"),
+                        ("type", "cual de los eventos declarados es"),
+                        ("data", "su contenido"),
+                    ] {
+                        if !t.tiene(col) {
+                            errors.push(format!(
+                                "{svc}.{nombre}: `{tabla}` sin columna `{col}`: ahi va {para}"
+                            ));
+                        }
+                    }
+                    // Sin el UNIQUE, dos escrituras concurrentes sobre el mismo
+                    // flujo se aceptan las dos con la misma version. Nadie ve un
+                    // error y el estado reconstruido depende del orden de
+                    // lectura.
+                    let optimista = t.uniques.iter().any(|u| {
+                        u.len() == 2
+                            && u.iter().any(|c| c == "stream_id")
+                            && u.iter().any(|c| c == "version")
+                    });
+                    if !optimista {
+                        errors.push(format!(
+                            "{svc}.{nombre}: `{tabla}` sin UNIQUE sobre (stream_id, version). Dos \
+                             escrituras concurrentes sobre el mismo flujo entran las dos con la \
+                             misma version, sin un solo error, y el estado que se reconstruye \
+                             depende de en que orden se lean"
+                        ));
+                    }
+                }
+            }
+            // Append-only, y no como recomendacion. Una migracion que
+            // actualiza o borra del flujo no rompe nada visible: deja un
+            // pasado que no ocurrio, y todo lo que se reconstruya despues sera
+            // consistente con esa mentira. No hay `.contract.sql` que lo
+            // habilite, a diferencia del resto de las tablas.
+            for f in migrations_of(m) {
+                let texto = std::fs::read_to_string(&f).unwrap_or_default().to_lowercase();
+                let nombre_archivo = f.file_name().unwrap_or_default().to_string_lossy().to_string();
+                for verbo in ["update", "delete from", "truncate"] {
+                    // se busca el verbo Y la tabla en la misma sentencia
+                    for sent in texto.split(';') {
+                        let limpio: String = sent
+                            .lines()
+                            .filter(|l| !l.trim_start().starts_with("--"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if limpio.contains(verbo) && limpio.contains(&tabla) {
+                            errors.push(format!(
+                                "{svc}/{nombre_archivo}: `{}` sobre `{tabla}`, que es el flujo de \
+                                 `{nombre}`. Un flujo es append-only: cambiar un evento pasado \
+                                 deja un pasado que no ocurrio, y todo lo que se reconstruya \
+                                 despues va a ser coherente con esa mentira. Para corregir se \
+                                 agrega un evento nuevo, no se edita el viejo",
+                                verbo.to_uppercase()
+                            ));
+                        }
+                    }
+                }
+            }
+            if ag.snapshot_every > 0 {
+                let fotos = Aggregate::fotos(nombre);
+                if esquemas.get(svc).and_then(|t| t.get(&fotos)).is_none() {
+                    errors.push(format!(
+                        "{svc}.{nombre}: `snapshot_every = {}` sin la tabla `{fotos}`",
+                        ag.snapshot_every
+                    ));
+                }
+            }
+        }
+
+        // Modelos de lectura.
+        for (nombre, vi) in &m.view {
+            if vi.on.is_empty() {
+                errors.push(format!(
+                    "{svc}.{nombre}: una vista sin eventos no se construye con nada"
+                ));
+            }
+            for ev in &vi.on {
+                // Puede consumir eventos propios o de otro; lo que no puede es
+                // consumir uno que nadie emite.
+                if !emitters.contains_key(ev.as_str()) {
+                    errors.push(format!(
+                        "{svc}.{nombre}: se construye con `{ev}`, que nadie emite"
+                    ));
+                }
+                // Y si es de otro servicio, tiene que estar declarado en
+                // `[consumes]`: la entrega la arma `axon infra` desde ahi.
+                let propio = m.emits.contains_key(ev.as_str());
+                if !propio && !m.consumes.contains_key(ev.as_str()) {
+                    errors.push(format!(
+                        "{svc}.{nombre}: usa `{ev}`, de otro servicio, sin declararlo en \
+                         `[consumes]`. La suscripcion sale de ahi, y sin ella la vista se \
+                         genera y nunca recibe nada"
+                    ));
+                }
+            }
+            let tablas = esquemas.get(svc);
+            let tabla = vi.tabla(nombre);
+            if tablas.and_then(|t| t.get(&tabla)).is_none() {
+                errors.push(format!(
+                    "{svc}.{nombre}: falta la tabla `{tabla}`, donde vive la vista"
+                ));
+            }
+            let cp = View::checkpoint(nombre);
+            match tablas.and_then(|t| t.get(&cp)) {
+                None => errors.push(format!(
+                    "{svc}.{nombre}: falta la tabla `{cp}`. Sin anotar hasta donde llego, un \
+                     reinicio reprocesa desde el principio o se salta lo que no alcanzo a \
+                     aplicar; las dos cosas dan una vista incorrecta y ninguna da un error"
+                )),
+                Some(t) => {
+                    for col in ["vista", "posicion"] {
+                        if !t.tiene(col) {
+                            errors.push(format!(
+                                "{svc}.{nombre}: `{cp}` sin columna `{col}`"
+                            ));
+                        }
+                    }
+                }
+            }
+            // Una vista es eventual por construccion: se llena DESPUES de que
+            // el evento ocurrio. Prometer CP sobre ella es la misma
+            // contradiccion que leer de una replica y prometer CP.
+            if !m.cap.eventual() {
+                errors.push(format!(
+                    "{svc}.{nombre}: un modelo de lectura con `consistency = \"strong\"`. La \
+                     vista se llena despues de que el evento ocurrio: lo que sirve es un dato \
+                     viejo por definicion"
+                ));
+            }
+            match (vi.max_staleness_ms, m.cap.max_staleness_ms) {
+                (Some(v), Some(tope)) if v > tope => errors.push(format!(
+                    "{svc}.{nombre}: la vista admite {v}ms de atraso y el servicio declaro un \
+                     tope de {tope}ms. El servicio no puede cumplir lo que prometio sirviendo \
+                     de una vista mas vieja que su propio presupuesto"
+                )),
+                (None, _) => warnings.push(format!(
+                    "{svc}.{nombre}: sin `max_staleness_ms`. Sin presupuesto de atraso, nadie \
+                     puede decir si la vista que sirvio estaba aceptablemente vieja"
+                )),
+                _ => {}
+            }
+        }
+    }
+
     // maquinas de estado: estados muertos, inalcanzables y disparadores fantasma
     for m in ms.iter().filter(|m| !m.external) {
         for (name, mac) in &m.machine {

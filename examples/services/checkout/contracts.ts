@@ -146,6 +146,8 @@ export const manifest = {
       "timeout_ms": 60000
     }
   },
+  "aggregate": {},
+  "view": {},
   "infra": {
     "state": "postgres",
     "runtime": "container",
