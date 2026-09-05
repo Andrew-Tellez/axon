@@ -308,7 +308,9 @@ export const manifest = {
     "read_replicas": null,
     "shard_key": null,
     "tenant_column": "tenant_id",
-    "tenant_exempt": []
+    "tenant_exempt": [
+      "intento"
+    ]
   },
   "env": {
     "staging": {

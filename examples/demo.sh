@@ -134,6 +134,9 @@ paso "aislamiento por inquilino a traves del pooler"
 paso "la saga: compensacion y retome, medidos"
 ./verificar-saga.sh
 
+paso "reintentos declarados vs ocurridos"
+./verificar-reintentos.sh
+
 paso "rollout declarado vs aplicado"
 python3 verificar-flags.py "localhost:${AXON_FLAGS_PORT:-8016}" cobro_v2 10
 

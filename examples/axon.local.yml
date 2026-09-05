@@ -337,7 +337,7 @@ services:
     depends_on: { checkout: { condition: service_started } }
     # `while` y no `sleep` de una vez: un job que corre una sola vez y termina
     # deja a `up --wait` contando un contenedor caido
-    command: ["sh", "-c", "while :; do sleep 50; curl -fsS -m 10 -X POST http://checkout:8080/internal/saga/compra/barrer || true; done"]
+    command: ["sh", "-c", "while :; do sleep 60; curl -fsS -m 10 -X POST http://checkout:8080/internal/saga/compra/barrer || true; done"]
 
 # streams JetStream a crear al arrancar:
 #   nats stream add order.placed.v1 --subjects order.placed.v1

@@ -55,6 +55,10 @@ breaker = true
 [infra]
 state = "postgres"
 tenant_column = "tenant_id"
+# `intento` es el registro de intentos de la politica de reintentos: es
+# infraestructura, no dato de inquilino. Exento a proposito y por escrito, que
+# es la unica forma de que la regla RLS siga sirviendo para el resto.
+tenant_exempt = ["intento"]
 # Tier 0: standby con failover, y respaldos aparte —el standby replica un
 # borrado en segundos, asi que no cubre ese caso.
 ha = true

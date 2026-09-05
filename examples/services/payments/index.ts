@@ -61,7 +61,25 @@ export class Payments extends PaymentsService {
    *  compensar. */
   static readonly TOPE_COMERCIO = 100_000;
 
+  /** Registra el intento. Sin esto, la politica de reintentos que declara el
+   *  manifiesto no se puede comprobar: no hay forma de saber cuantas veces
+   *  llego la llamada. */
+  async #intento(metodo: string, paymentId: string): Promise<number> {
+    const { rows } = await this.#db.query(
+      `INSERT INTO intento (id, metodo, payment_id) VALUES (gen_random_uuid(), $1, $2)
+       RETURNING (SELECT count(*) FROM intento WHERE metodo = $1 AND payment_id = $2) AS n`,
+      [metodo, paymentId],
+    );
+    return Number(rows[0].n) + 1;
+  }
+
   async payoutMerchant(input: PayoutMerchantIn): Promise<PayoutMerchantOut> {
+    await this.#intento("payout", input.paymentId);
+    // Interruptor del demo, no del negocio: hace que la llamada exceda su
+    // propio timeout para poder MEDIR los reintentos declarados. Sin esto no
+    // hay fallo transitorio que contar.
+    const lento = Number(process.env.AXON_DEMO_PAYOUT_LENTO_MS ?? 0);
+    if (lento > 0) await new Promise((r) => setTimeout(r, lento));
     if (input.amount.amount > Payments.TOPE_COMERCIO) {
       throw new Error(`monto ${input.amount.amount} supera el tope del comercio`);
     }
@@ -82,6 +100,12 @@ export class Payments extends PaymentsService {
    *  no dice que del otro lado no paso nada— y cuando ya se reembolso, porque
    *  se reintenta hasta que entra. */
   async refundPayment(input: RefundPaymentIn): Promise<RefundPaymentOut> {
+    const n = await this.#intento("refund", input.paymentId);
+    // El otro interruptor del demo: falla las primeras N veces y despues
+    // entra. Es lo que permite medir que los reintentos de la COMPENSACION son
+    // lo que salva a la saga de quedarse atascada.
+    const fallar = Number(process.env.AXON_DEMO_REFUND_FALLAR_VECES ?? 0);
+    if (n <= fallar) throw new Error(`reembolso rechazado (intento ${n} de ${fallar})`);
     const { rows } = await this.#db.query(`SELECT status FROM payment WHERE id = $1`, [input.paymentId]);
     const actual = rows[0]?.status as PaymentState | undefined;
     if (!actual) return { paymentId: input.paymentId, status: "sin_cobro" };

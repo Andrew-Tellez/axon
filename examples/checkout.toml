@@ -18,13 +18,13 @@ out = { estado = "string" }
 # transaccion que los cubra: si el segundo falla, el primero hay que deshacerlo.
 #
 # El presupuesto cubre la suma de los pasos CON sus reintentos: 8000 + 8000x4
-# + 4000 = 44000. Son cuatro intentos y no tres, porque `retries = 3` son tres
-# REintentos ademas del primero —`axon verify` hizo la cuenta y corrigio la que
-# estaba escrita aqui—. Rendirse antes dejaria al coordinador compensando algo
-# que despues tiene exito.
+# + 4000x3 = 52000. Son cuatro intentos y no tres, porque `retries = 3` son
+# tres REintentos ademas del primero —`axon verify` hizo la cuenta y corrigio la
+# que estaba escrita aqui—. Rendirse antes dejaria al coordinador compensando
+# algo que despues tiene exito.
 [saga.compra]
 on = "checkout"
-timeout_ms = 50000
+timeout_ms = 60000
 steps = [
   { do = "payments.capturePayment", undo = "payments.refundPayment" },
   { do = "payments.payoutMerchant" },
@@ -49,6 +49,9 @@ breaker = true
 service = "payments"
 method = "payoutMerchant"
 timeout_ms = 4000
+# Idempotente, asi que reintentar es legal: `axon verify` bloquea los
+# reintentos sobre lo que no lo es. El demo mide que sean exactamente estos.
+retries = 2
 breaker = true
 
 [infra]

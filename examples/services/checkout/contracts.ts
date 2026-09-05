@@ -103,7 +103,7 @@ export const manifest = {
       "method": "payoutMerchant",
       "via": null,
       "timeout_ms": 4000,
-      "retries": 0,
+      "retries": 2,
       "breaker": true
     }
   ],
@@ -143,7 +143,7 @@ export const manifest = {
           "undo": null
         }
       ],
-      "timeout_ms": 50000
+      "timeout_ms": 60000
     }
   },
   "infra": {
@@ -322,7 +322,7 @@ export async function correrCompra(
   const total = 2;
   // presupuesto declarado en el manifiesto; `axon verify` ya comprobo
   // que cubre la suma de los pasos y sus compensaciones
-  const limite = Date.now() + 50000;
+  const limite = Date.now() + 60000;
   const previo = await diario.leer(id);
   if (!previo) await diario.abrir(id, "compra", e);
   // Rehidratado del diario, no de una variable: al retomar, esto es lo
@@ -420,7 +420,7 @@ async function deshacerCompra(paso: number, acciones: CompraAcciones, e: Envelop
 
 /** Una pasada del barrido: retoma las sagas `compra` que no avanzan.
  *
- *  Solo toca las que llevan mas de su PRESUPUESTO sin moverse (50000ms).
+ *  Solo toca las que llevan mas de su PRESUPUESTO sin moverse (60000ms).
  *  Ese umbral no es una heuristica: `axon verify` ya comprobo que el
  *  presupuesto cubre la suma de los pasos y sus compensaciones, asi que
  *  una saga mas vieja que eso no esta en camino, esta colgada. Barrer
@@ -434,7 +434,7 @@ export async function barrerCompra(
   diario: SagaDiario,
   limite = 50,
 ): Promise<SagaBarrido> {
-  const antesDe = new Date(Date.now() - 50000);
+  const antesDe = new Date(Date.now() - 60000);
   const colgadas = await diario.reclamar("compra", antesDe, limite);
   const r: SagaBarrido = {
     reclamadas: colgadas.length,
@@ -473,7 +473,7 @@ export function arrancarBarridoCompra(
   acciones: CompraAcciones,
   diario: SagaDiario,
   alTerminar: (r: SagaBarrido) => void,
-  intervaloMs = 50000,
+  intervaloMs = 60000,
 ): () => void {
   let corriendo = false;
   const t = setInterval(async () => {
@@ -652,9 +652,9 @@ export class Clientes {
       (await this.transporte.invocar("payments", "refundPayment", input, cabeceras(e, true))) as PaymentsRefundPaymentOut);
     return hacer();
   }
-  /** payments.payoutMerchant · timeout 4000ms · 0 reintentos · breaker true */
+  /** payments.payoutMerchant · timeout 4000ms · 2 reintentos · breaker true */
   async paymentsPayoutMerchant(input: PaymentsPayoutMerchantIn, e: Envelope<unknown>): Promise<PaymentsPayoutMerchantOut> {
-    const hacer = () => conPolitica("payments.payoutMerchant", { timeoutMs: 4000, reintentos: 0, breaker: true }, async () =>
+    const hacer = () => conPolitica("payments.payoutMerchant", { timeoutMs: 4000, reintentos: 2, breaker: true }, async () =>
       (await this.transporte.invocar("payments", "payoutMerchant", input, cabeceras(e, true))) as PaymentsPayoutMerchantOut);
     return hacer();
   }

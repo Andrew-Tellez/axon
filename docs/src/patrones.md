@@ -311,8 +311,46 @@ Y las afirmaciones son sobre el **invariante**, no sobre conteos: de ese pedido 
 ningún cobro en pie y al comercio no se le pagó nada. Un conteo acumula corridas
 anteriores y termina afirmando sobre otra cosa.
 
-## Lo que falta
+## Los reintentos, medidos
 
-El `[[depends]]` de un paso puede declarar `retries`, que el coordinador respeta a través
-del cliente generado. La interacción entre esos reintentos y el reintento del barrido está
-declarada y acotada por el presupuesto —`verify` hace la cuenta— pero no medida.
+`[[depends]]` declara `retries` por paso, y el coordinador los aplica a través del cliente
+generado. El demo mide que sean **exactamente** esos, y que sean lo que decide si una saga
+se compensa o se atasca.
+
+Lo declarado no sale de un número escrito en el script: sale del **código generado** —
+`conPolitica("payments.payoutMerchant", { timeoutMs: 4000, reintentos: 2, ... })` — y el
+presupuesto, del `const limite = Date.now() + 60000` del coordinador. Comparar contra una
+copia a mano no compara nada. Lo medido sale de la tabla `intento` de `payments`, que
+registra cada llamada que llegó.
+
+```console
+==> reintentos declarados vs ocurridos
+  declarado en el generado: payout 2 reintentos, refund 3
+    {"estado":"compensada"}  (14s)
+  OK: 3 llamadas = 1 + 2 reintentos, exactamente lo declarado
+  OK: 14000ms dentro del presupuesto de 60000ms
+    {"estado":"compensada"}
+  OK: 3 llamadas al reembolso (2 fallos y la que entro), y el cobro quedo deshecho
+  i sin los 3 reintentos declarados, esta saga terminaba ATASCADA
+    HTTP 500
+  OK: 4 llamadas, la saga quedo ATASCADA y la respuesta no lo oculto
+```
+
+Cuatro cosas, y cada una responde a una pregunta distinta:
+
+| | |
+| --- | --- |
+| **el paso reintenta lo declarado, y ni una vez más** | el payout tarda más que su propio timeout, así que cada intento se agota. Llegan 3 llamadas: `1 + retries` |
+| **agotar los reintentos cabe en el presupuesto** | 14000ms contra los 60000ms declarados. Es lo que hace que rendirse por tiempo signifique algo y no sea un límite que se cruza siempre |
+| **los reintentos de la compensación son lo que salva la saga** | el reembolso falla dos veces y entra a la tercera. Con `retries = 3` hay margen: la saga termina `compensada`. Sin ellos, `atascada` |
+| **agotarlos no queda en silencio** | con más fallos que reintentos, la saga queda `atascada` en el diario **y** la respuesta es un 500. Una saga a medias que devuelve 200 es el peor resultado posible |
+
+Los dos interruptores que provocan los fallos —un payout lento y un reembolso que rechaza
+las primeras N veces— son del **demo, no del servicio**: viajan por `.env.local`, que es el
+`env_file` que el compose generado ya monta. Una variable en el shell no entra al
+contenedor si el compose no la declara, y declararla ahí sería meter algo del demo dentro
+de la infraestructura generada.
+
+Y el registro de intentos vive en `tenant_exempt` por escrito: es infraestructura de la
+política de reintentos, no dato de inquilino. Sin esa declaración explícita, la regla de
+RLS lo marcaría —correctamente— y dejaría de servir para el resto.
