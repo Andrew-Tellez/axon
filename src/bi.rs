@@ -210,6 +210,174 @@ pub fn cargador(ms: &[Manifest], base: &str, log: &str) -> String {
     o.join("\n")
 }
 
+
+/// La consulta que vuelca el esquema REAL de la bodega.
+///
+/// Se emite en vez de ejecutarse por la misma razon que `axon load --check`:
+/// axon no tiene —ni quiere— credenciales de la bodega. La salida vuelve por
+/// `--check`, y el diff lo hace el compilador.
+pub fn consulta(d: &Dialecto, base: &str) -> String {
+    let cuerpo = match d.nombre {
+        "clickhouse" => format!(
+            "SELECT table, name, type FROM system.columns\n \
+             WHERE database = '{base}'\n \
+             ORDER BY table, position\n\
+             FORMAT TSV"
+        ),
+        "bigquery" => format!(
+            "SELECT table_name, column_name, data_type\n  \
+               FROM `{base}`.INFORMATION_SCHEMA.COLUMNS\n \
+              ORDER BY table_name, ordinal_position"
+        ),
+        _ => format!(
+            "SELECT table_name, column_name, data_type\n  \
+               FROM information_schema.columns\n \
+              WHERE table_schema = '{base}'\n \
+              ORDER BY table_name, ordinal_position"
+        ),
+    };
+    format!(
+        "-- generado por axon — no editar.\n\
+         --   axon analytics manifests/ --consulta > esquema.sql\n\
+         --   ... correrlo contra la bodega y guardar la salida ...\n\
+         --   axon analytics manifests/ --check esquema.tsv\n\
+         --\n\
+         -- Tres columnas, en este orden: tabla, columna, tipo.\n\
+         {cuerpo};\n"
+    )
+}
+
+/// La familia de un tipo, que es lo unico comparable entre bodegas.
+///
+/// `Nullable(String)`, `STRING` y `text` son el mismo tipo con tres nombres. Lo
+/// que NO se puede confundir es una fecha con un texto o un entero con una
+/// cadena, y eso es justo lo que rompe una consulta sin dar error: un
+/// `event_time` guardado como texto ordena mal.
+fn familia(t: &str) -> &'static str {
+    let t = t.to_lowercase();
+    let t = t
+        .trim_start_matches("nullable(")
+        .trim_end_matches(')')
+        .trim();
+    if t.contains("date") || t.contains("time") {
+        "fecha"
+    } else if t.contains("int") || t.contains("numeric") || t.contains("decimal") || t.contains("float") {
+        "numero"
+    } else if t.contains("bool") {
+        "booleano"
+    } else {
+        "texto"
+    }
+}
+
+/// Lo declarado contra lo que hay en la bodega.
+///
+/// El drift aqui no da un error en ninguna parte: una columna nueva que la
+/// tabla no tiene se carga como nada, y una columna vieja que ya nadie escribe
+/// se queda con los datos que tenia. Las dos cosas dan consultas que devuelven
+/// numeros, y por eso nadie las mira.
+pub fn revisar(ms: &[Manifest], d: &Dialecto, real: &str) -> (Vec<String>, Vec<String>) {
+    let (mut errores, mut avisos) = (Vec::new(), Vec::new());
+    // lo que hay: tabla -> columna -> tipo
+    let mut hay: IndexMap<String, IndexMap<String, String>> = IndexMap::new();
+    for linea in real.lines() {
+        let l = linea.trim();
+        if l.is_empty() || l.starts_with('-') || l.starts_with('#') {
+            continue;
+        }
+        let campos: Vec<&str> = l.split(['\t', ',']).map(str::trim).collect();
+        if campos.len() < 3 {
+            continue;
+        }
+        hay.entry(campos[0].to_lowercase())
+            .or_default()
+            .insert(campos[1].to_lowercase(), campos[2].to_string());
+    }
+    if hay.is_empty() {
+        errores.push(
+            "el volcado no tiene ninguna columna. Corre `axon analytics --consulta` contra la \
+             bodega y pasa su salida: comparar contra un archivo vacio da 0 diferencias y eso \
+             se lee como que todo esta bien"
+                .into(),
+        );
+        return (errores, avisos);
+    }
+
+    for e in eventos(ms) {
+        let t = tabla(e.nombre);
+        let Some(real_cols) = hay.get(&t) else {
+            errores.push(format!(
+                "{}: falta la tabla `{t}` en la bodega. El evento se emite y no se guarda en \
+                 ninguna parte",
+                e.nombre
+            ));
+            continue;
+        };
+        let mut declaradas: IndexMap<String, String> = IndexMap::new();
+        for (n, t) in ENVELOPE {
+            declaradas.insert(n.to_string(), (d.tipo)(t));
+        }
+        for (campo, tipo) in e.campos {
+            let sensible = es_pii(&e.pii, campo);
+            if sensible && e.modo_pii == "exclude" {
+                // Declarado como excluido y presente en la bodega: el dato
+                // personal esta ahi de una version anterior, y seguira estando.
+                for (n, _) in columnas(d, campo, tipo) {
+                    if real_cols.contains_key(&n) {
+                        errores.push(format!(
+                            "{}: `{t}.{n}` existe en la bodega y el manifiesto declara ese campo \
+                             como excluido. El dato personal quedo ahi de una version anterior y \
+                             no se va solo: hay que borrar la columna",
+                            e.nombre
+                        ));
+                    }
+                }
+                continue;
+            }
+            for (n, ty) in columnas(d, campo, tipo) {
+                let nombre = if sensible { format!("{n}_hash") } else { n.clone() };
+                declaradas.insert(nombre, if sensible { (d.tipo)("string") } else { ty });
+                // el valor en claro no puede seguir ahi despues de pasar a hash
+                if sensible && real_cols.contains_key(&n) {
+                    errores.push(format!(
+                        "{}: `{t}.{n}` existe en claro y el manifiesto declara `pii = \"hash\"`. \
+                         La columna nueva se llena y la vieja se queda con los correos que ya \
+                         tenia",
+                        e.nombre
+                    ));
+                }
+            }
+        }
+        for (n, ty) in &declaradas {
+            match real_cols.get(n) {
+                None => errores.push(format!(
+                    "{}: falta `{t}.{n}` en la bodega. Lo que se declara se carga ahi, y sin la \
+                     columna ese campo no se guarda en ningun lado",
+                    e.nombre
+                )),
+                Some(real_ty) if familia(real_ty) != familia(ty) => errores.push(format!(
+                    "{}: `{t}.{n}` es {} en la bodega y el manifiesto declara {}. Una fecha \
+                     guardada como texto ordena mal y no da error",
+                    e.nombre,
+                    familia(real_ty),
+                    familia(ty)
+                )),
+                _ => {}
+            }
+        }
+        for n in real_cols.keys() {
+            if !declaradas.contains_key(n) {
+                avisos.push(format!(
+                    "{}: `{t}.{n}` esta en la bodega y no en el manifiesto. Sobra de una version \
+                     anterior: no rompe nada y se sigue consultando",
+                    e.nombre
+                ));
+            }
+        }
+    }
+    (errores, avisos)
+}
+
 /// Nombre de tabla a partir del evento: `order.placed@v1` -> `order_placed_v1`.
 fn tabla(ev: &str) -> String {
     tfname(ev)

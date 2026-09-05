@@ -69,6 +69,28 @@ else
   exit 1
 fi
 
+# --- el esquema real contra el declarado ---------------------------------
+# Un campo nuevo en un evento cambia el esquema generado, y la tabla que ya
+# existe se queda como estaba: el campo se carga como nada y las consultas
+# siguen devolviendo numeros. Nadie ve un error.
+echo "  el esquema de la bodega contra el manifiesto"
+"$AXON" analytics . --target clickhouse --consulta | grep -v '^--' > .axon/esquema.sql
+ch --multiquery < .axon/esquema.sql > .axon/esquema.tsv
+"$AXON" analytics . --target clickhouse --check .axon/esquema.tsv
+
+# y que la comprobacion SIRVA: se rompe la bodega a proposito y tiene que verlo.
+# Una comprobacion que solo se ha visto pasar no se ha visto funcionar.
+echo "  la misma comprobacion, con la bodega rota a proposito"
+ch -q "ALTER TABLE axon.order_placed_v1 DROP COLUMN total_amount"
+ch --multiquery < .axon/esquema.sql > .axon/roto.tsv
+if "$AXON" analytics . --target clickhouse --check .axon/roto.tsv > /dev/null 2>&1; then
+  echo "  FALLO: falta una columna declarada y la comprobacion paso"
+  ch -q "ALTER TABLE axon.order_placed_v1 ADD COLUMN total_amount Nullable(Int64)"
+  exit 1
+fi
+echo "  OK: la columna que falta se detecta, y sin ella el campo no se guardaria en ningun lado"
+ch -q "ALTER TABLE axon.order_placed_v1 ADD COLUMN total_amount Nullable(Int64)"
+
 # --- cargar dos veces no duplica -----------------------------------------
 # Un cargador periodico corre muchas veces sobre el mismo log. Si no filtra por
 # lo ya cargado, cada evento se multiplica y el embudo miente sin fallar.

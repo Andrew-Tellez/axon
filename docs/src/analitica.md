@@ -227,11 +227,59 @@ El cargador sale del mismo sitio que el esquema —las columnas y sus rutas dent
 así que no pueden desincronizarse. Y el salt del hash entra por parámetro, nunca en el SQL
 generado.
 
+## El drift de la bodega
+
+Agregar un campo a un evento cambia el esquema generado. La tabla que ya existe se queda
+como estaba: el campo se carga como nada y las consultas siguen devolviendo números. **No
+hay error en ninguna parte** — y por eso nadie lo mira.
+
+```sh
+axon analytics manifests/ --consulta > esquema.sql   # la consulta al information_schema
+# ... correrla contra la bodega ...
+axon analytics manifests/ --check esquema.tsv        # el diff lo hace el compilador
+```
+
+La consulta se **emite** en vez de ejecutarse, por la misma razón que `axon load --check`:
+axon no tiene —ni quiere— credenciales de la bodega.
+
+| lo que encuentra | por qué importa |
+| --- | --- |
+| falta una columna declarada | ese campo no se guarda en ningún lado |
+| falta la tabla entera | el evento se emite y no se guarda en ningún lado |
+| el tipo no es de la misma familia | una fecha guardada como texto **ordena mal y no da error** |
+| el correo en claro junto a su hash | el manifiesto dice `pii = "hash"`, la columna nueva se llena y **la vieja se queda con los correos que ya tenía** |
+| el campo declarado `exclude` existe en la bodega | el dato personal quedó de una versión anterior y no se va solo |
+| una columna que sobra | aviso: no rompe nada, y se sigue consultando |
+
+Los tipos se comparan por **familia** —`Nullable(String)`, `STRING` y `text` son el mismo
+tipo con tres nombres— porque lo que rompe una consulta sin avisar no es el nombre del
+tipo, es confundir una fecha con un texto.
+
+### Un volcado vacío no puede dar cero
+
+Es el resultado de correr la consulta contra la bodega equivocada, y leerlo como «todo
+bien» es peor que no comprobar. Así que un archivo sin columnas es un **error**, no un
+diff limpio.
+
+### Comprobado rompiéndola
+
+El demo corre la comprobación contra la bodega real —0 diferencias— y después **borra una
+columna a propósito** y la vuelve a correr, que es lo único que prueba que sirve:
+
+```console
+  el esquema de la bodega contra el manifiesto
+axon: la bodega tiene 0 diferencias con el manifiesto
+  la misma comprobacion, con la bodega rota a proposito
+  OK: la columna que falta se detecta, y sin ella el campo no se guardaria en ningun lado
+```
+
+Una comprobación que sólo se ha visto pasar no se ha visto funcionar.
+
 ## Lo que falta
 
 `k8s` no tiene camino de ingesta, y el rechazo lo dice en vez de fingirlo. Cerrarlo pide un
 consumidor del broker que escriba en la bodega —lo que en local se resuelve leyendo el log,
 en un clúster hay que consumir— y eso es código, no IaC.
 
-Tampoco hay retención declarable de las tablas de la bodega, ni un `axon analytics --check`
-que compare el esquema declarado contra el que existe allí.
+Tampoco hay retención declarable de las tablas de la bodega, ni una forma de declarar
+métricas de negocio más allá de los embudos que salen de la cadena causal.

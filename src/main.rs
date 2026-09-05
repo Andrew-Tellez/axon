@@ -97,9 +97,17 @@ enum Cmd {
         /// de envelopes a la bodega. Solo ClickHouse por ahora.
         #[arg(long)]
         cargar: Option<String>,
-        /// la base de la bodega para el cargador
+        /// la base de la bodega, para el cargador y para la consulta
         #[arg(long, default_value = "axon")]
         dataset: String,
+        /// emite la consulta que vuelca el esquema REAL de la bodega. Su salida
+        /// vuelve por `--check`.
+        #[arg(long)]
+        consulta: bool,
+        /// compara lo declarado contra el volcado de la bodega. Un campo nuevo
+        /// que la tabla no tiene se carga como nada, y nadie ve un error.
+        #[arg(long)]
+        check: Option<PathBuf>,
     },
     /// reconcilia el lado CAP declarado con los patrones en uso
     Cap {
@@ -345,11 +353,45 @@ fn run() -> Result<ExitCode, String> {
             target,
             cargar,
             dataset,
+            consulta,
+            check,
         } => {
             let ms = manifest::discover(&sources)?;
             if let Some(log) = cargar {
                 print!("{}", bi::cargador(&ms, &dataset, &log));
                 return Ok(ExitCode::SUCCESS);
+            }
+            if consulta || check.is_some() {
+                let d = bi::dialecto(&target)
+                    .ok_or_else(|| format!("bodega `{target}` desconocida"))?;
+                if consulta {
+                    print!("{}", bi::consulta(&d, &dataset));
+                    return Ok(ExitCode::SUCCESS);
+                }
+                let ruta = check.unwrap();
+                let real = std::fs::read_to_string(&ruta)
+                    .map_err(|e| format!("{}: {e}", ruta.display()))?;
+                let (errores, avisos) = bi::revisar(&ms, &d, &real);
+                for a in &avisos {
+                    eprintln!("{}", color::amarillo(&format!("aviso: {a}")));
+                }
+                for e in &errores {
+                    eprintln!("{}", color::rojo(&format!("error: {e}")));
+                }
+                println!(
+                    "axon: la bodega tiene {} {} con el manifiesto",
+                    errores.len(),
+                    if errores.len() == 1 {
+                        "diferencia"
+                    } else {
+                        "diferencias"
+                    }
+                );
+                return Ok(if errores.is_empty() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                });
             }
             match target.as_str() {
                 "plan" => println!(

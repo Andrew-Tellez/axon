@@ -3672,3 +3672,111 @@ fn la_ingesta_no_se_promete_sin_camino() {
     // idempotente: un cargador periodico corre muchas veces sobre el mismo log
     assert!(sql.contains("NOT IN (SELECT event_id FROM"), "{sql}");
 }
+
+/// El drift de la bodega no da error en ninguna parte: un campo nuevo que la
+/// tabla no tiene se carga como nada, y una columna vieja se queda con los
+/// datos que tenia. Las dos cosas dan consultas que devuelven numeros.
+#[test]
+fn el_drift_de_la_bodega_se_detecta() {
+    let dir = std::env::temp_dir().join("axon-bodega-check");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let tsv = dir.join("real.tsv");
+
+    // El volcado que corresponde a lo declarado, armado a mano a partir del
+    // esquema generado: si esto no diera 0, el resto del test no diria nada.
+    let real = "\
+order_placed_v1\tevent_id\tString
+order_placed_v1\tevent_type\tString
+order_placed_v1\tsource\tString
+order_placed_v1\tevent_time\tDateTime64(3)
+order_placed_v1\ttrace_id\tNullable(String)
+order_placed_v1\tcorrelation_id\tString
+order_placed_v1\tcausation_id\tNullable(String)
+order_placed_v1\torder_id\tNullable(String)
+order_placed_v1\tcustomer_id\tNullable(String)
+order_placed_v1\tcustomer_email_hash\tNullable(String)
+order_placed_v1\ttotal_amount\tNullable(Int64)
+order_placed_v1\ttotal_currency\tNullable(String)
+";
+    let manifiesto = r#"service = "tienda"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[analytics]
+pii = "hash"
+warehouse = "clickhouse"
+
+[emits."order.placed@v1"]
+orderId = "uuid"
+customerId = "uuid"
+customerEmail = "string"
+total = "money"
+
+pii = []
+"#;
+    // `pii` va como campo del servicio, no dentro de emits
+    let manifiesto = manifiesto.replace("pii = []\n", "");
+    let manifiesto = manifiesto.replace(
+        "tier = \"1\"",
+        "tier = \"1\"\npii = [\"customerEmail\"]",
+    );
+    std::fs::write(dir.join("tienda.toml"), &manifiesto).unwrap();
+    let d = dir.to_str().unwrap();
+
+    let check = |contenido: &str| -> (String, bool) {
+        std::fs::write(&tsv, contenido).unwrap();
+        let (out, err, ok) = axon(&[
+            "analytics",
+            d,
+            "--target",
+            "clickhouse",
+            "--check",
+            tsv.to_str().unwrap(),
+        ]);
+        (format!("{out}{err}"), ok)
+    };
+
+    let (salida, ok) = check(real);
+    assert!(ok, "el volcado que coincide dio diferencias:\n{salida}");
+    assert!(salida.contains("0 diferencias"), "{salida}");
+
+    // una columna declarada que la tabla no tiene
+    let falta = real.replace("order_placed_v1\ttotal_amount\tNullable(Int64)\n", "");
+    let (salida, ok) = check(&falta);
+    assert!(!ok, "una columna que falta paso limpio");
+    assert!(salida.contains("falta `order_placed_v1.total_amount`"), "{salida}");
+    assert!(salida.contains("no se guarda en ningun lado"), "{salida}");
+
+    // un tipo que no es el mismo: una fecha guardada como texto ordena mal
+    let tipo = real.replace(
+        "order_placed_v1\tevent_time\tDateTime64(3)",
+        "order_placed_v1\tevent_time\tString",
+    );
+    let (salida, ok) = check(&tipo);
+    assert!(!ok, "una fecha como texto paso limpio");
+    assert!(salida.contains("es texto en la bodega"), "{salida}");
+
+    // el correo en claro junto al hash: el manifiesto dice `hash` y el valor
+    // viejo sigue ahi
+    let claro = format!("{real}order_placed_v1\tcustomer_email\tNullable(String)\n");
+    let (salida, ok) = check(&claro);
+    assert!(!ok, "el correo en claro paso limpio");
+    assert!(salida.contains("existe en claro"), "{salida}");
+    assert!(salida.contains("se queda con los correos que ya tenia"), "{salida}");
+
+    // una columna de mas es un aviso, no un error: no rompe nada
+    let sobra = format!("{real}order_placed_v1\tsobra\tString\n");
+    let (salida, ok) = check(&sobra);
+    assert!(ok, "una columna de mas bloqueo:\n{salida}");
+    assert!(salida.contains("Sobra de una version anterior"), "{salida}");
+
+    // Y lo que mas importa: un volcado vacio NO puede dar 0 diferencias. Es el
+    // resultado de correr la consulta contra la bodega equivocada, y leerlo
+    // como "todo bien" es peor que no comprobar.
+    let (salida, ok) = check("");
+    assert!(!ok, "un volcado vacio dio 0 diferencias");
+    assert!(salida.contains("no tiene ninguna columna"), "{salida}");
+    assert!(salida.contains("se lee como que todo esta bien"), "{salida}");
+}
