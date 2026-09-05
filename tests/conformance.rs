@@ -412,11 +412,41 @@ fn el_hcl_generado_valida() {
              variable \"ecs_execution_role_arn\" {}\nvariable \"subnets\" { type = list(string) }\n",
         ),
     ];
-    for (target, provider, vars) in casos {
-        let dir = std::env::temp_dir().join(format!("axon-tf-{target}"));
+    // Y los mismos dos targets sobre un manifiesto CON saga: el barrido emite
+    // un programador y una tarea que el ejemplo no tiene, y un atributo
+    // inventado ahi no lo ve nadie hasta el `apply`.
+    //
+    // Las variables propias del barrido las declara axon, asi que aca NO van:
+    // declararlas de los dos lados es un `Duplicate variable declaration`, y el
+    // respaldo a `fmt` no lo ve.
+    let saga = fixture_saga("tf").to_string_lossy().to_string();
+    let mut casos: Vec<(String, &str, String, String)> = casos
+        .iter()
+        .map(|(t, prov, vars)| (t.to_string(), *prov, vars.to_string(), fuente(t)))
+        .collect();
+    casos.push((
+        "gcp-saga".into(),
+        casos[0].1,
+        casos[0].2.clone(),
+        saga.clone(),
+    ));
+    casos.push((
+        "aws-saga".into(),
+        casos[1].1,
+        // solo lo que es de la cuenta, no del barrido
+        format!(
+            "{}variable \"region\" {{}}\nvariable \"account_id\" {{}}\n",
+            casos[1].2
+        ),
+        saga,
+    ));
+
+    for (etiqueta, provider, vars, fuente_tf) in casos {
+        let target = etiqueta.trim_end_matches("-saga");
+        let dir = std::env::temp_dir().join(format!("axon-tf-{etiqueta}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let (tf, _, _) = axon(&["infra", &fuente(target), "--target", target]);
+        let (tf, _, _) = axon(&["infra", &fuente_tf, "--target", target]);
         std::fs::write(dir.join("main.tf"), tf).unwrap();
         std::fs::write(dir.join("vars.tf"), vars).unwrap();
         std::fs::write(
@@ -2660,17 +2690,11 @@ fn openapi_exige_idempotency_key() {
     assert!(json.contains("/v1/payments"));
 }
 
-/// Una saga no se valida leyendo el codigo generado: se corre. Lo que tiene que
-/// pasar cuando el paso 2 falla es que el paso 1 quede DESHECHO, y que el
-/// diario diga que la saga se compenso. Eso no se puede afirmar con un assert
-/// sobre el texto.
-#[test]
-fn la_saga_generada_compensa_al_reves() {
-    if !tiene("node") {
-        eprintln!("salteado: falta node");
-        return;
-    }
-    let dir = std::env::temp_dir().join("axon-saga");
+/// Un par de manifiestos con una saga de dos pasos, uno con compensacion y el
+/// ultimo sin. Lo usan el test del coordinador y el de Terraform: la saga es lo
+/// unico que hace aparecer los recursos del barrido en la IaC.
+fn fixture_saga(sufijo: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("axon-saga-{sufijo}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("sql")).unwrap();
     std::fs::write(
@@ -2757,6 +2781,64 @@ idempotent = true
     )
     .unwrap();
 
+    dir
+}
+
+/// El barrido tiene que EXISTIR en los cuatro targets. Un coordinador que sabe
+/// retomar y un programador que no se despliega es lo mismo que no tenerlo, y
+/// la IaC se aplica sin decir nada.
+#[test]
+fn el_barrido_se_despliega_en_los_cuatro_targets() {
+    let dir = fixture_saga("targets");
+    let f = dir.to_str().unwrap();
+    for (target, marca) in [
+        ("local", "/internal/saga/checkout/barrer"),
+        ("gcp", "resource \"google_cloud_scheduler_job\""),
+        ("aws", "resource \"aws_scheduler_schedule\""),
+        ("k8s", "kind: CronJob"),
+    ] {
+        let (out, err, ok) = axon(&["infra", f, "--target", target]);
+        assert!(ok, "{target}: {err}");
+        assert!(out.contains(marca), "{target} no despliega el barrido");
+        // y siempre contra la ruta interna, no contra el edge
+        assert!(
+            out.contains("/internal/saga/checkout/barrer"),
+            "{target} no apunta a la ruta del barrido"
+        );
+    }
+    // La ruta del barrido NO es una ruta declarada del servicio, asi que no
+    // sale por el gateway: dispara compensaciones y no puede ser publica.
+    let (g, _, _) = axon(&["infra", f, "--target", "gcp"]);
+    assert!(
+        !g.contains("google_compute_url_map"),
+        "el barrido se colo en el edge"
+    );
+    // En k8s la politica de red tiene que dejar entrar al pod del barrido: si
+    // no, el CronJob se aplica, el curl no llega y solo lo dice el historial.
+    let (k, _, _) = axon(&["infra", f, "--target", "k8s"]);
+    assert!(k.contains("axon.dev/barrido"), "el pod del barrido no entra");
+    assert_eq!(
+        k.matches("axon.dev/barrido").count(),
+        2,
+        "la etiqueta va en el pod y en la politica, no en uno solo"
+    );
+    // El intervalo sale del presupuesto declarado, y con 1 minuto la unidad de
+    // EventBridge va en singular: `rate(1 minutes)` no valida.
+    let (a, _, _) = axon(&["infra", f, "--target", "aws"]);
+    assert!(a.contains("rate(1 minute)"), "{a}");
+}
+
+/// Una saga no se valida leyendo el codigo generado: se corre. Lo que tiene que
+/// pasar cuando el paso 2 falla es que el paso 1 quede DESHECHO, y que el
+/// diario diga que la saga se compenso. Eso no se puede afirmar con un assert
+/// sobre el texto.
+#[test]
+fn la_saga_generada_compensa_al_reves() {
+    if !tiene("node") {
+        eprintln!("salteado: falta node");
+        return;
+    }
+    let dir = fixture_saga("compensa");
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(ok, "el fixture de la saga no esta limpio:\n{err}");
 

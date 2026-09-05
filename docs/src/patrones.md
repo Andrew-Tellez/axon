@@ -106,12 +106,39 @@ El coordinador sabe retomar, pero por sí solo nadie lo llama: el proceso que te
 en vuelo es el que se murió. Sin un barrido, una saga con un paso en `intentando` se queda
 ahí para siempre y el diario la registra sin que nadie lo lea.
 
+Hay dos formas de correrlo, y las dos se generan:
+
+**Dentro del proceso**, con el intervalo derivado del presupuesto:
+
 ```ts
 const parar = arrancarBarridoCheckout(acciones, diario, (r) => {
   log.info({ barrido: "checkout", ...r });
   if (r.atascadas) log.error({ atascadas: r.atascadas });  // esto necesita una persona
 });
 ```
+
+**Disparado desde fuera**, que es lo que `axon infra` despliega. El código generado
+publica la ruta y el arranque tiene que servirla:
+
+```ts
+export const rutaBarridoCheckout = "POST /internal/saga/checkout/barrer" as const;
+```
+
+Va por HTTP y no como un comando aparte porque un comando obliga a un entrypoint distinto
+en cada lenguaje, y esto tiene que funcionar igual en el generador de Go que en el de
+TypeScript. **Una ruta es el único contrato que todos comparten.** Y no es un método
+declarado, así que no sale por el gateway: dispara compensaciones, no puede ser pública.
+
+| target | qué se despliega |
+| --- | --- |
+| `local` | un contenedor con `curl` en bucle, para que el barrido corra también acá y no se descubra en producción que la ruta no existía |
+| `gcp` | `google_cloud_scheduler_job` con OIDC de la misma cuenta del servicio |
+| `aws` | `aws_scheduler_schedule` que lanza una tarea Fargate de un disparo **en las mismas subredes** — EventBridge no alcanza un endpoint privado, y una API destination tendría que ser pública |
+| `k8s` | un `CronJob` con `concurrencyPolicy: Forbid`, y la `NetworkPolicy` del servicio deja entrar exactamente a ese pod |
+
+Esa última fila es la que casi se fue rota: la política del servicio decía `ingress: []`, así
+que el CronJob se habría aplicado sin error y el `curl` no habría llegado nunca. Lo único
+que lo diría es el historial de un job que falla.
 
 ### El umbral no es una heurística
 
@@ -232,7 +259,8 @@ dejaba el paso fallido aplicado. Un timeout no dice que del otro lado no pasó n
 
 ## Lo que falta
 
-El barrido corre dentro del proceso del servicio. Eso alcanza mientras haya al menos una
-instancia viva —y con `min_instances` declarado, la hay— pero un servicio escalado a cero
-no barre nada hasta que alguien lo despierta. Emitir el barrido como job programado en cada
-target (CronJob, Cloud Scheduler, EventBridge) es lo que cerraría ese hueco.
+La saga todavía no está en `examples/`, así que lo medido es el coordinador y el barrido
+—corriéndolos— pero no una compensación contra contenedores reales. Y el `[[depends]]` de
+un paso puede declarar `retries`, que el coordinador respeta a través del cliente
+generado: la interacción entre esos reintentos y el reintento del barrido está declarada y
+acotada por el presupuesto, pero no medida.

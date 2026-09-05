@@ -836,6 +836,16 @@ pub fn sagas_ts(m: &Manifest) -> String {
             }
         }
         o.push(format!(
+            "/** La ruta que golpea el programador para correr una pasada del\n \
+             *  barrido. `axon infra` la despliega en los cuatro targets, asi que el\n \
+             *  arranque tiene que servirla llamando a `barrer{p}`: un programador\n \
+             *  apuntando a un 404 se aplica sin error y no barre nada.\n \
+             *\n \
+             *  NO es un metodo declarado, asi que no sale por el gateway. Dispara\n \
+             *  compensaciones: no puede ser publica. */\n\
+             export const rutaBarrido{p} = \"POST /internal/saga/{nombre}/barrer\" as const;\n"
+        ));
+        o.push(format!(
             "/** Los pasos declarados en el manifiesto. Generado: no editar. */\n\
              export const {c}Pasos = [\n{}\n] as const;\n",
             tabla.join("\n")

@@ -91,6 +91,43 @@ pub struct Route {
     pub timeout_ms: u32,
 }
 
+/// Un disparo periodico. El unico que existe hoy sale de `[saga.*]`: el
+/// coordinador sabe retomar y hace falta algo que lo llame.
+///
+/// Va por HTTP contra el propio servicio y no como un comando aparte, porque un
+/// comando obliga a un entrypoint distinto en cada lenguaje y esto tiene que
+/// funcionar igual en el generador de Go que en el de TypeScript. Una ruta es
+/// el unico contrato que todos comparten.
+#[derive(Debug, Serialize)]
+pub struct Cron {
+    pub service: String,
+    /// `saga.checkout`, para nombrar el recurso sin ambiguedad.
+    pub name: String,
+    pub path: String,
+    pub port: u16,
+    /// Cada cuanto. Sale del presupuesto declarado de la saga: nada se vuelve
+    /// elegible antes, asi que disparar mas seguido es trabajo sin resultado.
+    pub every_ms: u32,
+}
+
+impl Cron {
+    /// El intervalo en minutos, redondeado hacia arriba y con piso en 1: los
+    /// programadores de los tres proveedores hablan en cron de minutos, y un
+    /// intervalo que redondea a 0 se convierte en "cada minuto" sin avisar.
+    pub fn minutos(&self) -> u32 {
+        self.every_ms.div_ceil(60_000).max(1)
+    }
+
+    /// `rate(...)` de EventBridge: con 1 la unidad va en SINGULAR. `rate(1
+    /// minutes)` no es un aviso, es un error de validacion.
+    pub fn rate(&self) -> String {
+        match self.minutos() {
+            1 => "rate(1 minute)".to_string(),
+            n => format!("rate({n} minutes)"),
+        }
+    }
+}
+
 /// Almacenamiento de objetos, y su CDN si es publico.
 #[derive(Debug, Serialize)]
 pub struct Store2 {
@@ -113,6 +150,7 @@ pub struct Plan {
     pub topics: Vec<Topic>,
     pub subs: Vec<Sub>,
     pub stores: Vec<Store>,
+    pub crons: Vec<Cron>,
     pub secrets: Vec<Secret>,
     pub workloads: Vec<Workload>,
 }
@@ -136,6 +174,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
     let mut buckets = Vec::new();
     let mut subs = Vec::new();
     let mut stores = Vec::new();
+    let mut crons = Vec::new();
     let mut secrets = Vec::new();
     let mut workloads = Vec::new();
     for m in ms.iter().filter(|m| !m.external) {
@@ -147,6 +186,15 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 name: format!("{svc}--{}", topic(ev)),
                 // DLQ siempre: no hay forma de declarar un consumidor sin ella
                 max_attempts: 5,
+            });
+        }
+        for (nombre, sg) in &m.saga {
+            crons.push(Cron {
+                service: svc.clone(),
+                name: format!("saga.{nombre}"),
+                path: format!("/internal/saga/{nombre}/barrer"),
+                port: m.infra.port.unwrap_or(8080),
+                every_ms: sg.timeout_ms.unwrap_or(60_000),
             });
         }
         if let Some(engine) = &m.infra.state {
@@ -219,6 +267,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
         topics,
         subs,
         stores,
+        crons,
         secrets,
         workloads,
     }
@@ -414,6 +463,32 @@ fn gcp(p: &Plan) -> String {
             s.name, s.max_attempts
         ));
     }
+    for c in &p.crons {
+        let (sv, n) = (tfname(&c.service), tfname(&c.name.replace('.', "-")));
+        // OIDC con la misma cuenta del servicio: la ruta del barrido no puede
+        // ser publica. Un endpoint interno que resulta ser abierto es un
+        // disparador para cualquiera, y este dispara compensaciones.
+        o.push(format!(
+            "resource \"google_cloud_scheduler_job\" \"{sv}_{n}\" {{\n  \
+             name     = \"{svc}-{nombre}\"\n  \
+             schedule = \"*/{min} * * * *\"\n  \
+             # si una pasada tarda mas que el intervalo, esta se corta antes de\n  \
+             # que arranque la siguiente\n  \
+             attempt_deadline = \"{plazo}s\"\n  \
+             retry_config {{\n    retry_count = 1\n  }}\n  \
+             http_target {{\n    \
+               http_method = \"POST\"\n    \
+               uri         = \"${{google_cloud_run_v2_service.{sv}.uri}}{path}\"\n    \
+               oidc_token {{\n      \
+                 service_account_email = google_service_account.{sv}.email\n      \
+                 audience              = google_cloud_run_v2_service.{sv}.uri\n    }}\n  }}\n}}\n",
+            svc = c.service,
+            nombre = c.name.replace('.', "-"),
+            min = c.minutos(),
+            plazo = (c.every_ms / 1000).max(30),
+            path = c.path,
+        ));
+    }
     for s in &p.stores {
         let sv = tfname(&s.service);
         o.push(format!(
@@ -536,6 +611,15 @@ fn aws(p: &Plan) -> String {
                 .to_string(),
         );
     }
+    if !p.crons.is_empty() {
+        o.push(
+            "variable \"scheduler_role_arn\" {\n  type        = string\n  \
+             description = \"Rol que EventBridge Scheduler asume para lanzar la tarea del barrido\"\n}\n\
+             variable \"task_execution_role_arn\" {\n  type        = string\n  \
+             description = \"Rol de ejecucion de la tarea del barrido\"\n}\n"
+                .to_string(),
+        );
+    }
     for t in &p.topics {
         o.push(format!(
             "resource \"aws_sns_topic\" \"{}\" {{\n  name = \"{}\"\n}}\n",
@@ -646,6 +730,49 @@ fn aws(p: &Plan) -> String {
                 auth = if r.public { "NONE" } else { "JWT" }
             ));
         }
+    }
+    for c in &p.crons {
+        let (sv, n) = (tfname(&c.service), tfname(&c.name.replace('.', "-")));
+        // EventBridge Scheduler no alcanza un endpoint privado: una API
+        // destination tendria que ser publica, y la ruta del barrido no puede
+        // serlo. Asi que lanza una tarea de un disparo en las MISMAS subredes,
+        // que es desde donde el servicio si es alcanzable.
+        o.push(format!(
+            "resource \"aws_ecs_task_definition\" \"{sv}_{n}\" {{\n  \
+             family                   = \"{svc}-{nombre}\"\n  \
+             requires_compatibilities = [\"FARGATE\"]\n  \
+             network_mode             = \"awsvpc\"\n  cpu = \"256\"\n  memory = \"512\"\n  \
+             execution_role_arn       = var.task_execution_role_arn\n  \
+             container_definitions    = jsonencode([{{\n    \
+               name    = \"barrer\"\n    \
+               image   = \"curlimages/curl:8.11.1\"\n    \
+               command = [\"-fsS\", \"-m\", \"{plazo}\", \"-X\", \"POST\", \"http://{svc}.internal:{port}{path}\"]\n  \
+             }}])\n}}\n",
+            svc = c.service,
+            nombre = c.name.replace('.', "-"),
+            plazo = (c.every_ms / 1000).max(30),
+            port = c.port,
+            path = c.path,
+        ));
+        o.push(format!(
+            "resource \"aws_scheduler_schedule\" \"{sv}_{n}\" {{\n  \
+             name                         = \"{svc}-{nombre}\"\n  \
+             schedule_expression          = \"{rate}\"\n  \
+             # sin esto, una ventana perdida se recupera disparando varias veces\n  \
+             # seguidas: varios barridos a la vez sobre las mismas sagas\n  \
+             flexible_time_window {{\n    mode = \"OFF\"\n  }}\n  \
+             target {{\n    \
+               arn      = \"arn:aws:ecs:${{var.region}}:${{var.account_id}}:cluster/${{var.ecs_cluster}}\"\n    \
+               role_arn = var.scheduler_role_arn\n    \
+               ecs_parameters {{\n      \
+                 task_definition_arn = aws_ecs_task_definition.{sv}_{n}.arn\n      \
+                 launch_type         = \"FARGATE\"\n      \
+                 network_configuration {{\n        subnets = var.subnets\n      }}\n    }}\n    \
+               retry_policy {{\n      maximum_retry_attempts = 1\n    }}\n  }}\n}}\n",
+            svc = c.service,
+            nombre = c.name.replace('.', "-"),
+            rate = c.rate(),
+        ));
     }
     for s in &p.stores {
         let sv = tfname(&s.service);
@@ -906,8 +1033,23 @@ spec:
         // el servicio expone rutas. Un servicio sin ruta no es alcanzable
         // desde fuera, aunque alguien se equivoque en el gateway.
         let desde_edge = p.routes.iter().any(|r| r.service == w.service);
-        let reglas = if desde_edge {
-            "\n    - from:\n        - namespaceSelector:\n            matchLabels: { axon.dev/edge: \"true\" }"
+        // El barrido de una saga entra por HTTP, asi que si la politica lo deja
+        // fuera el CronJob se aplica sin error y no llega nunca: el barrido no
+        // corre y lo unico que lo dice es el historial de un job que falla.
+        let barrido = p.crons.iter().any(|c| c.service == w.service);
+        let mut froms = String::new();
+        if desde_edge {
+            froms.push_str(
+                "\n    - from:\n        - namespaceSelector:\n            matchLabels: { axon.dev/edge: \"true\" }",
+            );
+        }
+        if barrido {
+            froms.push_str(
+                "\n    # solo el pod del barrido\n    - from:\n        - podSelector:\n            matchLabels: { axon.dev/barrido: \"true\" }",
+            );
+        }
+        let reglas = if !froms.is_empty() {
+            froms.as_str()
         } else {
             " []   # nadie: este servicio solo reacciona a eventos"
         };
@@ -955,6 +1097,59 @@ spec:
     - secretKey: {}
       remoteRef: {{ key: {} }}",
             s.name, s.service, s.key, s.name
+        ));
+    }
+    for c in &p.crons {
+        let nombre = c.name.replace('.', "-");
+        o.push(format!(
+            "---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {svc}-{nombre}
+spec:
+  schedule: \"*/{min} * * * *\"
+  # `Forbid`: si una pasada tarda mas que el intervalo, la siguiente NO arranca.
+  # Dos barridos a la vez reclaman la misma saga, y aunque `reclamar` lo evita,
+  # no hay razon para apoyarse en eso desde el programador.
+  concurrencyPolicy: Forbid
+  # el historial es lo unico que queda de un barrido que fallo
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # sin esto un job atascado se reintenta para siempre
+      backoffLimit: 2
+      activeDeadlineSeconds: {plazo}
+      template:
+        metadata:
+          # la NetworkPolicy del servicio deja entrar exactamente a esto
+          labels: {{ axon.dev/barrido: \"true\" }}
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: barrer
+              image: curlimages/curl:8.11.1
+              args:
+                - -fsS
+                - -m
+                - \"{plazo}\"
+                - -X
+                - POST
+                - http://{svc}.$(NAMESPACE).svc.cluster.local:{port}{path}
+              env:
+                - name: NAMESPACE
+                  valueFrom: {{ fieldRef: {{ fieldPath: metadata.namespace }} }}
+              securityContext:
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {{ drop: [ALL] }}",
+            svc = c.service,
+            min = c.minutos(),
+            plazo = (c.every_ms / 1000).max(30),
+            port = c.port,
+            path = c.path,
         ));
     }
     o.join("\n")
@@ -1217,6 +1412,26 @@ services:
             v = tfname(&w.service),
             labels = etiquetas_edge(p, &w.service)
         ));
+    }
+    for (i, c) in p.crons.iter().enumerate() {
+        let svc = &c.service;
+        // Local no simula el programador del proveedor: hace lo mismo que el,
+        // que es golpear la ruta cada tanto. Asi el barrido corre tambien aca y
+        // no se descubre en produccion que la ruta no existia.
+        o.push_str(&format!(
+            "  cron-{n}:
+    image: curlimages/curl:8.11.1
+    depends_on: {{ {svc}: {{ condition: service_started }} }}
+    # `while` y no `sleep` de una vez: un job que corre una sola vez y termina
+    # deja a `up --wait` contando un contenedor caido
+    command: [\"sh\", \"-c\", \"while :; do sleep {seg}; curl -fsS -m 10 -X POST http://{svc}:{port}{path} || true; done\"]
+",
+            n = tfname(&c.name.replace('.', "-")),
+            seg = (c.every_ms / 1000).max(1),
+            port = c.port,
+            path = c.path,
+        ));
+        let _ = i;
     }
     o.push_str("\n# streams JetStream a crear al arrancar:\n");
     for t in &p.topics {
