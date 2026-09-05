@@ -6,7 +6,14 @@
 set -eu
 cd "$(dirname "$0")"
 AXON="${AXON:-../target/release/axon}"
-PORT="${AXON_PORT_orders:-8080}"
+
+# Los puertos por defecto los deriva axon del NOMBRE del servicio, para que
+# agregar uno no le mueva el puerto a otro. El demo los fija a proposito: asi el
+# script y el compose hablan del mismo numero sin leerse entre ellos.
+export AXON_PORT_orders="${AXON_PORT_orders:-8080}"
+export AXON_PORT_checkout="${AXON_PORT_checkout:-8081}"
+export AXON_PORT_payments="${AXON_PORT_payments:-8082}"
+PORT="$AXON_PORT_orders"
 
 # Cuando esto falla en CI no hay nadie mirando la pantalla: el diagnostico
 # tiene que quedar en el log del run, o se pierde.
@@ -123,6 +130,9 @@ fi
 
 paso "aislamiento por inquilino a traves del pooler"
 ./verificar-pooler.sh
+
+paso "la saga: compensacion y retome, medidos"
+./verificar-saga.sh
 
 paso "rollout declarado vs aplicado"
 python3 verificar-flags.py "localhost:${AXON_FLAGS_PORT:-8016}" cobro_v2 10

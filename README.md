@@ -63,9 +63,9 @@ diagrama esté viejo: es que alguien rompió el manifiesto, y CI lo dice antes d
 
 ## La demo, en dos comandos
 
-`examples/` trae dos servicios que corren de verdad —uno de ellos sobre cuatro nodos de
-Postgres con [pgdog](https://pgdog.dev) delante. `./demo.sh` levanta el sistema completo
-y comprueba **cinco** cosas contra la realidad:
+`examples/` trae tres servicios que corren de verdad —uno sobre cuatro nodos de Postgres
+con [pgdog](https://pgdog.dev) delante, y otro coordinando una saga. `./demo.sh` levanta
+el sistema completo y comprueba **seis** cosas contra la realidad:
 
 ```console
 $ cd examples && ./demo.sh
@@ -83,6 +83,10 @@ $ cd examples && ./demo.sh
 ==> aislamiento por inquilino a traves del pooler
   OK: pgdog rechaza en el router la consulta sin inquilino
   OK: 20 de 20 conexiones vieron 1 fila propia y 0 del inquilino ajeno
+
+==> la saga: compensacion y retome, medidos
+  OK: el cobro se deshizo y al comercio no se le pago
+  OK: retomada desde el diario, compensada, y el reembolso alcanzo al cobro
 
 ==> rollout declarado vs aplicado
   declarado 10%  medido 10.7%  (32 de 300)

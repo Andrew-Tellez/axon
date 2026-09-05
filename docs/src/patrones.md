@@ -47,15 +47,31 @@ las **entradas** de cada llamada, porque son datos de negocio. Eso es una interf
 implementa, y un paso sin implementar no compila:
 
 ```ts
-export interface CheckoutAcciones {
-  /** paso 1 · banco.cobrar */
-  paso1Cobrar(e: Envelope<unknown>): Promise<void>;
-  /** deshace el paso 1 · banco.reembolsar · tiene que tolerar que no haya nada que deshacer */
-  deshacer1Reembolsar(e: Envelope<unknown>): Promise<void>;
-  /** paso 2 · banco.pagarProveedor */
-  paso2PagarProveedor(e: Envelope<unknown>): Promise<void>;
+export interface CompraSalidas {
+  paso1?: PaymentsCapturePaymentOut;
+  paso2?: PaymentsPayoutMerchantOut;
+}
+
+export interface CompraAcciones {
+  /** paso 1 · payments.capturePayment */
+  paso1CapturePayment(e: Envelope<unknown>, previas: CompraSalidas): Promise<PaymentsCapturePaymentOut>;
+  /** deshace el paso 1 · payments.refundPayment · recibe lo que devolvieron los pasos
+   *  anteriores, y tiene que tolerar que no haya nada que deshacer */
+  deshacer1RefundPayment(e: Envelope<unknown>, previas: CompraSalidas): Promise<void>;
+  /** paso 2 · payments.payoutMerchant */
+  paso2PayoutMerchant(e: Envelope<unknown>, previas: CompraSalidas): Promise<PaymentsPayoutMerchantOut>;
 }
 ```
+
+`previas` está tipado con las salidas reales de los métodos declarados —los mismos tipos
+que ya emite el cliente de cada dependencia— y **sale del diario, no de una variable**.
+Esa es la diferencia entre una saga que se puede retomar y una que no: deshacer el paso 1
+necesita el id que ese paso devolvió, y el proceso que lo tenía en memoria es justo el que
+se murió.
+
+Por eso todo lo que una acción necesita tiene que salir del envelope o de `previas`. Una
+closure funciona en la primera pasada y desaparece en el retome, que es exactamente cuando
+hace falta.
 
 Los pasos se invocan con los clientes que ya genera `[[depends]]`, así que llevan puesto
 el timeout, los reintentos y el circuito. Por eso `verify` exige que todo paso esté
@@ -257,10 +273,46 @@ es justamente el que no se corre nunca hasta el día que importa:
 El primer bug salió de ahí: el coordinador compensaba desde el último paso **exitoso** y
 dejaba el paso fallido aplicado. Un timeout no dice que del otro lado no pasó nada.
 
+## En el demo, contra contenedores
+
+`examples/` trae un tercer servicio, `checkout`, cuyo único trabajo es coordinar la saga
+sobre `payments`. Su base **no se reparte por inquilino**, y esa decisión es del diseño:
+el barrido tiene que poder mirar todas las sagas colgadas de una vez, y una consulta sin
+la clave de reparto no se puede rutear. El inquilino viaja dentro de `datos`.
+
+`payments.payoutMerchant` rechaza los montos que superan el tope del comercio, que es un
+fallo de negocio realista y determinista: ocurre **después** de haber cobrado. Es
+exactamente el caso que hace falta una saga.
+
+```console
+==> la saga: compensacion y retome, medidos
+  una compra por debajo del tope
+    {"estado":"completada"}
+  una compra por ENCIMA del tope: el paso 2 falla despues de cobrar
+    {"estado":"compensada"}
+  OK: el cobro se deshizo y al comercio no se le pago
+  una saga colgada en otro proceso, retomada por el barrido
+    {"reclamadas":1,"completadas":0,"compensadas":1,"atascadas":0,"pendientes":false}
+  OK: retomada desde el diario, compensada, y el reembolso alcanzo al cobro
+  OK: una saga cerrada no se vuelve a barrer
+```
+
+El tercer caso es el que no se puede simular con una closure: se inserta en el diario una
+saga cuyo paso 1 quedó `hecho` **en otro proceso**, con su salida guardada, y se golpea la
+ruta del barrido. El reembolso tiene que alcanzar a ese cobro concreto, y el único lugar
+de donde puede salir el `paymentId` es el diario.
+
+Ahí salió el bug que ningún test unitario había visto: el diario guarda las salidas por
+**número** de paso y la interfaz las expone como `paso1`. El cast de una forma a la otra
+compilaba y dejaba todo en `undefined`, así que la compensación de una saga retomada no
+reembolsaba nada —y no fallaba—. Ahora la traducción es explícita, campo por campo.
+
+Y las afirmaciones son sobre el **invariante**, no sobre conteos: de ese pedido no queda
+ningún cobro en pie y al comercio no se le pagó nada. Un conteo acumula corridas
+anteriores y termina afirmando sobre otra cosa.
+
 ## Lo que falta
 
-La saga todavía no está en `examples/`, así que lo medido es el coordinador y el barrido
-—corriéndolos— pero no una compensación contra contenedores reales. Y el `[[depends]]` de
-un paso puede declarar `retries`, que el coordinador respeta a través del cliente
-generado: la interacción entre esos reintentos y el reintento del barrido está declarada y
-acotada por el presupuesto, pero no medida.
+El `[[depends]]` de un paso puede declarar `retries`, que el coordinador respeta a través
+del cliente generado. La interacción entre esos reintentos y el reintento del barrido está
+declarada y acotada por el presupuesto —`verify` hace la cuenta— pero no medida.

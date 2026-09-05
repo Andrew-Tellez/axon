@@ -1169,6 +1169,26 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
 
     // migraciones: expand -> migrate -> contract, y orden determinista
     for m in ms {
+        // Dos migraciones con la misma version: Flyway se niega a aplicar
+        // NINGUNA, asi que el despliegue se cae con la base a medio migrar. Lo
+        // caza al arrancar; aca se caza al commitear, que es cuando se puede
+        // renombrar el archivo sin prisa.
+        let mut vistas: IndexMap<String, String> = IndexMap::new();
+        for f in migrations_of(m) {
+            let name = f.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let Some((ver, _)) = name.split_once('_') else {
+                continue;
+            };
+            if let Some(otra) = vistas.get(ver) {
+                errors.push(format!(
+                    "{}: `{name}` y `{otra}` comparten la version `{ver}`. Flyway no aplica \
+                     ninguna de las dos y el despliegue se cae con la base a medio migrar",
+                    m.service
+                ));
+            } else {
+                vistas.insert(ver.to_string(), name);
+            }
+        }
         for f in migrations_of(m) {
             let name = f
                 .file_name()

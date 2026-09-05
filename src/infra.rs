@@ -3,6 +3,7 @@
 //! que emite el JSON del plan para que lo rendericen ustedes.
 use crate::manifest::*;
 use serde::Serialize;
+use indexmap::IndexMap;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Serialize)]
@@ -615,6 +616,9 @@ fn aws(p: &Plan) -> String {
         o.push(
             "variable \"scheduler_role_arn\" {\n  type        = string\n  \
              description = \"Rol que EventBridge Scheduler asume para lanzar la tarea del barrido\"\n}\n\
+             variable \"ecs_cluster_arn\" {\n  type        = string\n  \
+             description = \"ARN del cluster ECS. El scheduler necesita el ARN, no el nombre, y \
+             armarlo con region y cuenta obligaria a declarar dos variables que ya suelen existir del lado de quien despliega\"\n}\n\
              variable \"task_execution_role_arn\" {\n  type        = string\n  \
              description = \"Rol de ejecucion de la tarea del barrido\"\n}\n"
                 .to_string(),
@@ -762,7 +766,7 @@ fn aws(p: &Plan) -> String {
              # seguidas: varios barridos a la vez sobre las mismas sagas\n  \
              flexible_time_window {{\n    mode = \"OFF\"\n  }}\n  \
              target {{\n    \
-               arn      = \"arn:aws:ecs:${{var.region}}:${{var.account_id}}:cluster/${{var.ecs_cluster}}\"\n    \
+               arn      = var.ecs_cluster_arn\n    \
                role_arn = var.scheduler_role_arn\n    \
                ecs_parameters {{\n      \
                  task_definition_arn = aws_ecs_task_definition.{sv}_{n}.arn\n      \
@@ -1157,6 +1161,36 @@ spec:
 
 /// El mismo plan, en tu laptop. Ese es el punto: local y produccion salen de
 /// la misma declaracion, asi que no pueden divergir.
+/// El puerto del host para un servicio en el target local.
+///
+/// Sale del NOMBRE, no de la posicion. Con el indice, agregar un servicio le
+/// movia el puerto a otro que ya estaba —el compose se levanta igual y quien
+/// tenia `localhost:8080` en un script apunta de golpe a otro servicio—. Con el
+/// nombre, un servicio nuevo no toca los que ya existen.
+///
+/// Las colisiones se resuelven en orden alfabetico, que es estable: si dos
+/// nombres caen en el mismo puerto, el segundo se corre, y sigue haciendolo
+/// igual en la proxima corrida.
+fn puertos(base: u16, rango: u16, nombres: &[&str]) -> IndexMap<String, u16> {
+    let mut orden: Vec<&str> = nombres.to_vec();
+    orden.sort_unstable();
+    let mut out: IndexMap<String, u16> = IndexMap::new();
+    for n in orden {
+        // FNV-1a: dos lineas, sin dependencia, y suficiente para repartir
+        // nombres cortos en un rango de cientos.
+        let mut h: u32 = 2_166_136_261;
+        for b in n.as_bytes() {
+            h = (h ^ *b as u32).wrapping_mul(16_777_619);
+        }
+        let mut puerto = base + (h % rango as u32) as u16;
+        while out.values().any(|p| *p == puerto) {
+            puerto = base + (puerto + 1 - base) % rango;
+        }
+        out.insert(n.to_string(), puerto);
+    }
+    out
+}
+
 /// Los motores detras de un store: uno solo, o los nodos del sharder. El
 /// nombre del contenedor es tambien el host que ve pgdog, asi que sale de aca
 /// y no de dos lados.
@@ -1180,6 +1214,20 @@ pub fn nodo(svc: &str, shards: Option<u32>, i: u32) -> String {
 
 fn local(p: &Plan) -> String {
     const PROY: &str = "local";
+    // Puertos derivados del nombre: agregar un servicio no le mueve el puerto a
+    // ninguno de los que ya estaban.
+    let svcs: Vec<&str> = p.workloads.iter().map(|w| w.service.as_str()).collect();
+    let apps = puertos(8080, 400, &svcs);
+    let nodos_todos: Vec<String> = p
+        .stores
+        .iter()
+        .flat_map(|s| nodos(s).into_iter().map(|(_, h)| h))
+        .collect();
+    let motores = puertos(
+        15432,
+        400,
+        &nodos_todos.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+    );
     let mut o = String::from(
         "# generado por axon — no editar.  docker compose -f axon.local.yml up -d --wait
 services:
@@ -1192,14 +1240,12 @@ services:
       interval: 2s
 ",
     );
-    let mut siguiente = 15432;
     for s in p.stores.iter() {
         let svc = &s.service;
         let v = tfname(&s.service);
         let conexiones = s.max_connections.unwrap_or(100);
         for (nodo, host) in nodos(s) {
-            let port = siguiente;
-            siguiente += 1;
+            let port = motores[&host];
             let sufijo = match s.shards {
                 Some(_) => format!("_{nodo}"),
                 None => String::new(),
@@ -1257,7 +1303,7 @@ services:
         // parsea la consulta contra el esquema, y contra una base vacia no
         // sabe a que nodo mandarla.
         if s.shards.is_some() {
-            let port = 16432 + p.stores.iter().position(|x| x.service == *svc).unwrap();
+            let port = 16432 + (motores[&nodos(s)[0].1] - 15432);
             let ultimo = if s.policies { "policies" } else { "migrate" };
             let espera: Vec<String> = nodos(s)
                 .iter()
@@ -1343,7 +1389,7 @@ services:
 ",
         );
     }
-    for (i, w) in p.workloads.iter().enumerate() {
+    for w in p.workloads.iter() {
         let svc = &w.service;
         let mut deps = vec![
             "broker: { condition: service_healthy }".to_string(),
@@ -1407,7 +1453,7 @@ services:
 {db_env}{secrets}    volumes: [\"./.axon:/out\"]
 {labels}",
             deps = deps.join(", "),
-            host = 8080 + i,
+            host = apps[&w.service],
             port = w.port,
             v = tfname(&w.service),
             labels = etiquetas_edge(p, &w.service)

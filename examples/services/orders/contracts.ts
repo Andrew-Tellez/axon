@@ -224,10 +224,8 @@ export const manifest = {
 
 export abstract class OrdersService {
   protected readonly bus: Bus;
-  protected readonly inbox: Inbox;
-  constructor(bus: Bus, inbox: Inbox) {
+  constructor(bus: Bus) {
     this.bus = bus;
-    this.inbox = inbox;
   }
   static readonly wellKnown = "/.well-known/axon.json";
   protected emitOrderPlacedV1(data: OrderPlacedV1, cause?: Envelope<unknown>) {

@@ -28,6 +28,16 @@ idempotent = true
 in = { paymentId = "uuid" }
 out = { paymentId = "uuid", status = "string" }
 
+# El pago al comercio, que es el paso que puede fallar despues de haber
+# cobrado: el motivo por el que existe una saga y no una transaccion.
+[methods.payoutMerchant]
+http = "POST /v1/payouts"
+auth = "required"
+timeout_ms = 4000
+idempotent = true
+in = { paymentId = "uuid", amount = "money" }
+out = { payoutId = "uuid" }
+
 [[depends]]
 service = "orders"
 method = "getOrder"

@@ -433,11 +433,8 @@ fn el_hcl_generado_valida() {
     casos.push((
         "aws-saga".into(),
         casos[1].1,
-        // solo lo que es de la cuenta, no del barrido
-        format!(
-            "{}variable \"region\" {{}}\nvariable \"account_id\" {{}}\n",
-            casos[1].2
-        ),
+        // las variables del barrido las declara axon: aca no va ninguna
+        casos[1].2.clone(),
         saga,
     ));
 
@@ -2862,22 +2859,23 @@ fn la_saga_generada_compensa_al_reves() {
         r#"import { test } from "node:test";
 import assert from "node:assert/strict";
 import { correrCheckout, barrerCheckout, newEnvelope, checkoutPasos, SagaAtascada,
-         type CheckoutAcciones, type Envelope, type SagaDiario,
-         type SagaEstado } from "./axon.saga.contratos.ts";
+         type CheckoutAcciones, type CheckoutSalidas, type Envelope,
+         type SagaDiario, type SagaEstado } from "./axon.saga.contratos.ts";
 
 /** Un diario en memoria, con el mismo contrato que el de Postgres. */
 class Diario implements SagaDiario {
   marcas: string[] = [];
   final: SagaEstado | null = null;
-  filas = new Map<string, { paso: number; estado: string; datos: any; actualizado: number }>();
+  filas = new Map<string, { paso: number; estado: string; datos: any; actualizado: number; salidas?: Record<number, unknown> }>();
   async abrir(id: string, saga: string, e: Envelope<unknown>) {
     this.marcas.push(`abrir ${saga}`);
     this.filas.set(id, { paso: 0, estado: "abierta", datos: e, actualizado: Date.now() });
   }
-  async marcar(id: string, paso: number, estado: "intentando" | "hecho" | "deshecho") {
+  async marcar(id: string, paso: number, estado: "intentando" | "hecho" | "deshecho", salida?: unknown) {
     this.marcas.push(`${paso}:${estado}`);
     const f = this.filas.get(id)!;
-    this.filas.set(id, { ...f, paso, estado, actualizado: Date.now() });
+    const salidas = salida === undefined ? f.salidas : { ...f.salidas, [paso]: salida };
+    this.filas.set(id, { ...f, paso, estado, salidas, actualizado: Date.now() });
   }
   async cerrar(id: string, estado: SagaEstado) {
     this.final = estado;
@@ -2886,7 +2884,9 @@ class Diario implements SagaDiario {
   }
   async leer(id: string) {
     const f = this.filas.get(id);
-    return f && f.estado !== "abierta" ? { paso: f.paso, estado: f.estado } : null;
+    return f && f.estado !== "abierta"
+      ? { paso: f.paso, estado: f.estado, salidas: f.salidas ?? {} }
+      : null;
   }
   /** Reclama tocando `actualizado`, igual que el UPDATE ... RETURNING. */
   async reclamar(saga: string, antesDe: Date, limite: number) {
@@ -2906,9 +2906,22 @@ class Diario implements SagaDiario {
 function acciones(rompe: string[]) {
   const hechas: string[] = [];
   const a: CheckoutAcciones = {
-    async paso1Cobrar() { if (rompe.includes("cobrar")) throw new Error("cobrar"); hechas.push("cobrar"); },
-    async deshacer1Reembolsar() { if (rompe.includes("reembolsar")) throw new Error("reembolsar"); hechas.push("reembolsar"); },
-    async paso2PagarProveedor() { if (rompe.includes("pagar")) throw new Error("pagar"); hechas.push("pagar"); },
+    async paso1Cobrar() {
+      if (rompe.includes("cobrar")) throw new Error("cobrar");
+      hechas.push("cobrar");
+      return { ok: "cobrado" };
+    },
+    async deshacer1Reembolsar(_e: Envelope<unknown>, previas: CheckoutSalidas) {
+      if (rompe.includes("reembolsar")) throw new Error("reembolsar");
+      // el sufijo es lo que prueba que la compensacion recibio la salida del
+      // paso 1 —y tras un retome, que salio del diario y no de una variable
+      hechas.push(`reembolsar:${previas.paso1?.ok ?? "sin-cobro"}`);
+    },
+    async paso2PagarProveedor() {
+      if (rompe.includes("pagar")) throw new Error("pagar");
+      hechas.push("pagar");
+      return { ok: "pagado" };
+    },
   };
   return { a, hechas };
 }
@@ -2928,7 +2941,8 @@ test("si el paso 2 falla, el paso 1 se deshace", async () => {
   const r = await correrCheckout("s2", a, d, newEnvelope("x@v1", "prueba", {}));
   assert.equal(r.estado, "compensada");
   // el orden importa: primero se hizo cobrar, y lo ultimo que corrio fue su inversa
-  assert.deepEqual(hechas, ["cobrar", "reembolsar"]);
+  // el sufijo prueba que la compensacion RECIBIO lo que devolvio el paso 1
+  assert.deepEqual(hechas, ["cobrar", "reembolsar:cobrado"]);
   assert.equal(d.final, "compensada");
 });
 
@@ -2938,7 +2952,7 @@ test("si el paso 1 falla, no hay nada hecho que deshacer", async () => {
   const r = await correrCheckout("s3", a, d, newEnvelope("x@v1", "prueba", {}));
   assert.equal(r.estado, "compensada");
   // se intento, asi que se deshace igual: la compensacion tolera que no haya nada
-  assert.deepEqual(hechas, ["reembolsar"]);
+  assert.deepEqual(hechas, ["reembolsar:sin-cobro"]);
 });
 
 test("una compensacion que falla deja la saga atascada, y se nota", async () => {
@@ -2964,7 +2978,23 @@ test("el barrido retoma una saga colgada y la compensa", async () => {
   assert.equal(r.completadas, 0);
   assert.equal(r.pendientes, false);
   // un paso en duda no se reintenta: se deshace
-  assert.deepEqual(hechas, ["reembolsar"]);
+  assert.deepEqual(hechas, ["reembolsar:sin-cobro"]);
+});
+
+test("al retomar, la compensacion recibe lo que el diario guardo", async () => {
+  const d = new Diario();
+  const e = newEnvelope("x@v1", "prueba", {});
+  // el paso 1 quedo HECHO en otro proceso, y su salida esta en el diario
+  d.filas.set("colgada", {
+    paso: 1, estado: "hecho", datos: e, actualizado: 0,
+    salidas: { 1: { ok: "cobrado" } },
+  });
+  // el paso 2 falla, asi que hay que deshacer el 1 con lo que el 1 devolvio
+  const { a, hechas } = acciones(["pagar"]);
+  const r = await barrerCheckout(a, d);
+  assert.equal(r.compensadas, 1);
+  // "sin-cobro" aqui querria decir que el cast del diario dejo todo undefined
+  assert.deepEqual(hechas, ["reembolsar:cobrado"]);
 });
 
 test("el barrido no toca una saga que va en camino", async () => {
@@ -3039,7 +3069,7 @@ test("el ultimo paso no lleva compensacion, y el resto si", () => {
         out.status.success(),
         "el coordinador generado no compensa como dice:\n{salida}"
     );
-    assert!(salida.contains("pass 10"), "{salida}");
+    assert!(salida.contains("pass 11"), "{salida}");
 }
 
 /// Las reglas de la saga: cada una bloquea una forma distinta de quedarse a

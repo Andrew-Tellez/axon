@@ -75,6 +75,15 @@ export interface RefundPaymentOut {
   status: string;
 }
 
+export interface PayoutMerchantIn {
+  paymentId: string;
+  amount: { amount: number; currency: string };
+}
+
+export interface PayoutMerchantOut {
+  payoutId: string;
+}
+
 export const manifest = {
   "service": "payments",
   "version": "1.2.0",
@@ -123,6 +132,21 @@ export const manifest = {
       "auth": "required",
       "rate_limit": null,
       "timeout_ms": 8000,
+      "paginated": false
+    },
+    "payoutMerchant": {
+      "in": {
+        "paymentId": "uuid",
+        "amount": "money"
+      },
+      "out": {
+        "payoutId": "uuid"
+      },
+      "http": "POST /v1/payouts",
+      "idempotent": true,
+      "auth": "required",
+      "rate_limit": null,
+      "timeout_ms": 4000,
       "paginated": false
     }
   },
@@ -345,6 +369,7 @@ export abstract class PaymentsService {
   abstract onOrderPlaced(e: Envelope<OrderPlacedV1>): Promise<void>;
   abstract capturePayment(input: CapturePaymentIn, e: Envelope<unknown>): Promise<CapturePaymentOut>;
   abstract refundPayment(input: RefundPaymentIn, e: Envelope<unknown>): Promise<RefundPaymentOut>;
+  abstract payoutMerchant(input: PayoutMerchantIn, e: Envelope<unknown>): Promise<PayoutMerchantOut>;
   /** Punto de entrada unico: rutea por tipo y deduplica por id de envelope. */
   dispatch(e: Envelope<unknown>): Promise<void> {
     return this.inbox.once(e.id, async () => {
@@ -374,7 +399,7 @@ export const paymentCan = (state: PaymentState, action: PaymentAction) => paymen
 
 /** Rutas HTTP que declara el manifiesto. El arranque debe fallar si
  *  alguna no tiene handler: un 404 en produccion no avisa a nadie. */
-export const rutasHttp = ["POST /v1/payments", "POST /v1/payments/{paymentId}/refunds"] as const;
+export const rutasHttp = ["POST /v1/payments", "POST /v1/payments/{paymentId}/refunds", "POST /v1/payouts"] as const;
 
 
 /** Lado del teorema CAP declarado en el manifiesto: strong/reject.

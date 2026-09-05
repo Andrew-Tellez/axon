@@ -2,6 +2,7 @@
 import { PaymentsService, rutasHttp, paymentNext, paymentCan, flagCobroV2, flagCortarStripe,
          type CapturePaymentIn, type CapturePaymentOut,
          type RefundPaymentIn, type RefundPaymentOut,
+         type PayoutMerchantIn, type PayoutMerchantOut,
          type OrderPlacedV1, type Envelope, type PaymentState } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
 import { arrancarFlags, flags } from "../flags.ts";
@@ -55,10 +56,36 @@ export class Payments extends PaymentsService {
     return { paymentId };
   }
 
+  /** El tope del comercio. Arriba de esto el pago se rechaza, y ese rechazo
+   *  llega DESPUES de haber cobrado: es el fallo que la saga tiene que
+   *  compensar. */
+  static readonly TOPE_COMERCIO = 100_000;
+
+  async payoutMerchant(input: PayoutMerchantIn): Promise<PayoutMerchantOut> {
+    if (input.amount.amount > Payments.TOPE_COMERCIO) {
+      throw new Error(`monto ${input.amount.amount} supera el tope del comercio`);
+    }
+    const payoutId = crypto.randomUUID();
+    // `idempotent = true` en el manifiesto no es una etiqueta: reintentar tiene
+    // que no pagar dos veces, y eso lo sostiene el UNIQUE sobre payment_id
+    const { rows } = await this.#db.query(
+      `INSERT INTO payout (id, payment_id, cents) VALUES ($1,$2,$3)
+       ON CONFLICT (payment_id) DO UPDATE SET cents = payout.cents
+       RETURNING id`,
+      [payoutId, input.paymentId, input.amount.amount],
+    );
+    return { payoutId: rows[0].id };
+  }
+
+  /** Compensacion del cobro. Tiene que tolerar que no haya nada que deshacer:
+   *  el coordinador la llama tambien cuando el cobro quedo en duda —un timeout
+   *  no dice que del otro lado no paso nada— y cuando ya se reembolso, porque
+   *  se reintenta hasta que entra. */
   async refundPayment(input: RefundPaymentIn): Promise<RefundPaymentOut> {
     const { rows } = await this.#db.query(`SELECT status FROM payment WHERE id = $1`, [input.paymentId]);
     const actual = rows[0]?.status as PaymentState | undefined;
-    if (!actual) throw new Error(`pago ${input.paymentId} no existe`);
+    if (!actual) return { paymentId: input.paymentId, status: "sin_cobro" };
+    if (actual === "refunded") return { paymentId: input.paymentId, status: actual };
     if (!paymentCan(actual, "refund")) throw new Error(`no se puede reembolsar desde ${actual}`);
     const estado = paymentNext(actual, "refund");
     await this.#db.query(`UPDATE payment SET status = $2 WHERE id = $1`, [input.paymentId, estado]);
@@ -89,6 +116,7 @@ servir(
     "POST /v1/payments": (body, e) => svc.capturePayment(body, e),
     "POST /v1/payments/{paymentId}/refunds": (_b, _e, params) =>
       svc.refundPayment({ paymentId: params.paymentId }),
+    "POST /v1/payouts": (body) => svc.payoutMerchant(body),
   },
   rutasHttp,
 );

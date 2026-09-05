@@ -20,6 +20,16 @@
     }
   },
   "methods": {
+    "checkout.checkout": {
+      "in": {
+        "orderId": "uuid",
+        "amount": "money"
+      },
+      "out": {
+        "estado": "string"
+      },
+      "http": "POST /v1/checkouts"
+    },
     "orders.getOrder": {
       "in": {
         "tenantId": "uuid",
@@ -53,6 +63,16 @@
         "paymentId": "uuid"
       },
       "http": "POST /v1/payments"
+    },
+    "payments.payoutMerchant": {
+      "in": {
+        "paymentId": "uuid",
+        "amount": "money"
+      },
+      "out": {
+        "payoutId": "uuid"
+      },
+      "http": "POST /v1/payouts"
     },
     "payments.refundPayment": {
       "in": {

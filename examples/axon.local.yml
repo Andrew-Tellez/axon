@@ -7,13 +7,33 @@ services:
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 2s
+  db-checkout:
+    image: postgres:16-alpine
+    # el mismo tope que en produccion: agotar conexiones en local es la unica
+    # forma de descubrirlo antes de que escale
+    command: ["postgres", "-c", "max_connections=100"]
+    environment: { POSTGRES_DB: checkout, POSTGRES_PASSWORD: local }
+    ports: ["${AXON_DB_PORT_checkout:-15734}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+  migrate-db-checkout:
+    image: flyway/flyway:10-alpine
+    depends_on: { db-checkout: { condition: service_healthy } }
+    volumes: ["./sql/checkout:/flyway/sql:ro"]
+    command: >
+      -url=jdbc:postgresql://db-checkout:5432/checkout
+      -user=postgres -password=local -connectRetries=10
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
   db-orders-0:
     image: postgres:16-alpine
     # el mismo tope que en produccion: agotar conexiones en local es la unica
     # forma de descubrirlo antes de que escale
     command: ["postgres", "-c", "max_connections=100"]
     environment: { POSTGRES_DB: orders, POSTGRES_PASSWORD: local }
-    ports: ["${AXON_DB_PORT_orders_0:-15432}:5432"]
+    ports: ["${AXON_DB_PORT_orders_0:-15814}:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
@@ -87,7 +107,7 @@ services:
     # forma de descubrirlo antes de que escale
     command: ["postgres", "-c", "max_connections=100"]
     environment: { POSTGRES_DB: orders, POSTGRES_PASSWORD: local }
-    ports: ["${AXON_DB_PORT_orders_2:-15434}:5432"]
+    ports: ["${AXON_DB_PORT_orders_2:-15776}:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
@@ -124,7 +144,7 @@ services:
     # forma de descubrirlo antes de que escale
     command: ["postgres", "-c", "max_connections=100"]
     environment: { POSTGRES_DB: orders, POSTGRES_PASSWORD: local }
-    ports: ["${AXON_DB_PORT_orders_3:-15435}:5432"]
+    ports: ["${AXON_DB_PORT_orders_3:-15795}:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
@@ -162,7 +182,7 @@ services:
     depends_on: { policies-db-orders-0: { condition: service_completed_successfully }, policies-db-orders-1: { condition: service_completed_successfully }, policies-db-orders-2: { condition: service_completed_successfully }, policies-db-orders-3: { condition: service_completed_successfully } }
     # el workdir de la imagen es /pgdog, de ahi lee su configuracion
     volumes: ["./.axon/pgdog/orders:/pgdog:ro"]
-    ports: ["${AXON_POOLER_PORT_orders:-16432}:6432"]
+    ports: ["${AXON_POOLER_PORT_orders:-16814}:6432"]
     healthcheck:
       # contra el pooler, no contra un nodo: comprueba que pgdog acepta el
       # protocolo, que es lo unico que el servicio va a ver
@@ -175,7 +195,7 @@ services:
     # forma de descubrirlo antes de que escale
     command: ["postgres", "-c", "max_connections=200"]
     environment: { POSTGRES_DB: payments, POSTGRES_PASSWORD: local }
-    ports: ["${AXON_DB_PORT_payments:-15436}:5432"]
+    ports: ["${AXON_DB_PORT_payments:-15729}:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
@@ -242,12 +262,34 @@ services:
       - --entrypoints.web.address=:80
     ports: ["${AXON_EDGE_PORT:-8000}:80"]
     volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+  checkout:
+    build:
+      context: .
+      dockerfile: services/checkout/Dockerfile
+    depends_on: { broker: { condition: service_healthy }, traza: { condition: service_healthy }, db-checkout: { condition: service_healthy }, migrate-db-checkout: { condition: service_completed_successfully } }
+    ports: ["${AXON_PORT_checkout:-8201}:8080"]
+    env_file: [.env.local]
+    environment:
+      AXON_BROKER_URL: nats://broker:4222
+      AXON_TRACE_LOG: /out/local.ndjson
+      DATABASE_URL: postgres://postgres:local@db-checkout:5432/checkout
+      AXON_FLAGS_URL: http://flags:8016
+      OTEL_SERVICE_NAME: "checkout"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://traza:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=checkout,axon.owner=equipo-comercio,axon.tier=1,service.version=1.0.0"
+      OTEL_TRACES_SAMPLER: "parentbased_always_on"
+    volumes: ["./.axon:/out"]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.checkout.rule=PathPrefix(`/v1/checkouts`)
+      - traefik.http.services.checkout.loadbalancer.server.port=8080
   orders:
     build:
       context: .
       dockerfile: services/orders/Dockerfile
     depends_on: { broker: { condition: service_healthy }, traza: { condition: service_healthy }, pooler-orders: { condition: service_healthy } }
-    ports: ["${AXON_PORT_orders:-8080}:8080"]
+    ports: ["${AXON_PORT_orders:-8300}:8080"]
     env_file: [.env.local]
     environment:
       AXON_BROKER_URL: nats://broker:4222
@@ -269,7 +311,7 @@ services:
       context: .
       dockerfile: services/payments/Dockerfile
     depends_on: { broker: { condition: service_healthy }, traza: { condition: service_healthy }, crear-buckets: { condition: service_completed_successfully }, db-payments: { condition: service_healthy }, policies-db-payments: { condition: service_completed_successfully } }
-    ports: ["${AXON_PORT_payments:-8081}:8080"]
+    ports: ["${AXON_PORT_payments:-8278}:8080"]
     env_file: [.env.local]
     environment:
       AXON_BROKER_URL: nats://broker:4222
@@ -288,8 +330,14 @@ services:
     volumes: ["./.axon:/out"]
     labels:
       - traefik.enable=true
-      - traefik.http.routers.payments.rule=PathPrefix(`/v1/payments`)
+      - traefik.http.routers.payments.rule=PathPrefix(`/v1/payments`) || PathPrefix(`/v1/payouts`)
       - traefik.http.services.payments.loadbalancer.server.port=8080
+  cron-saga_compra:
+    image: curlimages/curl:8.11.1
+    depends_on: { checkout: { condition: service_started } }
+    # `while` y no `sleep` de una vez: un job que corre una sola vez y termina
+    # deja a `up --wait` contando un contenedor caido
+    command: ["sh", "-c", "while :; do sleep 50; curl -fsS -m 10 -X POST http://checkout:8080/internal/saga/compra/barrer || true; done"]
 
 # streams JetStream a crear al arrancar:
 #   nats stream add order.placed.v1 --subjects order.placed.v1

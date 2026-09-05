@@ -106,10 +106,36 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
 
     // Campos explicitos, no parameter properties: son TS puro y no sobreviven
     // al type-stripping de Node ni a un port directo a otro lenguaje.
-    let ctor = if m.patterns.outbox {
-        "  protected readonly bus: Bus;\n  protected readonly inbox: Inbox;\n  protected readonly outbox: Outbox;\n  constructor(bus: Bus, inbox: Inbox, outbox: Outbox) {\n    this.bus = bus;\n    this.inbox = inbox;\n    this.outbox = outbox;\n  }"
+    // Solo los colaboradores que el servicio USA. Pedirle un bus a un
+    // coordinador que no emite nada obliga a fabricar uno de mentira, y un
+    // objeto de mentira en el constructor es una dependencia que nadie revisa.
+    let mut campos = Vec::new();
+    let mut params = Vec::new();
+    let mut asigna = Vec::new();
+    if !m.emits.is_empty() {
+        campos.push("  protected readonly bus: Bus;");
+        params.push("bus: Bus");
+        asigna.push("    this.bus = bus;");
+    }
+    if !m.consumes.is_empty() {
+        campos.push("  protected readonly inbox: Inbox;");
+        params.push("inbox: Inbox");
+        asigna.push("    this.inbox = inbox;");
+    }
+    if m.patterns.outbox {
+        campos.push("  protected readonly outbox: Outbox;");
+        params.push("outbox: Outbox");
+        asigna.push("    this.outbox = outbox;");
+    }
+    let ctor = if params.is_empty() {
+        String::new()
     } else {
-        "  protected readonly bus: Bus;\n  protected readonly inbox: Inbox;\n  constructor(bus: Bus, inbox: Inbox) {\n    this.bus = bus;\n    this.inbox = inbox;\n  }"
+        format!(
+            "{}\n  constructor({}) {{\n{}\n  }}",
+            campos.join("\n"),
+            params.join(", "),
+            asigna.join("\n")
+        )
     };
     let sink = if m.patterns.outbox {
         "this.outbox.stage"
@@ -119,7 +145,7 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
 
     let mut cls = vec![
         format!("export abstract class {}Service {{", pascal(svc)),
-        ctor.to_string(),
+        ctor.clone(),
         "  static readonly wellKnown = \"/.well-known/axon.json\";".to_string(),
     ];
     for ev in m.emits.keys() {
@@ -498,6 +524,18 @@ pub fn build_er(ms: &[Manifest]) -> String {
     out.join("\n")
 }
 
+/// El tipo TypeScript de la salida de un paso. Es el mismo nombre que ya emite
+/// el cliente de la dependencia, asi que el contexto de la saga queda tipado
+/// sin inventar tipos nuevos.
+fn salida_de(m: &Manifest, r: &str) -> String {
+    match Paso::partes(r) {
+        // un paso sobre el propio servicio usa sus tipos, sin prefijo
+        Some((s, met)) if s == m.service => format!("{}Out", pascal(met)),
+        Some((s, met)) => format!("{}{}Out", pascal(s), pascal(met)),
+        None => "unknown".to_string(),
+    }
+}
+
 /// La saga como diagrama: el camino de ida y, en la misma imagen, la vuelta.
 ///
 /// Que la compensacion se dibuje sola es la mitad del valor de declararla: en
@@ -749,10 +787,16 @@ pub fn sagas_ts(m: &Manifest) -> String {
          *  tenia en memoria es justo el que se murio. */\n\
          export interface SagaDiario {\n  \
            abrir(id: string, saga: string, e: Envelope<unknown>): Promise<void>;\n  \
-           marcar(id: string, paso: number, estado: \"intentando\" | \"hecho\" | \"deshecho\"): Promise<void>;\n  \
+           marcar(id: string, paso: number, estado: \"intentando\" | \"hecho\" | \"deshecho\", salida?: unknown): Promise<void>;\n  \
            cerrar(id: string, estado: SagaEstado): Promise<void>;\n  \
-           /** Hasta donde llego, para retomar. `null` si es nueva. */\n  \
-           leer(id: string): Promise<{ paso: number; estado: string } | null>;\n  \
+           /** Hasta donde llego, y lo que devolvio cada paso. `null` si es nueva.\n   \
+            *\n   \
+            *  Las salidas hacen falta para COMPENSAR: deshacer un paso suele\n   \
+            *  necesitar el id que ESE paso devolvio, y tras un reinicio ese valor\n   \
+            *  no esta en ninguna variable —el proceso que lo tenia es justo el\n   \
+            *  que se murio—. Guardarlo en el diario es lo que mantiene la\n   \
+            *  compensacion posible. */\n  \
+           leer(id: string): Promise<{ paso: number; estado: string; salidas: Record<number, unknown> } | null>;\n  \
            /** Reclama hasta `limite` sagas abiertas que no avanzan desde `antesDe`,\n   \
             *  y devuelve el envelope de cada una.\n   \
             *\n   \
@@ -806,22 +850,28 @@ pub fn sagas_ts(m: &Manifest) -> String {
         let p = pascal(nombre);
         let c = camel(nombre);
         let mut acciones = Vec::new();
+        let mut salidas = Vec::new();
         let mut tabla = Vec::new();
         for (i, paso) in sg.steps.iter().enumerate() {
             let n = i + 1;
             let met = Paso::partes(&paso.hacer).map(|(_, x)| x).unwrap_or("?");
+            salidas.push(format!("  paso{n}?: {};", salida_de(m, &paso.hacer)));
             acciones.push(format!(
-                "  /** paso {n} · {} */\n  paso{n}{}(e: Envelope<unknown>): Promise<void>;",
+                "  /** paso {n} · {} */\n  paso{n}{}(e: Envelope<unknown>, previas: {p}Salidas): Promise<{s}>;",
                 paso.hacer,
-                pascal(met)
+                pascal(met),
+                p = p,
+                s = salida_de(m, &paso.hacer)
             ));
             match &paso.undo {
                 Some(u) => {
                     let umet = Paso::partes(u).map(|(_, x)| x).unwrap_or("?");
                     acciones.push(format!(
-                        "  /** deshace el paso {n} · {u} · tiene que tolerar que no haya nada que deshacer */\n  \
-                         deshacer{n}{}(e: Envelope<unknown>): Promise<void>;",
-                        pascal(umet)
+                        "  /** deshace el paso {n} · {u} · recibe lo que devolvieron los pasos\n   \
+                         *  anteriores, y tiene que tolerar que no haya nada que deshacer */\n  \
+                         deshacer{n}{}(e: Envelope<unknown>, previas: {p}Salidas): Promise<void>;",
+                        pascal(umet),
+                        p = p
                     ));
                     tabla.push(format!(
                         "  {{ paso: {n}, hacer: \"{}\", deshacer: \"{u}\" }},",
@@ -851,6 +901,14 @@ pub fn sagas_ts(m: &Manifest) -> String {
             tabla.join("\n")
         ));
         o.push(format!(
+            "/** Lo que devolvio cada paso, guardado en el diario. Es lo que hace\n \
+             *  posible compensar despues de un reinicio: deshacer un paso suele\n \
+             *  necesitar el id que ese paso devolvio, y una variable en memoria no\n \
+             *  sobrevive al proceso que la tenia. */\n\
+             export interface {p}Salidas {{\n{}\n}}\n",
+            salidas.join("\n")
+        ));
+        o.push(format!(
             "/** Un metodo por paso y uno por compensacion. Los implementa quien\n \
              *  conoce los datos: el coordinador sabe el orden, no el contenido. */\n\
              export interface {p}Acciones {{\n{}\n}}\n",
@@ -860,14 +918,21 @@ pub fn sagas_ts(m: &Manifest) -> String {
         // el cuerpo: hacia adelante hasta que algo falla, y de vuelta
         let mut adelante = Vec::new();
         let mut atras = Vec::new();
+        let mut rehidrata = Vec::new();
         for (i, paso) in sg.steps.iter().enumerate() {
             let n = i + 1;
             let met = Paso::partes(&paso.hacer).map(|(_, x)| x).unwrap_or("?");
+            rehidrata.push(format!(
+                "    paso{n}: guardadas[{n}] as {} | undefined,",
+                salida_de(m, &paso.hacer)
+            ));
             adelante.push(format!(
                 "      case {n}:\n        \
                    await diario.marcar(id, {n}, \"intentando\");\n        \
-                   await acciones.paso{n}{}(e);\n        \
-                   await diario.marcar(id, {n}, \"hecho\");\n        \
+                   previas.paso{n} = await acciones.paso{n}{}(e, previas);\n        \
+                   // la salida se guarda CON el `hecho`: en dos escrituras, un\n        \
+                   // corte entre las dos deja el paso hecho y su resultado perdido\n        \
+                   await diario.marcar(id, {n}, \"hecho\", previas.paso{n});\n        \
                    break;",
                 pascal(met)
             ));
@@ -875,7 +940,7 @@ pub fn sagas_ts(m: &Manifest) -> String {
                 let umet = Paso::partes(u).map(|(_, x)| x).unwrap_or("?");
                 atras.push(format!(
                     "      case {n}:\n        \
-                       await acciones.deshacer{n}{}(e);\n        \
+                       await acciones.deshacer{n}{}(e, previas);\n        \
                        break;",
                     pascal(umet)
                 ));
@@ -912,6 +977,15 @@ pub fn sagas_ts(m: &Manifest) -> String {
                const limite = Date.now() + {plazo};\n  \
                const previo = await diario.leer(id);\n  \
                if (!previo) await diario.abrir(id, \"{nombre}\", e);\n  \
+               // Rehidratado del diario, no de una variable: al retomar, esto es lo\n  \
+               // unico que queda de lo que hicieron los pasos anteriores.\n  \
+               //\n  \
+               // El diario las guarda por NUMERO de paso y aca se nombran: un cast\n  \
+               // de una forma a la otra compila y deja todo en `undefined`, asi que\n  \
+               // la traduccion es explicita, campo por campo.\n  \
+               const guardadas = previo?.salidas ?? {{}};\n  \
+               const previas: {p}Salidas = {{\n{rehidrata}\n  \
+               }};\n  \
                // un paso a medio intentar no se reintenta: se deshace\n  \
                let hecho = previo ? (previo.estado === \"hecho\" ? previo.paso : previo.paso - 1) : 0;\n  \
                const dudoso = previo?.estado === \"intentando\" ? previo.paso : 0;\n  \
@@ -928,7 +1002,7 @@ pub fn sagas_ts(m: &Manifest) -> String {
                    }}\n      \
                    intentado = paso;\n      \
                    try {{\n        \
-                     await paso{p}(paso, acciones, diario, e, id);\n        \
+                     await paso{p}(paso, acciones, diario, e, id, previas);\n        \
                      hecho = paso;\n      \
                    }} catch (err) {{\n        \
                      fallo = err;\n        \
@@ -943,7 +1017,7 @@ pub fn sagas_ts(m: &Manifest) -> String {
                // de vuelta: todo lo que se INTENTO, en orden inverso\n  \
                for (let paso = intentado; paso >= 1; paso--) {{\n    \
                  try {{\n      \
-                   await deshacer{p}(paso, acciones, e);\n      \
+                   await deshacer{p}(paso, acciones, e, previas);\n      \
                    await diario.marcar(id, paso, \"deshecho\");\n    \
                  }} catch (err) {{\n      \
                    await diario.cerrar(id, \"atascada\");\n      \
@@ -959,7 +1033,8 @@ pub fn sagas_ts(m: &Manifest) -> String {
                acciones: {p}Acciones,\n  \
                diario: SagaDiario,\n  \
                e: Envelope<unknown>,\n  \
-               id: string,\n\
+               id: string,\n  \
+               previas: {p}Salidas,\n\
              ): Promise<void> {{\n  \
                switch (paso) {{\n\
              {adelante}\n    \
@@ -968,7 +1043,7 @@ pub fn sagas_ts(m: &Manifest) -> String {
                }}\n\
              }}\n\
              \n\
-             async function deshacer{p}(paso: number, acciones: {p}Acciones, e: Envelope<unknown>): Promise<void> {{\n  \
+             async function deshacer{p}(paso: number, acciones: {p}Acciones, e: Envelope<unknown>, previas: {p}Salidas): Promise<void> {{\n  \
                switch (paso) {{\n\
              {atras}\n    \
                  default:\n      \
@@ -978,6 +1053,7 @@ pub fn sagas_ts(m: &Manifest) -> String {
             total = sg.steps.len(),
             adelante = adelante.join("\n"),
             atras = atras.join("\n"),
+            rehidrata = rehidrata.join("\n"),
         ));
 
         // El barrido: quien vuelve a llamar a la saga que quedo colgada.

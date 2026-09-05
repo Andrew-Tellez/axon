@@ -1,0 +1,75 @@
+service = "checkout"
+owner = "equipo-comercio"
+tier = "1"
+version = "1.0.0"
+transport = "pubsub"
+
+# El unico metodo: arranca la saga. Todo lo demas lo hace el coordinador
+# generado.
+[methods.checkout]
+http = "POST /v1/checkouts"
+auth = "required"
+timeout_ms = 30000
+idempotent = true
+in = { orderId = "uuid", amount = "money" }
+out = { estado = "string" }
+
+# Cobrar y despues pagarle al comercio son dos efectos en dos sistemas. No hay
+# transaccion que los cubra: si el segundo falla, el primero hay que deshacerlo.
+#
+# El presupuesto cubre la suma de los pasos CON sus reintentos: 8000 + 8000x4
+# + 4000 = 44000. Son cuatro intentos y no tres, porque `retries = 3` son tres
+# REintentos ademas del primero —`axon verify` hizo la cuenta y corrigio la que
+# estaba escrita aqui—. Rendirse antes dejaria al coordinador compensando algo
+# que despues tiene exito.
+[saga.compra]
+on = "checkout"
+timeout_ms = 50000
+steps = [
+  { do = "payments.capturePayment", undo = "payments.refundPayment" },
+  { do = "payments.payoutMerchant" },
+]
+
+[[depends]]
+service = "payments"
+method = "capturePayment"
+timeout_ms = 8000
+breaker = true
+
+[[depends]]
+service = "payments"
+method = "refundPayment"
+# La compensacion se reintenta mas que el paso: es el ultimo recurso, no hay
+# nada detras de ella.
+timeout_ms = 8000
+retries = 3
+breaker = true
+
+[[depends]]
+service = "payments"
+method = "payoutMerchant"
+timeout_ms = 4000
+breaker = true
+
+[infra]
+state = "postgres"
+# El diario del coordinador NO se reparte por inquilino: el barrido tiene que
+# poder mirar todas las sagas colgadas de una vez, y una consulta sin la clave
+# de reparto no se puede rutear. El inquilino viaja dentro de `datos`.
+migrations = "sql/checkout/"
+runtime = "container"
+backup_retention_days = 7
+pool_size = 4
+max_connections = 100
+min_instances = 1
+port = 8080
+
+# Una saga es consistencia eventual por construccion: entre cobrar y pagarle al
+# comercio el sistema esta en un estado que ningun invariante describe.
+[cap]
+consistency = "eventual"
+on_partition = "reject"
+max_staleness_ms = 5000
+
+[env.prod]
+min_instances = 2

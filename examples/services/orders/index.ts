@@ -2,13 +2,15 @@
 import { OrdersService, rutasHttp, type PlaceOrderIn, type PlaceOrderOut,
          type GetOrderIn, type GetOrderOut, type Envelope } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
-import { NoEncontrado, bus, conectar, esperarDb, inbox, servir } from "../runtime.ts";
+import { NoEncontrado, bus, conectar, esperarDb, servir } from "../runtime.ts";
 import type pg from "pg";
 
 class Orders extends OrdersService {
   #db: pg.Pool;
-  constructor(b: any, i: any, db: pg.Pool) {
-    super(b, i);
+  constructor(b: any, db: pg.Pool) {
+    // sin inbox: `orders` emite y no consume nada, y el generado solo pide lo
+    // que el manifiesto declara
+    super(b);
     this.#db = db;
   }
 
@@ -81,7 +83,7 @@ class Orders extends OrdersService {
 
 arrancarTelemetria();
 const db = await esperarDb();
-const svc = new Orders(bus(await conectar()), inbox(db), db);
+const svc = new Orders(bus(await conectar()), db);
 servir(
   Number(process.env.PORT ?? 8080),
   {
