@@ -228,7 +228,8 @@ export const manifest = {
   },
   "analytics": {
     "export": true,
-    "pii": "exclude"
+    "pii": "exclude",
+    "warehouse": "clickhouse"
   },
   "pooler": {
     "engine": "none",

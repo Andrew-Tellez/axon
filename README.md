@@ -65,7 +65,7 @@ diagrama esté viejo: es que alguien rompió el manifiesto, y CI lo dice antes d
 
 `examples/` trae tres servicios que corren de verdad —uno sobre cuatro nodos de Postgres
 con [pgdog](https://pgdog.dev) delante, y otro coordinando una saga. `./demo.sh` levanta
-el sistema completo y comprueba **siete** cosas contra la realidad:
+el sistema completo y comprueba **ocho** cosas contra la realidad:
 
 ```console
 $ cd examples && ./demo.sh
@@ -95,6 +95,10 @@ $ cd examples && ./demo.sh
 ==> rollout declarado vs aplicado
   declarado 10%  medido 10.7%  (32 de 300)
   OK: estable por inquilino, y el porcentaje aplica
+
+==> la bodega: esquema, embudo y PII
+  OK: 12 flujos, 12 llegaron al cobro (conversion 100%)
+  OK: 12 hasheados, 0 correos en claro
 
 ==> capacidad declarada vs medida
   axon: 0 umbrales incumplidos
@@ -126,7 +130,7 @@ proyecto producían salida inválida y el suite no lo veía, porque axon se veri
 | **OpenTelemetry** | trazas; el envelope ya propaga `traceparent` | el demo verifica el árbol de spans: un raíz, cero huérfanos, dos servicios |
 | **OpenFeature / flagd** | `axon flags`: evaluación por OFREP | el demo mide el rollout declarado contra el aplicado |
 | **Flyway** | aplica las migraciones; axon las lee, no las ejecuta | `validateMigrationNaming` obligatorio: ignoraba archivos en silencio |
-| **BigQuery / Snowflake / ClickHouse** | `axon analytics` | el DDL se parsea con **el dialecto de cada uno** |
+| **BigQuery / Snowflake / ClickHouse** | `axon analytics`, y la ingesta que la lleva | el DDL se parsea con **el dialecto de cada uno**, y el demo carga eventos reales en ClickHouse y comprueba el embudo |
 | **pgdog** | `axon pooler`: pooler y sharder, levantado por el target local | el `pgdog.toml` se valida contra su **JSON Schema oficial**, y el demo mide el aislamiento por inquilino a través del pooler |
 | **cocogitto** | Conventional Commits y el changelog | el hook rechaza el mensaje antes de crear el commit |
 | **mdBook** | esta documentación | cada bloque `toml` de las páginas pasa por `axon verify` |

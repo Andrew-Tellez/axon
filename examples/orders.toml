@@ -41,6 +41,9 @@ breaker = true
 # que el default es no exportarlo. Aca se elige hashearlo para poder contar
 # clientes unicos sin guardar el correo.
 [analytics]
+# ClickHouse: es la unica bodega con camino de ingesta en el target local, y
+# `axon infra` rechaza la combinacion que no lo tiene.
+warehouse = "clickhouse"
 pii = "hash"
 
 [infra]

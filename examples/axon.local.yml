@@ -338,6 +338,18 @@ services:
     # `while` y no `sleep` de una vez: un job que corre una sola vez y termina
     # deja a `up --wait` contando un contenedor caido
     command: ["sh", "-c", "while :; do sleep 60; curl -fsS -m 10 -X POST http://checkout:8080/internal/saga/compra/barrer || true; done"]
+  bodega:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    environment: { CLICKHOUSE_DB: axon, CLICKHOUSE_USER: local, CLICKHOUSE_PASSWORD: local }
+    # El log de envelopes, donde `file()` puede leerlo. NO read-only: el
+    # entrypoint de la imagen hace `chown` de este directorio y con `:ro`
+    # falla y el contenedor no arranca.
+    volumes: ["./.axon:/var/lib/clickhouse/user_files"]
+    ports: ["${AXON_BODEGA_PORT:-8123}:8123"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping"]
+      interval: 2s
+      retries: 30
 
 # streams JetStream a crear al arrancar:
 #   nats stream add order.placed.v1 --subjects order.placed.v1

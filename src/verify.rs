@@ -240,6 +240,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
 
     // ---- exportacion a la bodega ----
     for m in ms.iter().filter(|m| !m.external) {
+        if !BODEGAS.contains(&m.analytics.warehouse.as_str()) {
+            errors.push(format!(
+                "{}: `[analytics] warehouse = \"{}\"` no tiene dialecto. Hay: {}",
+                m.service,
+                m.analytics.warehouse,
+                BODEGAS.join(", ")
+            ));
+        }
         match m.analytics.pii.as_str() {
             "exclude" | "hash" => {}
             otro => errors.push(format!(
@@ -847,6 +855,30 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 errors.push(format!(
                     "{}.{name}: paginada pero no devuelve `cursor`; offset se rompe al crecer",
                     m.service
+                ));
+            }
+        }
+    }
+
+    // Una bodega por plataforma. Los eventos de un mismo flujo tienen que caer
+    // en el mismo lugar: repartidos entre dos bodegas, el embudo —que es lo que
+    // hace util exportar— no se puede armar con una sola consulta, y nadie ve
+    // un error porque cada tabla existe y tiene filas.
+    let exportan: Vec<&Manifest> = ms
+        .iter()
+        .filter(|m| !m.external && m.analytics.export)
+        .collect();
+    if let Some(primero) = exportan.first() {
+        for otro in exportan.iter().skip(1) {
+            if otro.analytics.warehouse != primero.analytics.warehouse {
+                errors.push(format!(
+                    "{} exporta a `{}` y {} a `{}`. Los eventos de un mismo flujo tienen que \
+                     caer en la misma bodega o el embudo no se puede armar, y cada tabla \
+                     existiria con filas sin que nada avise",
+                    primero.service,
+                    primero.analytics.warehouse,
+                    otro.service,
+                    otro.analytics.warehouse
                 ));
             }
         }

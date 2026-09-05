@@ -52,6 +52,12 @@ method = "charges.create"
 timeout_ms = 8000
 breaker = true
 
+# La bodega es una decision de plataforma: `verify` exige que los tres
+# servicios declaren la misma, porque un embudo repartido entre dos bodegas no
+# se puede armar con una consulta.
+[analytics]
+warehouse = "clickhouse"
+
 [infra]
 state = "postgres"
 tenant_column = "tenant_id"

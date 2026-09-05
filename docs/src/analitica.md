@@ -4,9 +4,50 @@ Esto es **derivable entero**: axon ya conoce el esquema de cada evento, qué cam
 personales, y —lo más importante— **quién causa a quién**. Esa última parte es la que
 ninguna bodega tiene.
 
-```sh
-axon analytics manifests/ --target bigquery > bodega.sql
+```toml
+[analytics]
+export    = true
+pii       = "hash"        # o "exclude", que es el default
+warehouse = "clickhouse"  # bigquery · snowflake · clickhouse
 ```
+
+```sh
+axon analytics manifests/ --target clickhouse > bodega.sql
+```
+
+## La bodega se declara, y por eso hay ingesta
+
+`warehouse` estaba como bandera de la CLI, y eso permitía generar el esquema de Snowflake
+y desplegar una infraestructura que **no lleva nada ahí**: el esquema se aplicaba, las
+tablas se quedaban vacías, y nadie veía un error. Una bodega vacía es indistinguible de
+«no pasó nada en el negocio».
+
+Declarada, `axon infra` puede cablear la ingesta — o negarse:
+
+```console
+$ axon infra manifests/ --target gcp
+error  `[analytics] warehouse = "clickhouse"` no tiene camino de ingesta en `gcp`. El
+       esquema se genera igual y las tablas se quedarian vacias sin un solo error.
+       Combinaciones cableadas: gcp+bigquery, aws+snowflake, aws+clickhouse,
+       local+clickhouse. O `export = false` si este entorno no exporta.
+```
+
+| target + bodega | qué se despliega |
+| --- | --- |
+| `gcp` + `bigquery` | una suscripción de Pub/Sub que escribe **directo** a la tabla, con `use_table_schema` y su propia DLQ |
+| `aws` + `snowflake` o `clickhouse` | un Firehose por evento hacia S3, con el **mismo particionado por fecha** que el esquema generado. De ahí la bodega carga con lo suyo —Snowpipe, una tabla externa— porque ese paso vive del lado de la bodega, no del proveedor |
+| `local` + `clickhouse` | un ClickHouse y un cargador del log de envelopes que el propio target ya escribe |
+| `k8s` + cualquiera | **nada, y lo dice**. Un clúster no trae bodega: apuntarías a la que corras, y axon no puede adivinarla |
+
+Y una bodega por plataforma: `verify` exige que todos los servicios que exportan declaren
+la misma. Repartidos entre dos, el embudo —que es lo que hace útil exportar— no se puede
+armar con una consulta, y cada tabla existiría con filas sin que nada avise.
+
+### Por qué el Firehose lleva un `error_output_prefix`
+
+Lo que no encaja en el esquema cae en `errores/` y se puede volver a cargar. Es el
+equivalente del DLQ para la bodega: un evento que se descarta en silencio es un agujero en
+el histórico que nadie va a notar hasta que alguien pregunte por un número que no cuadra.
 
 ## Una tabla por evento
 
@@ -155,3 +196,42 @@ los tres bugs que esto encontró:
   `DateTime64(3,` y rompía el tipo parametrizado.
 - ClickHouse espera `ORDER BY` justo después del motor: con `PARTITION BY` en medio, el
   DDL no parsea.
+
+## Medido en el demo, contra ClickHouse
+
+El target local levanta la bodega y la llena del log de envelopes. Eso no es un artefacto
+del demo: `AXON_TRACE_LOG` está en el compose generado, así que **la traza y la analítica
+salen de la misma fuente** — y el `trace_id` de cada fila sale del `traceparent` del
+envelope, así que desde un embudo se puede saltar a la traza de ese flujo concreto.
+
+```console
+==> la bodega: esquema, embudo y PII
+  OK: 12 eventos en la bodega, con el esquema generado sin tocarlo
+  OK: 12 flujos, 12 llegaron al cobro (conversion 100%)
+  i latencia de negocio del embudo: 15ms de la orden al cobro
+  OK: 12 hasheados, 0 correos en claro
+  OK: 12 filas antes y despues; el cargador es idempotente
+```
+
+Cinco cosas, cada una una pregunta distinta:
+
+| | |
+| --- | --- |
+| **el esquema generado acepta los eventos reales** | se aplica sin tocarlo. Si una columna o un tipo no cuadrara, la carga fallaría aquí y no en producción |
+| **el embudo declarado cuenta el flujo que ocurrió** | y los flujos del embudo coinciden con las filas del paso 1: si no, estaría contando flujos de otra parte |
+| **la latencia de negocio es un número** | del `order.placed@v1` al `payment.captured@v1`, no la de una petición |
+| **el campo personal no viaja en claro** | `pii = "hash"` declarado → 64 caracteres hex, 0 arrobas. Que la política se aplicó no se sabe leyendo el manifiesto |
+| **cargar dos veces no duplica** | un cargador periódico corre muchas veces sobre el mismo log; sin filtrar por lo ya cargado, cada evento se multiplica y el embudo miente sin fallar |
+
+El cargador sale del mismo sitio que el esquema —las columnas y sus rutas dentro del JSON—
+así que no pueden desincronizarse. Y el salt del hash entra por parámetro, nunca en el SQL
+generado.
+
+## Lo que falta
+
+`k8s` no tiene camino de ingesta, y el rechazo lo dice en vez de fingirlo. Cerrarlo pide un
+consumidor del broker que escriba en la bodega —lo que en local se resuelve leyendo el log,
+en un clúster hay que consumir— y eso es código, no IaC.
+
+Tampoco hay retención declarable de las tablas de la bodega, ni un `axon analytics --check`
+que compare el esquema declarado contra el que existe allí.

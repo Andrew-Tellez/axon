@@ -93,6 +93,13 @@ enum Cmd {
         #[arg(long, default_value = "bigquery",
               value_parser = ["bigquery", "snowflake", "clickhouse", "plan"])]
         target: String,
+        /// emite el cargador del target local en vez del esquema: lleva el log
+        /// de envelopes a la bodega. Solo ClickHouse por ahora.
+        #[arg(long)]
+        cargar: Option<String>,
+        /// la base de la bodega para el cargador
+        #[arg(long, default_value = "axon")]
+        dataset: String,
     },
     /// reconcilia el lado CAP declarado con los patrones en uso
     Cap {
@@ -333,8 +340,17 @@ fn run() -> Result<ExitCode, String> {
             };
             print!("{}", import::asyncapi(&text, service.as_deref())?);
         }
-        Cmd::Analytics { sources, target } => {
+        Cmd::Analytics {
+            sources,
+            target,
+            cargar,
+            dataset,
+        } => {
             let ms = manifest::discover(&sources)?;
+            if let Some(log) = cargar {
+                print!("{}", bi::cargador(&ms, &dataset, &log));
+                return Ok(ExitCode::SUCCESS);
+            }
             match target.as_str() {
                 "plan" => println!(
                     "{}",

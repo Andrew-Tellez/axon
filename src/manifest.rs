@@ -138,6 +138,33 @@ pub struct Analytics {
     /// vive mas tiempo, se copia mas veces y lo lee mas gente, asi que el
     /// valor seguro tiene que ser el que no lo manda.
     pub pii: String,
+    /// A que bodega. Estaba como bandera de la CLI, y eso permitia generar el
+    /// esquema de Snowflake y desplegar una infraestructura que no lleva nada
+    /// ahi: el esquema se aplicaba y las tablas se quedaban vacias sin que nada
+    /// avisara. Declarado, `axon infra` puede cablear la ingesta —o negarse.
+    pub warehouse: String,
+}
+
+/// Las bodegas para las que hay dialecto. Que exista el dialecto no quiere
+/// decir que exista el camino de ingesta en todos los targets: eso lo dice
+/// `INGESTA`.
+pub const BODEGAS: [&str; 3] = ["bigquery", "snowflake", "clickhouse"];
+
+/// Combinaciones (target, bodega) con camino de ingesta cableado. Lo que no
+/// esta aqui `axon infra` lo RECHAZA: generar el esquema y no llevar nada a la
+/// bodega es el peor resultado, porque se aplica sin error.
+pub const INGESTA: [(&str, &str); 4] = [
+    // suscripcion de Pub/Sub directa a BigQuery
+    ("gcp", "bigquery"),
+    // Firehose a S3, y de ahi la bodega carga con lo suyo
+    ("aws", "snowflake"),
+    ("aws", "clickhouse"),
+    // un contenedor de ClickHouse y un cargador del log de envelopes
+    ("local", "clickhouse"),
+];
+
+pub fn hay_ingesta(target: &str, bodega: &str) -> bool {
+    INGESTA.contains(&(target, bodega))
 }
 
 impl Default for Analytics {
@@ -145,6 +172,7 @@ impl Default for Analytics {
         Self {
             export: true,
             pii: "exclude".into(),
+            warehouse: "bigquery".into(),
         }
     }
 }

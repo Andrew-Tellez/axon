@@ -148,7 +148,8 @@ export const manifest = {
   "flags": {},
   "analytics": {
     "export": true,
-    "pii": "hash"
+    "pii": "hash",
+    "warehouse": "clickhouse"
   },
   "pooler": {
     "engine": "pgdog",

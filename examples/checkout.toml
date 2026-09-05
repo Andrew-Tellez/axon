@@ -54,6 +54,12 @@ timeout_ms = 4000
 retries = 2
 breaker = true
 
+# La bodega es una decision de plataforma: `verify` exige que los tres
+# servicios declaren la misma, porque un embudo repartido entre dos bodegas no
+# se puede armar con una consulta.
+[analytics]
+warehouse = "clickhouse"
+
 [infra]
 state = "postgres"
 # El diario del coordinador NO se reparte por inquilino: el barrido tiene que

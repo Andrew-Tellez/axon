@@ -27,7 +27,13 @@ fn axon(args: &[&str]) -> (String, String, bool) {
 /// aplicaria sin error y dejaria el reparto sin existir. Asi que todo lo que se
 /// afirma sobre gcp, aws y k8s se afirma sobre esta copia — y `el_reparto_no_se_
 /// renderiza_donde_no_existe` cubre el rechazo.
-fn sin_pooler() -> String {
+/// El ejemplo sin `[pooler]` y con la bodega que el target sepa alimentar.
+///
+/// `axon infra` rechaza una bodega sin camino de ingesta, y con razon: el
+/// esquema se aplicaria y las tablas se quedarian vacias sin un solo error. El
+/// ejemplo declara ClickHouse, que es el que tiene camino en local; para gcp
+/// hay que decir BigQuery, y k8s todavia no tiene ninguno.
+fn ajustado(bodega: &str) -> String {
     // un directorio por llamada: los tests corren en paralelo y compartir la
     // ruta hace que uno borre el arbol que otro esta leyendo
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -49,7 +55,19 @@ fn sin_pooler() -> String {
         if !nombre.ends_with(".toml") && !nombre.ends_with(".json") {
             continue;
         }
-        let texto = std::fs::read_to_string(e.path()).unwrap();
+        let mut texto = std::fs::read_to_string(e.path()).unwrap();
+        texto = match bodega {
+            // k8s no tiene camino de ingesta: lo que corresponde es justo lo
+            // que dice el mensaje de error, `export = false`
+            "ninguna" => texto.replace(
+                "[analytics]",
+                "[analytics]\nexport = false",
+            ),
+            otra => texto.replace(
+                "warehouse = \"clickhouse\"",
+                &format!("warehouse = \"{otra}\""),
+            ),
+        };
         // el bloque va al final del manifiesto, asi que cortar desde ahi
         // alcanza y no hay que parsear TOML en un test
         let sin = match texto.find("\n[pooler]") {
@@ -66,7 +84,9 @@ fn sin_pooler() -> String {
 fn fuente(target: &str) -> String {
     match target {
         "local" | "plan" => "examples".to_string(),
-        _ => sin_pooler(),
+        "gcp" => ajustado("bigquery"),
+        "k8s" => ajustado("ninguna"),
+        _ => ajustado("clickhouse"),
     }
 }
 
@@ -91,10 +111,10 @@ fn el_reparto_no_se_renderiza_donde_no_existe() {
         assert!(err.contains("shards = 4"), "{t}: {err}");
         assert!(err.contains("--target local"), "{t}: {err}");
     }
-    // y sin el pooler, los tres siguen rindiendo
-    let base = sin_pooler();
+    // y sin el pooler —y con una bodega que el target sepa alimentar— los tres
+    // siguen rindiendo
     for t in ["gcp", "aws", "k8s"] {
-        let (_, err, ok) = axon(&["infra", &base, "--target", t]);
+        let (_, err, ok) = axon(&["infra", &fuente(t), "--target", t]);
         assert!(ok, "{t}: {err}");
     }
 }
@@ -252,9 +272,9 @@ fn todos_los_targets_despliegan_el_workload() {
         assert!(out.contains(marca), "{target} no despliega el workload");
     }
     // y la entrega llega a alguien: nada de suscripciones al vacio
-    let (gcp, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
+    let (gcp, _, _) = axon(&["infra", &fuente("gcp"), "--target", "gcp"]);
     assert!(gcp.contains("push_endpoint = google_cloud_run_v2_service.payments.uri"));
-    let (k, _, _) = axon(&["infra", &sin_pooler(), "--target", "k8s"]);
+    let (k, _, _) = axon(&["infra", &fuente("k8s"), "--target", "k8s"]);
     assert!(
         k.contains("kind: Service\nmetadata:\n  name: payments"),
         "el Trigger apunta a un Service inexistente"
@@ -882,14 +902,14 @@ fn el_edge_y_los_buckets_salen_del_plan() {
         assert!(out.contains(marca), "{target} no genero el edge ({marca})");
     }
     // auth y rate limit llegan a la configuracion, no se quedan en el manifiesto
-    let (k, _, _) = axon(&["infra", &sin_pooler(), "--target", "k8s"]);
+    let (k, _, _) = axon(&["infra", &fuente("k8s"), "--target", "k8s"]);
     assert!(k.contains("axon.dev/auth: public"), "{k}");
     assert!(k.contains("axon.dev/rate-limit: \"60\""), "{k}");
     assert!(
         k.contains("timeouts: { request: 5s }"),
         "el timeout del edge no llego"
     );
-    let (a, _, _) = axon(&["infra", &sin_pooler(), "--target", "aws"]);
+    let (a, _, _) = axon(&["infra", &fuente("aws"), "--target", "aws"]);
     assert!(
         a.contains("authorization_type = \"JWT\""),
         "ruta privada sin authorizer"
@@ -900,7 +920,7 @@ fn el_edge_y_los_buckets_salen_del_plan() {
     );
 
     // publico implica CDN; privado implica que no la lleva
-    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &fuente("gcp"), "--target", "gcp"]);
     assert!(g.contains("enable_cdn  = true"), "bucket publico sin CDN");
     assert!(
         g.contains("default_ttl = 86400"),
@@ -1019,7 +1039,7 @@ public = true
     }
 
     // A05: el endurecimiento va generado, no recordado
-    let (k, _, _) = axon(&["infra", &sin_pooler(), "--target", "k8s"]);
+    let (k, _, _) = axon(&["infra", &fuente("k8s"), "--target", "k8s"]);
     for marca in [
         "runAsNonRoot: true",
         "readOnlyRootFilesystem: true",
@@ -1030,7 +1050,7 @@ public = true
         assert!(k.contains(marca), "k8s sin `{marca}`");
     }
     // A01: sin ruta publica no hay puerta a internet
-    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &fuente("gcp"), "--target", "gcp"]);
     assert!(
         g.contains("ingress  = \"INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER\""),
         "un servicio sin ruta publica quedo expuesto"
@@ -1620,7 +1640,7 @@ fn otel_en_los_cuatro_targets() {
 
     // el muestreo sale del tier: un tier 0 se traza entero, porque cuando se
     // cae la traza que falta es justo la que hacia falta
-    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &fuente("gcp"), "--target", "gcp"]);
     assert!(
         g.contains("parentbased_always_on"),
         "tier 0 sin muestreo completo"
@@ -1865,7 +1885,7 @@ fn el_escalado_de_la_base_se_verifica() {
     assert!(msg.contains("sin `ha = true`"), "{msg}");
 
     // y los recursos: standby, respaldos y replicas salen del manifiesto
-    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &fuente("gcp"), "--target", "gcp"]);
     assert!(
         g.contains("availability_type = \"REGIONAL\""),
         "payments es tier 0: falta el standby"
@@ -1885,7 +1905,7 @@ fn el_escalado_de_la_base_se_verifica() {
         !g.contains("var.sql_instance"),
         "las bases siguen compartiendo instancia"
     );
-    let (a, _, _) = axon(&["infra", &sin_pooler(), "--target", "aws"]);
+    let (a, _, _) = axon(&["infra", &fuente("aws"), "--target", "aws"]);
     assert!(a.contains("multi_az                = true"), "{a}");
     assert!(a.contains("backup_retention_period = 30"), "{a}");
     assert!(
@@ -2356,7 +2376,7 @@ fn los_esquemas_de_bodega_son_sql_valido() {
     );
 
     // y el sink nativo: Pub/Sub escribe directo, sin un proceso intermedio
-    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &fuente("gcp"), "--target", "gcp"]);
     assert!(g.contains("bigquery_config"), "{g}");
     assert!(g.contains("use_table_schema = true"), "{g}");
     // la bodega tambien necesita DLQ: un mensaje que no encaja no desaparece
@@ -2459,7 +2479,7 @@ fn las_reglas_de_reparto_bloquean() {
 /// nadie fija esta comparando contra el default del motor, que es mas bajo.
 #[test]
 fn el_tope_de_conexiones_se_aplica() {
-    let (g, _, _) = axon(&["infra", &sin_pooler(), "--target", "gcp"]);
+    let (g, _, _) = axon(&["infra", &fuente("gcp"), "--target", "gcp"]);
     assert!(
         g.contains("name  = \"max_connections\""),
         "gcp no aplica el tope:\n{g}"
@@ -2468,7 +2488,7 @@ fn el_tope_de_conexiones_se_aplica() {
         g.contains("value = \"200\""),
         "el valor de payments no llego:\n{g}"
     );
-    let (a, _, _) = axon(&["infra", &sin_pooler(), "--target", "aws"]);
+    let (a, _, _) = axon(&["infra", &fuente("aws"), "--target", "aws"]);
     // en RDS el tope va en un parameter group, no en la instancia
     assert!(a.contains("resource \"aws_db_parameter_group\""), "{a}");
     assert!(
@@ -2713,6 +2733,12 @@ consistency = "eventual"
 on_partition = "reject"
 max_staleness_ms = 5000
 
+# Este fixture prueba la saga, no la bodega. Sin esto, `axon infra` rechaza el
+# plan porque la bodega por defecto no tiene camino de ingesta en todos los
+# targets — que es justo lo que el mensaje de error sugiere hacer.
+[analytics]
+export = false
+
 [methods.checkout]
 in = { orderId = "uuid" }
 out = { ok = "string" }
@@ -2756,6 +2782,9 @@ migrations = "sql/"
 version = "1.0.0"
 owner = "equipo"
 tier = "1"
+
+[analytics]
+export = false
 
 [methods.cobrar]
 in = { orderId = "uuid" }
@@ -3123,6 +3152,9 @@ migrations = "sql/"
 version = "1.0.0"
 owner = "equipo"
 tier = "1"
+
+[analytics]
+export = false
 
 [methods.cobrar]
 in = { orderId = "uuid" }
@@ -3595,3 +3627,48 @@ fn las_reglas_de_event_sourcing_bloquean() {
     assert!(err.contains("no sabria a que estado llevarlo"), "{err}");
 }
 
+/// El hueco que esto cierra: el esquema de la bodega se generaba para tres
+/// dialectos y solo GCP tenia camino de ingesta. Se podia aplicar el esquema en
+/// Snowflake, desplegar, y quedarse con tablas vacias sin un solo error — que
+/// es indistinguible de "no paso nada en el negocio".
+#[test]
+fn la_ingesta_no_se_promete_sin_camino() {
+    // Cada combinacion cableada tiene que rendir, y el recurso que lleva los
+    // eventos tiene que estar ahi. Un target que "rinde" sin el recurso es el
+    // mismo silencio con otra forma.
+    for (target, bodega, marca) in [
+        ("gcp", "bigquery", "bigquery_config"),
+        ("aws", "clickhouse", "aws_kinesis_firehose_delivery_stream"),
+        ("aws", "snowflake", "aws_kinesis_firehose_delivery_stream"),
+        ("local", "clickhouse", "clickhouse/clickhouse-server"),
+    ] {
+        let f = ajustado(bodega);
+        let (out, err, ok) = axon(&["infra", &f, "--target", target]);
+        assert!(ok, "{target}+{bodega}: {err}");
+        assert!(
+            out.contains(marca),
+            "{target}+{bodega} rinde sin `{marca}`: nada llevaria los eventos a la bodega"
+        );
+    }
+    // Y lo que no tiene camino se RECHAZA, con el nombre de la combinacion y
+    // que hacer al respecto.
+    for (target, bodega) in [("gcp", "clickhouse"), ("aws", "bigquery"), ("k8s", "clickhouse")] {
+        let f = ajustado(bodega);
+        let (_, err, ok) = axon(&["infra", &f, "--target", target]);
+        assert!(!ok, "{target}+{bodega} rindio sin camino de ingesta");
+        assert!(err.contains("no tiene camino de ingesta"), "{err}");
+        assert!(err.contains("las tablas se quedarian vacias"), "{err}");
+        assert!(err.contains("export = false"), "no dice que hacer:\n{err}");
+    }
+    // El cargador local sale del mismo sitio que el esquema: si las rutas del
+    // JSON no coincidieran con las columnas, la carga fallaria en la bodega y
+    // no aqui.
+    let (sql, err, ok) = axon(&["analytics", "examples", "--cargar", "local.ndjson"]);
+    assert!(ok, "{err}");
+    assert!(sql.contains("INSERT INTO axon.order_placed_v1"), "{sql}");
+    // el hash sale con salt por parametro, nunca el valor
+    assert!(sql.contains("SHA256(concat({salt:String}"), "{sql}");
+    assert!(!sql.contains("AS customer_email,"), "el correo viaja en claro:\n{sql}");
+    // idempotente: un cargador periodico corre muchas veces sobre el mismo log
+    assert!(sql.contains("NOT IN (SELECT event_id FROM"), "{sql}");
+}

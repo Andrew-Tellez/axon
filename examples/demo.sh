@@ -140,6 +140,9 @@ paso "reintentos declarados vs ocurridos"
 paso "rollout declarado vs aplicado"
 python3 verificar-flags.py "localhost:${AXON_FLAGS_PORT:-8016}" cobro_v2 10
 
+paso "la bodega: esquema, embudo y PII"
+./verificar-bodega.sh
+
 paso "capacidad declarada vs medida"
 if command -v k6 >/dev/null 2>&1; then
   "$AXON" load orders.toml > .axon/carga.js

@@ -146,6 +146,10 @@ pub struct Store2 {
 pub struct Plan {
     /// Hay flags declarados: el target local levanta flagd con su config.
     pub flags: bool,
+    /// A que bodega exportan los servicios que exportan. `None` si ninguno lo
+    /// hace. Una sola por plataforma: los eventos de un flujo tienen que caer
+    /// en el mismo lugar o el embudo no se puede armar.
+    pub warehouse: Option<String>,
     pub buckets: Vec<Store2>,
     pub routes: Vec<Route>,
     pub topics: Vec<Topic>,
@@ -263,6 +267,10 @@ pub fn plan(ms: &[Manifest]) -> Plan {
     routes.sort_by(|a, b| (&a.path, &a.method).cmp(&(&b.path, &b.method)));
     Plan {
         flags: ms.iter().any(|m| !m.flags.is_empty()),
+        warehouse: ms
+            .iter()
+            .find(|m| m.analytics.export && !m.external)
+            .map(|m| m.analytics.warehouse.clone()),
         buckets,
         routes,
         topics,
@@ -283,9 +291,32 @@ pub fn render(p: &Plan, target: &str) -> Result<String, String> {
     if matches!(target, "gcp" | "aws" | "k8s") {
         if let Some(s) = p.stores.iter().find(|s| s.shards.unwrap_or(1) > 1) {
             return Err(format!(
-                "{}: `[pooler] shards = {}` todavia no se renderiza en `{target}`.                  Hoy el reparto solo se levanta en `--target local`; emitir una sola                  instancia aca aplicaria sin error y dejaria el reparto sin existir.                  `--target plan` da el plan con los nodos para renderizarlo con tu plantilla.",
+                "{}: `[pooler] shards = {}` todavia no se renderiza en `{target}`. Hoy el reparto \
+                 solo se levanta en `--target local`; emitir una sola instancia aca aplicaria \
+                 sin error y dejaria el reparto sin existir. `--target plan` da el plan con \
+                 los nodos para renderizarlo con tu plantilla.",
                 s.service,
                 s.shards.unwrap_or(1)
+            ));
+        }
+    }
+    // El esquema de la bodega se genera para tres dialectos, pero el camino que
+    // lleva los eventos hasta ahi no existe en todas las combinaciones. Sin
+    // este rechazo, `terraform apply` pasa, el esquema se aplica, y las tablas
+    // se quedan VACIAS: nadie ve un error y el embudo no dice nada porque no
+    // hay filas que decir.
+    if let Some(bodega) = &p.warehouse {
+        if target != "plan" && !hay_ingesta(target, bodega) {
+            return Err(format!(
+                "`[analytics] warehouse = \"{bodega}\"` no tiene camino de ingesta en \
+                 `{target}`. El esquema se genera igual y las tablas se quedarian vacias \
+                 sin un solo error. Combinaciones cableadas: {}. O `export = false` si \
+                 este entorno no exporta.",
+                INGESTA
+                    .iter()
+                    .map(|(t, b)| format!("{t}+{b}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     }
@@ -612,6 +643,26 @@ fn aws(p: &Plan) -> String {
                 .to_string(),
         );
     }
+    if p.topics.iter().any(|t| t.analytics) {
+        o.push(
+            "variable \"firehose_role_arn\" {\n  type        = string\n  \
+             description = \"Rol que Firehose asume para escribir en el bucket de aterrizaje\"\n}\n\
+             variable \"sns_firehose_role_arn\" {\n  type        = string\n  \
+             description = \"Rol que SNS asume para entregar a Firehose\"\n}\n\
+             \n\
+             # El aterrizaje. La bodega carga DESDE aqui con lo suyo —Snowpipe, una\n\
+             # tabla externa— porque ese paso vive del lado de la bodega, no del\n\
+             # proveedor. Lo que axon garantiza es que los eventos LLEGUEN, con el\n\
+             # mismo particionado por fecha que el esquema generado.\n\
+             resource \"aws_s3_bucket\" \"bodega\" {\n  \
+             bucket = \"${var.project}-axon-bodega\"\n}\n\
+             \n\
+             resource \"aws_s3_bucket_versioning\" \"bodega\" {\n  \
+             bucket = aws_s3_bucket.bodega.id\n  \
+             versioning_configuration { status = \"Enabled\" }\n}\n"
+                .to_string(),
+        );
+    }
     if !p.crons.is_empty() {
         o.push(
             "variable \"scheduler_role_arn\" {\n  type        = string\n  \
@@ -776,6 +827,40 @@ fn aws(p: &Plan) -> String {
             svc = c.service,
             nombre = c.name.replace('.', "-"),
             rate = c.rate(),
+        ));
+    }
+    for t in p.topics.iter().filter(|t| t.analytics) {
+        let n = tfname(&t.event);
+        // Un stream por evento, y no uno para todo: el particionado y el
+        // esquema son por evento, y un solo stream obligaria a separarlos
+        // despues, en la bodega, con una consulta que nadie escribio.
+        o.push(format!(
+            "resource \"aws_kinesis_firehose_delivery_stream\" \"bodega_{n}\" {{\n  \
+             name        = \"axon-bodega-{tabla}\"\n  \
+             destination = \"extended_s3\"\n  \
+             extended_s3_configuration {{\n    \
+               role_arn   = var.firehose_role_arn\n    \
+               bucket_arn = aws_s3_bucket.bodega.arn\n    \
+               # el mismo particionado por fecha que `PARTITION BY DATE(event_time)`\n    \
+               # del esquema generado: si no coinciden, la bodega lee de mas\n    \
+               prefix              = \"eventos/{tabla}/dt=!{{timestamp:yyyy-MM-dd}}/\"\n    \
+               error_output_prefix = \"errores/{tabla}/dt=!{{timestamp:yyyy-MM-dd}}/\"\n    \
+               # lo que no encaja no se descarta: cae en `errores/` y se puede\n    \
+               # volver a cargar. Es el equivalente del DLQ para la bodega.\n    \
+               compression_format  = \"GZIP\"\n    \
+               buffering_interval  = 60\n    \
+               buffering_size      = 5\n  }}\n}}\n",
+            tabla = t.table
+        ));
+        o.push(format!(
+            "resource \"aws_sns_topic_subscription\" \"bodega_{n}\" {{\n  \
+             topic_arn             = aws_sns_topic.{n}.arn\n  \
+             protocol              = \"firehose\"\n  \
+             endpoint              = aws_kinesis_firehose_delivery_stream.bodega_{n}.arn\n  \
+             subscription_role_arn = var.sns_firehose_role_arn\n  \
+             # el envelope entero, no una envoltura de SNS alrededor: la tabla\n  \
+             # generada espera los campos del evento en la raiz\n  \
+             raw_message_delivery  = true\n}}\n"
         ));
     }
     for s in &p.stores {
@@ -1478,6 +1563,26 @@ services:
             path = c.path,
         ));
         let _ = i;
+    }
+    if p.topics.iter().any(|t| t.analytics) {
+        // La bodega en local no es un adorno: sin ella el esquema se genera y
+        // nadie comprueba nunca que las columnas y las rutas del JSON
+        // coincidan. Se llena del log de envelopes que este mismo target ya
+        // escribe, asi que la traza y la analitica salen de la misma fuente.
+        o.push_str(
+            "  bodega:\n    \
+             image: clickhouse/clickhouse-server:24.8-alpine\n    \
+             environment: { CLICKHOUSE_DB: axon, CLICKHOUSE_USER: local, CLICKHOUSE_PASSWORD: local }\n    \
+             # El log de envelopes, donde `file()` puede leerlo. NO read-only: el\n    \
+             # entrypoint de la imagen hace `chown` de este directorio y con `:ro`\n    \
+             # falla y el contenedor no arranca.\n    \
+             volumes: [\"./.axon:/var/lib/clickhouse/user_files\"]\n    \
+             ports: [\"${AXON_BODEGA_PORT:-8123}:8123\"]\n    \
+             healthcheck:\n      \
+             test: [\"CMD-SHELL\", \"wget -qO- http://127.0.0.1:8123/ping\"]\n      \
+             interval: 2s\n      \
+             retries: 30\n",
+        );
     }
     o.push_str("\n# streams JetStream a crear al arrancar:\n");
     for t in &p.topics {

@@ -118,7 +118,8 @@ export const manifest = {
   "flags": {},
   "analytics": {
     "export": true,
-    "pii": "exclude"
+    "pii": "exclude",
+    "warehouse": "clickhouse"
   },
   "pooler": {
     "engine": "none",

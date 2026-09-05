@@ -139,6 +139,77 @@ pub fn dialecto(nombre: &str) -> Option<Dialecto> {
     })
 }
 
+
+/// El cargador del target local: lleva el log de envelopes a ClickHouse.
+///
+/// El log lo escribe el propio target —`AXON_TRACE_LOG` esta en el compose
+/// generado, no es un artefacto del demo— asi que la bodega local se llena de
+/// la misma fuente que la traza. Y las columnas y sus rutas dentro del JSON
+/// salen del mismo lugar que el esquema: si el esquema cambia, esto cambia con
+/// el, que es la unica forma de que no se desincronicen.
+///
+/// Existe porque generar el esquema sin un camino que lo llene deja tablas
+/// vacias sin un solo error, y eso es indistinguible de "no paso nada".
+pub fn cargador(ms: &[Manifest], base: &str, log: &str) -> String {
+    let d = dialecto("clickhouse").expect("clickhouse");
+    let mut o = vec![
+        "-- generado por axon — no editar.".to_string(),
+        format!("--   axon analytics manifests/ --cargar {log} > cargar.sql"),
+        "--".to_string(),
+        "-- Idempotente por evento: se filtra por lo que ya se cargo, asi que".to_string(),
+        "-- correrlo dos veces no duplica filas. Sin eso, un cargador periodico".to_string(),
+        "-- multiplica cada evento por la cantidad de pasadas y el embudo miente.".to_string(),
+        String::new(),
+    ];
+    for e in eventos(ms) {
+        let t = tabla(e.nombre);
+        let mut sel = vec![
+            "  JSONExtractString(l, 'id')            AS event_id".to_string(),
+            "  JSONExtractString(l, 'type')          AS event_type".to_string(),
+            "  JSONExtractString(l, 'source')        AS source".to_string(),
+            "  parseDateTime64BestEffort(JSONExtractString(l, 'time'), 3) AS event_time".to_string(),
+            // el trace_id es el segundo campo del traceparent de W3C
+            "  splitByChar('-', JSONExtractString(l, 'traceparent'))[2] AS trace_id".to_string(),
+            "  JSONExtractString(l, 'correlationId') AS correlation_id".to_string(),
+            "  nullIf(JSONExtractString(l, 'causationId'), '') AS causation_id".to_string(),
+        ];
+        for (campo, tipo) in e.campos {
+            let sensible = es_pii(&e.pii, campo);
+            if sensible && e.modo_pii == "exclude" {
+                continue;
+            }
+            for (n, _) in columnas(&d, campo, tipo) {
+                // la ruta dentro del JSON: `data.<campo>`, y `money` se aplana
+                // en las dos que declara el esquema
+                let ruta = if n.ends_with("_currency") {
+                    format!("'data', '{campo}', 'currency'")
+                } else if tipo == "money" {
+                    format!("'data', '{campo}', 'amount'")
+                } else {
+                    format!("'data', '{campo}'")
+                };
+                if sensible {
+                    sel.push(format!(
+                        "  lower(hex(SHA256(concat({{salt:String}}, JSONExtractString(l, {ruta}))))) AS {n}_hash"
+                    ));
+                } else if tipo == "int" || (tipo == "money" && !n.ends_with("_currency")) {
+                    sel.push(format!("  JSONExtractInt(l, {ruta}) AS {n}"));
+                } else {
+                    sel.push(format!("  nullIf(JSONExtractString(l, {ruta}), '') AS {n}"));
+                }
+            }
+        }
+        o.push(format!(
+            "-- {} · dueno: {}\nINSERT INTO {base}.{t}\nSELECT\n{}\nFROM file('{log}', LineAsString, 'l String')\nWHERE JSONExtractString(l, 'type') = '{}'\n  -- lo ya cargado no se vuelve a cargar\n  AND JSONExtractString(l, 'id') NOT IN (SELECT event_id FROM {base}.{t});\n",
+            e.nombre,
+            e.duenio,
+            sel.join(",\n"),
+            e.nombre
+        ));
+    }
+    o.join("\n")
+}
+
 /// Nombre de tabla a partir del evento: `order.placed@v1` -> `order_placed_v1`.
 fn tabla(ev: &str) -> String {
     tfname(ev)
