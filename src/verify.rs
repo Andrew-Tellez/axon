@@ -897,12 +897,39 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                          fueron: no se puede terminar ni compensar"
                     )),
                     Some(t) => {
-                        for col in ["id", "paso", "estado"] {
-                            if !t.tiene(col) {
-                                errors.push(format!(
-                                    "{svc}.{nombre}: `{tabla}` sin columna `{col}`. El \
-                                     coordinador generado guarda ahi hasta donde llego"
-                                ));
+                        // `datos` y `actualizado` no son adorno: sin el envelope
+                        // que la arranco no se puede reconstruir la llamada al
+                        // retomar, y sin la marca de tiempo el barrido no puede
+                        // distinguir una saga colgada de una que va en camino.
+                        for (col, para) in [
+                            ("id", "el id del flujo"),
+                            ("paso", "hasta donde llego"),
+                            ("estado", "si el paso se intento o se completo"),
+                            ("datos", "el envelope que la arranco, para poder retomarla"),
+                            ("actualizado", "cuando avanzo por ultima vez, para el barrido"),
+                        ] {
+                            match t.col(col) {
+                                None => errors.push(format!(
+                                    "{svc}.{nombre}: `{tabla}` sin columna `{col}`: ahi va {para}"
+                                )),
+                                Some(c) => {
+                                    // Un tipo equivocado no da error: da una
+                                    // comparacion que compila y compara mal.
+                                    let esperado = match col {
+                                        "datos" => "json",
+                                        "actualizado" => "timestamp",
+                                        _ => continue,
+                                    };
+                                    if !c.ty.to_lowercase().contains(esperado) {
+                                        errors.push(format!(
+                                            "{svc}.{nombre}: `{tabla}.{col}` es `{}` y tiene que \
+                                             ser {esperado}. Comparar una fecha guardada como \
+                                             texto compila y ordena mal: el barrido se saltaria \
+                                             sagas colgadas sin decir nada",
+                                            c.ty
+                                        ));
+                                    }
+                                }
                             }
                         }
                     }

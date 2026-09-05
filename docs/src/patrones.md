@@ -15,7 +15,7 @@ Si no está en el código generado, no está.
 | **Idempotency-Key** | `idempotent = true` | Header obligatorio en el OpenAPI de todo método mutante. |
 | **RFC 7807** | siempre | Un solo formato de error en toda la plataforma, con el `traceId` dentro. |
 | **Expand / migrate / contract** | nombre del archivo | Un `DROP` fuera de un `.contract.sql` es un error de `verify`. |
-| **Saga** | `[saga.<nombre>]` | El coordinador completo: orden, diario, y compensación en orden inverso. Un paso intermedio sin `undo` es un error. Ver [abajo](#saga). |
+| **Saga** | `[saga.<nombre>]` | El coordinador completo: orden, diario, compensación en orden inverso, y el barrido que retoma lo que quedó colgado. Un paso intermedio sin `undo` es un error. Ver [abajo](#saga). |
 
 Los patrones GoF viven un nivel abajo, en el código que escribe el equipo — para eso
 está [`gof-patterns`](https://github.com/Andrew-Tellez/patterns), en seis lenguajes.
@@ -79,15 +79,88 @@ la deja silenciosamente inconsistente, que es el peor resultado posible.
 
 ```sql
 CREATE TABLE saga_checkout (
-  id      uuid PRIMARY KEY,   -- el id del flujo; el correlationId sirve
-  paso    int  NOT NULL,
-  estado  text NOT NULL
+  id           uuid        PRIMARY KEY,  -- el id del flujo; el correlationId sirve
+  paso         int         NOT NULL,
+  estado       text        NOT NULL,
+  datos        jsonb       NOT NULL,     -- el envelope que la arranco
+  actualizado  timestamptz NOT NULL      -- cuando avanzo por ultima vez
 );
 ```
 
-`verify` la exige y comprueba sus columnas contra las migraciones reales. Sin ella un
-reinicio a mitad de camino deja los pasos ya hechos aplicados y **sin registro de cuáles
-fueron**: no se puede terminar ni compensar.
+`verify` la exige y comprueba sus columnas —y los tipos de las dos últimas— contra las
+migraciones reales. Sin ella un reinicio a mitad de camino deja los pasos ya hechos
+aplicados y **sin registro de cuáles fueron**: no se puede terminar ni compensar.
+
+Las dos últimas columnas no son adorno:
+
+- **`datos`** guarda el envelope que la arrancó. Retomar sin él es imposible: las acciones
+  necesitan los datos de la llamada, y el proceso que los tenía en memoria es justo el que
+  se murió.
+- **`actualizado`** es lo que distingue una saga colgada de una que va en camino. Si se
+  guarda como `text` la comparación compila y ordena mal, y el barrido **se saltaría sagas
+  colgadas sin decir nada** — por eso `verify` comprueba el tipo, no sólo el nombre.
+
+## El barrido: quién vuelve a llamar
+
+El coordinador sabe retomar, pero por sí solo nadie lo llama: el proceso que tenía la saga
+en vuelo es el que se murió. Sin un barrido, una saga con un paso en `intentando` se queda
+ahí para siempre y el diario la registra sin que nadie lo lea.
+
+```ts
+const parar = arrancarBarridoCheckout(acciones, diario, (r) => {
+  log.info({ barrido: "checkout", ...r });
+  if (r.atascadas) log.error({ atascadas: r.atascadas });  // esto necesita una persona
+});
+```
+
+### El umbral no es una heurística
+
+El barrido sólo toca las sagas que llevan **más de su propio presupuesto** sin moverse.
+Ese número ya está declarado, y `verify` ya comprobó que cubre la suma de los pasos y sus
+compensaciones: una saga más vieja que eso no está en camino, está colgada. Barrer antes
+sería correr un **segundo coordinador sobre una saga viva**, compensando pasos que el
+primero todavía está haciendo.
+
+El intervalo sale del mismo número: nada se vuelve elegible antes, así que barrer más
+seguido es trabajo sin resultado.
+
+### `reclamar` reclama, no lista
+
+Dos instancias del servicio barren a la vez. Si el barrido *listara* las sagas colgadas,
+las dos tomarían la misma. En Postgres el reclamo y el filtro son **la misma sentencia**:
+
+```sql
+UPDATE saga_checkout SET actualizado = now()
+ WHERE estado IN ('intentando','hecho') AND actualizado < $1
+ RETURNING id, datos
+```
+
+Tocar `actualizado` *es* el reclamo: el otro barredor ya no la ve. Y si este proceso muere
+a mitad, la saga vuelve a ser elegible en la siguiente ventana **sin que nadie la
+desbloquee a mano** — un bloqueo que hay que limpiar a mano es un bloqueo que alguien va a
+olvidar.
+
+### Dos cosas que el barrido no hace
+
+**No reintenta una `atascada`.** Una compensación que ya falló necesita una persona;
+reintentarla en silencio esconde exactamente eso. Se cuenta y se deja.
+
+**No se calla cuando no alcanza.** Si se llena el límite de la pasada, `pendientes` sale
+`true`. Un tope silencioso se lee igual que «no había más», y esa es la diferencia entre un
+barrido que va al día y uno que lleva semanas atrasado.
+
+```ts
+export interface SagaBarrido {
+  reclamadas: number;
+  completadas: number;
+  compensadas: number;
+  atascadas: number;    // necesitan una persona
+  pendientes: boolean;  // quedaron para la proxima pasada
+}
+```
+
+Devolver el resultado es lo que lo hace medible: **un barrido que no reporta nada es
+indistinguible de uno que no corre.**
 
 ### Lo que `verify` refuta
 
@@ -135,19 +208,31 @@ sequenceDiagram
 Que la compensación se dibuje sola es la mitad del valor de declararla: en una revisión,
 un paso sin flecha de vuelta se ve.
 
-### Comprobado corriéndolo, no leyéndolo
+## Comprobado corriéndolo, no leyéndolo
 
-El coordinador generado se ejecuta con `node --test` y acciones de mentira, y se comprueba
-que el paso 1 quede **deshecho** cuando el paso 2 falla, que el orden sea el inverso, que
-un paso que falló también se compense, y que una compensación fallida lance
-`SagaAtascada` y cierre el diario en `atascada`. Cinco casos: es la única forma de saber
-que el camino de vuelta funciona, porque es el que no se corre nunca hasta el día que
-importa.
+El coordinador y el barrido generados se ejecutan con `node --test` y un diario en memoria
+que cumple el mismo contrato que el de Postgres. **Diez casos**, porque el camino de vuelta
+es justamente el que no se corre nunca hasta el día que importa:
 
-### Lo que falta
+| | |
+| --- | --- |
+| el camino feliz no compensa nada | |
+| si el paso 2 falla, el paso 1 se deshace | y el orden es el inverso |
+| si el paso 1 falla, no hay nada hecho que deshacer | se deshace igual: se intentó |
+| una compensación que falla deja la saga atascada, y se nota | `SagaAtascada`, diario en `atascada` |
+| el último paso no lleva compensación, y el resto sí | |
+| el barrido retoma una saga colgada y la compensa | un paso en duda no se reintenta |
+| el barrido no toca una saga que va en camino | sería un segundo coordinador |
+| `reclamar` reclama: el segundo barredor no ve la misma saga | |
+| una saga atascada se cuenta y no se reintenta | y no la vuelve a tomar |
+| si se llena el límite, el barrido lo dice | |
 
-El coordinador corre en el proceso que lo llama. Si ese proceso muere, la saga queda con
-un paso en `intentando` y **alguien tiene que volver a llamarla** para que retome: el
-código para retomar está generado y probado, pero no hay quién lo dispare. Un barrido
-periódico sobre el diario —las sagas abiertas más viejas que su presupuesto— es lo que
-sigue.
+El primer bug salió de ahí: el coordinador compensaba desde el último paso **exitoso** y
+dejaba el paso fallido aplicado. Un timeout no dice que del otro lado no pasó nada.
+
+## Lo que falta
+
+El barrido corre dentro del proceso del servicio. Eso alcanza mientras haya al menos una
+instancia viva —y con `min_instances` declarado, la hay— pero un servicio escalado a cero
+no barre nada hasta que alguien lo despierta. Emitir el barrido como job programado en cada
+target (CronJob, Cloud Scheduler, EventBridge) es lo que cerraría ese hueco.

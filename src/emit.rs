@@ -742,13 +742,33 @@ pub fn sagas_ts(m: &Manifest) -> String {
          *  `intentando` se escribe ANTES de la llamada y `hecho` DESPUES. Un paso\n \
          *  que quedo en `intentando` puede haber ocurrido o no, asi que al retomar\n \
          *  se COMPENSA, no se reintenta: por eso toda compensacion tiene que\n \
-         *  tolerar que no haya nada que deshacer. */\n\
+         *  tolerar que no haya nada que deshacer.\n \
+         *\n \
+         *  Guarda tambien el envelope que la arranco. Retomar sin el es imposible:\n \
+         *  las acciones necesitan los datos de la llamada, y el proceso que los\n \
+         *  tenia en memoria es justo el que se murio. */\n\
          export interface SagaDiario {\n  \
-           abrir(id: string, saga: string): Promise<void>;\n  \
+           abrir(id: string, saga: string, e: Envelope<unknown>): Promise<void>;\n  \
            marcar(id: string, paso: number, estado: \"intentando\" | \"hecho\" | \"deshecho\"): Promise<void>;\n  \
            cerrar(id: string, estado: SagaEstado): Promise<void>;\n  \
            /** Hasta donde llego, para retomar. `null` si es nueva. */\n  \
-           leer(id: string): Promise<{ paso: number; estado: string } | null>;\n\
+           leer(id: string): Promise<{ paso: number; estado: string } | null>;\n  \
+           /** Reclama hasta `limite` sagas abiertas que no avanzan desde `antesDe`,\n   \
+            *  y devuelve el envelope de cada una.\n   \
+            *\n   \
+            *  RECLAMA, no lista: dos instancias del servicio barren a la vez, y dos\n   \
+            *  coordinadores sobre la misma saga compensan los mismos pasos dos\n   \
+            *  veces. En Postgres el reclamo y el filtro son la misma sentencia:\n   \
+            *\n   \
+            *    UPDATE saga_<nombre> SET actualizado = now()\n   \
+            *     WHERE estado IN ('intentando','hecho') AND actualizado < $1\n   \
+            *     RETURNING id, datos\n   \
+            *    LIMIT $2\n   \
+            *\n   \
+            *  Tocar `actualizado` es el reclamo: el otro barredor ya no la ve. Y si\n   \
+            *  este proceso muere a mitad, vuelve a ser elegible en la siguiente\n   \
+            *  ventana sin que nadie la desbloquee a mano. */\n  \
+           reclamar(saga: string, antesDe: Date, limite: number): Promise<{ id: string; datos: Envelope<unknown> }[]>;\n\
          }\n\
          \n\
          export type SagaEstado = \"completada\" | \"compensada\" | \"atascada\";\n\
@@ -766,6 +786,19 @@ pub fn sagas_ts(m: &Manifest) -> String {
              this.paso = paso;\n    \
              this.causa = causa;\n  \
            }\n\
+         }\n\
+         \n\
+         /** Lo que hizo una pasada del barrido. Se devuelve para que se pueda\n \
+         *  medir: un barrido que no reporta nada es indistinguible de uno que no\n \
+         *  corre. */\n\
+         export interface SagaBarrido {\n  \
+           reclamadas: number;\n  \
+           completadas: number;\n  \
+           compensadas: number;\n  \
+           /** Necesitan una persona. El barrido NO las reintenta. */\n  \
+           atascadas: number;\n  \
+           /** Quedaron para la proxima pasada porque se alcanzo el limite. */\n  \
+           pendientes: boolean;\n\
          }\n"
             .to_string(),
     ];
@@ -868,7 +901,7 @@ pub fn sagas_ts(m: &Manifest) -> String {
                // que cubre la suma de los pasos y sus compensaciones\n  \
                const limite = Date.now() + {plazo};\n  \
                const previo = await diario.leer(id);\n  \
-               if (!previo) await diario.abrir(id, \"{nombre}\");\n  \
+               if (!previo) await diario.abrir(id, \"{nombre}\", e);\n  \
                // un paso a medio intentar no se reintenta: se deshace\n  \
                let hecho = previo ? (previo.estado === \"hecho\" ? previo.paso : previo.paso - 1) : 0;\n  \
                const dudoso = previo?.estado === \"intentando\" ? previo.paso : 0;\n  \
@@ -935,6 +968,89 @@ pub fn sagas_ts(m: &Manifest) -> String {
             total = sg.steps.len(),
             adelante = adelante.join("\n"),
             atras = atras.join("\n"),
+        ));
+
+        // El barrido: quien vuelve a llamar a la saga que quedo colgada.
+        //
+        // El coordinador ya sabe retomar, pero nadie lo llama: el proceso que
+        // la tenia en vuelo es el que se murio. Sin esto, una saga con un paso
+        // en `intentando` se queda ahi para siempre, y el diario la registra sin
+        // que nadie lo lea.
+        let ventana = sg.timeout_ms.unwrap_or(60_000);
+        o.push(format!(
+            "/** Una pasada del barrido: retoma las sagas `{nombre}` que no avanzan.\n \
+             *\n \
+             *  Solo toca las que llevan mas de su PRESUPUESTO sin moverse ({ventana}ms).\n \
+             *  Ese umbral no es una heuristica: `axon verify` ya comprobo que el\n \
+             *  presupuesto cubre la suma de los pasos y sus compensaciones, asi que\n \
+             *  una saga mas vieja que eso no esta en camino, esta colgada. Barrer\n \
+             *  antes seria correr un segundo coordinador sobre una saga viva.\n \
+             *\n \
+             *  Una que quedo `atascada` NO se reintenta: se cuenta y se deja. Una\n \
+             *  compensacion que ya fallo necesita una persona, y reintentarla en\n \
+             *  silencio esconde justo eso. */\n\
+             export async function barrer{p}(\n  \
+               acciones: {p}Acciones,\n  \
+               diario: SagaDiario,\n  \
+               limite = 50,\n\
+             ): Promise<SagaBarrido> {{\n  \
+               const antesDe = new Date(Date.now() - {ventana});\n  \
+               const colgadas = await diario.reclamar(\"{nombre}\", antesDe, limite);\n  \
+               const r: SagaBarrido = {{\n    \
+                 reclamadas: colgadas.length,\n    \
+                 completadas: 0,\n    \
+                 compensadas: 0,\n    \
+                 atascadas: 0,\n    \
+                 // si se lleno el limite hay mas esperando, y decirlo es la\n    \
+                 // diferencia entre un barrido que va al dia y uno que no alcanza\n    \
+                 pendientes: colgadas.length >= limite,\n  \
+               }};\n  \
+               for (const {{ id, datos }} of colgadas) {{\n    \
+                 try {{\n      \
+                   const salida = await correr{p}(id, acciones, diario, datos);\n      \
+                   if (salida.estado === \"completada\") r.completadas++;\n      \
+                   else r.compensadas++;\n    \
+                 }} catch (err) {{\n      \
+                   // una saga atascada no aborta la pasada: las demas siguen\n      \
+                   // colgadas y este es el unico que las va a mirar\n      \
+                   if (err instanceof SagaAtascada) r.atascadas++;\n      \
+                   else throw err;\n    \
+                 }}\n  \
+               }}\n  \
+               return r;\n\
+             }}\n\
+             \n\
+             /** Arranca el barrido periodico y devuelve como pararlo.\n \
+             *\n \
+             *  El intervalo sale del presupuesto declarado: nada se vuelve elegible\n \
+             *  antes, asi que barrer mas seguido es trabajo sin resultado. Es seguro\n \
+             *  con varias instancias porque `reclamar` reclama.\n \
+             *\n \
+             *  `alTerminar` recibe cada pasada. Conectalo a las metricas: un barrido\n \
+             *  que no reporta es indistinguible de uno que no corre, y este es el\n \
+             *  unico lugar desde donde se ve que una saga quedo atascada. */\n\
+             export function arrancarBarrido{p}(\n  \
+               acciones: {p}Acciones,\n  \
+               diario: SagaDiario,\n  \
+               alTerminar: (r: SagaBarrido) => void,\n  \
+               intervaloMs = {ventana},\n\
+             ): () => void {{\n  \
+               let corriendo = false;\n  \
+               const t = setInterval(async () => {{\n    \
+                 // sin esto, una pasada lenta se solapa con la siguiente en el\n    \
+                 // mismo proceso y las dos reclaman\n    \
+                 if (corriendo) return;\n    \
+                 corriendo = true;\n    \
+                 try {{\n      \
+                   alTerminar(await barrer{p}(acciones, diario));\n    \
+                 }} finally {{\n      \
+                   corriendo = false;\n    \
+                 }}\n  \
+               }}, intervaloMs);\n  \
+               // que un barrido de fondo no mantenga el proceso vivo al apagarlo\n  \
+               t.unref?.();\n  \
+               return () => clearInterval(t);\n\
+             }}\n"
         ));
     }
     o.join("\n")

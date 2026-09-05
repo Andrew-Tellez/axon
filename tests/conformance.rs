@@ -2676,7 +2676,8 @@ fn la_saga_generada_compensa_al_reves() {
     std::fs::write(
         dir.join("sql/001_init.expand.sql"),
         "CREATE TABLE saga_checkout (\n  id uuid PRIMARY KEY,\n  paso int NOT NULL,\n  \
-         estado text NOT NULL\n);\n",
+         estado text NOT NULL,\n  datos jsonb NOT NULL,\n  \
+         actualizado timestamptz NOT NULL\n);\n",
     )
     .unwrap();
     std::fs::write(
@@ -2778,20 +2779,45 @@ idempotent = true
         destino.join("axon.saga.test.ts"),
         r#"import { test } from "node:test";
 import assert from "node:assert/strict";
-import { correrCheckout, newEnvelope, checkoutPasos, SagaAtascada,
-         type CheckoutAcciones, type SagaDiario, type SagaEstado } from "./axon.saga.contratos.ts";
+import { correrCheckout, barrerCheckout, newEnvelope, checkoutPasos, SagaAtascada,
+         type CheckoutAcciones, type Envelope, type SagaDiario,
+         type SagaEstado } from "./axon.saga.contratos.ts";
 
+/** Un diario en memoria, con el mismo contrato que el de Postgres. */
 class Diario implements SagaDiario {
   marcas: string[] = [];
   final: SagaEstado | null = null;
-  #estado: { paso: number; estado: string } | null = null;
-  async abrir(id: string, saga: string) { this.marcas.push(`abrir ${saga}`); }
+  filas = new Map<string, { paso: number; estado: string; datos: any; actualizado: number }>();
+  async abrir(id: string, saga: string, e: Envelope<unknown>) {
+    this.marcas.push(`abrir ${saga}`);
+    this.filas.set(id, { paso: 0, estado: "abierta", datos: e, actualizado: Date.now() });
+  }
   async marcar(id: string, paso: number, estado: "intentando" | "hecho" | "deshecho") {
     this.marcas.push(`${paso}:${estado}`);
-    this.#estado = { paso, estado };
+    const f = this.filas.get(id)!;
+    this.filas.set(id, { ...f, paso, estado, actualizado: Date.now() });
   }
-  async cerrar(id: string, estado: SagaEstado) { this.final = estado; }
-  async leer(id: string) { return this.#estado; }
+  async cerrar(id: string, estado: SagaEstado) {
+    this.final = estado;
+    const f = this.filas.get(id);
+    if (f) this.filas.set(id, { ...f, estado, actualizado: Date.now() });
+  }
+  async leer(id: string) {
+    const f = this.filas.get(id);
+    return f && f.estado !== "abierta" ? { paso: f.paso, estado: f.estado } : null;
+  }
+  /** Reclama tocando `actualizado`, igual que el UPDATE ... RETURNING. */
+  async reclamar(saga: string, antesDe: Date, limite: number) {
+    const out: { id: string; datos: Envelope<unknown> }[] = [];
+    for (const [id, f] of this.filas) {
+      if (out.length >= limite) break;
+      if (!["intentando", "hecho"].includes(f.estado)) continue;
+      if (f.actualizado >= antesDe.getTime()) continue;
+      this.filas.set(id, { ...f, actualizado: Date.now() });
+      out.push({ id, datos: f.datos });
+    }
+    return out;
+  }
 }
 
 /** Acciones de mentira: registran el orden y fallan cuando se les dice. */
@@ -2843,6 +2869,72 @@ test("una compensacion que falla deja la saga atascada, y se nota", async () => 
   assert.equal(d.final, "atascada");
 });
 
+test("el barrido retoma una saga colgada y la compensa", async () => {
+  const d = new Diario();
+  const e = newEnvelope("x@v1", "prueba", { orderId: "o-1" });
+  // una saga que quedo con el paso 1 en `intentando`: el proceso que la tenia
+  // en vuelo se murio justo despues de llamar y antes de anotar el resultado
+  d.filas.set("colgada", { paso: 1, estado: "intentando", datos: e, actualizado: 0 });
+  const { a, hechas } = acciones([]);
+  const r = await barrerCheckout(a, d);
+  assert.equal(r.reclamadas, 1);
+  assert.equal(r.compensadas, 1);
+  assert.equal(r.completadas, 0);
+  assert.equal(r.pendientes, false);
+  // un paso en duda no se reintenta: se deshace
+  assert.deepEqual(hechas, ["reembolsar"]);
+});
+
+test("el barrido no toca una saga que va en camino", async () => {
+  const d = new Diario();
+  const e = newEnvelope("x@v1", "prueba", {});
+  d.filas.set("viva", { paso: 1, estado: "intentando", datos: e, actualizado: Date.now() });
+  const { a, hechas } = acciones([]);
+  const r = await barrerCheckout(a, d);
+  // barrer una saga viva seria un segundo coordinador sobre los mismos pasos
+  assert.equal(r.reclamadas, 0);
+  assert.deepEqual(hechas, []);
+});
+
+test("reclamar reclama: el segundo barredor no ve la misma saga", async () => {
+  const d = new Diario();
+  const e = newEnvelope("x@v1", "prueba", {});
+  d.filas.set("colgada", { paso: 1, estado: "hecho", datos: e, actualizado: 0 });
+  const antes = new Date(Date.now() - 20000);
+  const primero = await d.reclamar("checkout", antes, 50);
+  const segundo = await d.reclamar("checkout", antes, 50);
+  assert.equal(primero.length, 1);
+  assert.equal(segundo.length, 0);
+});
+
+test("una saga atascada se cuenta y no se reintenta", async () => {
+  const d = new Diario();
+  const e = newEnvelope("x@v1", "prueba", {});
+  d.filas.set("colgada", { paso: 1, estado: "intentando", datos: e, actualizado: 0 });
+  const { a, hechas } = acciones(["reembolsar"]);
+  const r = await barrerCheckout(a, d);
+  // la pasada no aborta: cuenta la atascada y sigue
+  assert.equal(r.atascadas, 1);
+  assert.equal(d.final, "atascada");
+  assert.deepEqual(hechas, []);
+  // y ya cerrada como atascada, el barrido siguiente no la vuelve a tomar
+  const otra = await barrerCheckout(a, d);
+  assert.equal(otra.reclamadas, 0);
+});
+
+test("si se llena el limite, el barrido lo dice", async () => {
+  const d = new Diario();
+  const e = newEnvelope("x@v1", "prueba", {});
+  for (const id of ["a", "b", "c"]) {
+    d.filas.set(id, { paso: 1, estado: "intentando", datos: e, actualizado: 0 });
+  }
+  const { a } = acciones([]);
+  const r = await barrerCheckout(a, d, 2);
+  assert.equal(r.reclamadas, 2);
+  // un tope silencioso se lee como "no habia mas"
+  assert.equal(r.pendientes, true);
+});
+
 test("el ultimo paso no lleva compensacion, y el resto si", () => {
   assert.equal(checkoutPasos.length, 2);
   assert.equal(checkoutPasos[0].deshacer, "banco.reembolsar");
@@ -2865,7 +2957,7 @@ test("el ultimo paso no lleva compensacion, y el resto si", () => {
         out.status.success(),
         "el coordinador generado no compensa como dice:\n{salida}"
     );
-    assert!(salida.contains("pass 5"), "{salida}");
+    assert!(salida.contains("pass 10"), "{salida}");
 }
 
 /// Las reglas de la saga: cada una bloquea una forma distinta de quedarse a
@@ -2948,7 +3040,8 @@ timeout_ms = 5000
         err
     };
     const TABLA: &str = "CREATE TABLE saga_checkout (\n  id uuid PRIMARY KEY,\n  \
-                         paso int NOT NULL,\n  estado text NOT NULL\n);\n";
+                         paso int NOT NULL,\n  estado text NOT NULL,\n  \
+                         datos jsonb NOT NULL,\n  actualizado timestamptz NOT NULL\n);\n";
 
     // un paso intermedio sin compensacion
     let err = correr(
@@ -3004,6 +3097,39 @@ steps = [
         "CREATE TABLE otra (id uuid PRIMARY KEY);\n",
     );
     assert!(err.contains("falta la tabla `saga_checkout`"), "{err}");
+
+    // sin `datos` no se puede retomar: las acciones necesitan la llamada, y el
+    // proceso que la tenia en memoria es el que se murio
+    let err = correr(
+        r#"[saga.checkout]
+on = "checkout"
+timeout_ms = 20000
+steps = [
+  { do = "banco.cobrar", undo = "banco.reembolsar" },
+  { do = "banco.pagarProveedor" },
+]"#,
+        "CREATE TABLE saga_checkout (\n  id uuid PRIMARY KEY,\n  paso int NOT NULL,\n  \
+         estado text NOT NULL,\n  actualizado timestamptz NOT NULL\n);\n",
+    );
+    assert!(err.contains("sin columna `datos`"), "{err}");
+    assert!(err.contains("para poder retomarla"), "{err}");
+
+    // y una fecha guardada como texto: la comparacion del barrido compila y
+    // ordena mal, asi que se saltaria sagas colgadas sin decir nada
+    let err = correr(
+        r#"[saga.checkout]
+on = "checkout"
+timeout_ms = 20000
+steps = [
+  { do = "banco.cobrar", undo = "banco.reembolsar" },
+  { do = "banco.pagarProveedor" },
+]"#,
+        "CREATE TABLE saga_checkout (\n  id uuid PRIMARY KEY,\n  paso int NOT NULL,\n  \
+         estado text NOT NULL,\n  datos jsonb NOT NULL,\n  \
+         actualizado text NOT NULL\n);\n",
+    );
+    assert!(err.contains("tiene que ser timestamp"), "{err}");
+    assert!(err.contains("se saltaria sagas colgadas"), "{err}");
 
     // un `undo` que no existe
     let err = correr(
