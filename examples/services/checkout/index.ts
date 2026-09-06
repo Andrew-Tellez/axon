@@ -1,7 +1,7 @@
 // El coordinador de la saga. Lo unico escrito a mano son las ENTRADAS de cada
 // paso —datos de negocio— y el diario. El orden, la compensacion en orden
 // inverso y el barrido los genero axon.
-import { CheckoutService, Clientes, rutasHttp, rutaBarridoCompra, correrCompra,
+import { CheckoutService, Clients, httpRoutes, rutaBarridoCompra, correrCompra,
          barrerCompra, arrancarBarridoCompra, compraFold, compraCargar,
          compraFotografiar, conversionAplicar, limpiarCompra, newEnvelope,
          rutaLimpiezaCompra, reconstruirConversion, rutaReconstruirConversion,
@@ -10,27 +10,27 @@ import { CheckoutService, Clientes, rutasHttp, rutaBarridoCompra, correrCompra,
          type CompraReglas, type ConversionProyeccion, type Checkpoint,
          type Envelope, type FlujoConFotos, type Outbox, type SagaDiario, type SagaEstado,
          type Sombra,
-         type Transporte } from "./contracts.ts";
+         type Transport } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
 import { bus, conectar, esperarDb, outbox, relay, servir } from "../runtime.ts";
 import type pg from "pg";
 
-/** HTTP contra los servicios declarados. El framework no elige transporte: el
+/** HTTP contra los servicios declarados. El framework no elige transport: el
  *  cliente generado pone el timeout, los reintentos y el circuito encima. */
-function transporte(): Transporte {
+function transport(): Transport {
   return {
-    async invocar(destino, metodo, cuerpo, cabeceras) {
-      const rutas: Record<string, string> = {
+    async call(target, method, body, hdrs) {
+      const routes: Record<string, string> = {
         capturePayment: "/v1/payments",
-        refundPayment: `/v1/payments/${(cuerpo as any).paymentId}/refunds`,
+        refundPayment: `/v1/payments/${(body as any).paymentId}/refunds`,
         payoutMerchant: "/v1/payouts",
       };
-      const r = await fetch(`http://${destino}:8080${rutas[metodo]}`, {
+      const r = await fetch(`http://${target}:8080${routes[method]}`, {
         method: "POST",
-        headers: { "content-type": "application/json", ...cabeceras },
-        body: JSON.stringify(cuerpo),
+        headers: { "content-type": "application/json", ...hdrs },
+        body: JSON.stringify(body),
       });
-      if (!r.ok) throw new Error(`${destino}.${metodo}: ${r.status} ${await r.text()}`);
+      if (!r.ok) throw new Error(`${target}.${method}: ${r.status} ${await r.text()}`);
       return r.json();
     },
   };
@@ -371,7 +371,7 @@ class Conversion implements ConversionProyeccion, Checkpoint, Sombra {
  *  Todo sale del envelope y de `previas`, nunca de una variable de este
  *  proceso: el barrido corre estas mismas acciones sobre una saga que arranco
  *  en OTRO proceso, y ahi una closure no existe. */
-function acciones(clientes: Clientes): CompraAcciones {
+function acciones(clientes: Clients): CompraAcciones {
   const entrada = (e: Envelope<unknown>) => e.data as CheckoutIn;
   return {
     async paso1CapturePayment(e) {
@@ -406,7 +406,7 @@ class Checkout extends CheckoutService {
     this.#flujo = new Flujo(db, o);
     this.#vista = new Conversion(db);
     this.#sombra = new Conversion(db, true);
-    this.#acciones = acciones(new Clientes(transporte()));
+    this.#acciones = acciones(new Clients(transport()));
   }
 
   get flujo() {
@@ -506,6 +506,6 @@ async function main() {
         aplicados: await reconstruirConversion(svc.sombra, svc.flujo),
       }),
     },
-    rutasHttp,
+    httpRoutes,
   );
 }

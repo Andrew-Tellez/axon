@@ -248,116 +248,116 @@ export abstract class OrdersService {
 }
 
 
-/** Rutas HTTP que declara el manifiesto. El arranque debe fallar si
- *  alguna no tiene handler: un 404 en produccion no avisa a nadie. */
-export const rutasHttp = ["POST /v1/tenants/{tenantId}/orders", "GET /v1/tenants/{tenantId}/orders/{orderId}"] as const;
+/** HTTP routes the manifest declares. Startup must fail if any of them
+ *  has no handler: a 404 in production tells nobody. */
+export const httpRoutes = ["POST /v1/tenants/{tenantId}/orders", "GET /v1/tenants/{tenantId}/orders/{orderId}"] as const;
 
 
-/** Lado del teorema CAP declarado en el manifiesto: eventual/degrade.
- *  De ahi sale el nivel de aislamiento: pagar dos veces sale mas caro
- *  que reintentar, y servir un dato viejo cuesta menos que no servir. */
-export const nivelAislamiento = "READ COMMITTED" as const;
-/** Presupuesto de obsolescencia: un dato mas viejo que esto no se sirve. */
-export const obsolescenciaMaximaMs = 3000;
+/** The CAP side declared in the manifest: eventual/degrade.
+ *  The isolation level follows from it: paying twice costs more than
+ *  retrying, and serving stale data costs less than serving nothing. */
+export const isolationLevel = "READ COMMITTED" as const;
+/** Staleness budget: data older than this does not get served. */
+export const maxStalenessMs = 3000;
 
 
 
-/** Todo lo que hace falta para alcanzar a otro servicio. Lo implementa quien
- *  despliega: HTTP, gRPC, un SDK. El framework no elige transporte. */
-export interface Transporte {
-  invocar(destino: string, metodo: string, cuerpo: unknown, cabeceras: Record<string, string>): Promise<unknown>;
+/** Everything needed to reach another service. Implemented by whoever
+ *  deploys: HTTP, gRPC, an SDK. The framework does not pick a transport. */
+export interface Transport {
+  call(target: string, method: string, body: unknown, headers: Record<string, string>): Promise<unknown>;
 }
 
-export class ErrorAgotado extends Error {}
-export class ErrorCircuitoAbierto extends Error {}
+export class TimedOut extends Error {}
+export class CircuitOpen extends Error {}
 
-/** Politica declarada en el manifiesto. El generador la emite; nadie la teclea. */
-export interface Politica {
+/** The policy declared in the manifest. The generator emits it; nobody types it. */
+export interface Policy {
   timeoutMs: number;
-  reintentos: number;
+  retries: number;
   breaker: boolean;
 }
 
-/** Circuito por destino: cuando el otro lado se cae, deja de golpearlo.
- *  Tras el enfriamiento pasa a medio abierto y prueba una sola vez. */
-class Circuito {
-  #fallos = 0;
-  #abiertoHasta = 0;
-  // campos explicitos: las parameter properties son TS puro y no sobreviven
-  // al type-stripping de Node
-  readonly umbral: number;
-  readonly enfriamientoMs: number;
-  constructor(umbral = 5, enfriamientoMs = 10_000) {
-    this.umbral = umbral;
-    this.enfriamientoMs = enfriamientoMs;
+/** One breaker per target: when the other side goes down, stop hitting it.
+ *  After the cooldown it goes half-open and tries exactly once. */
+class Breaker {
+  #failures = 0;
+  #openUntil = 0;
+  // explicit fields: parameter properties are TypeScript-only and do not
+  // survive Node's type stripping
+  readonly threshold: number;
+  readonly cooldownMs: number;
+  constructor(threshold = 5, cooldownMs = 10_000) {
+    this.threshold = threshold;
+    this.cooldownMs = cooldownMs;
   }
 
-  permite(ahora: number) {
-    return this.#abiertoHasta === 0 || ahora >= this.#abiertoHasta;
+  allows(now: number) {
+    return this.#openUntil === 0 || now >= this.#openUntil;
   }
-  exito() {
-    this.#fallos = 0;
-    this.#abiertoHasta = 0;
+  succeeded() {
+    this.#failures = 0;
+    this.#openUntil = 0;
   }
-  fallo(ahora: number) {
-    this.#fallos++;
-    if (this.#fallos >= this.umbral) this.#abiertoHasta = ahora + this.enfriamientoMs;
+  failed(now: number) {
+    this.#failures++;
+    if (this.#failures >= this.threshold) this.#openUntil = now + this.cooldownMs;
   }
 }
 
-const circuitos = new Map<string, Circuito>();
+const breakers = new Map<string, Breaker>();
 
-const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function conTiempo<T>(p: Promise<T>, ms: number, quien: string): Promise<T> {
+async function withTimeout<T>(p: Promise<T>, ms: number, who: string): Promise<T> {
   let t: ReturnType<typeof setTimeout>;
-  const limite = new Promise<never>((_, rechaza) => {
-    t = setTimeout(() => rechaza(new ErrorAgotado(`${quien}: agotado tras ${ms}ms`)), ms);
+  const limit = new Promise<never>((_, reject) => {
+    t = setTimeout(() => reject(new TimedOut(`${who}: timed out after ${ms}ms`)), ms);
   });
   try {
-    return await Promise.race([p, limite]);
+    return await Promise.race([p, limit]);
   } finally {
     clearTimeout(t!);
   }
 }
 
-/** Aplica la politica declarada. Los reintentos solo los emite el generador
- *  para metodos idempotentes: `axon verify` bloquea el resto. */
-export async function conPolitica<T>(quien: string, pol: Politica, hacer: () => Promise<T>): Promise<T> {
-  const circuito = pol.breaker
-    ? (circuitos.get(quien) ?? circuitos.set(quien, new Circuito()).get(quien)!)
+/** Applies the declared policy. Retries are only emitted for idempotent
+ *  methods: `axon verify` blocks the rest. */
+export async function withPolicy<T>(who: string, pol: Policy, attempt: () => Promise<T>): Promise<T> {
+  const breaker = pol.breaker
+    ? (breakers.get(who) ?? breakers.set(who, new Breaker()).get(who)!)
     : null;
-  if (circuito && !circuito.permite(Date.now())) {
-    throw new ErrorCircuitoAbierto(`${quien}: circuito abierto`);
+  if (breaker && !breaker.allows(Date.now())) {
+    throw new CircuitOpen(`${who}: circuit open`);
   }
-  let ultimo: unknown;
-  for (let intento = 0; intento <= pol.reintentos; intento++) {
+  let last: unknown;
+  for (let n = 0; n <= pol.retries; n++) {
     try {
-      const r = await conTiempo(hacer(), pol.timeoutMs, quien);
-      circuito?.exito();
+      const r = await withTimeout(attempt(), pol.timeoutMs, who);
+      breaker?.succeeded();
       return r;
     } catch (err) {
-      ultimo = err;
-      circuito?.fallo(Date.now());
-      if (intento === pol.reintentos) break;
-      // exponencial con jitter completo: sin jitter, todos los clientes
-      // reintentan a la vez y el otro lado nunca se levanta
-      const techo = Math.min(1000 * 2 ** intento, 10_000);
-      await dormir(Math.random() * techo);
+      last = err;
+      breaker?.failed(Date.now());
+      if (n === pol.retries) break;
+      // exponential with full jitter: without jitter every client retries at
+      // the same instant and the other side never comes back up
+      const ceiling = Math.min(1000 * 2 ** n, 10_000);
+      await sleep(Math.random() * ceiling);
     }
   }
-  throw ultimo;
+  throw last;
 }
 
-/** Cabeceras de una llamada saliente: la traza sigue siendo la misma. */
-export function cabeceras(e: Envelope<unknown>, idempotente: boolean): Record<string, string> {
+/** Headers of an outgoing call: the trace stays the same one. */
+export function headers(e: Envelope<unknown>, idempotent: boolean): Record<string, string> {
   const h: Record<string, string> = {
     traceparent: e.traceparent,
     "x-correlation-id": e.correlationId,
     "x-causation-id": e.id,
   };
-  // reintentar sin llave duplicaria el efecto en el otro lado
-  if (idempotente) h["idempotency-key"] = e.id;
+  // retrying without a key would duplicate the effect on the other side
+  if (idempotent) h["idempotency-key"] = e.id;
   return h;
 }
 
@@ -371,45 +371,45 @@ export interface PaymentsCapturePaymentOut {
 }
 
 
-/** Clientes de las dependencias declaradas en el manifiesto. */
-export class Clientes {
-  protected readonly transporte: Transporte;
-  constructor(transporte: Transporte) {
-    this.transporte = transporte;
+/** Clients for the dependencies declared in the manifest. */
+export class Clients {
+  protected readonly transport: Transport;
+  constructor(transport: Transport) {
+    this.transport = transport;
   }
-  /** payments.capturePayment · timeout 3000ms · 2 reintentos · breaker true */
-  async paymentsCapturePayment(input: PaymentsCapturePaymentIn, e: Envelope<unknown>, respaldo: () => Promise<PaymentsCapturePaymentOut>): Promise<PaymentsCapturePaymentOut> {
-    const hacer = () => conPolitica("payments.capturePayment", { timeoutMs: 3000, reintentos: 2, breaker: true }, async () =>
-      (await this.transporte.invocar("payments", "capturePayment", input, cabeceras(e, true))) as PaymentsCapturePaymentOut);
+  /** payments.capturePayment · timeout 3000ms · 2 retries · breaker true */
+  async paymentsCapturePayment(input: PaymentsCapturePaymentIn, e: Envelope<unknown>, fallback: () => Promise<PaymentsCapturePaymentOut>): Promise<PaymentsCapturePaymentOut> {
+    const attempt = () => withPolicy("payments.capturePayment", { timeoutMs: 3000, retries: 2, breaker: true }, async () =>
+      (await this.transport.call("payments", "capturePayment", input, headers(e, true))) as PaymentsCapturePaymentOut);
     try {
-      return await hacer();
+      return await attempt();
     } catch {
-      // declarado `degrade`: se sirve algo viejo antes que nada
-      return respaldo();
+      // declared `degrade`: serving something stale beats serving nothing
+      return fallback();
     }
   }
 }
 
 
-/** Campos declarados PII en el manifiesto. */
-export const camposPII = ["customer_email"] as const;
+/** Fields declared as PII in the manifest. */
+export const piiFields = ["customer_email"] as const;
 
-/** Reemplaza todo campo PII por "[redactado]", a cualquier profundidad.
- *  Pasa por aqui cualquier objeto antes de mandarlo a un log.
+/** Replaces every PII field with "[redacted]", at any depth.
+ *  Run anything through here before it reaches a log.
  *
- *  La comparacion normaliza: `customer_email` declarado en el manifiesto
- *  cubre `customerEmail` en el contrato y `customer-email` en una
- *  cabecera. El mismo concepto se declara una vez. */
-const normalizarPII = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-const pii = new Set((camposPII as readonly string[]).map(normalizarPII));
+ *  The comparison normalizes: `customer_email` declared in the manifest
+ *  covers `customerEmail` in a contract and `customer-email` in a header.
+ *  The same concept gets declared once. */
+const normalizePii = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+const pii = new Set((piiFields as readonly string[]).map(normalizePii));
 
-export function redactar<T>(valor: T): T {
-  if (Array.isArray(valor)) return valor.map(redactar) as T;
-  if (valor === null || typeof valor !== "object") return valor;
-  const salida: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(valor)) {
-    salida[k] = pii.has(normalizarPII(k)) ? "[redactado]" : redactar(v);
+export function redact<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(redact) as T;
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) {
+    out[k] = pii.has(normalizePii(k)) ? "[redacted]" : redact(v);
   }
-  return salida as T;
+  return out as T;
 }
 

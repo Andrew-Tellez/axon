@@ -488,7 +488,7 @@ fn el_hcl_generado_valida() {
     //
     // Las variables propias del barrido las declara axon, asi que aca NO van:
     // declararlas de los dos lados es un `Duplicate variable declaration`, y el
-    // respaldo a `fmt` no lo ve.
+    // fallback a `fmt` no lo ve.
     let saga = fixture_saga("tf").to_string_lossy().to_string();
     let mut casos: Vec<(String, &str, String, String)> = casos
         .iter()
@@ -1114,18 +1114,18 @@ public = true
     // A09: la lista de PII y su redactor llegan al codigo
     let (ts, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
     assert!(
-        ts.contains("export const camposPII = [\"customer_email\"]"),
+        ts.contains("export const piiFields = [\"customer_email\"]"),
         "{ts}"
     );
-    assert!(ts.contains("export function redactar"), "{ts}");
+    assert!(ts.contains("export function redact"), "{ts}");
     // El mismo concepto se declara UNA vez: `customer_email` en el manifiesto
     // cubre `customerEmail` en el contrato y `customer-email` en una cabecera.
     // Antes hacia falta declararlo dos veces, que es absurdo.
     assert!(
-        ts.contains("const normalizarPII"),
+        ts.contains("const normalizePii"),
         "el redactor compara claves exactas:\n{ts}"
     );
-    assert!(ts.contains("pii.has(normalizarPII(k))"), "{ts}");
+    assert!(ts.contains("pii.has(normalizePii(k))"), "{ts}");
     // y la normalizacion llega a las tres capas desde una sola declaracion
     let (bodega, _, _) = axon(&["analytics", "examples"]);
     assert!(
@@ -1495,33 +1495,33 @@ fn la_politica_declarada_se_ejecuta() {
     // los numeros del manifiesto llegan literales al codigo
     assert!(
         ts.contains(
-            r#"conPolitica("orders.getOrder", { timeoutMs: 1000, reintentos: 3, breaker: true }"#
+            r#"withPolicy("orders.getOrder", { timeoutMs: 1000, retries: 3, breaker: true }"#
         ),
         "la politica no salio del manifiesto:\n{ts}"
     );
     // reintentar sin llave de idempotencia duplica el efecto del otro lado
-    assert!(ts.contains(r#"cabeceras(e, true)"#));
+    assert!(ts.contains(r#"headers(e, true)"#));
     // CAP: el lado declarado decide el aislamiento
     assert!(
-        ts.contains(r#"export const nivelAislamiento = "SERIALIZABLE""#),
+        ts.contains(r#"export const isolationLevel = "SERIALIZABLE""#),
         "{ts}"
     );
     let (o, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
     assert!(
-        o.contains(r#"export const nivelAislamiento = "READ COMMITTED""#),
+        o.contains(r#"export const isolationLevel = "READ COMMITTED""#),
         "{o}"
     );
     assert!(
-        o.contains("export const obsolescenciaMaximaMs = 3000"),
+        o.contains("export const maxStalenessMs = 3000"),
         "{o}"
     );
     // `degrade` obliga a pasar el camino degradado; `reject` no lo admite
     assert!(
-        o.contains("respaldo: () => Promise<PaymentsCapturePaymentOut>"),
-        "declarar degrade no obligo a un respaldo:\n{o}"
+        o.contains("fallback: () => Promise<PaymentsCapturePaymentOut>"),
+        "declarar degrade no obligo a un fallback:\n{o}"
     );
     assert!(
-        !ts.contains("respaldo: () =>"),
+        !ts.contains("fallback: () =>"),
         "un servicio `reject` no degrada"
     );
 
@@ -1533,19 +1533,19 @@ fn la_politica_declarada_se_ejecuta() {
         r#"
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { conPolitica, cabeceras, newEnvelope, ErrorAgotado, ErrorCircuitoAbierto } from "./contracts.ts";
+import { withPolicy, headers, newEnvelope, TimedOut, CircuitOpen } from "./contracts.ts";
 
-test("el timeout corta", async () => {
+test("the timeout cuts the call", async () => {
   await assert.rejects(
-    () => conPolitica("x.lento", { timeoutMs: 50, reintentos: 0, breaker: false },
+    () => withPolicy("x.slow", { timeoutMs: 50, retries: 0, breaker: false },
       () => new Promise((r) => setTimeout(r, 5000))),
-    ErrorAgotado,
+    TimedOut,
   );
 });
 
-test("reintenta hasta que sale bien", async () => {
+test("it retries until it succeeds", async () => {
   let n = 0;
-  const r = await conPolitica("x.flaky", { timeoutMs: 500, reintentos: 3, breaker: false }, async () => {
+  const r = await withPolicy("x.flaky", { timeoutMs: 500, retries: 3, breaker: false }, async () => {
     if (++n < 3) throw new Error("boom");
     return "ok";
   });
@@ -1553,24 +1553,24 @@ test("reintenta hasta que sale bien", async () => {
   assert.equal(n, 3);
 });
 
-test("el circuito se abre y deja de golpear", async () => {
-  let llamadas = 0;
-  const caer = () => conPolitica("x.caido", { timeoutMs: 100, reintentos: 0, breaker: true },
-    async () => { llamadas++; throw new Error("caido"); });
-  for (let i = 0; i < 5; i++) await assert.rejects(caer);
-  assert.equal(llamadas, 5);
-  await assert.rejects(caer, ErrorCircuitoAbierto);
-  assert.equal(llamadas, 5, "siguio golpeando con el circuito abierto");
+test("the breaker opens and stops hitting", async () => {
+  let calls = 0;
+  const down = () => withPolicy("x.down", { timeoutMs: 100, retries: 0, breaker: true },
+    async () => { calls++; throw new Error("down"); });
+  for (let i = 0; i < 5; i++) await assert.rejects(down);
+  assert.equal(calls, 5);
+  await assert.rejects(down, CircuitOpen);
+  assert.equal(calls, 5, "it kept hitting with the breaker open");
 });
 
-test("la traza y la llave de idempotencia viajan en la llamada", () => {
-  const e = newEnvelope("x@v1", "prueba", {});
-  const h = cabeceras(e, true);
+test("the trace and the idempotency key travel with the call", () => {
+  const e = newEnvelope("x@v1", "test", {});
+  const h = headers(e, true);
   assert.equal(h.traceparent, e.traceparent);
   assert.equal(h["x-correlation-id"], e.correlationId);
   assert.equal(h["x-causation-id"], e.id);
   assert.equal(h["idempotency-key"], e.id);
-  assert.equal(cabeceras(e, false)["idempotency-key"], undefined);
+  assert.equal(headers(e, false)["idempotency-key"], undefined);
 });
 "#,
     )
@@ -1918,7 +1918,7 @@ fn el_escalado_de_la_base_se_verifica() {
     assert!(!ok);
     assert!(msg.contains("lee de 2 replicas y declara"), "{msg}");
 
-    // alta disponibilidad no es respaldo: el standby replica el DROP TABLE
+    // alta disponibilidad no es fallback: el standby replica el DROP TABLE
     let (msg, ok) = escribir(
         "service = \"s\"\nowner = \"x\"\ntier = \"0\"\n[infra]\nstate = \"postgres\"\nha = true\n",
     );
@@ -2051,7 +2051,7 @@ fn las_rutas_declaradas_llegan_al_codigo() {
     let (ts, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
     assert!(
         ts.contains(
-            r#"export const rutasHttp = ["POST /v1/tenants/{tenantId}/orders", "GET /v1/tenants/{tenantId}/orders/{orderId}"]"#
+            r#"export const httpRoutes = ["POST /v1/tenants/{tenantId}/orders", "GET /v1/tenants/{tenantId}/orders/{orderId}"]"#
         ),
         "{ts}"
     );

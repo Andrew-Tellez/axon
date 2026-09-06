@@ -228,28 +228,28 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     if !m.view.is_empty() {
         out.push(vistas_ts(m));
     }
-    let rutas: Vec<String> = m
+    let routes: Vec<String> = m
         .methods
         .values()
         .filter_map(|me| me.http.clone())
         .map(|h| format!("\"{h}\""))
         .collect();
-    if !rutas.is_empty() {
-        // Una ruta declarada que nadie sirve devuelve 404 en produccion y no
-        // aparece en ningun test. El runtime puede negarse a arrancar, pero
-        // solo si sabe cuales tenia que haber.
+    if !routes.is_empty() {
+        // A declared route nobody serves returns 404 in production and shows up
+        // in no test. Startup can refuse — but only if it knows which routes
+        // there were supposed to be.
         out.push(format!(
-            "\n/** Rutas HTTP que declara el manifiesto. El arranque debe fallar si\n \
-             *  alguna no tiene handler: un 404 en produccion no avisa a nadie. */\n\
-             export const rutasHttp = [{}] as const;\n",
-            rutas.join(", ")
+            "\n/** HTTP routes the manifest declares. Startup must fail if any of them\n \
+             *  has no handler: a 404 in production tells nobody. */\n\
+             export const httpRoutes = [{}] as const;\n",
+            routes.join(", ")
         ));
     }
     out.push(format!(
-        "\n/** Lado del teorema CAP declarado en el manifiesto: {c}/{p}.\n \
-         *  De ahi sale el nivel de aislamiento: pagar dos veces sale mas caro\n \
-         *  que reintentar, y servir un dato viejo cuesta menos que no servir. */\n\
-         export const nivelAislamiento = \"{a}\" as const;\n{st}",
+        "\n/** The CAP side declared in the manifest: {c}/{p}.\n \
+         *  The isolation level follows from it: paying twice costs more than\n \
+         *  retrying, and serving stale data costs less than serving nothing. */\n\
+         export const isolationLevel = \"{a}\" as const;\n{st}",
         c = m.cap.consistency,
         p = m.cap.on_partition,
         a = m.cap.aislamiento(),
@@ -257,34 +257,34 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
             .cap
             .max_staleness_ms
             .map(|v| format!(
-                "/** Presupuesto de obsolescencia: un dato mas viejo que esto no se sirve. */\n\
-                 export const obsolescenciaMaximaMs = {v};\n"
+                "/** Staleness budget: data older than this does not get served. */\n\
+                 export const maxStalenessMs = {v};\n"
             ))
             .unwrap_or_default(),
     ));
     out.push(flags_ts(m));
-    out.push(clientes_ts(m, all)?);
+    out.push(clients_ts(m, all)?);
     if !m.pii.is_empty() {
-        // [A09] Un dato personal se filtra por un log, no por un exploit.
-        // El generador da la lista y la funcion; usarla es de la persona,
-        // pero no puede alegar que no sabia cuales son.
+        // [A09] Personal data leaks through a log, not through an exploit. The
+        // generator hands over the list and the function; using it is up to the
+        // person, but they cannot claim not to have known which fields they are.
         out.push(format!(
-            "\n/** Campos declarados PII en el manifiesto. */\nexport const camposPII = [{}] as const;\n\n\
-             /** Reemplaza todo campo PII por \"[redactado]\", a cualquier profundidad.\n \
-             *  Pasa por aqui cualquier objeto antes de mandarlo a un log.\n \
+            "\n/** Fields declared as PII in the manifest. */\nexport const piiFields = [{}] as const;\n\n\
+             /** Replaces every PII field with \"[redacted]\", at any depth.\n \
+             *  Run anything through here before it reaches a log.\n \
              *\n \
-             *  La comparacion normaliza: `customer_email` declarado en el manifiesto\n \
-             *  cubre `customerEmail` en el contrato y `customer-email` en una\n \
-             *  cabecera. El mismo concepto se declara una vez. */\n\
-             const normalizarPII = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, \"\");\n\
-             const pii = new Set((camposPII as readonly string[]).map(normalizarPII));\n\n\
-             export function redactar<T>(valor: T): T {{\n  \
-               if (Array.isArray(valor)) return valor.map(redactar) as T;\n  \
-               if (valor === null || typeof valor !== \"object\") return valor;\n  \
-               const salida: Record<string, unknown> = {{}};\n  \
-               for (const [k, v] of Object.entries(valor)) {{\n    \
-                 salida[k] = pii.has(normalizarPII(k)) ? \"[redactado]\" : redactar(v);\n  \
-               }}\n  return salida as T;\n}}\n",
+             *  The comparison normalizes: `customer_email` declared in the manifest\n \
+             *  covers `customerEmail` in a contract and `customer-email` in a header.\n \
+             *  The same concept gets declared once. */\n\
+             const normalizePii = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, \"\");\n\
+             const pii = new Set((piiFields as readonly string[]).map(normalizePii));\n\n\
+             export function redact<T>(value: T): T {{\n  \
+               if (Array.isArray(value)) return value.map(redact) as T;\n  \
+               if (value === null || typeof value !== \"object\") return value;\n  \
+               const out: Record<string, unknown> = {{}};\n  \
+               for (const [k, v] of Object.entries(value)) {{\n    \
+                 out[k] = pii.has(normalizePii(k)) ? \"[redacted]\" : redact(v);\n  \
+               }}\n  return out as T;\n}}\n",
             m.pii.iter().map(|p| format!("\"{p}\"")).collect::<Vec<_>>().join(", ")
         ));
     }
@@ -1594,178 +1594,185 @@ pub fn build_states(ms: &[Manifest]) -> String {
     o.join("\n")
 }
 
-// ---------- clientes resilientes ----------
+// ---------- resilient clients ----------
 
-const RESILIENCIA_TS: &str = r#"
-/** Todo lo que hace falta para alcanzar a otro servicio. Lo implementa quien
- *  despliega: HTTP, gRPC, un SDK. El framework no elige transporte. */
-export interface Transporte {
-  invocar(destino: string, metodo: string, cuerpo: unknown, cabeceras: Record<string, string>): Promise<unknown>;
+const RESILIENCE_TS: &str = r#"
+/** Everything needed to reach another service. Implemented by whoever
+ *  deploys: HTTP, gRPC, an SDK. The framework does not pick a transport. */
+export interface Transport {
+  call(target: string, method: string, body: unknown, headers: Record<string, string>): Promise<unknown>;
 }
 
-export class ErrorAgotado extends Error {}
-export class ErrorCircuitoAbierto extends Error {}
+export class TimedOut extends Error {}
+export class CircuitOpen extends Error {}
 
-/** Politica declarada en el manifiesto. El generador la emite; nadie la teclea. */
-export interface Politica {
+/** The policy declared in the manifest. The generator emits it; nobody types it. */
+export interface Policy {
   timeoutMs: number;
-  reintentos: number;
+  retries: number;
   breaker: boolean;
 }
 
-/** Circuito por destino: cuando el otro lado se cae, deja de golpearlo.
- *  Tras el enfriamiento pasa a medio abierto y prueba una sola vez. */
-class Circuito {
-  #fallos = 0;
-  #abiertoHasta = 0;
-  // campos explicitos: las parameter properties son TS puro y no sobreviven
-  // al type-stripping de Node
-  readonly umbral: number;
-  readonly enfriamientoMs: number;
-  constructor(umbral = 5, enfriamientoMs = 10_000) {
-    this.umbral = umbral;
-    this.enfriamientoMs = enfriamientoMs;
+/** One breaker per target: when the other side goes down, stop hitting it.
+ *  After the cooldown it goes half-open and tries exactly once. */
+class Breaker {
+  #failures = 0;
+  #openUntil = 0;
+  // explicit fields: parameter properties are TypeScript-only and do not
+  // survive Node's type stripping
+  readonly threshold: number;
+  readonly cooldownMs: number;
+  constructor(threshold = 5, cooldownMs = 10_000) {
+    this.threshold = threshold;
+    this.cooldownMs = cooldownMs;
   }
 
-  permite(ahora: number) {
-    return this.#abiertoHasta === 0 || ahora >= this.#abiertoHasta;
+  allows(now: number) {
+    return this.#openUntil === 0 || now >= this.#openUntil;
   }
-  exito() {
-    this.#fallos = 0;
-    this.#abiertoHasta = 0;
+  succeeded() {
+    this.#failures = 0;
+    this.#openUntil = 0;
   }
-  fallo(ahora: number) {
-    this.#fallos++;
-    if (this.#fallos >= this.umbral) this.#abiertoHasta = ahora + this.enfriamientoMs;
+  failed(now: number) {
+    this.#failures++;
+    if (this.#failures >= this.threshold) this.#openUntil = now + this.cooldownMs;
   }
 }
 
-const circuitos = new Map<string, Circuito>();
+const breakers = new Map<string, Breaker>();
 
-const dormir = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function conTiempo<T>(p: Promise<T>, ms: number, quien: string): Promise<T> {
+async function withTimeout<T>(p: Promise<T>, ms: number, who: string): Promise<T> {
   let t: ReturnType<typeof setTimeout>;
-  const limite = new Promise<never>((_, rechaza) => {
-    t = setTimeout(() => rechaza(new ErrorAgotado(`${quien}: agotado tras ${ms}ms`)), ms);
+  const limit = new Promise<never>((_, reject) => {
+    t = setTimeout(() => reject(new TimedOut(`${who}: timed out after ${ms}ms`)), ms);
   });
   try {
-    return await Promise.race([p, limite]);
+    return await Promise.race([p, limit]);
   } finally {
     clearTimeout(t!);
   }
 }
 
-/** Aplica la politica declarada. Los reintentos solo los emite el generador
- *  para metodos idempotentes: `axon verify` bloquea el resto. */
-export async function conPolitica<T>(quien: string, pol: Politica, hacer: () => Promise<T>): Promise<T> {
-  const circuito = pol.breaker
-    ? (circuitos.get(quien) ?? circuitos.set(quien, new Circuito()).get(quien)!)
+/** Applies the declared policy. Retries are only emitted for idempotent
+ *  methods: `axon verify` blocks the rest. */
+export async function withPolicy<T>(who: string, pol: Policy, attempt: () => Promise<T>): Promise<T> {
+  const breaker = pol.breaker
+    ? (breakers.get(who) ?? breakers.set(who, new Breaker()).get(who)!)
     : null;
-  if (circuito && !circuito.permite(Date.now())) {
-    throw new ErrorCircuitoAbierto(`${quien}: circuito abierto`);
+  if (breaker && !breaker.allows(Date.now())) {
+    throw new CircuitOpen(`${who}: circuit open`);
   }
-  let ultimo: unknown;
-  for (let intento = 0; intento <= pol.reintentos; intento++) {
+  let last: unknown;
+  for (let n = 0; n <= pol.retries; n++) {
     try {
-      const r = await conTiempo(hacer(), pol.timeoutMs, quien);
-      circuito?.exito();
+      const r = await withTimeout(attempt(), pol.timeoutMs, who);
+      breaker?.succeeded();
       return r;
     } catch (err) {
-      ultimo = err;
-      circuito?.fallo(Date.now());
-      if (intento === pol.reintentos) break;
-      // exponencial con jitter completo: sin jitter, todos los clientes
-      // reintentan a la vez y el otro lado nunca se levanta
-      const techo = Math.min(1000 * 2 ** intento, 10_000);
-      await dormir(Math.random() * techo);
+      last = err;
+      breaker?.failed(Date.now());
+      if (n === pol.retries) break;
+      // exponential with full jitter: without jitter every client retries at
+      // the same instant and the other side never comes back up
+      const ceiling = Math.min(1000 * 2 ** n, 10_000);
+      await sleep(Math.random() * ceiling);
     }
   }
-  throw ultimo;
+  throw last;
 }
 
-/** Cabeceras de una llamada saliente: la traza sigue siendo la misma. */
-export function cabeceras(e: Envelope<unknown>, idempotente: boolean): Record<string, string> {
+/** Headers of an outgoing call: the trace stays the same one. */
+export function headers(e: Envelope<unknown>, idempotent: boolean): Record<string, string> {
   const h: Record<string, string> = {
     traceparent: e.traceparent,
     "x-correlation-id": e.correlationId,
     "x-causation-id": e.id,
   };
-  // reintentar sin llave duplicaria el efecto en el otro lado
-  if (idempotente) h["idempotency-key"] = e.id;
+  // retrying without a key would duplicate the effect on the other side
+  if (idempotent) h["idempotency-key"] = e.id;
   return h;
 }
 "#;
 
-fn clientes_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
+/// Typed clients for the declared dependencies.
+///
+/// The numbers are not a suggestion: the timeout, the retries and the breaker
+/// come from `[[depends]]` and land literally in the emitted code, so the
+/// policy that ships is the policy that was declared.
+fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     if m.depends.is_empty() {
         return Ok(String::new());
     }
-    let mut tipos = Vec::new();
-    let mut metodos = Vec::new();
+    let mut types = Vec::new();
+    let mut methods = Vec::new();
     for d in &m.depends {
         let tgt = d.target();
-        let otro = all
+        let other = all
             .iter()
             .find(|o| o.service == tgt)
-            .ok_or_else(|| format!("{}: depende de {tgt}, sin manifiesto", m.service))?;
-        let firma = otro
+            .ok_or_else(|| format!("{}: depends on {tgt}, which has no manifest", m.service))?;
+        let sig = other
             .methods
             .get(&d.method)
-            .ok_or_else(|| format!("{}: {tgt} no expone `{}`", m.service, d.method))?;
-        // prefijado con el servicio: los tipos de otro no pueden chocar con los propios
+            .ok_or_else(|| format!("{}: {tgt} does not expose `{}`", m.service, d.method))?;
+        // Prefixed with the service: another service's types cannot collide
+        // with our own.
         let base = format!("{}{}", pascal(tgt), pascal(&d.method));
-        tipos.push(iface(&format!("{base}In"), &firma.input));
-        tipos.push(iface(&format!("{base}Out"), &firma.output));
+        types.push(iface(&format!("{base}In"), &sig.input));
+        types.push(iface(&format!("{base}Out"), &sig.output));
 
         let pol = format!(
-            "{{ timeoutMs: {}, reintentos: {}, breaker: {} }}",
+            "{{ timeoutMs: {}, retries: {}, breaker: {} }}",
             d.timeout_ms.unwrap_or(10_000),
             d.retries,
             d.breaker
         );
-        // `on_partition = "degrade"` obliga a pasar el camino degradado: no se
-        // puede llamar al cliente sin decir que se sirve cuando el otro no esta.
-        let (param, cuerpo) = if m.cap.degrada() {
+        // `on_partition = "degrade"` makes the degraded path a required
+        // argument: the client cannot be called without saying what gets served
+        // while the other side is unreachable.
+        let (param, body) = if m.cap.degrada() {
             (
-                format!(", respaldo: () => Promise<{base}Out>"),
+                format!(", fallback: () => Promise<{base}Out>"),
                 concat!(
                     "    try {\n",
-                    "      return await hacer();\n",
+                    "      return await attempt();\n",
                     "    } catch {\n",
-                    "      // declarado `degrade`: se sirve algo viejo antes que nada\n",
-                    "      return respaldo();\n",
+                    "      // declared `degrade`: serving something stale beats serving nothing\n",
+                    "      return fallback();\n",
                     "    }"
                 )
                 .to_string(),
             )
         } else {
-            (String::new(), "    return hacer();".to_string())
+            (String::new(), "    return attempt();".to_string())
         };
-        metodos.push(format!(
-            "  /** {tgt}.{met} · timeout {t}ms · {r} reintentos · breaker {b} */\n  \
-             async {nombre}(input: {base}In, e: Envelope<unknown>{param}): Promise<{base}Out> {{\n    \
-               const hacer = () => conPolitica(\"{tgt}.{met}\", {pol}, async () =>\n      \
-                 (await this.transporte.invocar(\"{tgt}\", \"{met}\", input, cabeceras(e, {idem}))) as {base}Out);\n\
-{cuerpo}\n  \
+        methods.push(format!(
+            "  /** {tgt}.{met} · timeout {t}ms · {r} retries · breaker {b} */\n  \
+             async {name}(input: {base}In, e: Envelope<unknown>{param}): Promise<{base}Out> {{\n    \
+               const attempt = () => withPolicy(\"{tgt}.{met}\", {pol}, async () =>\n      \
+                 (await this.transport.call(\"{tgt}\", \"{met}\", input, headers(e, {idem}))) as {base}Out);\n\
+{body}\n  \
              }}",
             met = d.method,
             t = d.timeout_ms.unwrap_or(10_000),
             r = d.retries,
             b = d.breaker,
-            nombre = camel(&format!("{tgt}.{}", d.method)),
-            idem = firma.is_idempotent(),
+            name = camel(&format!("{tgt}.{}", d.method)),
+            idem = sig.is_idempotent(),
         ));
     }
     Ok(format!(
-        "{}\n{}\n\n/** Clientes de las dependencias declaradas en el manifiesto. */\n\
-         export class Clientes {{\n  \
-           protected readonly transporte: Transporte;\n  \
-           constructor(transporte: Transporte) {{\n    this.transporte = transporte;\n  }}\n\
+        "{}\n{}\n\n/** Clients for the dependencies declared in the manifest. */\n\
+         export class Clients {{\n  \
+           protected readonly transport: Transport;\n  \
+           constructor(transport: Transport) {{\n    this.transport = transport;\n  }}\n\
          {}\n}}\n",
-        RESILIENCIA_TS,
-        tipos.join("\n"),
-        metodos.join("\n")
+        RESILIENCE_TS,
+        types.join("\n"),
+        methods.join("\n")
     ))
 }
 

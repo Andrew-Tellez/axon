@@ -1,7 +1,7 @@
 #!/bin/sh
 # Los reintentos declarados, medidos.
 #
-# Lo declarado sale del CODIGO GENERADO —`conPolitica(..., { reintentos: N })`—
+# Lo declarado sale del CODIGO GENERADO —`withPolicy(..., { retries: N })`—
 # y no de un numero escrito aqui: comparar contra una copia a mano no compara
 # nada. Lo medido sale de la tabla `intento` de payments, que registra cada
 # llamada que llego.
@@ -34,7 +34,7 @@ uuid() { sql_pagos -c 'SELECT gen_random_uuid()' | tr -d ' \r\n'; }
 
 # lo declarado, leido del generado
 declarado() {
-  sed -n "s/.*conPolitica(\"payments\.$1\", { timeoutMs: \([0-9]*\), reintentos: \([0-9]*\).*/\2/p" \
+  sed -n "s/.*withPolicy(\"payments\.$1\", { timeoutMs: \([0-9]*\), retries: \([0-9]*\).*/\2/p" \
     services/checkout/contracts.ts | head -1
 }
 # el presupuesto de la SAGA, no el del metodo: los dos se llaman `timeout_ms`

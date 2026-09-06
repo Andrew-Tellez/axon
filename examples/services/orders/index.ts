@@ -1,5 +1,5 @@
 // La logica de negocio. Lo unico que escribe una persona.
-import { OrdersService, rutasHttp, type PlaceOrderIn, type PlaceOrderOut,
+import { OrdersService, httpRoutes, type PlaceOrderIn, type PlaceOrderOut,
          type GetOrderIn, type GetOrderOut, type Envelope } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
 import { NoEncontrado, bus, conectar, esperarDb, servir } from "../runtime.ts";
@@ -52,7 +52,7 @@ class Orders extends OrdersService {
       {
         orderId,
         customerId: input.customerId,
-        // declarado `pii`: se redacta en logs con `redactar()`, se excluye o
+        // declarado `pii`: se redacta en logs con `redact()`, se excluye o
         // hashea en la bodega, y se enmascara en la vista de analitica
         customerEmail: input.customerEmail,
         total: input.total,
@@ -93,5 +93,5 @@ servir(
       svc.getOrder({ tenantId: params.tenantId, orderId: params.orderId }),
   },
   // el arranque falla si el manifiesto declara una ruta sin handler
-  rutasHttp,
+  httpRoutes,
 );

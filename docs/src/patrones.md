@@ -355,7 +355,7 @@ generado. El demo mide que sean **exactamente** esos, y que sean lo que decide s
 se compensa o se atasca.
 
 Lo declarado no sale de un número escrito en el script: sale del **código generado** —
-`conPolitica("payments.payoutMerchant", { timeoutMs: 4000, reintentos: 2, ... })` — y el
+`withPolicy("payments.payoutMerchant", { timeoutMs: 4000, retries: 2, ... })` — y el
 presupuesto, del `const limite = Date.now() + 60000` del coordinador. Comparar contra una
 copia a mano no compara nada. Lo medido sale de la tabla `intento` de `payments`, que
 registra cada llamada que llegó.

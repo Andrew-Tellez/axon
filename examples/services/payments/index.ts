@@ -1,5 +1,5 @@
 // La logica de negocio. La maquina de estados la impone el codigo generado.
-import { PaymentsService, rutasHttp, paymentNext, paymentCan, flagCobroV2, flagCortarStripe,
+import { PaymentsService, httpRoutes, paymentNext, paymentCan, flagCobroV2, flagCortarStripe,
          type CapturePaymentIn, type CapturePaymentOut,
          type RefundPaymentIn, type RefundPaymentOut,
          type PayoutMerchantIn, type PayoutMerchantOut,
@@ -155,6 +155,6 @@ servir(
       svc.refundPayment({ paymentId: params.paymentId }),
     "POST /v1/payouts": (body) => svc.payoutMerchant(body),
   },
-  rutasHttp,
+  httpRoutes,
 );
 }
