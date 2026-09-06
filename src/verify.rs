@@ -383,18 +383,18 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
-    // ---- el pooler: cambia el sujeto de las reglas, y puede romper el
-    // aislamiento por inquilino sin dar un error ----
+    // ---- the pooler: it changes the subject of the arithmetic, and it can
+    // break tenant isolation without raising an error ----
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let pl = &m.pooler;
         if !pl.activo() {
-            // declarar campos de pooler sin pooler es una configuracion que no
-            // se aplica en ningun lado
+            // declaring pooler fields with no pooler is configuration that
+            // lands nowhere
             if pl.shards > 1 || pl.max_client_conn.is_some() || pl.tenant_binding.is_some() {
                 errors.push(format!(
-                    "{svc}: hay campos de `[pooler]` declarados con `engine = \"none\"`; no se \
-                     aplican en ninguna parte"
+                    "{svc}: there are `[pooler]` fields declared with `engine = \"none\"`; none \
+                     of them is applied anywhere"
                 ));
             }
             continue;
@@ -402,28 +402,29 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         match pl.engine.as_str() {
             "pgdog" => {}
             otro => errors.push(format!(
-                "{svc}: `[pooler] engine = \"{otro}\"` no esta soportado. Nativo: pgdog"
+                "{svc}: `[pooler] engine = \"{otro}\"` is not supported. Native: pgdog"
             )),
         }
         match pl.mode.as_str() {
             "transaction" | "session" | "statement" => {}
             otro => errors.push(format!(
-                "{svc}: `[pooler] mode = \"{otro}\"` no existe; usa transaction, session o statement"
+                "{svc}: `[pooler] mode = \"{otro}\"` does not exist; use transaction, session or statement"
             )),
         }
 
-        // LA REGLA. En modo transaccion la conexion vuelve al pool en cada
-        // COMMIT y se le entrega a otro inquilino. Si el inquilino se fija con
-        // un `SET` de sesion, el valor sobrevive y la siguiente peticion lee
-        // las filas del anterior. Sin error.
+        // THE RULE. In transaction mode the connection goes back to the pool at
+        // every COMMIT and is handed to another tenant. If the tenant is pinned
+        // with a session `SET`, the value survives and the next request reads
+        // the previous tenant's rows. With no error.
         if m.infra.tenant_column.is_some() && pl.mode != "session" {
             match pl.tenant_binding.as_deref() {
                 Some("set_local") => {}
                 _ => errors.push(format!(
-                    "{svc}: `mode = \"{}\"` con `tenant_column` y sin `tenant_binding = \
-                     \"set_local\"`. La conexion vuelve al pool en cada COMMIT y se le entrega a \
-                     otro inquilino: una GUC de sesion sobrevive y la siguiente peticion lee las \
-                     filas del anterior, sin un error. `SET LOCAL` muere con la transaccion",
+                    "{svc}: `mode = \"{}\"` with `tenant_column` and no `tenant_binding = \
+                     \"set_local\"`. The connection goes back to the pool at every COMMIT and is \
+                     handed to another tenant: a session GUC survives and the next request reads \
+                     the previous tenant's rows, with no error. `SET LOCAL` dies with the \
+                     transaction",
                     pl.mode
                 )),
             }
@@ -431,61 +432,61 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if let Some(b) = &pl.tenant_binding {
             if b != "set_local" {
                 errors.push(format!(
-                    "{svc}: `tenant_binding = \"{b}\"` no existe; el unico seguro es \"set_local\""
+                    "{svc}: `tenant_binding = \"{b}\"` does not exist; the only safe one is \"set_local\""
                 ));
             }
         }
 
-        // Repartir sin declarar por que columna no se puede.
+        // Sharding without declaring which column shards by is not possible.
         if pl.shards > 1 && m.infra.shard_key.is_none() {
             errors.push(format!(
-                "{svc}: `shards = {}` sin `shard_key`. El sharder necesita saber por que columna \
-                 reparte, y `verify` necesita comprobar que toda tabla la lleve",
+                "{svc}: `shards = {}` with no `shard_key`. The sharder needs to know which \
+                 column it shards by, and `verify` needs to check that every table carries it",
                 pl.shards
             ));
         }
 
-        // El 2PC de un sharder da consistencia eventual con lecturas parciales
-        // visibles, no atomicidad. Prometer CP encima es la misma clase de
-        // contradiccion que leer de una replica y prometer CP.
+        // A sharder's 2PC gives eventual consistency with visible partial reads,
+        // not atomicity. Promising CP on top is the same class of contradiction
+        // as reading from a replica and promising CP.
         if pl.shards > 1 && !m.cap.eventual() {
             errors.push(format!(
-                "{svc}: {} nodos de reparto con `consistency = \"strong\"`. Una transaccion que \
-                 cruza nodos se confirma en dos fases y deja ver estados parciales: la garantia \
-                 real es eventual, y declararla fuerte no la cambia",
+                "{svc}: {} shard nodes with `consistency = \"strong\"`. A transaction that crosses \
+                 nodes commits in two phases and makes partial states visible: the real \
+                 guarantee is eventual, and declaring it strong does not change that",
                 pl.shards
             ));
         }
 
-        // Medido contra pgdog: con la columna de inquilino declarada, TODA
-        // consulta sobre una tabla que la lleva tiene que filtrar por ella o el
-        // router la rechaza con `no multi tenant id`. Y para el sharder es lo
-        // mismo: sin la clave no sabe a que nodo ir. Asi que un metodo que no
-        // recibe el inquilino no se puede servir — y el sintoma aparece en la
-        // primera peticion contra un pooler real, no en el manifiesto.
+        // Measured against pgdog: with the tenant column declared, EVERY query on
+        // a table that carries it has to filter by it or the router rejects it
+        // with `no multi tenant id`. And it is the same for the sharder: without
+        // the key it does not know which node to go to. So a method that does
+        // not receive the tenant cannot be served — and the symptom shows up on
+        // the first request against a real pooler, not in the manifest.
         if let (true, Some(col)) = (pl.shards > 1, m.infra.tenant_column.as_ref()) {
             for (nombre, me) in m.methods.iter() {
                 if me.input.keys().any(|k| normalizar(k) == normalizar(col)) {
                     continue;
                 }
                 errors.push(format!(
-                    "{svc}.{nombre}: no recibe `{col}` y la base esta repartida por esa columna. \
-                     El router rechaza la consulta que no filtra por el inquilino (`no multi \
-                     tenant id`), y el sharder no sabe a que nodo mandarla. Agregala a `in`, \
-                     normalmente tambien a la ruta"
+                    "{svc}.{nombre}: does not receive `{col}` and the database is sharded by \
+                     that column. The router rejects a query that does not filter by tenant \
+                     (`no multi tenant id`), and the sharder does not know which node to send \
+                     it to. Add it to `in`, and usually to the route as well"
                 ));
             }
         }
 
-        // Con el pooler delante, el sujeto de la aritmetica cambia dos veces.
+        // With the pooler in front, the subject of the arithmetic changes twice.
         let techo = m.infra.max_instances.unwrap_or(10);
         if let (Some(pool), Some(clientes)) = (m.infra.pool_size, pl.max_client_conn) {
             let pico = pool * techo;
             if pico > clientes {
                 errors.push(format!(
-                    "{svc}: {pool} conexiones x {techo} instancias = {pico} clientes, y el pooler \
-                     acepta {clientes}. Con un pooler en medio la aritmetica va contra su tope de \
-                     clientes, no contra el del motor"
+                    "{svc}: {pool} connections x {techo} instances = {pico} clients, and the \
+                     pooler accepts {clientes}. With a pooler in between, the arithmetic runs \
+                     against its client limit, not the engine's"
                 ));
             }
         }
@@ -495,35 +496,35 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             let reservado = if m.patterns.outbox { 5 } else { 2 };
             if ppool + reservado > tope {
                 errors.push(format!(
-                    "{svc}: el pooler abre {ppool} conexiones a cada motor, mas {reservado} \
-                     reservadas, contra un tope de {tope} POR MOTOR"
+                    "{svc}: the pooler opens {ppool} connections to each engine, plus \
+                     {reservado} reserved, against a limit of {tope} PER ENGINE"
                 ));
             }
         }
-        // En modo sesion una conexion de cliente ata una de servidor: no hay
-        // multiplexado, asi que declarar mas clientes que conexiones al motor
-        // es prometer algo que el pooler no hace.
+        // In session mode one client connection pins one server connection: there
+        // is no multiplexing, so declaring more clients than engine connections
+        // promises something the pooler does not do.
         if pl.mode == "session" {
             if let (Some(pool), Some(ppool)) = (m.infra.pool_size, pl.pool_size) {
                 if pool * techo > ppool {
                     errors.push(format!(
-                        "{svc}: `mode = \"session\"` no multiplexa —una conexion de cliente ata \
-                         una de servidor—, y {pool} x {techo} = {} clientes contra {ppool} \
-                         conexiones al motor",
+                        "{svc}: `mode = \"session\"` does not multiplex —one client connection \
+                         pins one server connection—, and {pool} x {techo} = {} clients against \
+                         {ppool} engine connections",
                         pool * techo
                     ));
                 }
             }
         }
 
-        // Una consulta que cruza nodos, ejecutada, puede devolver un resultado
-        // incompleto en silencio: sin JOIN entre nodos, sin unicidad global.
+        // A query that crosses nodes, once executed, can return an incomplete
+        // result in silence: no cross-node JOIN, no global uniqueness.
         if pl.shards > 1 && !pl.cross_shard_disabled {
             warnings.push(format!(
-                "{svc}: `cross_shard_disabled = false` con {} nodos. Una consulta que cruza \
-                 nodos se ejecuta igual, y las que el sharder no sabe resolver —JOIN entre \
-                 nodos, funciones de ventana, agregados que no estan en su lista— pueden \
-                 devolver un resultado incompleto en vez de un error",
+                "{svc}: `cross_shard_disabled = false` with {} nodes. A query that crosses \
+                 nodes runs anyway, and the ones the sharder cannot resolve —cross-node JOINs, \
+                 window functions, aggregates not on its list— can return an incomplete result \
+                 instead of an error",
                 pl.shards
             ));
         }

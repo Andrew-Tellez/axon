@@ -2657,10 +2657,10 @@ fn las_reglas_del_pooler_bloquean() {
     let (msg, ok) = probar("[pooler]\nengine = \"pgdog\"\nmode = \"transaction\"\nshards = 2\n");
     assert!(!ok);
     assert!(
-        msg.contains("sin `tenant_binding = \"set_local\"`"),
+        msg.contains("no `tenant_binding = \"set_local\"`"),
         "{msg}"
     );
-    assert!(msg.contains("lee las filas del anterior"), "{msg}");
+    assert!(msg.contains("reads the previous tenant's rows"), "{msg}");
 
     // declararlo la deja pasar
     let (msg, ok) = probar(
@@ -2702,10 +2702,10 @@ fn las_reglas_del_pooler_bloquean() {
     let msg = format!("{out}{err}");
     assert!(!ok);
     assert!(
-        msg.contains("nodos de reparto con `consistency = \"strong\"`"),
+        msg.contains("shard nodes with `consistency = \"strong\"`"),
         "{msg}"
     );
-    assert!(msg.contains("la garantia real es eventual"), "{msg}");
+    assert!(msg.contains("the real guarantee is eventual"), "{msg}");
 
     // en modo sesion una conexion de cliente ata una de servidor
     let (msg, ok) = probar(
@@ -2713,12 +2713,12 @@ fn las_reglas_del_pooler_bloquean() {
          mode = \"session\"\npool_size = 30\n",
     );
     assert!(!ok);
-    assert!(msg.contains("no multiplexa"), "{msg}");
+    assert!(msg.contains("does not multiplex"), "{msg}");
 
     // campos de pooler sin pooler no se aplican en ninguna parte
     let (msg, ok) = probar("[pooler]\nshards = 4\n");
     assert!(!ok);
-    assert!(msg.contains("con `engine = \"none\"`"), "{msg}");
+    assert!(msg.contains("with `engine = \"none\"`"), "{msg}");
 }
 
 #[test]
