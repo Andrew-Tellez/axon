@@ -2,11 +2,11 @@
 // paso —datos de negocio— y el diario. El orden, la compensacion en orden
 // inverso y el barrido los genero axon.
 import { CheckoutService, Clientes, rutasHttp, rutaBarridoCompra, correrCompra,
-         barrerCompra, arrancarBarridoCompra, compraFold, conversionAplicar,
-         newEnvelope, VersionEnConflicto,
+         barrerCompra, arrancarBarridoCompra, compraFold, compraCargar,
+         compraFotografiar, conversionAplicar, newEnvelope, VersionEnConflicto,
          type CheckoutIn, type CheckoutOut, type CompraAcciones, type CompraSalidas,
          type CompraReglas, type ConversionProyeccion, type Checkpoint,
-         type Envelope, type FlujoEventos, type SagaDiario, type SagaEstado,
+         type Envelope, type FlujoConFotos, type SagaDiario, type SagaEstado,
          type Transporte } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
 import { bus, conectar, esperarDb, outbox, relay, servir } from "../runtime.ts";
@@ -112,10 +112,31 @@ class Diario implements SagaDiario {
  *  (stream_id, version) es lo que la hace valer: si otro escribio en medio, la
  *  insercion falla y quien la recibe vuelve a leer. Sin el UNIQUE las dos
  *  entrarian y el estado reconstruido dependeria del orden de lectura. */
-class Flujo implements FlujoEventos {
+class Flujo implements FlujoConFotos {
   #db: pg.Pool;
   constructor(db: pg.Pool) {
     this.#db = db;
+  }
+
+  /** Solo las fotos de la version de reglas vigente. Una de otra version se
+   *  ignora y el estado se reconstruye entero: lento y correcto, en ese
+   *  orden. */
+  async foto(streamId: string, reglas: number) {
+    const { rows } = await this.#db.query(
+      `SELECT version, estado FROM compra_snapshot
+        WHERE stream_id = $1 AND reglas = $2 ORDER BY version DESC LIMIT 1`,
+      [streamId, reglas],
+    );
+    return rows[0] ? { version: Number(rows[0].version), estado: rows[0].estado } : null;
+  }
+
+  async guardarFoto(streamId: string, version: number, reglas: number, estado: unknown) {
+    await this.#db.query(
+      `INSERT INTO compra_snapshot (stream_id, version, reglas, estado)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (stream_id, version, reglas) DO NOTHING`,
+      [streamId, version, reglas, JSON.stringify(estado)],
+    );
   }
 
   async leer(streamId: string, desde = 0) {
@@ -303,14 +324,21 @@ class Checkout extends CheckoutService {
    *  con dos instancias, un contador local se desincroniza y el UNIQUE es lo
    *  unico que lo dice. */
   async #anotar<T>(streamId: string, tipo: string, data: T, causa: Envelope<unknown>) {
-    const eventos = await this.#flujo.leer(streamId);
-    const { version } = compraFold(reglasCompra, streamId, eventos);
+    // `compraCargar` lee la ultima foto valida y solo el resto del flujo desde
+    // ahi. Sin fotos leeria el flujo entero, que es lo mismo hasta que un flujo
+    // tiene cien mil eventos.
+    const { version } = await compraCargar(reglasCompra, this.#flujo, streamId);
     // El envelope se construye ANTES de escribirlo. Nadie publica aqui: el
     // append deja la fila en el outbox en la misma transaccion, y de ahi
     // publica el relay. Un `publish` en esta linea seria el dual-write que
     // todo esto evita.
     const e = newEnvelope(tipo, "checkout", data, causa);
     const nueva = await this.#flujo.append(streamId, version, e);
+    // La foto se saca DESPUES del append y de un estado recien reconstruido:
+    // fotografiar lo que se creia el estado antes de escribir guardaria una
+    // foto de algo que no quedo en el flujo.
+    const { estado } = await compraCargar(reglasCompra, this.#flujo, streamId);
+    await compraFotografiar(this.#flujo, streamId, nueva, estado);
     // La proyeccion se aplica aqui mismo. En un sistema mas grande la haria un
     // consumidor aparte, y el checkpoint es justo lo que permite separarlos sin
     // reprocesar todo.

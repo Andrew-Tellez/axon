@@ -185,7 +185,8 @@ export const manifest = {
         "compra.compensada@v1"
       ],
       "machine": null,
-      "snapshot_every": 0
+      "snapshot_every": 2,
+      "snapshot_version": 1
     }
   },
   "view": {
@@ -572,9 +573,9 @@ export interface FlujoEventos {
   leer(streamId: string, desde?: number): Promise<{ version: number; type: string; data: unknown }[]>;
   /** Agrega al final. Rechaza si `esperada` ya no es la ultima version. */
   append(streamId: string, esperada: number, e: Envelope<unknown>): Promise<number>;
-  /** La ultima foto, si hay fotos declaradas. */
-  foto?(streamId: string): Promise<{ version: number; estado: unknown } | null>;
-  guardarFoto?(streamId: string, version: number, estado: unknown): Promise<void>;
+  /** Las fotos van en `FlujoConFotos`, que solo se genera si el
+   *  manifiesto las declara: opcionales aqui, declararlas y no
+   *  implementarlas compilaria y no haria nada. */
 }
 
 /** Otro escribio primero. No es un error de programa: es la condicion
@@ -588,6 +589,22 @@ export class VersionEnConflicto extends Error {
     this.streamId = streamId;
     this.esperada = esperada;
   }
+}
+
+/** Un flujo que ademas guarda fotos.
+ *
+ *  Una foto es una CACHE del `fold`, y por eso lleva la version de las
+ *  reglas con la que se calculo: si el `fold` cambia, las fotos viejas
+ *  codifican la version anterior y rehidratar de ahi da un estado que
+ *  ya no coincide con reproducir el flujo. Eso no da ningun error: da
+ *  un numero equivocado.
+ *
+ *  `foto` devuelve solo las de la version vigente. Las de otra version
+ *  se ignoran y el estado se reconstruye desde el principio, que es
+ *  lento y correcto —en ese orden. */
+export interface FlujoConFotos extends FlujoEventos {
+  foto(streamId: string, reglas: number): Promise<{ version: number; estado: unknown } | null>;
+  guardarFoto(streamId: string, version: number, reglas: number, estado: unknown): Promise<void>;
 }
 
 /** Los eventos que componen `compra`, declarados en el manifiesto. */
@@ -639,6 +656,42 @@ function compraAplicar<E>(reglas: CompraReglas<E>, estado: E, ev: { type: string
       // que saldria de ignorarlo es incorrecto y nadie lo sabria.
       throw new Error(`compra: `+ev.type+` no es un evento declarado del agregado`);
   }
+}
+
+/** Cada cuantos eventos se fotografia, y con que version de reglas.
+ *  Los dos numeros salen del manifiesto: nadie los teclea dos veces. */
+export const compraFotoCada = 2;
+export const compraFotoReglas = 1;
+
+/** Carga el estado: de la ultima foto valida, y solo el resto del
+ *  flujo desde ahi.
+ *
+ *  Si no hay foto de la version vigente, reconstruye entero. Eso es
+ *  lento y correcto, en ese orden: una foto de otra version daria un
+ *  estado incorrecto sin decirlo. */
+export async function compraCargar<E>(
+  reglas: CompraReglas<E>,
+  flujo: FlujoConFotos,
+  streamId: string,
+): Promise<{ version: number; estado: E }> {
+  const f = await flujo.foto(streamId, compraFotoReglas);
+  const desde = f ? { version: f.version, estado: f.estado as E } : undefined;
+  const eventos = await flujo.leer(streamId, f?.version ?? 0);
+  return compraFold(reglas, streamId, eventos, desde);
+}
+
+/** Fotografia si toca. Devuelve si la guardo, para poder medirlo:
+ *  una cadencia declarada que no se cumple es una foto que nadie
+ *  sabe que falta. */
+export async function compraFotografiar<E>(
+  flujo: FlujoConFotos,
+  streamId: string,
+  version: number,
+  estado: E,
+): Promise<boolean> {
+  if (version === 0 || version % compraFotoCada !== 0) return false;
+  await flujo.guardarFoto(streamId, version, compraFotoReglas, estado);
+  return true;
 }
 
 

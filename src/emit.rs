@@ -564,9 +564,9 @@ pub fn agregados_ts(m: &Manifest) -> String {
            leer(streamId: string, desde?: number): Promise<{ version: number; type: string; data: unknown }[]>;\n  \
            /** Agrega al final. Rechaza si `esperada` ya no es la ultima version. */\n  \
            append(streamId: string, esperada: number, e: Envelope<unknown>): Promise<number>;\n  \
-           /** La ultima foto, si hay fotos declaradas. */\n  \
-           foto?(streamId: string): Promise<{ version: number; estado: unknown } | null>;\n  \
-           guardarFoto?(streamId: string, version: number, estado: unknown): Promise<void>;\n\
+           /** Las fotos van en `FlujoConFotos`, que solo se genera si el\n   \
+            *  manifiesto las declara: opcionales aqui, declararlas y no\n   \
+            *  implementarlas compilaria y no haria nada. */\n\
          }\n\
          \n\
          /** Otro escribio primero. No es un error de programa: es la condicion\n \
@@ -583,6 +583,26 @@ pub fn agregados_ts(m: &Manifest) -> String {
          }\n"
             .to_string(),
     ];
+    if m.aggregate.values().any(|a| a.snapshot_every > 0) {
+        o.push(
+            "/** Un flujo que ademas guarda fotos.\n \
+             *\n \
+             *  Una foto es una CACHE del `fold`, y por eso lleva la version de las\n \
+             *  reglas con la que se calculo: si el `fold` cambia, las fotos viejas\n \
+             *  codifican la version anterior y rehidratar de ahi da un estado que\n \
+             *  ya no coincide con reproducir el flujo. Eso no da ningun error: da\n \
+             *  un numero equivocado.\n \
+             *\n \
+             *  `foto` devuelve solo las de la version vigente. Las de otra version\n \
+             *  se ignoran y el estado se reconstruye desde el principio, que es\n \
+             *  lento y correcto —en ese orden. */\n\
+             export interface FlujoConFotos extends FlujoEventos {\n  \
+               foto(streamId: string, reglas: number): Promise<{ version: number; estado: unknown } | null>;\n  \
+               guardarFoto(streamId: string, version: number, reglas: number, estado: unknown): Promise<void>;\n\
+             }\n"
+                .to_string(),
+        );
+    }
     for (nombre, ag) in &m.aggregate {
         let p = pascal(nombre);
         let c = camel(nombre);
@@ -660,6 +680,47 @@ pub fn agregados_ts(m: &Manifest) -> String {
              }}\n",
             aplica = aplica.join("\n"),
         ));
+        if ag.snapshot_every > 0 {
+            o.push(format!(
+                "/** Cada cuantos eventos se fotografia, y con que version de reglas.\n \
+                 *  Los dos numeros salen del manifiesto: nadie los teclea dos veces. */\n\
+                 export const {c}FotoCada = {cada};\n\
+                 export const {c}FotoReglas = {reglas};\n\
+                 \n\
+                 /** Carga el estado: de la ultima foto valida, y solo el resto del\n \
+                 *  flujo desde ahi.\n \
+                 *\n \
+                 *  Si no hay foto de la version vigente, reconstruye entero. Eso es\n \
+                 *  lento y correcto, en ese orden: una foto de otra version daria un\n \
+                 *  estado incorrecto sin decirlo. */\n\
+                 export async function {c}Cargar<E>(\n  \
+                   reglas: {p}Reglas<E>,\n  \
+                   flujo: FlujoConFotos,\n  \
+                   streamId: string,\n\
+                 ): Promise<{{ version: number; estado: E }}> {{\n  \
+                   const f = await flujo.foto(streamId, {c}FotoReglas);\n  \
+                   const desde = f ? {{ version: f.version, estado: f.estado as E }} : undefined;\n  \
+                   const eventos = await flujo.leer(streamId, f?.version ?? 0);\n  \
+                   return {c}Fold(reglas, streamId, eventos, desde);\n\
+                 }}\n\
+                 \n\
+                 /** Fotografia si toca. Devuelve si la guardo, para poder medirlo:\n \
+                 *  una cadencia declarada que no se cumple es una foto que nadie\n \
+                 *  sabe que falta. */\n\
+                 export async function {c}Fotografiar<E>(\n  \
+                   flujo: FlujoConFotos,\n  \
+                   streamId: string,\n  \
+                   version: number,\n  \
+                   estado: E,\n\
+                 ): Promise<boolean> {{\n  \
+                   if (version === 0 || version % {c}FotoCada !== 0) return false;\n  \
+                   await flujo.guardarFoto(streamId, version, {c}FotoReglas, estado);\n  \
+                   return true;\n\
+                 }}\n",
+                cada = ag.snapshot_every,
+                reglas = ag.snapshot_version,
+            ));
+        }
     }
     o.join("\n")
 }

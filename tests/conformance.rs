@@ -3371,6 +3371,14 @@ CREATE TABLE cuenta_event (
   UNIQUE (stream_id, version)
 );
 
+CREATE TABLE cuenta_snapshot (
+  stream_id  uuid NOT NULL,
+  version    int  NOT NULL,
+  reglas     int  NOT NULL,
+  estado     jsonb NOT NULL,
+  PRIMARY KEY (stream_id, version, reglas)
+);
+
 CREATE TABLE vista_saldos (
   stream_id  uuid PRIMARY KEY,
   centavos   bigint NOT NULL,
@@ -3410,6 +3418,8 @@ outbox = true
 
 [aggregate.cuenta]
 events = ["cuenta.abierta@v1", "cuenta.depositada@v1", "cuenta.cerrada@v1"]
+snapshot_every = 2
+snapshot_version = 3
 
 [view.saldos]
 on = ["cuenta.abierta@v1", "cuenta.depositada@v1"]
@@ -3446,7 +3456,8 @@ fn el_fold_generado_reconstruye_y_se_niega() {
         destino.join("es.test.ts"),
         r#"import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cuentaFold, cuentaEventos, saldosAplicar, saldosTabla, saldosAtrasoMaximoMs,
+import { cuentaFold, cuentaEventos, cuentaCargar, cuentaFotografiar, cuentaFotoReglas,
+         saldosAplicar, saldosTabla, saldosAtrasoMaximoMs,
          newEnvelope, type CuentaReglas, type SaldosProyeccion,
          type CuentaAbiertaV1, type CuentaDepositadaV1 } from "./contratos.ts";
 
@@ -3501,6 +3512,50 @@ test("los eventos del agregado son los del manifiesto", () => {
     ["cuenta.abierta@v1", "cuenta.depositada@v1", "cuenta.cerrada@v1"]);
 });
 
+test("una foto de otra version de reglas no se usa", async () => {
+  const eventos = [
+    ev(1, "cuenta.abierta@v1", { streamId: "c1" }),
+    ev(2, "cuenta.depositada@v1", { streamId: "c1", centavos: 500 }),
+    ev(3, "cuenta.depositada@v1", { streamId: "c1", centavos: 250 }),
+  ];
+  // Un flujo con UNA foto guardada, de la version de reglas equivocada. Lo que
+  // tiene que pasar es que no se use: rehidratar de ahi daria 99999 centavos.
+  const flujo = {
+    pedidas: [] as number[],
+    async leer(_id: string, desde = 0) { return eventos.filter((e) => e.version > desde); },
+    async append() { return 0; },
+    async foto(_id: string, reglas: number) {
+      this.pedidas.push(reglas);
+      // solo devuelve la de la version pedida, como el SQL generado
+      return reglas === 1 ? { version: 2, estado: { abierta: true, centavos: 99999, cerrada: false } } : null;
+    },
+    async guardarFoto() {},
+  };
+  const r = await cuentaCargar(reglas, flujo, "c1");
+  // pidio la version vigente, no la que habia guardada
+  assert.deepEqual(flujo.pedidas, [cuentaFotoReglas]);
+  assert.notEqual(cuentaFotoReglas, 1);
+  // y el estado salio del flujo entero, no de la foto envenenada
+  assert.equal(r.estado.centavos, 750);
+  assert.equal(r.version, 3);
+});
+
+test("solo se fotografia en la cadencia declarada", async () => {
+  const guardadas: number[] = [];
+  const flujo = {
+    async leer() { return []; },
+    async append() { return 0; },
+    async foto() { return null; },
+    async guardarFoto(_id: string, version: number) { guardadas.push(version); },
+  };
+  const estado = { abierta: true, centavos: 1, cerrada: false };
+  for (let v = 0; v <= 4; v++) {
+    await cuentaFotografiar(flujo, "c1", v, estado);
+  }
+  // cada 2, y nunca en la version 0: una foto del estado inicial no cachea nada
+  assert.deepEqual(guardadas, [2, 4]);
+});
+
 test("la vista solo acepta los eventos que declara, y le llega la posicion", async () => {
   const vistas: string[] = [];
   const proyeccion: SaldosProyeccion = {
@@ -3536,7 +3591,7 @@ test("la vista solo acepta los eventos que declara, y le llega la posicion", asy
         out.status.success(),
         "el fold generado no reconstruye como dice:\n{salida}"
     );
-    assert!(salida.contains("pass 6"), "{salida}");
+    assert!(salida.contains("pass 8"), "{salida}");
 }
 
 /// Las reglas de event sourcing y CQRS: cada una bloquea una forma de tener un
@@ -3596,6 +3651,33 @@ fn las_reglas_de_event_sourcing_bloquean() {
         .replace("max_staleness_ms = 5000\n", "");
     let err = correr(&fuerte, DDL_ES);
     assert!(err.contains("un dato viejo por definicion"), "{err}");
+
+    // fotos declaradas sin tabla, y sin la columna que las hace seguras
+    let sin_tabla = DDL_ES.replace("CREATE TABLE cuenta_snapshot", "CREATE TABLE otra_foto");
+    let err = correr(MANIFIESTO_ES, &sin_tabla);
+    assert!(err.contains("sin la tabla `cuenta_snapshot`"), "{err}");
+
+    let sin_reglas = DDL_ES.replace("  reglas     int  NOT NULL,\n", "");
+    let err = correr(MANIFIESTO_ES, &sin_reglas);
+    assert!(err.contains("sin columna `reglas`"), "{err}");
+    assert!(
+        err.contains("da un estado que ya no coincide con reproducir el flujo"),
+        "{err}"
+    );
+
+    // una foto por evento no es una cache
+    let cada_uno = MANIFIESTO_ES.replace("snapshot_every = 2", "snapshot_every = 1");
+    let (out, _, _) = {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sql")).unwrap();
+        std::fs::write(dir.join("sql/001_init.expand.sql"), DDL_ES).unwrap();
+        std::fs::write(dir.join("libro.toml"), &cada_uno).unwrap();
+        axon(&["verify", dir.to_str().unwrap()])
+    };
+    assert!(
+        out.contains("una segunda copia del flujo"),
+        "una foto por evento no aviso:\n{out}"
+    );
 
     // un agregado que publica sin outbox: el dual-write que el flujo evitaba
     let sin_outbox = MANIFIESTO_ES.replace("outbox = true", "outbox = false");

@@ -47,6 +47,13 @@ motivo = "string"
 
 [aggregate.compra]
 events = ["compra.iniciada@v1", "compra.cobrada@v1", "compra.compensada@v1"]
+# Cada 2 eventos. En un agregado real seria 50 o 100; aca es 2 para que el demo
+# ejercite la foto con una sola compra.
+snapshot_every = 2
+# La version de las REGLAS. Subirla invalida las fotos existentes: una foto
+# calculada con reglas viejas da un estado que ya no coincide con reproducir el
+# flujo, y eso no da error, da un numero equivocado.
+snapshot_version = 1
 
 # El traspaso al bus, en la misma transaccion que el append. `verify` lo exige
 # para un agregado cuyos eventos se publican: el flujo ya es durable, asi que

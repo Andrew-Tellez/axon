@@ -563,12 +563,87 @@ El demo lo comprueba en las dos mitades: que la fila del outbox quede marcada, *
 envelope aparezca en el log del bus. Marcar sin publicar es el fallo silencioso que un
 `published_at` a solas no distingue.
 
+## Las fotos, y por qué llevan versión de reglas
+
+Reconstruir desde el principio funciona hasta que un flujo tiene cien mil eventos.
+
+```toml
+[aggregate.compra]
+events = ["compra.iniciada@v1", "compra.cobrada@v1", "compra.compensada@v1"]
+snapshot_every   = 50
+snapshot_version = 1
+```
+
+Una foto es una **cache del `fold`**: se pueden borrar todas y el sistema sigue siendo
+correcto, sólo más lento. Eso es lo que la distingue del flujo, y también de dónde sale su
+único peligro real.
+
+**Lo peligroso no es que falte una foto** —eso cuesta tiempo— **sino que esté mal.** Si el
+`fold` cambia —una regla nueva, un campo que ahora se acumula distinto— las fotos viejas
+codifican la versión anterior. Rehidratar de ahí da un estado que ya no coincide con
+reproducir el flujo, y eso no da ningún error: da un número equivocado.
+
+De ahí `snapshot_version`. Va en la tabla, y `foto()` devuelve **sólo** las de la versión
+vigente:
+
+```sql
+CREATE TABLE compra_snapshot (
+  stream_id  uuid  NOT NULL,
+  version    int   NOT NULL,
+  reglas     int   NOT NULL,   -- con que version de las reglas se calculo
+  estado     jsonb NOT NULL,
+  en         timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (stream_id, version, reglas)
+);
+```
+
+`verify` exige esa columna con ese razonamiento en el mensaje. Subir el número invalida las
+fotos existentes y las hace reconstruir: es lo único que convierte «la foto quedó mal» en
+«la foto se reconstruye» — la diferencia entre un número equivocado y una consulta lenta.
+
+### El ciclo se genera, con los números dentro
+
+```ts
+export const compraFotoCada   = 50;
+export const compraFotoReglas = 1;
+
+/** De la ultima foto valida, y solo el resto del flujo desde ahi. */
+export async function compraCargar<E>(reglas, flujo: FlujoConFotos, streamId)
+/** Fotografia si toca. Devuelve si la guardo, para poder medirlo. */
+export async function compraFotografiar<E>(flujo, streamId, version, estado)
+```
+
+Los dos números salen del manifiesto: nadie los teclea dos veces. Y `FlujoConFotos` sólo se
+genera si el manifiesto declara fotos — en `FlujoEventos` eran métodos opcionales, y
+declarar fotos sin implementarlas compilaba y no hacía nada.
+
+Un detalle del orden: la foto se saca **después** del append y de un estado recién
+reconstruido. Fotografiar lo que se creía el estado antes de escribir guardaría una foto de
+algo que no quedó en el flujo.
+
+### Medido
+
+```console
+  OK: foto en la version 2, multiplo de la cadencia declarada (2)
+  OK: la foto dice 'compensada' y la proyeccion, que no la uso, dice lo mismo
+  OK: la foto de reglas 0 convive con la vigente, que dice 900 centavos
+```
+
+La segunda es la que importa: **la foto contra la vista**, que se construyó evento por
+evento sin usar fotos. Si difirieran, la cache estaría mintiendo.
+
+Y el testkit prueba lo que el demo no puede: que una foto de otra versión de reglas **no se
+use**. Se le da al `cargar` un flujo con una foto guardada de la versión equivocada, que
+diría 99999 centavos, y el estado tiene que salir del flujo entero: 750.
+
+`snapshot_every = 1` es un aviso, no un error: guardar una foto por evento no es una cache,
+es una segunda copia del flujo con el doble de escrituras.
+
 ## Lo que falta de event sourcing
 
-Las fotos: `snapshot_every` se declara y `verify` exige la tabla, pero nada las escribe
-todavía — reconstruir siempre desde el principio funciona hasta que un flujo tiene cien
-mil eventos.
+Un `Outbox` que acepte la conexión de quien lo llama, para que el `append` generado pueda
+hacer las dos escrituras en una transacción sin que cada servicio lo escriba a mano.
 
-Y un `Outbox` que acepte la conexión de quien lo llama, para que el `append` generado
-pueda hacer las dos escrituras en una transacción sin que cada servicio lo escriba a
-mano.
+Y borrar las fotos viejas: `snapshot_version` las invalida pero no las quita, así que la
+tabla crece con cada versión de reglas. Es una tarea de limpieza, no un riesgo de
+corrección — pero alguien va a preguntar por ese espacio.

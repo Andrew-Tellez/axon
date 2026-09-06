@@ -154,3 +154,60 @@ else
   echo "  FALLO: se marco como publicado y no aparece en el log de envelopes"
   exit 1
 fi
+
+# --- las fotos: una cache que no puede mentir ---------------------------
+# Una foto es una cache del fold. Lo peligroso no es que falte —eso solo cuesta
+# tiempo— sino que este MAL: rehidratar de una foto incorrecta da un estado que
+# ya no coincide con reproducir el flujo, y eso no da ningun error.
+echo "  la foto, en la cadencia declarada"
+cada=$(sed -n 's/.*compraFotoCada = \([0-9]*\).*/\1/p' services/checkout/contracts.ts | head -1)
+reglas=$(sed -n 's/.*compraFotoReglas = \([0-9]*\).*/\1/p' services/checkout/contracts.ts | head -1)
+FOTO=$(sql -c "SELECT stream_id FROM compra_snapshot ORDER BY en DESC LIMIT 1" | tr -d ' \r\n')
+[ -n "$FOTO" ] || { echo "  FALLO: snapshot_every declarado y ninguna foto guardada"; exit 1; }
+ver=$(sql -c "SELECT version FROM compra_snapshot WHERE stream_id = '$FOTO' ORDER BY version DESC LIMIT 1" | tr -d ' \r\n')
+if [ $((ver % cada)) -eq 0 ]; then
+  echo "  OK: foto en la version $ver, multiplo de la cadencia declarada ($cada)"
+else
+  echo "  FALLO: foto en la version $ver y la cadencia declarada es $cada"
+  exit 1
+fi
+
+# Lo que hace segura a una foto: rehidratar desde ella da EXACTAMENTE lo mismo
+# que reproducir el flujo entero. Se compara el estado guardado contra el que
+# sale de la vista, que se construyo evento por evento sin usar fotos.
+echo "  la foto contra la vista, que se construyo sin fotos"
+en_foto=$(sql -c "SELECT estado->>'estado' FROM compra_snapshot WHERE stream_id = '$FOTO' ORDER BY version DESC LIMIT 1" | tr -d ' \r\n')
+en_vista=$(sql -c "SELECT estado FROM vista_conversion WHERE stream_id = '$FOTO'" | tr -d ' \r\n')
+if [ "$en_foto" = "$en_vista" ]; then
+  echo "  OK: la foto dice '$en_foto' y la proyeccion, que no la uso, dice lo mismo"
+else
+  echo "  FALLO: foto '$en_foto' contra vista '$en_vista'"
+  exit 1
+fi
+
+# Y la parte que convierte el fallo silencioso en uno que se corrige solo: una
+# foto de OTRA version de reglas se ignora. Se ensucia una a proposito y el
+# servicio tiene que seguir dando el estado correcto.
+echo "  una foto con reglas viejas, envenenada a proposito"
+sql -v ON_ERROR_STOP=1 -c "INSERT INTO compra_snapshot (stream_id, version, reglas, estado)
+  VALUES ('$FOTO', $ver, $((reglas - 1)),
+          '{\"estado\":\"basura\",\"centavos\":-1,\"paymentId\":null}'::jsonb)" > /dev/null
+# una compra nueva sobre el MISMO flujo tiene que salir del estado real, no de
+# la foto envenenada
+ultima=$(sql -c "SELECT max(version) FROM compra_event WHERE stream_id = '$FOTO'" | tr -d ' \r\n')
+sql -v ON_ERROR_STOP=1 -c "INSERT INTO compra_event (id, stream_id, version, type, data)
+  VALUES (gen_random_uuid(), '$FOTO', $((ultima + 1)), 'compra.compensada@v1',
+          '{\"streamId\":\"$FOTO\",\"motivo\":\"prueba de foto\"}'::jsonb)" > /dev/null
+buenas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE stream_id = '$FOTO' AND reglas = $reglas" | tr -d ' \r\n')
+malas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE stream_id = '$FOTO' AND reglas <> $reglas" | tr -d ' \r\n')
+centavos=$(sql -c "SELECT (estado->>'centavos')::bigint FROM compra_snapshot
+                    WHERE stream_id = '$FOTO' AND reglas = $reglas ORDER BY version DESC LIMIT 1" | tr -d ' \r\n')
+if [ "$malas" -ge 1 ] && [ "$buenas" -ge 1 ] && [ "$centavos" -gt 0 ]; then
+  echo "  OK: la foto de reglas $((reglas - 1)) convive con la vigente, que dice $centavos centavos"
+  echo "  i que el codigo la IGNORE lo prueba el testkit: aqui se comprueba que"
+  echo "    una foto de otra version no pisa a la vigente. Subir snapshot_version"
+  echo "    es lo que convierte 'la foto quedo mal' en 'la foto se reconstruye'"
+else
+  echo "  FALLO: buenas=$buenas malas=$malas centavos=$centavos"
+  exit 1
+fi

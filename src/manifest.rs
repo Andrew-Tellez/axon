@@ -505,6 +505,22 @@ pub struct Aggregate {
     /// desde el principio siempre.
     #[serde(default)]
     pub snapshot_every: u32,
+    /// Version de las REGLAS con las que se calculo la foto.
+    ///
+    /// Una foto es una cache del `fold`, y si el `fold` cambia —una regla nueva,
+    /// un campo que ahora se acumula distinto— las fotos viejas codifican la
+    /// version anterior. Rehidratar de ahi da un estado que ya no coincide con
+    /// reproducir el flujo, y eso no da ningun error: da un numero equivocado.
+    ///
+    /// Subir este numero invalida las fotos existentes y las hace reconstruir.
+    /// Es lo unico que convierte ese fallo silencioso en uno que se corrige
+    /// solo.
+    #[serde(default = "una")]
+    pub snapshot_version: u32,
+}
+
+fn una() -> u32 {
+    1
 }
 
 impl Aggregate {

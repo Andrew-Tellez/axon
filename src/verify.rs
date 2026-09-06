@@ -1213,11 +1213,48 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
             if ag.snapshot_every > 0 {
                 let fotos = Aggregate::fotos(nombre);
-                if esquemas.get(svc).and_then(|t| t.get(&fotos)).is_none() {
-                    errors.push(format!(
+                match esquemas.get(svc).and_then(|t| t.get(&fotos)) {
+                    None => errors.push(format!(
                         "{svc}.{nombre}: `snapshot_every = {}` sin la tabla `{fotos}`",
                         ag.snapshot_every
-                    ));
+                    )),
+                    Some(t) => {
+                        for (col, para, tipo) in [
+                            ("stream_id", "de que instancia es la foto", ""),
+                            ("version", "hasta que evento del flujo la cubre", ""),
+                            ("estado", "el estado calculado", "json"),
+                            (
+                                "reglas",
+                                "con que version de las reglas se calculo: sin esta columna, \
+                                 una foto vieja se rehidrata con reglas nuevas y da un estado \
+                                 que ya no coincide con reproducir el flujo, sin ningun error",
+                                "",
+                            ),
+                        ] {
+                            match t.col(col) {
+                                None => errors.push(format!(
+                                    "{svc}.{nombre}: `{fotos}` sin columna `{col}`: ahi va {para}"
+                                )),
+                                Some(c) if !tipo.is_empty() && !c.ty.to_lowercase().contains(tipo) => {
+                                    errors.push(format!(
+                                        "{svc}.{nombre}: `{fotos}.{col}` es `{}` y tiene que ser \
+                                         {tipo}",
+                                        c.ty
+                                    ))
+                                }
+                                _ => {}
+                            }
+                        }
+                        // Una foto por cada evento no es una cache, es una
+                        // segunda copia del flujo con el doble de escrituras.
+                        if ag.snapshot_every == 1 {
+                            warnings.push(format!(
+                                "{svc}.{nombre}: `snapshot_every = 1` guarda una foto por evento: \
+                                 eso no es una cache, es una segunda copia del flujo con el doble \
+                                 de escrituras"
+                            ));
+                        }
+                    }
                 }
             }
         }
