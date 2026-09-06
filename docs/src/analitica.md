@@ -37,7 +37,7 @@ error  `[analytics] warehouse = "clickhouse"` no tiene camino de ingesta en `gcp
 | `gcp` + `bigquery` | una suscripción de Pub/Sub que escribe **directo** a la tabla, con `use_table_schema` y su propia DLQ |
 | `aws` + `snowflake` o `clickhouse` | un Firehose por evento hacia S3, con el **mismo particionado por fecha** que el esquema generado. De ahí la bodega carga con lo suyo —Snowpipe, una tabla externa— porque ese paso vive del lado de la bodega, no del proveedor |
 | `local` + `clickhouse` | un ClickHouse y un cargador del log de envelopes que el propio target ya escribe |
-| `k8s` + cualquiera | **nada, y lo dice**. Un clúster no trae bodega: apuntarías a la que corras, y axon no puede adivinarla |
+| `k8s` + `clickhouse` | un **Vector** que consume del broker y escribe en la bodega, con la config generada y validada con `vector validate` |
 
 Y una bodega por plataforma: `verify` exige que todos los servicios que exportan declaren
 la misma. Repartidos entre dos, el embudo —que es lo que hace útil exportar— no se puede
@@ -275,11 +275,56 @@ axon: la bodega tiene 0 diferencias con el manifiesto
 
 Una comprobación que sólo se ha visto pasar no se ha visto funcionar.
 
+## El clúster: consumir, no suscribirse
+
+Un clúster no trae bodega gestionada, así que no hay a qué suscribirse — eso es lo que
+dejaba a `k8s` sin camino. La respuesta no es que axon traiga un consumidor: **genera la
+configuración de una herramienta real**, igual que con flagd, pgdog o Flyway.
+
+```sh
+axon analytics manifests/ --vector > vector.yaml
+kubectl create configmap axon-warehouse --from-file=vector.yaml
+```
+
+Y `axon infra --target k8s` despliega el `Deployment` que la lee.
+
+### Cuatro decisiones, y las cuatro salieron de `vector validate`
+
+**Una fuente por evento, no una comodín con router.** Un `route` deja una rama
+`_unmatched`, y el evento que cae ahí **se descarta en silencio**. `vector validate` lo
+avisa — y un aviso hoy es un evento perdido mañana. Con una fuente por subject, nada
+inesperado puede llegar.
+
+**`queue: axon-warehouse`.** Sin el grupo de cola, cada réplica escribe la misma fila y el
+embudo cuenta cada flujo tantas veces como réplicas haya.
+
+**`skip_unknown_fields: false`.** Un campo que la tabla no tiene es un **error**, no algo
+que se descarta: significa que el esquema y el manifiesto se separaron, y
+`axon analytics --check` es lo que dice para qué lado.
+
+**`buffer: { type: disk, when_full: block }`.** En memoria, un reinicio pierde lo que no
+alcanzó a escribir. Y descartar cuando el buffer se llena pierde eventos justo bajo la carga
+que los hace valiosos.
+
+### El ConfigMap no es un objeto, a propósito
+
+`axon infra --target k8s` **no** emite el ConfigMap. Uno vacío con ese nombre sobrescribiría
+el real la primera vez que alguien aplicara el archivo, y Vector volvería a arrancar sin
+nada que leer. En su lugar el manifiesto lleva el comando exacto para crearlo, y el del
+secreto con las credenciales — que tampoco están ahí: un manifiesto generado no es lugar
+para ellas.
+
+### Comprobado con la herramienta que lo va a leer
+
+El suite escribe la config generada y corre `vector validate` en Docker. No es que parsee
+como YAML: es que el parser de Vector dice que las fuentes, los transforms y los sinks
+existen y encajan. Y falla también con **avisos**, no sólo con errores.
+
 ## Lo que falta
 
-`k8s` no tiene camino de ingesta, y el rechazo lo dice en vez de fingirlo. Cerrarlo pide un
-consumidor del broker que escriba en la bodega —lo que en local se resuelve leyendo el log,
-en un clúster hay que consumir— y eso es código, no IaC.
+Retención declarable de las tablas de la bodega, y una forma de declarar métricas de negocio
+más allá de los embudos que salen de la cadena causal.
 
-Tampoco hay retención declarable de las tablas de la bodega, ni una forma de declarar
-métricas de negocio más allá de los embudos que salen de la cadena causal.
+Y la ingesta de `k8s` está validada pero no medida contra contenedores: el target local se
+llena del log de envelopes, así que el camino de Vector no pasa por el demo. Levantarlo ahí
+—broker, Vector y ClickHouse— es lo que lo pondría al nivel del resto.

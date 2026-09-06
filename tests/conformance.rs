@@ -3909,6 +3909,7 @@ fn la_ingesta_no_se_promete_sin_camino() {
         ("aws", "clickhouse", "aws_kinesis_firehose_delivery_stream"),
         ("aws", "snowflake", "aws_kinesis_firehose_delivery_stream"),
         ("local", "clickhouse", "clickhouse/clickhouse-server"),
+        ("k8s", "clickhouse", "image: timberio/vector"),
     ] {
         let f = ajustado(bodega);
         let (out, err, ok) = axon(&["infra", &f, "--target", target]);
@@ -3920,7 +3921,7 @@ fn la_ingesta_no_se_promete_sin_camino() {
     }
     // Y lo que no tiene camino se RECHAZA, con el nombre de la combinacion y
     // que hacer al respecto.
-    for (target, bodega) in [("gcp", "clickhouse"), ("aws", "bigquery"), ("k8s", "clickhouse")] {
+    for (target, bodega) in [("gcp", "clickhouse"), ("aws", "bigquery"), ("k8s", "bigquery")] {
         let f = ajustado(bodega);
         let (_, err, ok) = axon(&["infra", &f, "--target", target]);
         assert!(!ok, "{target}+{bodega} rindio sin camino de ingesta");
@@ -4047,4 +4048,61 @@ pii = []
     assert!(!ok, "un volcado vacio dio 0 diferencias");
     assert!(salida.contains("no tiene ninguna columna"), "{salida}");
     assert!(salida.contains("se lee como que todo esta bien"), "{salida}");
+}
+
+/// La config de Vector se valida con `vector validate`: el parser que la va a
+/// leer es el que dice si esta bien. Un `route` con una rama sin consumidor, o
+/// un campo mal, salen ahi y no el dia que falte un evento en la bodega.
+#[test]
+fn la_config_de_vector_valida() {
+    if !tiene("docker") {
+        eprintln!("salteado: falta docker");
+        return;
+    }
+    let dir = std::env::temp_dir().join("axon-vector");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (cfg, err, ok) = axon(&["analytics", "examples", "--vector"]);
+    assert!(ok, "{err}");
+    std::fs::write(dir.join("vector.yaml"), &cfg).unwrap();
+
+    // Una fuente por evento, no una comodin con router: un router deja una rama
+    // `_unmatched`, y el evento que cae ahi se descarta en silencio.
+    assert!(!cfg.contains("type: route"), "un router deja eventos sin consumidor");
+    assert!(cfg.contains("queue: axon-warehouse"), "sin queue group, cada replica escribe la misma fila");
+    // El salt del hash entra por variable, nunca en el archivo generado.
+    assert!(cfg.contains("get_env_var!(\"AXON_PII_SALT\")"), "{cfg}");
+    assert!(!cfg.contains("customer_email\":"), "el correo viaja en claro:\n{cfg}");
+    // Un campo que la tabla no tiene es un error, no algo que se descarta.
+    assert!(cfg.contains("skip_unknown_fields: false"), "{cfg}");
+    // El buffer en disco: en memoria, un reinicio pierde lo no escrito.
+    assert!(cfg.contains("type: disk"), "{cfg}");
+
+    let out = Command::new("docker")
+        .args([
+            "run", "--rm",
+            "-e", "AXON_WAREHOUSE_USER=u",
+            "-e", "AXON_WAREHOUSE_PASSWORD=p",
+            "-e", "AXON_PII_SALT=s",
+            "-v", &format!("{}:/etc/vector:ro", dir.display()),
+            "timberio/vector:0.44.0-alpine",
+            // `--no-environment` no comprueba conexiones: aqui no hay broker ni
+            // bodega, y lo que se valida es la config, no el entorno.
+            "validate", "--no-environment", "/etc/vector/vector.yaml",
+        ])
+        .output()
+        .expect("docker run vector");
+    let salida = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if salida.contains("Unable to find image") || salida.contains("Cannot connect to the Docker daemon") {
+        eprintln!("salteado: sin la imagen de vector");
+        return;
+    }
+    assert!(out.status.success(), "vector no valida la config generada:\n{salida}");
+    // un aviso hoy es un evento perdido manana
+    assert!(!salida.contains("warning"), "valida con avisos:\n{salida}");
+    assert!(!salida.contains("no consumers"), "una rama sin consumidor:\n{salida}");
 }

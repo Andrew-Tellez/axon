@@ -108,6 +108,10 @@ enum Cmd {
         /// que la tabla no tiene se carga como nada, y nadie ve un error.
         #[arg(long)]
         check: Option<PathBuf>,
+        /// emite la config de Vector: el camino de ingesta para un cluster,
+        /// donde no hay bodega gestionada a la que suscribirse.
+        #[arg(long)]
+        vector: bool,
     },
     /// reconcilia el lado CAP declarado con los patrones en uso
     Cap {
@@ -355,10 +359,15 @@ fn run() -> Result<ExitCode, String> {
             dataset,
             consulta,
             check,
+            vector,
         } => {
             let ms = manifest::discover(&sources)?;
             if let Some(log) = cargar {
                 print!("{}", bi::cargador(&ms, &dataset, &log));
+                return Ok(ExitCode::SUCCESS);
+            }
+            if vector {
+                print!("{}", bi::vector(&ms, &dataset));
                 return Ok(ExitCode::SUCCESS);
             }
             if consulta || check.is_some() {

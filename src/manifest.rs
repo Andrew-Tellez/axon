@@ -153,7 +153,7 @@ pub const BODEGAS: [&str; 3] = ["bigquery", "snowflake", "clickhouse"];
 /// Combinaciones (target, bodega) con camino de ingesta cableado. Lo que no
 /// esta aqui `axon infra` lo RECHAZA: generar el esquema y no llevar nada a la
 /// bodega es el peor resultado, porque se aplica sin error.
-pub const INGESTA: [(&str, &str); 4] = [
+pub const INGESTA: [(&str, &str); 5] = [
     // suscripcion de Pub/Sub directa a BigQuery
     ("gcp", "bigquery"),
     // Firehose a S3, y de ahi la bodega carga con lo suyo
@@ -161,6 +161,8 @@ pub const INGESTA: [(&str, &str); 4] = [
     ("aws", "clickhouse"),
     // un contenedor de ClickHouse y un cargador del log de envelopes
     ("local", "clickhouse"),
+    // un consumidor del broker, con config generada y validada con `vector validate`
+    ("k8s", "clickhouse"),
 ];
 
 pub fn hay_ingesta(target: &str, bodega: &str) -> bool {
