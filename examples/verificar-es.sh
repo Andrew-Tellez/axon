@@ -93,7 +93,7 @@ fi
 # —justo cuando esta parada— asi que sale del FLUJO: la edad del evento mas
 # viejo que la proyeccion todavia no aplico.
 echo "  el atraso de la vista contra su presupuesto"
-tope=$(sed -n 's/.*conversionAtrasoMaximoMs = \([0-9]*\).*/\1/p' services/checkout/contracts.ts | head -1)
+tope=$(sed -n 's/.*conversionMaxStalenessMs = \([0-9]*\).*/\1/p' services/checkout/contracts.ts | head -1)
 # El punto es POR FLUJO: la version de un evento es su posicion dentro de su
 # flujo, asi que un solo numero para toda la vista no identifica nada en cuanto
 # hay mas de un flujo. Con uno parecia funcionar.
@@ -172,8 +172,8 @@ fi
 # tiempo— sino que este MAL: rehidratar de una foto incorrecta da un estado que
 # ya no coincide con reproducir el flujo, y eso no da ningun error.
 echo "  la foto, en la cadencia declarada"
-cada=$(sed -n 's/.*compraFotoCada = \([0-9]*\).*/\1/p' services/checkout/contracts.ts | head -1)
-reglas=$(sed -n 's/.*compraFotoReglas = \([0-9]*\).*/\1/p' services/checkout/contracts.ts | head -1)
+cada=$(sed -n 's/.*compraSnapshotEvery = \([0-9]*\).*/\1/p' services/checkout/contracts.ts | head -1)
+reglas=$(sed -n 's/.*compraSnapshotRules = \([0-9]*\).*/\1/p' services/checkout/contracts.ts | head -1)
 FOTO=$(sql -c "SELECT stream_id FROM compra_snapshot ORDER BY en DESC LIMIT 1" | tr -d ' \r\n')
 [ -n "$FOTO" ] || { echo "  FALLO: snapshot_every declarado y ninguna foto guardada"; exit 1; }
 ver=$(sql -c "SELECT version FROM compra_snapshot WHERE stream_id = '$FOTO' ORDER BY version DESC LIMIT 1" | tr -d ' \r\n')
@@ -237,7 +237,7 @@ sucias=$(sql -c "SELECT count(*) FROM vista_conversion WHERE estado = 'basura'" 
 [ "$sucias" -ge 1 ] || { echo "  FALLO: no habia nada que ensuciar"; exit 1; }
 echo "    $sucias filas con basura"
 
-aplicados=$(curl -sS --fail-with-body -m 120 -X POST "$CHECKOUT/internal/view/conversion/reconstruir" \
+aplicados=$(curl -sS --fail-with-body -m 120 -X POST "$CHECKOUT/internal/view/conversion/rebuild" \
   | sed 's/.*"aplicados":\([0-9]*\).*/\1/')
 en_flujo=$(sql -c "SELECT count(*) FROM compra_event" | tr -d ' \r\n')
 quedan=$(sql -c "SELECT count(*) FROM vista_conversion WHERE estado = 'basura' OR centavos < 0" | tr -d ' \r\n')
@@ -295,7 +295,7 @@ printf 'AXON_DEMO_RECONSTRUIR_LENTO_MS=150\n' >> "$ENVQ"
 $COMPOSE stop checkout > /dev/null 2>&1
 $COMPOSE up -d --wait checkout > /dev/null 2>&1
 
-curl -sS -m 180 -X POST "$CHECKOUT/internal/view/conversion/reconstruir" > /tmp/axon-recon.json &
+curl -sS -m 180 -X POST "$CHECKOUT/internal/view/conversion/rebuild" > /tmp/axon-recon.json &
 recon=$!
 minimo=$filas_antes
 i=0
@@ -329,7 +329,7 @@ echo "  la limpieza de fotos que la version vigente no usa"
 antes=$(sql -c "SELECT count(*) FROM compra_snapshot" | tr -d ' \r\n')
 viejas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE reglas <> $reglas" | tr -d ' \r\n')
 [ "$viejas" -ge 1 ] || { echo "  FALLO: el montaje no dejo ninguna foto de otra version"; exit 1; }
-borradas=$(curl -sS --fail-with-body -m 30 -X POST "$CHECKOUT/internal/aggregate/compra/limpiar" \
+borradas=$(curl -sS --fail-with-body -m 30 -X POST "$CHECKOUT/internal/aggregate/compra/prune" \
   | sed 's/.*"borradas":\([0-9]*\).*/\1/')
 despues=$(sql -c "SELECT count(*) FROM compra_snapshot" | tr -d ' \r\n')
 quedan_viejas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE reglas <> $reglas" | tr -d ' \r\n')

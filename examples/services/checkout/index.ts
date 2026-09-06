@@ -2,14 +2,14 @@
 // paso —datos de negocio— y el diario. El orden, la compensacion en orden
 // inverso y el barrido los genero axon.
 import { CheckoutService, Clients, httpRoutes, sweepRouteCompra, runCompra,
-         sweepCompra, startSweepCompra, compraFold, compraCargar,
-         compraFotografiar, conversionAplicar, limpiarCompra, newEnvelope,
-         rutaLimpiezaCompra, reconstruirConversion, rutaReconstruirConversion,
-         VersionEnConflicto,
+         sweepCompra, startSweepCompra, compraFold, compraLoad,
+         compraSnapshot, conversionApply, pruneCompra, newEnvelope,
+         pruneRouteCompra, rebuildConversion, rebuildRouteConversion,
+         VersionConflict,
          type CheckoutIn, type CheckoutOut, type CompraActions, type CompraOutputs,
-         type CompraReglas, type ConversionProyeccion, type Checkpoint,
-         type Envelope, type FlujoConFotos, type Outbox, type SagaJournal, type SagaStatus,
-         type Sombra,
+         type CompraRules, type ConversionProjection, type Checkpoint,
+         type Envelope, type SnapshottingStream, type Outbox, type SagaJournal, type SagaStatus,
+         type Shadow,
          type Transport } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
 import { bus, conectar, esperarDb, outbox, relay, servir } from "../runtime.ts";
@@ -115,7 +115,7 @@ class Journal implements SagaJournal {
  *  (stream_id, version) es lo que la hace valer: si otro escribio en medio, la
  *  insercion falla y quien la recibe vuelve a leer. Sin el UNIQUE las dos
  *  entrarian y el estado reconstruido dependeria del orden de lectura. */
-class Flujo implements FlujoConFotos {
+class Stream implements SnapshottingStream {
   #db: pg.Pool;
   #outbox: Outbox<pg.PoolClient>;
   constructor(db: pg.Pool, o: Outbox<pg.PoolClient>) {
@@ -126,21 +126,21 @@ class Flujo implements FlujoConFotos {
   /** Solo las fotos de la version de reglas vigente. Una de otra version se
    *  ignora y el estado se reconstruye entero: lento y correcto, en ese
    *  orden. */
-  async foto(streamId: string, reglas: number) {
+  async snapshot(streamId: string, rules: number) {
     const { rows } = await this.#db.query(
       `SELECT version, estado FROM compra_snapshot
         WHERE stream_id = $1 AND reglas = $2 ORDER BY version DESC LIMIT 1`,
-      [streamId, reglas],
+      [streamId, rules],
     );
-    return rows[0] ? { version: Number(rows[0].version), estado: rows[0].estado } : null;
+    return rows[0] ? { version: Number(rows[0].version), state: rows[0].estado } : null;
   }
 
-  async guardarFoto(streamId: string, version: number, reglas: number, estado: unknown) {
+  async saveSnapshot(streamId: string, version: number, rules: number, state: unknown) {
     await this.#db.query(
       `INSERT INTO compra_snapshot (stream_id, version, reglas, estado)
        VALUES ($1,$2,$3,$4)
        ON CONFLICT (stream_id, version, reglas) DO NOTHING`,
-      [streamId, version, reglas, JSON.stringify(estado)],
+      [streamId, version, rules, JSON.stringify(state)],
     );
   }
 
@@ -151,22 +151,22 @@ class Flujo implements FlujoConFotos {
    *  version— una limpieza interrumpida a la mitad deja un estado que nadie
    *  penso. Y puede ser agresiva porque una foto es una cache: lo peor que
    *  pasa es reconstruir desde el flujo. */
-  async limpiarFotos(reglas: number) {
+  async pruneSnapshots(rules: number) {
     const { rowCount } = await this.#db.query(
       `DELETE FROM compra_snapshot s
         WHERE s.reglas <> $1
            OR s.version < (SELECT max(version) FROM compra_snapshot
                             WHERE stream_id = s.stream_id AND reglas = $1)`,
-      [reglas],
+      [rules],
     );
     return rowCount ?? 0;
   }
 
-  async leer(streamId: string, desde = 0) {
+  async read(streamId: string, from = 0) {
     const { rows } = await this.#db.query(
       `SELECT version, type, data, en FROM compra_event
         WHERE stream_id = $1 AND version > $2 ORDER BY version`,
-      [streamId, desde],
+      [streamId, from],
     );
     return rows.map((r: any) => ({
       version: Number(r.version),
@@ -174,12 +174,12 @@ class Flujo implements FlujoConFotos {
       data: r.data as unknown,
       // cuando OCURRIO. Al reconstruir la vista se vuelve a poner este, no la
       // hora de la reconstruccion.
-      en: new Date(r.en).toISOString(),
+      at: new Date(r.en).toISOString(),
     }));
   }
 
   /** Los flujos que existen, para poder recorrerlos al reconstruir. */
-  async flujos() {
+  async streams() {
     const { rows } = await this.#db.query(
       `SELECT DISTINCT stream_id FROM compra_event ORDER BY stream_id`,
     );
@@ -192,8 +192,8 @@ class Flujo implements FlujoConFotos {
    *
    *  El `stage` del outbox generado recibe esta transaccion, asi que la fila del
    *  outbox no se puede confirmar sin el evento. */
-  async append(streamId: string, esperada: number, e: Envelope<unknown>) {
-    const version = esperada + 1;
+  async append(streamId: string, expected: number, e: Envelope<unknown>) {
+    const version = expected + 1;
     const c = await this.#db.connect();
     try {
       await c.query("BEGIN");
@@ -209,7 +209,7 @@ class Flujo implements FlujoConFotos {
       // 23505: unique_violation. Otro escribio esta version primero, y eso no
       // es un error de programa: es la condicion normal de dos usuarios sobre
       // el mismo agregado.
-      if (err?.code === "23505") throw new VersionEnConflicto(streamId, esperada);
+      if (err?.code === "23505") throw new VersionConflict(streamId, expected);
       throw err;
     } finally {
       c.release();
@@ -226,17 +226,17 @@ interface Compra {
   paymentId: string | null;
 }
 
-const reglasCompra: CompraReglas<Compra> = {
-  inicial: () => ({ estado: "nueva", centavos: 0, paymentId: null }),
-  aplicarCompraIniciadaV1: (s, e) => ({ ...s, estado: "iniciada", centavos: e.amount.amount }),
-  aplicarCompraCobradaV1: (s, e) => ({ ...s, estado: "cobrada", paymentId: e.paymentId }),
-  aplicarCompraCompensadaV1: (s) => ({ ...s, estado: "compensada" }),
+const compraRules: CompraRules<Compra> = {
+  initial: () => ({ estado: "nueva", centavos: 0, paymentId: null }),
+  applyCompraIniciadaV1: (s, e) => ({ ...s, estado: "iniciada", centavos: e.amount.amount }),
+  applyCompraCobradaV1: (s, e) => ({ ...s, estado: "cobrada", paymentId: e.paymentId }),
+  applyCompraCompensadaV1: (s) => ({ ...s, estado: "compensada" }),
 };
 
 /** La proyeccion. Cada `aplicar*` guarda la posicion en la MISMA transaccion
  *  que su efecto: en dos, un corte entre ellas deja la vista adelantada o
  *  atrasada respecto de lo que dice haber aplicado, y ninguna da un error. */
-class Conversion implements ConversionProyeccion, Checkpoint, Sombra {
+class Conversion implements ConversionProjection, Checkpoint, Shadow {
   #db: pg.Pool;
   /** A que tabla escribe. La sombra es OTRA instancia, no un modo: un modo se
    *  queda encendido y la siguiente proyeccion en vivo escribe en la sombra
@@ -250,7 +250,7 @@ class Conversion implements ConversionProyeccion, Checkpoint, Sombra {
   }
 
   /** Deja la sombra vacia, con su punto en cero. */
-  async preparar() {
+  async prepare() {
     const c = await this.#db.connect();
     try {
       await c.query("BEGIN");
@@ -272,7 +272,7 @@ class Conversion implements ConversionProyeccion, Checkpoint, Sombra {
    *  ver una vista a medias. En dos transacciones, un corte entre ellas deja la
    *  tabla nueva con el punto de la vieja: se saltaria eventos o los
    *  reprocesaria, y nada lo diria. */
-  async intercambiar() {
+  async swap() {
     const c = await this.#db.connect();
     try {
       await c.query("BEGIN");
@@ -293,11 +293,11 @@ class Conversion implements ConversionProyeccion, Checkpoint, Sombra {
     }
   }
 
-  async leer(vista: string, streamId: string) {
+  async read(view: string, streamId: string) {
     const { rows } = await this.#db.query(
       `SELECT posicion FROM vista_conversion_checkpoint
         WHERE vista = $1 AND stream_id = $2`,
-      [vista, streamId],
+      [view, streamId],
     );
     return rows[0] ? Number(rows[0].posicion) : 0;
   }
@@ -326,12 +326,12 @@ class Conversion implements ConversionProyeccion, Checkpoint, Sombra {
     }
   }
 
-  async aplicarCompraIniciadaV1(e: Envelope<any>, posicion: number) {
+  async applyCompraIniciadaV1(e: Envelope<any>, posicion: number) {
     // Interruptor del demo: alarga la reconstruccion para poder MEDIR la
     // ventana. Sin esto termina en milisegundos y "nadie vio nada" no se
     // distingue de "nadie mirO".
     const lento = Number(process.env.AXON_DEMO_RECONSTRUIR_LENTO_MS ?? 0);
-    if (lento > 0 && e.source === "reconstruccion") {
+    if (lento > 0 && e.source === "rebuild") {
       await new Promise((r) => setTimeout(r, lento));
     }
     await this.#enUna(
@@ -344,7 +344,7 @@ class Conversion implements ConversionProyeccion, Checkpoint, Sombra {
     );
   }
 
-  async aplicarCompraCobradaV1(e: Envelope<any>, posicion: number) {
+  async applyCompraCobradaV1(e: Envelope<any>, posicion: number) {
     await this.#enUna(
       e.data.streamId,
       posicion,
@@ -354,7 +354,7 @@ class Conversion implements ConversionProyeccion, Checkpoint, Sombra {
     );
   }
 
-  async aplicarCompraCompensadaV1(e: Envelope<any>, posicion: number) {
+  async applyCompraCompensadaV1(e: Envelope<any>, posicion: number) {
     await this.#enUna(
       e.data.streamId,
       posicion,
@@ -397,20 +397,20 @@ function actions(clients: Clients): CompraActions {
 class Checkout extends CheckoutService {
   #journal: SagaJournal;
   #actions: CompraActions;
-  #flujo: Flujo;
+  #stream: Stream;
   #vista: Conversion;
   #sombra: Conversion;
   constructor(b: any, o: Outbox<pg.PoolClient>, db: pg.Pool) {
     super(b, o);
     this.#journal = new Journal(db);
-    this.#flujo = new Flujo(db, o);
+    this.#stream = new Stream(db, o);
     this.#vista = new Conversion(db);
     this.#sombra = new Conversion(db, true);
     this.#actions = actions(new Clients(transport()));
   }
 
-  get flujo() {
-    return this.#flujo;
+  get stream() {
+    return this.#stream;
   }
   get vista() {
     return this.#vista;
@@ -425,25 +425,25 @@ class Checkout extends CheckoutService {
    *  con dos instancias, un contador local se desincroniza y el UNIQUE es lo
    *  unico que lo dice. */
   async #anotar<T>(streamId: string, tipo: string, data: T, causa: Envelope<unknown>) {
-    // `compraCargar` lee la ultima foto valida y solo el resto del flujo desde
+    // `compraLoad` lee la ultima foto valida y solo el resto del flujo desde
     // ahi. Sin fotos leeria el flujo entero, que es lo mismo hasta que un flujo
     // tiene cien mil eventos.
-    const { version } = await compraCargar(reglasCompra, this.#flujo, streamId);
+    const { version } = await compraLoad(compraRules, this.#stream, streamId);
     // El envelope se construye ANTES de escribirlo. Nadie publica aqui: el
     // append deja la fila en el outbox en la misma transaccion, y de ahi
     // publica el relay. Un `publish` en esta linea seria el dual-write que
     // todo esto evita.
     const e = newEnvelope(tipo, "checkout", data, causa);
-    const nueva = await this.#flujo.append(streamId, version, e);
+    const nueva = await this.#stream.append(streamId, version, e);
     // La foto se saca DESPUES del append y de un estado recien reconstruido:
     // fotografiar lo que se creia el estado antes de escribir guardaria una
     // foto de algo que no quedo en el flujo.
-    const { estado } = await compraCargar(reglasCompra, this.#flujo, streamId);
-    await compraFotografiar(this.#flujo, streamId, nueva, estado);
+    const { state } = await compraLoad(compraRules, this.#stream, streamId);
+    await compraSnapshot(this.#stream, streamId, nueva, state);
     // La proyeccion se aplica aqui mismo. En un sistema mas grande la haria un
     // consumidor aparte, y el checkpoint es justo lo que permite separarlos sin
     // reprocesar todo.
-    await conversionAplicar(this.#vista, e, nueva);
+    await conversionApply(this.#vista, e, nueva);
     return e;
   }
 
@@ -499,11 +499,11 @@ async function main() {
       "POST /v1/checkouts": (body, e) => svc.checkout(body, e),
       [sweepRouteCompra]: () => sweepCompra(svc.steps, svc.journal),
       // la ruta que golpea el cron que despliega `axon infra`
-      [rutaLimpiezaCompra]: async () => ({ borradas: await limpiarCompra(svc.flujo) }),
+      [pruneRouteCompra]: async () => ({ borradas: await pruneCompra(svc.stream) }),
       // Reconstruir no lleva cron: no es periodico, es una operacion que
       // alguien decide.
-      [rutaReconstruirConversion]: async () => ({
-        aplicados: await reconstruirConversion(svc.sombra, svc.flujo),
+      [rebuildRouteConversion]: async () => ({
+        aplicados: await rebuildConversion(svc.sombra, svc.stream),
       }),
     },
     httpRoutes,

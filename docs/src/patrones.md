@@ -84,29 +84,29 @@ las **entradas** de cada llamada, porque son datos de negocio. Eso es una interf
 implementa, y un paso sin implementar no compila:
 
 ```ts
-export interface CompraSalidas {
+export interface CompraOutputs {
   paso1?: PaymentsCapturePaymentOut;
   paso2?: PaymentsPayoutMerchantOut;
 }
 
-export interface CompraAcciones {
+export interface CompraActions {
   /** paso 1 · payments.capturePayment */
-  paso1CapturePayment(e: Envelope<unknown>, previas: CompraSalidas): Promise<PaymentsCapturePaymentOut>;
+  step1CapturePayment(e: Envelope<unknown>, prior: CompraOutputs): Promise<PaymentsCapturePaymentOut>;
   /** deshace el paso 1 · payments.refundPayment · recibe lo que devolvieron los pasos
    *  anteriores, y tiene que tolerar que no haya nada que deshacer */
-  deshacer1RefundPayment(e: Envelope<unknown>, previas: CompraSalidas): Promise<void>;
+  undo1RefundPayment(e: Envelope<unknown>, prior: CompraOutputs): Promise<void>;
   /** paso 2 · payments.payoutMerchant */
-  paso2PayoutMerchant(e: Envelope<unknown>, previas: CompraSalidas): Promise<PaymentsPayoutMerchantOut>;
+  step2PayoutMerchant(e: Envelope<unknown>, prior: CompraOutputs): Promise<PaymentsPayoutMerchantOut>;
 }
 ```
 
-`previas` está tipado con las salidas reales de los métodos declarados —los mismos tipos
+`prior` está tipado con las salidas reales de los métodos declarados —los mismos tipos
 que ya emite el cliente de cada dependencia— y **sale del diario, no de una variable**.
 Esa es la diferencia entre una saga que se puede retomar y una que no: deshacer el paso 1
 necesita el id que ese paso devolvió, y el proceso que lo tenía en memoria es justo el que
 se murió.
 
-Por eso todo lo que una acción necesita tiene que salir del envelope o de `previas`. Una
+Por eso todo lo que una acción necesita tiene que salir del envelope o de `prior`. Una
 closure funciona en la primera pasada y desaparece en el retome, que es exactamente cuando
 hace falta.
 
@@ -164,9 +164,9 @@ Hay dos formas de correrlo, y las dos se generan:
 **Dentro del proceso**, con el intervalo derivado del presupuesto:
 
 ```ts
-const parar = arrancarBarridoCheckout(acciones, diario, (r) => {
+const parar = startSweepCheckout(acciones, diario, (r) => {
   log.info({ barrido: "checkout", ...r });
-  if (r.atascadas) log.error({ atascadas: r.atascadas });  // esto necesita una persona
+  if (r.stuck) log.error({ stuck: r.stuck });  // esto necesita una persona
 });
 ```
 
@@ -174,7 +174,7 @@ const parar = arrancarBarridoCheckout(acciones, diario, (r) => {
 publica la ruta y el arranque tiene que servirla:
 
 ```ts
-export const rutaBarridoCheckout = "POST /internal/saga/checkout/barrer" as const;
+export const sweepRouteCheckout = "POST /internal/saga/checkout/sweep" as const;
 ```
 
 Va por HTTP y no como un comando aparte porque un comando obliga a un entrypoint distinto
@@ -225,17 +225,17 @@ olvidar.
 **No reintenta una `atascada`.** Una compensación que ya falló necesita una persona;
 reintentarla en silencio esconde exactamente eso. Se cuenta y se deja.
 
-**No se calla cuando no alcanza.** Si se llena el límite de la pasada, `pendientes` sale
+**No se calla cuando no alcanza.** Si se llena el límite de la pasada, `pending` sale
 `true`. Un tope silencioso se lee igual que «no había más», y esa es la diferencia entre un
 barrido que va al día y uno que lleva semanas atrasado.
 
 ```ts
-export interface SagaBarrido {
-  reclamadas: number;
-  completadas: number;
-  compensadas: number;
-  atascadas: number;    // necesitan una persona
-  pendientes: boolean;  // quedaron para la proxima pasada
+export interface SweepReport {
+  claimed: number;
+  completed: number;
+  compensated: number;
+  stuck: number;    // necesitan una persona
+  pending: boolean;  // quedaron para la proxima pasada
 }
 ```
 
@@ -329,7 +329,7 @@ exactamente el caso que hace falta una saga.
     {"estado":"compensada"}
   OK: el cobro se deshizo y al comercio no se le pago
   una saga colgada en otro proceso, retomada por el barrido
-    {"reclamadas":1,"completadas":0,"compensadas":1,"atascadas":0,"pendientes":false}
+    {"claimed":1,"completed":0,"compensated":1,"stuck":0,"pending":false}
   OK: retomada desde el diario, compensada, y el reembolso alcanzo al cobro
   OK: una saga cerrada no se vuelve a barrer
 ```
@@ -448,11 +448,11 @@ Lo mecánico se genera: `append` con versión esperada, la rehidratación, y el 
 un caso por evento declarado. Cómo cada evento cambia el estado lo escribe quien lo sabe:
 
 ```ts
-export interface CuentaReglas<CuentaEstado> {
-  inicial(streamId: string): CuentaEstado;
-  aplicarCuentaAbiertaV1(estado: CuentaEstado, e: CuentaAbiertaV1): CuentaEstado;
-  aplicarCuentaDepositadaV1(estado: CuentaEstado, e: CuentaDepositadaV1): CuentaEstado;
-  aplicarCuentaCerradaV1(estado: CuentaEstado, e: CuentaCerradaV1): CuentaEstado;
+export interface CuentaRules<CuentaEstado> {
+  initial(streamId: string): CuentaEstado;
+  applyCuentaAbiertaV1(estado: CuentaEstado, e: CuentaAbiertaV1): CuentaEstado;
+  applyCuentaDepositadaV1(estado: CuentaEstado, e: CuentaDepositadaV1): CuentaEstado;
+  applyCuentaCerradaV1(estado: CuentaEstado, e: CuentaCerradaV1): CuentaEstado;
 }
 ```
 
@@ -501,9 +501,9 @@ export interface Checkpoint {
   leer(vista: string): Promise<number>;
 }
 
-export interface SaldosProyeccion {
+export interface SaldosProjection {
   /** cuenta.abierta@v1 · guarda `posicion` en la MISMA transaccion que el efecto */
-  aplicarCuentaAbiertaV1(e: Envelope<CuentaAbiertaV1>, posicion: number): Promise<void>;
+  applyCuentaAbiertaV1(e: Envelope<CuentaAbiertaV1>, posicion: number): Promise<void>;
   ...
 }
 ```
@@ -639,17 +639,17 @@ fotos existentes y las hace reconstruir: es lo único que convierte «la foto qu
 ### El ciclo se genera, con los números dentro
 
 ```ts
-export const compraFotoCada   = 50;
-export const compraFotoReglas = 1;
+export const compraSnapshotEvery   = 50;
+export const compraSnapshotRules = 1;
 
 /** De la ultima foto valida, y solo el resto del flujo desde ahi. */
-export async function compraCargar<E>(reglas, flujo: FlujoConFotos, streamId)
+export async function compraLoad<E>(reglas, flujo: SnapshottingStream, streamId)
 /** Fotografia si toca. Devuelve si la guardo, para poder medirlo. */
-export async function compraFotografiar<E>(flujo, streamId, version, estado)
+export async function compraSnapshot<E>(flujo, streamId, version, estado)
 ```
 
-Los dos números salen del manifiesto: nadie los teclea dos veces. Y `FlujoConFotos` sólo se
-genera si el manifiesto declara fotos — en `FlujoEventos` eran métodos opcionales, y
+Los dos números salen del manifiesto: nadie los teclea dos veces. Y `SnapshottingStream` sólo se
+genera si el manifiesto declara fotos — en `EventStream` eran métodos opcionales, y
 declarar fotos sin implementarlas compilaba y no hacía nada.
 
 Un detalle del orden: la foto se saca **después** del append y de un estado recién
@@ -681,8 +681,8 @@ cada versión de reglas. La limpieza borra **lo que la versión vigente no usa**
 versión de reglas, y todas menos la más nueva de cada flujo.
 
 ```ts
-export const rutaLimpiezaCompra = "POST /internal/aggregate/compra/limpiar" as const;
-export async function limpiarCompra(flujo: FlujoConFotos): Promise<number>
+export const pruneRouteCompra = "POST /internal/aggregate/compra/prune" as const;
+export async function pruneCompra(flujo: SnapshottingStream): Promise<number>
 ```
 
 Y `axon infra` la despliega en los cuatro targets, con la misma maquinaria que el barrido
@@ -719,10 +719,10 @@ sin migración: se cambia la proyección, se reconstruye, y no hay `ALTER TABLE`
 datos que se pueden recalcular.
 
 ```ts
-export const rutaReconstruirConversion = "POST /internal/view/conversion/reconstruir" as const;
-export async function reconstruirConversion(
-  proyeccion: ConversionProyeccion & Vaciable,
-  flujo: FlujoEventos & FuenteDeFlujos,
+export const rebuildRouteConversion = "POST /internal/view/conversion/rebuild" as const;
+export async function rebuildConversion(
+  proyeccion: ConversionProjection & Shadow,
+  flujo: EventStream & StreamSource,
 ): Promise<number>
 ```
 
@@ -743,7 +743,7 @@ reconstrucción interrumpida entre ellos deja una vista vacía que dice estar al
 no da ningún error, da respuestas vacías.
 
 **Las fechas son las del flujo.** Rellenar `evento_en` con la hora de la reconstrucción
-reescribiría el historial en silencio, así que `EventoDelFlujo` lleva su `en` y la
+reescribiría el historial en silencio, así que `StreamEvent` lleva su `en` y la
 reconstrucción lo repone. El testkit lo comprueba con una fecha de 2020.
 
 **El evento que la vista no declara se salta, no revienta**: está en el flujo por derecho
@@ -760,11 +760,11 @@ que preguntan reciben **menos filas de las que hay, sin ningún error**. Así qu
 reconstrucción se hace en una sombra y se cambia de golpe al final.
 
 ```ts
-export interface Sombra {
+export interface Shadow {
   /** Deja la sombra vacia, con su punto en cero. */
-  preparar(): Promise<void>;
+  prepare(): Promise<void>;
   /** Cambia la sombra por la viva, y su punto con ella, en UNA transaccion. */
-  intercambiar(): Promise<void>;
+  swap(): Promise<void>;
 }
 ```
 

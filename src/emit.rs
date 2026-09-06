@@ -223,10 +223,10 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         out.push(sagas_ts(m));
     }
     if !m.aggregate.is_empty() {
-        out.push(agregados_ts(m));
+        out.push(aggregates_ts(m));
     }
     if !m.view.is_empty() {
-        out.push(vistas_ts(m));
+        out.push(views_ts(m));
     }
     let routes: Vec<String> = m
         .methods
@@ -563,215 +563,217 @@ fn salida_de(m: &Manifest, r: &str) -> String {
 }
 
 
-/// El agregado: la tienda de eventos y el `fold`.
+/// The aggregate: the event store and the `fold`.
 ///
-/// Lo mecanico se genera —el append con version optimista, la rehidratacion, el
-/// switch con un caso por evento declarado— y lo que decide el negocio no: como
-/// cada evento cambia el estado lo escribe quien lo sabe, en una interfaz. Un
-/// evento declarado sin su caso no compila, que es la unica forma de que
-/// agregar un evento no deje el `fold` viejo funcionando en silencio.
-pub fn agregados_ts(m: &Manifest) -> String {
+/// The mechanical part is generated —the append with an optimistic version, the
+/// rehydration, the switch with one case per declared event— and the part the
+/// business decides is not: how each event changes the state is written by
+/// whoever knows, in an interface. A declared event without its case does not
+/// compile, which is the only way that adding an event does not leave the old
+/// `fold` quietly running and returning an incomplete state.
+pub fn aggregates_ts(m: &Manifest) -> String {
     let mut o = vec![
-        "\n/** El flujo de un agregado. Es la fuente de verdad: lo que hoy se\n \
-         *  guarda en una fila es una PROYECCION de esto.\n \
-         *\n \
-         *  `append` recibe la version que el llamador creia vigente. Si otro\n \
-         *  escribio en medio, tiene que fallar: eso es el UNIQUE (stream_id,\n \
-         *  version) haciendo su trabajo, y `axon verify` comprueba que exista\n \
-         *  porque sin el las dos escrituras entran y nadie ve un error. */\n\
-         /** Un evento tal como esta en el flujo. `en` es CUANDO OCURRIO, y viaja\n \
- *  porque al reconstruir una vista hay que volver a ponerlo: rellenarlo con\n \
- *  la hora de la reconstruccion reescribe el historial en silencio. */\n\
-         export interface EventoDelFlujo {\n  \
+        "\n/** An event as it sits in the stream. `at` is WHEN IT HAPPENED, and it\n \
+         *  travels because rebuilding a view has to put it back: filling it in with\n \
+         *  the rebuild's clock rewrites history in silence. */\n\
+         export interface StreamEvent {\n  \
            version: number;\n  \
            type: string;\n  \
            data: unknown;\n  \
-           en: string;\n\
+           at: string;\n\
          }\n\
          \n\
-         export interface FlujoEventos {\n  \
-           /** Los eventos de un flujo, en orden. `desde` permite arrancar de una foto. */\n  \
-           leer(streamId: string, desde?: number): Promise<EventoDelFlujo[]>;\n  \
-           /** Agrega al final. Rechaza si `esperada` ya no es la ultima version. */\n  \
-           append(streamId: string, esperada: number, e: Envelope<unknown>): Promise<number>;\n  \
-           /** Las fotos van en `FlujoConFotos`, que solo se genera si el\n   \
-            *  manifiesto las declara: opcionales aqui, declararlas y no\n   \
-            *  implementarlas compilaria y no haria nada. */\n\
+         /** An aggregate's stream. It is the source of truth: what today sits in a\n \
+         *  row is a PROJECTION of this.\n \
+         *\n \
+         *  `append` takes the version the caller believed was current. If someone\n \
+         *  else wrote in between, it has to fail: that is the UNIQUE (stream_id,\n \
+         *  version) doing its job, and `axon verify` checks that it exists — because\n \
+         *  without it both writes land and nobody sees an error. */\n\
+         export interface EventStream {\n  \
+           /** A stream's events, in order. `from` allows starting at a snapshot. */\n  \
+           read(streamId: string, from?: number): Promise<StreamEvent[]>;\n  \
+           /** Appends at the end. Rejects if `expected` is no longer the last version. */\n  \
+           append(streamId: string, expected: number, e: Envelope<unknown>): Promise<number>;\n  \
+           /** Snapshots live in `SnapshottingStream`, generated only when the\n   \
+            *  manifest declares them: optional here means declaring snapshots and\n   \
+            *  not implementing them would compile and do nothing. */\n\
          }\n\
          \n\
-         /** Otro escribio primero. No es un error de programa: es la condicion\n \
-         *  normal de dos usuarios sobre el mismo agregado, y quien la recibe\n \
-         *  vuelve a leer y reintenta. */\n\
-         export class VersionEnConflicto extends Error {\n  \
+         /** Someone else wrote first. Not a programming error: it is the normal\n \
+         *  condition of two users on the same aggregate, and whoever gets it reads\n \
+         *  again and retries. */\n\
+         export class VersionConflict extends Error {\n  \
            readonly streamId: string;\n  \
-           readonly esperada: number;\n  \
-           constructor(streamId: string, esperada: number) {\n    \
-             super(`${streamId}: la version ${esperada} ya no es la ultima`);\n    \
+           readonly expected: number;\n  \
+           constructor(streamId: string, expected: number) {\n    \
+             super(`${streamId}: version ${expected} is no longer the last one`);\n    \
              this.streamId = streamId;\n    \
-             this.esperada = esperada;\n  \
+             this.expected = expected;\n  \
            }\n\
          }\n"
             .to_string(),
     ];
     if m.aggregate.values().any(|a| a.snapshot_every > 0) {
         o.push(
-            "/** Un flujo que ademas guarda fotos.\n \
+            "/** A stream that also stores snapshots.\n \
              *\n \
-             *  Una foto es una CACHE del `fold`, y por eso lleva la version de las\n \
-             *  reglas con la que se calculo: si el `fold` cambia, las fotos viejas\n \
-             *  codifican la version anterior y rehidratar de ahi da un estado que\n \
-             *  ya no coincide con reproducir el flujo. Eso no da ningun error: da\n \
-             *  un numero equivocado.\n \
+             *  A snapshot is a CACHE of the `fold`, which is why it carries the\n \
+             *  version of the rules it was computed with: if the `fold` changes, the\n \
+             *  old snapshots encode the previous version, and rehydrating from one\n \
+             *  gives a state that no longer matches replaying the stream. That does\n \
+             *  not raise an error: it returns a wrong number.\n \
              *\n \
-             *  `foto` devuelve solo las de la version vigente. Las de otra version\n \
-             *  se ignoran y el estado se reconstruye desde el principio, que es\n \
-             *  lento y correcto —en ese orden. */\n\
-             export interface FlujoConFotos extends FlujoEventos {\n  \
-               foto(streamId: string, reglas: number): Promise<{ version: number; estado: unknown } | null>;\n  \
-               guardarFoto(streamId: string, version: number, reglas: number, estado: unknown): Promise<void>;\n  \
-               /** Borra las fotos que la version vigente no usa: las de OTRA version\n   \
-                *  de reglas, y todas menos la mas nueva de cada flujo. Devuelve\n   \
-                *  cuantas borro.\n   \
+             *  `snapshot` only returns those of the current version. Ones from another\n \
+             *  version are ignored and the state is rebuilt from scratch, which is\n \
+             *  slow and correct — in that order. */\n\
+             export interface SnapshottingStream extends EventStream {\n  \
+               snapshot(streamId: string, rules: number): Promise<{ version: number; state: unknown } | null>;\n  \
+               saveSnapshot(streamId: string, version: number, rules: number, state: unknown): Promise<void>;\n  \
+               /** Deletes the snapshots the current version does not use: those of\n   \
+                *  ANOTHER rules version, and all but the newest of each stream.\n   \
+                *  Returns how many it deleted.\n   \
                 *\n   \
-                *  Puede ser agresiva justamente porque una foto es una CACHE: lo\n   \
-                *  peor que puede pasar es reconstruir desde el flujo, que es lento y\n   \
-                *  correcto. Borrar de mas no rompe nada; no borrar nunca hace crecer\n   \
-                *  la tabla con cada version de reglas.\n   \
+                *  It can afford to be aggressive precisely because a snapshot is a\n   \
+                *  CACHE: the worst that can happen is rebuilding from the stream,\n   \
+                *  which is slow and correct. Deleting too much breaks nothing; never\n   \
+                *  deleting grows the table with every rules version.\n   \
                 *\n   \
-                *  Y no hay carrera con quien rehidrata: `foto` devuelve el estado por\n   \
-                *  valor, asi que borrar la fila despues no le quita nada. */\n  \
-               limpiarFotos(reglas: number): Promise<number>;\n\
+                *  And there is no race with whoever is rehydrating: `snapshot` returns\n   \
+                *  the state BY VALUE, so deleting the row afterwards takes nothing\n   \
+                *  away from them. */\n  \
+               pruneSnapshots(rules: number): Promise<number>;\n\
              }\n"
                 .to_string(),
         );
     }
-    for (nombre, ag) in &m.aggregate {
-        let p = pascal(nombre);
-        let c = camel(nombre);
-        let mut casos = Vec::new();
-        let mut aplica = Vec::new();
+    for (name, ag) in &m.aggregate {
+        let p = pascal(name);
+        let c = camel(name);
+        let mut cases = Vec::new();
+        let mut dispatch = Vec::new();
         for ev in &ag.events {
             let t = pascal(ev);
-            casos.push(format!("  aplicar{t}(estado: {p}Estado, e: {t}): {p}Estado;"));
-            aplica.push(format!(
+            cases.push(format!("  apply{t}(state: {p}State, e: {t}): {p}State;"));
+            dispatch.push(format!(
                 "      case \"{ev}\":\n        \
-                   return reglas.aplicar{t}(estado, ev.data as {t});"
+                   return rules.apply{t}(state, ev.data as {t});"
             ));
         }
         o.push(format!(
-            "/** Los eventos que componen `{nombre}`, declarados en el manifiesto. */\n\
-             export const {c}Eventos = [{}] as const;\n\
-             export type {p}Evento = typeof {c}Eventos[number];\n",
+            "/** The events that make up `{name}`, as declared in the manifest. */\n\
+             export const {c}Events = [{}] as const;\n\
+             export type {p}Event = typeof {c}Events[number];\n",
             ag.events
                 .iter()
                 .map(|e| format!("\"{e}\""))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
-        // El estado lo define quien lo sabe: el generador no puede inventar la
-        // forma del dominio, solo imponer que haya un caso por evento.
+        // The shape of the state is defined by whoever knows the domain: the
+        // generator cannot invent it, only enforce one case per declared event.
         o.push(format!(
-            "/** El estado reconstruido. Su forma la define el dominio; lo que\n \
-             *  impone el generador es que haya un caso por cada evento declarado. */\n\
-             export interface {p}Reglas<{p}Estado> {{\n  \
-               /** El estado antes del primer evento. */\n  \
-               inicial(streamId: string): {p}Estado;\n\
+            "/** The rebuilt state. Its shape is the domain's; what the generator\n \
+             *  enforces is that there is one case per declared event. */\n\
+             export interface {p}Rules<{p}State> {{\n  \
+               /** The state before the first event. */\n  \
+               initial(streamId: string): {p}State;\n\
              {}\n}}\n",
-            casos.join("\n")
+            cases.join("\n")
         ));
-        let gobierna = match &ag.machine {
+        let governed = match &ag.machine {
             Some(mac) => format!(
-                "\n *  Gobernado por `[machine.{mac}]`: un evento que no corresponde a\n \
-                 *  una transicion legal desde el estado actual se RECHAZA en vez de\n \
-                 *  aplicarse. Un flujo con un evento imposible dentro no se puede\n \
-                 *  arreglar despues: los eventos no se editan."
+                "\n *  Governed by `[machine.{mac}]`: an event that does not correspond to\n \
+                 *  a legal transition from the current state is REJECTED rather than\n \
+                 *  applied. A stream with an impossible event inside cannot be fixed\n \
+                 *  afterwards: events do not get edited."
             ),
             None => String::new(),
         };
         o.push(format!(
-            "/** Reconstruye el estado aplicando el flujo en orden.{gobierna} */\n\
+            "/** Rebuilds the state by applying the stream in order.{governed} */\n\
              export function {c}Fold<E>(\n  \
-               reglas: {p}Reglas<E>,\n  \
+               rules: {p}Rules<E>,\n  \
                streamId: string,\n  \
-               eventos: {{ version: number; type: string; data: unknown }}[],\n  \
-               desde?: {{ version: number; estado: E }},\n\
-             ): {{ version: number; estado: E }} {{\n  \
-               let estado = desde ? desde.estado : reglas.inicial(streamId);\n  \
-               let version = desde ? desde.version : 0;\n  \
-               for (const ev of eventos) {{\n    \
-                 // El orden no se asume: un hueco en las versiones significa que\n    \
-                 // falta un evento, y reconstruir sin el da un estado que nunca\n    \
-                 // existio.\n    \
+               events: StreamEvent[],\n  \
+               from?: {{ version: number; state: E }},\n\
+             ): {{ version: number; state: E }} {{\n  \
+               let state = from ? from.state : rules.initial(streamId);\n  \
+               let version = from ? from.version : 0;\n  \
+               for (const ev of events) {{\n    \
+                 // The order is not assumed: a gap in the versions means an event is\n    \
+                 // missing, and rebuilding without it gives a state that never\n    \
+                 // existed.\n    \
                  if (ev.version !== version + 1) {{\n      \
-                   throw new Error(`{nombre}/${{streamId}}: se esperaba la version ${{version + 1}} y llego ${{ev.version}}`);\n    \
+                   throw new Error(`{name}/${{streamId}}: expected version ${{version + 1}} and got ${{ev.version}}`);\n    \
                  }}\n    \
-                 estado = {c}Aplicar(reglas, estado, ev);\n    \
+                 state = {c}ApplyEvent(rules, state, ev);\n    \
                  version = ev.version;\n  \
                }}\n  \
-               return {{ version, estado }};\n\
+               return {{ version, state }};\n\
              }}\n\
              \n\
-             function {c}Aplicar<E>(reglas: {p}Reglas<E>, estado: E, ev: {{ type: string; data: unknown }}): E {{\n  \
+             function {c}ApplyEvent<E>(rules: {p}Rules<E>, state: E, ev: {{ type: string; data: unknown }}): E {{\n  \
                switch (ev.type) {{\n\
-             {aplica}\n    \
+             {dispatch}\n    \
                  default:\n      \
-                   // Un evento en el flujo que el manifiesto no declara: el estado\n      \
-                   // que saldria de ignorarlo es incorrecto y nadie lo sabria.\n      \
-                   throw new Error(`{nombre}: `+ev.type+` no es un evento declarado del agregado`);\n  \
+                   // An event in the stream the manifest does not declare: the state\n      \
+                   // that would come out of ignoring it is wrong and nobody would know.\n      \
+                   throw new Error(`{name}: `+ev.type+` is not a declared event of the aggregate`);\n  \
                }}\n\
              }}\n",
-            aplica = aplica.join("\n"),
+            dispatch = dispatch.join("\n"),
         ));
         if ag.snapshot_every > 0 {
             o.push(format!(
-                "/** Cada cuantos eventos se fotografia, y con que version de reglas.\n \
-                 *  Los dos numeros salen del manifiesto: nadie los teclea dos veces. */\n\
-                 export const {c}FotoCada = {cada};\n\
-                 export const {c}FotoReglas = {reglas};\n\
+                "/** How many events between snapshots, and with which rules version.\n \
+                 *  Both numbers come from the manifest: nobody types them twice. */\n\
+                 export const {c}SnapshotEvery = {every};\n\
+                 export const {c}SnapshotRules = {rules};\n\
                  \n\
-                 /** Carga el estado: de la ultima foto valida, y solo el resto del\n \
-                 *  flujo desde ahi.\n \
+                 /** Loads the state: from the last valid snapshot, and only the rest\n \
+                 *  of the stream from there.\n \
                  *\n \
-                 *  Si no hay foto de la version vigente, reconstruye entero. Eso es\n \
-                 *  lento y correcto, en ese orden: una foto de otra version daria un\n \
-                 *  estado incorrecto sin decirlo. */\n\
-                 export async function {c}Cargar<E>(\n  \
-                   reglas: {p}Reglas<E>,\n  \
-                   flujo: FlujoConFotos,\n  \
+                 *  With no snapshot of the current version it rebuilds the whole\n \
+                 *  thing. That is slow and correct, in that order: a snapshot from\n \
+                 *  another version would give a wrong state without saying so. */\n\
+                 export async function {c}Load<E>(\n  \
+                   rules: {p}Rules<E>,\n  \
+                   stream: SnapshottingStream,\n  \
                    streamId: string,\n\
-                 ): Promise<{{ version: number; estado: E }}> {{\n  \
-                   const f = await flujo.foto(streamId, {c}FotoReglas);\n  \
-                   const desde = f ? {{ version: f.version, estado: f.estado as E }} : undefined;\n  \
-                   const eventos = await flujo.leer(streamId, f?.version ?? 0);\n  \
-                   return {c}Fold(reglas, streamId, eventos, desde);\n\
+                 ): Promise<{{ version: number; state: E }}> {{\n  \
+                   const s = await stream.snapshot(streamId, {c}SnapshotRules);\n  \
+                   const from = s ? {{ version: s.version, state: s.state as E }} : undefined;\n  \
+                   const events = await stream.read(streamId, s?.version ?? 0);\n  \
+                   return {c}Fold(rules, streamId, events, from);\n\
                  }}\n\
                  \n\
-                 /** Fotografia si toca. Devuelve si la guardo, para poder medirlo:\n \
-                 *  una cadencia declarada que no se cumple es una foto que nadie\n \
-                 *  sabe que falta. */\n\
-                 export async function {c}Fotografiar<E>(\n  \
-                   flujo: FlujoConFotos,\n  \
+                 /** Snapshots if it is time to. Returns whether it saved one, so it\n \
+                 *  can be measured: a declared cadence that is not met is a snapshot\n \
+                 *  nobody knows is missing. */\n\
+                 export async function {c}Snapshot<E>(\n  \
+                   stream: SnapshottingStream,\n  \
                    streamId: string,\n  \
                    version: number,\n  \
-                   estado: E,\n\
+                   state: E,\n\
                  ): Promise<boolean> {{\n  \
-                   if (version === 0 || version % {c}FotoCada !== 0) return false;\n  \
-                   await flujo.guardarFoto(streamId, version, {c}FotoReglas, estado);\n  \
+                   if (version === 0 || version % {c}SnapshotEvery !== 0) return false;\n  \
+                   await stream.saveSnapshot(streamId, version, {c}SnapshotRules, state);\n  \
                    return true;\n\
                  }}\n",
-                cada = ag.snapshot_every,
-                reglas = ag.snapshot_version,
+                every = ag.snapshot_every,
+                rules = ag.snapshot_version,
             ));
             o.push(format!(
-                "/** La ruta que golpea el programador para limpiar las fotos viejas.\n \
-                 *  `axon infra` la despliega en los cuatro targets. */\n\
-                 export const rutaLimpieza{p} = \"POST /internal/aggregate/{nombre}/limpiar\" as const;\n\
+                "/** The route the scheduler hits to prune the old snapshots.\n \
+                 *  `axon infra` deploys it on all four targets. */\n\
+                 export const pruneRoute{p} = \"POST /internal/aggregate/{name}/prune\" as const;\n\
                  \n\
-                 /** Una pasada de limpieza. Devuelve cuantas fotos borro, para poder\n \
-                 *  medirlo: una limpieza que no reporta nada es indistinguible de una\n \
-                 *  que no corre, y lo que se nota entonces es el tamano de la tabla. */\n\
-                 export async function limpiar{p}(flujo: FlujoConFotos): Promise<number> {{\n  \
-                   return flujo.limpiarFotos({c}FotoReglas);\n\
+                 /** One prune pass. Returns how many snapshots it deleted, so it can\n \
+                 *  be measured: a prune that reports nothing is indistinguishable from\n \
+                 *  one that does not run, and what shows up then is the table size. */\n\
+                 export async function prune{p}(stream: SnapshottingStream): Promise<number> {{\n  \
+                   return stream.pruneSnapshots({c}SnapshotRules);\n\
                  }}\n"
             ));
         }
@@ -779,37 +781,39 @@ pub fn agregados_ts(m: &Manifest) -> String {
     o.join("\n")
 }
 
-/// La proyeccion: un caso por evento declarado, y el punto donde quedo.
-pub fn vistas_ts(m: &Manifest) -> String {
+/// The projection: one case per declared event, and where it left off.
+pub fn views_ts(m: &Manifest) -> String {
     let mut o = vec![
-        "\n/** Donde una vista anota hasta donde llego.\n \
+        "\n/** Where a view records how far it got.\n \
          *\n \
-         *  Sin esto, un reinicio reprocesa desde el principio o se salta lo que no\n \
-         *  alcanzo a aplicar. Las dos cosas dan una vista incorrecta, y ninguna da\n \
-         *  un error: por eso `axon verify` exige la tabla. */\n\
+         *  Without this, a restart either reprocesses from the beginning or skips\n \
+         *  what it did not get to apply. Both give a wrong view, and neither raises\n \
+         *  an error: that is why `axon verify` demands the table. */\n\
          export interface Checkpoint {\n  \
-           /** Desde donde retomar. La ESCRITURA no esta aqui a proposito: la\n   \
-            *  posicion tiene que guardarse en la misma transaccion que el efecto\n   \
-            *  de la vista, y esa transaccion es de la proyeccion, no del\n   \
-            *  framework. En dos transacciones, un corte entre ellas deja la vista\n   \
-            *  adelantada o atrasada respecto de lo que dice haber aplicado, y\n   \
-            *  ninguna de las dos da un error.\n   \
+           /** Where to resume from. The WRITE is deliberately not here: the\n   \
+            *  position has to be stored in the same transaction as the view's\n   \
+            *  effect, and that transaction belongs to the projection, not to the\n   \
+            *  framework. In two transactions, a crash between them leaves the view\n   \
+            *  ahead of or behind what it claims to have applied, and neither of\n   \
+            *  those raises an error.\n   \
             *\n   \
-            *  Por eso cada `aplicar*` recibe la posicion: la guarda quien puede\n   \
-            *  hacerlo junto con el resto.\n   \
+            *  That is why every `apply*` receives the position: it is stored by\n   \
+            *  whoever can do it alongside the rest.\n   \
             *\n   \
-            *  Y es POR FLUJO. La version de un evento es su posicion dentro de su\n   \
-            *  flujo, asi que un solo numero para toda la vista no identifica nada\n   \
-            *  en cuanto hay mas de un flujo: con uno parecia funcionar. */\n  \
-           leer(vista: string, streamId: string): Promise<number>;\n\
+            *  And it is PER STREAM. An event's version is its position inside its\n   \
+            *  own stream, so a single number for the whole view identifies nothing\n   \
+            *  as soon as there is more than one stream: with one it seemed to\n   \
+            *  work. */\n  \
+           read(view: string, streamId: string): Promise<number>;\n\
          }\n"
             .to_string(),
     ];
-    // Reconstruir una vista solo es posible si sus eventos estan LOCALMENTE. Los
-    // que llegaron por el bus ya no estan: se consumieron. Asi que la funcion se
-    // genera solo cuando todos los eventos de la vista son de un agregado
-    // propio, y su ausencia es la respuesta a "se puede reconstruir".
-    let reconstruibles: Vec<&String> = m
+    // Rebuilding a view is only possible if its events are available LOCALLY.
+    // The ones that arrived over the bus are gone: they were consumed. So the
+    // function is generated only when every event of the view belongs to an
+    // aggregate of this service, and its absence is the answer to "can this be
+    // rebuilt".
+    let rebuildable: Vec<&String> = m
         .view
         .iter()
         .filter(|(_, vi)| {
@@ -821,146 +825,147 @@ pub fn vistas_ts(m: &Manifest) -> String {
         })
         .map(|(n, _)| n)
         .collect();
-    if !reconstruibles.is_empty() {
+    if !rebuildable.is_empty() {
         o.push(
-            "/** Una vista sombra: se construye aparte y se cambia por la viva de\n \
-             *  golpe.\n \
+            "/** A shadow view: built aside and swapped for the live one all at\n \
+             *  once.\n \
              *\n \
-             *  Reconstruir en el sitio deja la vista incompleta mientras corre, y se\n \
-             *  sigue leyendo: los que preguntan reciben menos filas de las que hay,\n \
-             *  sin error. Con sombra, nadie ve un estado intermedio.\n \
+             *  Rebuilding in place leaves the view incomplete while it runs, and it\n \
+             *  keeps being read: whoever asks gets fewer rows than there are, with no\n \
+             *  error. With a shadow, nobody sees an intermediate state.\n \
              *\n \
-             *  La proyeccion que se le pasa a `reconstruir` tiene que estar apuntada a\n \
-             *  la SOMBRA. Si apuntara a la viva, esto seria una reconstruccion en el\n \
-             *  sitio con pasos extra —y por eso el demo mide que las lecturas nunca\n \
-             *  bajen mientras corre. */\n\
-             export interface Sombra {\n  \
-               /** Deja la sombra vacia, con su punto en cero. */\n  \
-               preparar(): Promise<void>;\n  \
-               /** Cambia la sombra por la viva, y su punto con ella, en UNA\n   \
-                *  transaccion. En dos, un corte entre ellas deja la vista nueva con el\n   \
-                *  punto de la vieja: se saltaria eventos o los reprocesaria. */\n  \
-               intercambiar(): Promise<void>;\n\
+             *  The projection handed to `rebuild` has to be pointed at the SHADOW. If\n \
+             *  it pointed at the live one this would be an in-place rebuild with extra\n \
+             *  steps — which is why the demo measures that reads never drop while it\n \
+             *  runs. */\n\
+             export interface Shadow {\n  \
+               /** Leaves the shadow empty, with its position at zero. */\n  \
+               prepare(): Promise<void>;\n  \
+               /** Swaps the shadow for the live one, and its position with it, in ONE\n   \
+                *  transaction. In two, a crash between them leaves the new table with\n   \
+                *  the old position: it would skip events or reprocess them. */\n  \
+               swap(): Promise<void>;\n\
              }\n\
              \n\
-             /** Los flujos del agregado, para recorrerlos. */\n\
-             export interface FuenteDeFlujos {\n  \
-               flujos(): Promise<string[]>;\n\
+             /** The aggregate's streams, so they can be walked. */\n\
+             export interface StreamSource {\n  \
+               streams(): Promise<string[]>;\n\
              }\n"
                 .to_string(),
         );
     }
-    for (nombre, vi) in &m.view {
-        let p = pascal(nombre);
-        let c = camel(nombre);
-        let mut casos = Vec::new();
-        let mut aplica = Vec::new();
+    for (name, vi) in &m.view {
+        let p = pascal(name);
+        let c = camel(name);
+        let mut cases = Vec::new();
+        let mut dispatch = Vec::new();
         for ev in &vi.on {
             let t = pascal(ev);
-            casos.push(format!(
-                "  /** {ev} · guarda `posicion` en la MISMA transaccion que el efecto */\n  \
-                 aplicar{t}(e: Envelope<{t}>, posicion: number): Promise<void>;"
+            cases.push(format!(
+                "  /** {ev} · stores `position` in the SAME transaction as the effect */\n  \
+                 apply{t}(e: Envelope<{t}>, position: number): Promise<void>;"
             ));
-            aplica.push(format!(
+            dispatch.push(format!(
                 "      case \"{ev}\":\n        \
-                   return proyeccion.aplicar{t}(e as Envelope<{t}>, posicion);"
+                   return projection.apply{t}(e as Envelope<{t}>, position);"
             ));
         }
         o.push(format!(
-            "/** La vista `{nombre}`, en `{tabla}`. Un metodo por evento declarado:\n \
-             *  agregar uno al manifiesto rompe la compilacion en vez de dejar la\n \
-             *  proyeccion vieja corriendo sin enterarse. */\n\
-             export interface {p}Proyeccion {{\n{}\n}}\n\
+            "/** The `{name}` view, in `{table}`. One method per declared event:\n \
+             *  adding one to the manifest breaks compilation instead of leaving the\n \
+             *  old projection running none the wiser. */\n\
+             export interface {p}Projection {{\n{}\n}}\n\
              \n\
-             export const {c}Tabla = \"{tabla}\" as const;\n\
-             export const {c}Eventos = [{eventos}] as const;\n{atraso}",
-            casos.join("\n"),
-            tabla = vi.tabla(nombre),
-            eventos = vi
+             export const {c}Table = \"{table}\" as const;\n\
+             export const {c}Events = [{events}] as const;\n{lag}",
+            cases.join("\n"),
+            table = vi.tabla(name),
+            events = vi
                 .on
                 .iter()
                 .map(|e| format!("\"{e}\""))
                 .collect::<Vec<_>>()
                 .join(", "),
-            atraso = match vi.max_staleness_ms {
+            lag = match vi.max_staleness_ms {
                 Some(ms) => format!(
-                    "/** Presupuesto de atraso declarado. Mas viejo que esto no se sirve. */\n\
-                     export const {c}AtrasoMaximoMs = {ms};\n"
+                    "/** The declared staleness budget. Older than this does not get served. */\n\
+                     export const {c}MaxStalenessMs = {ms};\n"
                 ),
                 None => String::new(),
             }
         ));
         o.push(format!(
-            "/** Rutea el evento al metodo de la vista. El `default` no es\n \
-             *  defensivo: un evento que la vista no declara llegaria de una\n \
-             *  suscripcion que nadie pidio. */\n\
-             export async function {c}Aplicar(\n  \
-               proyeccion: {p}Proyeccion,\n  \
+            "/** Routes the event to the view's method. The `default` is not\n \
+             *  defensive: an event the view does not declare would come from a\n \
+             *  subscription nobody asked for. */\n\
+             export async function {c}Apply(\n  \
+               projection: {p}Projection,\n  \
                e: Envelope<unknown>,\n  \
-               posicion: number,\n\
+               position: number,\n\
              ): Promise<void> {{\n  \
                switch (e.type) {{\n\
-             {aplica}\n    \
+             {dispatch}\n    \
                  default:\n      \
-                   throw new Error(`{nombre}: `+e.type+` no es un evento declarado de la vista`);\n  \
+                   throw new Error(`{name}: `+e.type+` is not a declared event of the view`);\n  \
                }}\n\
              }}\n\
              \n\
-             /** Cuanto atraso lleva la vista, para poder medirlo contra lo declarado. */\n\
-             export function {c}Atraso(ultimoEvento: Date, ahora = new Date()): number {{\n  \
-               return ahora.getTime() - ultimoEvento.getTime();\n\
+             /** How far behind the view is, so it can be measured against what was\n \
+             *  declared. */\n\
+             export function {c}Lag(lastEvent: Date, now = new Date()): number {{\n  \
+               return now.getTime() - lastEvent.getTime();\n\
              }}\n",
-            aplica = aplica.join("\n"),
+            dispatch = dispatch.join("\n"),
         ));
-        if reconstruibles.contains(&nombre) {
+        if rebuildable.contains(&name) {
             o.push(format!(
-                "/** La ruta que reconstruye la vista. NO lleva cron: reconstruir no es\n \
-                 *  periodico, es una operacion que alguien decide. */\n\
-                 export const rutaReconstruir{p} = \"POST /internal/view/{nombre}/reconstruir\" as const;\n\
+                "/** The route that rebuilds the view. It carries NO cron: rebuilding\n \
+                 *  is not periodic, it is an operation somebody decides on. */\n\
+                 export const rebuildRoute{p} = \"POST /internal/view/{name}/rebuild\" as const;\n\
                  \n\
-                 /** Tira la vista y la vuelve a construir del flujo. Devuelve cuantos\n \
-                 *  eventos aplico.\n \
+                 /** Throws the view away and builds it again from the stream. Returns\n \
+                 *  how many events it applied.\n \
                  *\n \
-                 *  Es lo que convierte un modelo de lectura en algo cuya FORMA se puede\n \
-                 *  cambiar sin migracion: se cambia la proyeccion, se reconstruye, y no\n \
-                 *  hay `ALTER TABLE` que preserve datos que se pueden recalcular.\n \
+                 *  This is what turns a read model into something whose SHAPE can be\n \
+                 *  changed without a migration: change the projection, rebuild, and\n \
+                 *  there is no `ALTER TABLE` preserving data that can be recomputed.\n \
                  *\n \
-                 *  Se construye en una SOMBRA y se cambia de golpe al final, asi que\n \
-                 *  nadie lee un estado intermedio: mientras corre, la vista viva sigue\n \
-                 *  respondiendo lo de antes. El intercambio toma un bloqueo breve.\n \
+                 *  It is built in a SHADOW and swapped at the very end, so nobody reads\n \
+                 *  an intermediate state: while it runs, the live view keeps answering\n \
+                 *  what it did before. The swap takes a brief lock.\n \
                  *\n \
-                 *  El recorrido es por flujo y en orden de version. Una proyeccion cuyo\n \
-                 *  resultado dependa del orden ENTRE flujos necesita un orden total que\n \
-                 *  el flujo no tiene: ahi esto da un resultado distinto al de la\n \
-                 *  proyeccion en vivo, y la comprobacion del demo lo veria. */\n\
-                 export async function reconstruir{p}(\n  \
-                   sombra: {p}Proyeccion & Sombra,\n  \
-                   flujo: FlujoEventos & FuenteDeFlujos,\n\
+                 *  The walk is per stream and in version order. A projection whose\n \
+                 *  result depends on the order BETWEEN streams needs a total order the\n \
+                 *  stream does not have: there this would give a different result from\n \
+                 *  the live projection, and the demo's check would see it. */\n\
+                 export async function rebuild{p}(\n  \
+                   shadow: {p}Projection & Shadow,\n  \
+                   stream: EventStream & StreamSource,\n\
                  ): Promise<number> {{\n  \
-                   await sombra.preparar();\n  \
-                   let aplicados = 0;\n  \
-                   for (const streamId of await flujo.flujos()) {{\n    \
-                     for (const ev of await flujo.leer(streamId)) {{\n      \
-                       // Los eventos del flujo no son envelopes: se arma el minimo que\n      \
-                       // la proyeccion necesita. El `time` es el del FLUJO, no el de\n      \
-                       // ahora: rellenarlo reescribiria el historial en silencio.\n      \
-                       if (!({c}Eventos as readonly string[]).includes(ev.type)) continue;\n      \
-                       await {c}Aplicar(sombra, {{\n        \
+                   await shadow.prepare();\n  \
+                   let applied = 0;\n  \
+                   for (const streamId of await stream.streams()) {{\n    \
+                     for (const ev of await stream.read(streamId)) {{\n      \
+                       // Stream events are not envelopes: the minimum the projection\n      \
+                       // needs gets built here. The `time` is the STREAM's, not now's:\n      \
+                       // filling it in would rewrite history in silence.\n      \
+                       if (!({c}Events as readonly string[]).includes(ev.type)) continue;\n      \
+                       await {c}Apply(shadow, {{\n        \
                          id: `${{streamId}}:${{ev.version}}`,\n        \
                          type: ev.type,\n        \
-                         source: \"reconstruccion\",\n        \
-                         time: ev.en,\n        \
+                         source: \"rebuild\",\n        \
+                         time: ev.at,\n        \
                          traceparent: \"\",\n        \
                          correlationId: streamId,\n        \
                          causationId: null,\n        \
                          data: ev.data,\n      \
                        }}, ev.version);\n      \
-                       aplicados++;\n    \
+                       applied++;\n    \
                      }}\n  \
                    }}\n  \
-                   // El cambio va al final: hasta aqui nadie vio nada de esto.\n  \
-                   await sombra.intercambiar();\n  \
-                   return aplicados;\n\
+                   // The swap goes at the end: until here nobody saw any of this.\n  \
+                   await shadow.swap();\n  \
+                   return applied;\n\
                  }}\n"
             ));
         }

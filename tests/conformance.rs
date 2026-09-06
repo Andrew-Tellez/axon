@@ -3545,135 +3545,136 @@ fn el_fold_generado_reconstruye_y_se_niega() {
         destino.join("es.test.ts"),
         r#"import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cuentaFold, cuentaEventos, cuentaCargar, cuentaFotografiar, cuentaFotoReglas,
-         limpiarCuenta, rutaLimpiezaCuenta, reconstruirSaldos,
-         saldosAplicar, saldosTabla, saldosAtrasoMaximoMs,
-         newEnvelope, type CuentaReglas, type SaldosProyeccion,
+import { cuentaFold, cuentaEvents, cuentaLoad, cuentaSnapshot, cuentaSnapshotRules,
+         pruneCuenta, pruneRouteCuenta, rebuildSaldos,
+         saldosApply, saldosTable, saldosMaxStalenessMs,
+         newEnvelope, type CuentaRules, type SaldosProjection,
          type CuentaAbiertaV1, type CuentaDepositadaV1 } from "./contratos.ts";
 
 interface Saldo { abierta: boolean; centavos: number; cerrada: boolean }
 
-const reglas: CuentaReglas<Saldo> = {
-  inicial: () => ({ abierta: false, centavos: 0, cerrada: false }),
-  aplicarCuentaAbiertaV1: (s) => ({ ...s, abierta: true }),
-  aplicarCuentaDepositadaV1: (s, e) => ({ ...s, centavos: s.centavos + e.centavos }),
-  aplicarCuentaCerradaV1: (s) => ({ ...s, cerrada: true }),
+const rules: CuentaRules<Saldo> = {
+  initial: () => ({ abierta: false, centavos: 0, cerrada: false }),
+  applyCuentaAbiertaV1: (s) => ({ ...s, abierta: true }),
+  applyCuentaDepositadaV1: (s, e) => ({ ...s, centavos: s.centavos + e.centavos }),
+  applyCuentaCerradaV1: (s) => ({ ...s, cerrada: true }),
 };
 
-const ev = (version: number, type: string, data: unknown) => ({ version, type, data });
+const ev = (version: number, type: string, data: unknown) =>
+  ({ version, type, data, at: "2020-01-01T00:00:00.000Z" });
 
 test("el estado sale del flujo, no de una fila", () => {
-  const r = cuentaFold(reglas, "c1", [
+  const r = cuentaFold(rules, "c1", [
     ev(1, "cuenta.abierta@v1", { streamId: "c1" }),
     ev(2, "cuenta.depositada@v1", { streamId: "c1", centavos: 500 }),
     ev(3, "cuenta.depositada@v1", { streamId: "c1", centavos: 250 }),
   ]);
   assert.equal(r.version, 3);
-  assert.deepEqual(r.estado, { abierta: true, centavos: 750, cerrada: false });
+  assert.deepEqual(r.state, { abierta: true, centavos: 750, cerrada: false });
 });
 
 test("un hueco en las versiones revienta en vez de dar un estado que nunca existio", () => {
   assert.throws(
-    () => cuentaFold(reglas, "c1", [
+    () => cuentaFold(rules, "c1", [
       ev(1, "cuenta.abierta@v1", { streamId: "c1" }),
       ev(3, "cuenta.depositada@v1", { streamId: "c1", centavos: 500 }),
     ]),
-    /se esperaba la version 2 y llego 3/,
+    /expected version 2 and got 3/,
   );
 });
 
 test("un evento que el manifiesto no declara no se ignora", () => {
   assert.throws(
-    () => cuentaFold(reglas, "c1", [ev(1, "cuenta.robada@v1", {})]),
-    /no es un evento declarado del agregado/,
+    () => cuentaFold(rules, "c1", [ev(1, "cuenta.robada@v1", {})]),
+    /is not a declared event of the aggregate/,
   );
 });
 
 test("desde una foto, el fold sigue desde ahi", () => {
-  const r = cuentaFold(reglas, "c1",
+  const r = cuentaFold(rules, "c1",
     [ev(8, "cuenta.depositada@v1", { streamId: "c1", centavos: 100 })],
-    { version: 7, estado: { abierta: true, centavos: 900, cerrada: false } });
+    { version: 7, state: { abierta: true, centavos: 900, cerrada: false } });
   assert.equal(r.version, 8);
-  assert.equal(r.estado.centavos, 1000);
+  assert.equal(r.state.centavos, 1000);
 });
 
 test("los eventos del agregado son los del manifiesto", () => {
-  assert.deepEqual([...cuentaEventos],
+  assert.deepEqual([...cuentaEvents],
     ["cuenta.abierta@v1", "cuenta.depositada@v1", "cuenta.cerrada@v1"]);
 });
 
 test("una foto de otra version de reglas no se usa", async () => {
-  const eventos = [
+  const events = [
     ev(1, "cuenta.abierta@v1", { streamId: "c1" }),
     ev(2, "cuenta.depositada@v1", { streamId: "c1", centavos: 500 }),
     ev(3, "cuenta.depositada@v1", { streamId: "c1", centavos: 250 }),
   ];
   // Un flujo con UNA foto guardada, de la version de reglas equivocada. Lo que
   // tiene que pasar es que no se use: rehidratar de ahi daria 99999 centavos.
-  const flujo = {
+  const stream = {
     pedidas: [] as number[],
-    async leer(_id: string, desde = 0) { return eventos.filter((e) => e.version > desde); },
+    async read(_id: string, from = 0) { return events.filter((e) => e.version > from); },
     async append() { return 0; },
-    async foto(_id: string, reglas: number) {
-      this.pedidas.push(reglas);
+    async snapshot(_id: string, rules: number) {
+      this.pedidas.push(rules);
       // solo devuelve la de la version pedida, como el SQL generado
-      return reglas === 1 ? { version: 2, estado: { abierta: true, centavos: 99999, cerrada: false } } : null;
+      return rules === 1 ? { version: 2, state: { abierta: true, centavos: 99999, cerrada: false } } : null;
     },
-    async guardarFoto() {},
+    async saveSnapshot() {},
   };
-  const r = await cuentaCargar(reglas, flujo, "c1");
+  const r = await cuentaLoad(rules, stream, "c1");
   // pidio la version vigente, no la que habia guardada
-  assert.deepEqual(flujo.pedidas, [cuentaFotoReglas]);
-  assert.notEqual(cuentaFotoReglas, 1);
+  assert.deepEqual(stream.pedidas, [cuentaSnapshotRules]);
+  assert.notEqual(cuentaSnapshotRules, 1);
   // y el estado salio del flujo entero, no de la foto envenenada
-  assert.equal(r.estado.centavos, 750);
+  assert.equal(r.state.centavos, 750);
   assert.equal(r.version, 3);
 });
 
 test("solo se fotografia en la cadencia declarada", async () => {
-  const guardadas: number[] = [];
-  const flujo = {
-    async leer() { return []; },
+  const saved: number[] = [];
+  const stream = {
+    async read() { return []; },
     async append() { return 0; },
-    async foto() { return null; },
-    async guardarFoto(_id: string, version: number) { guardadas.push(version); },
+    async snapshot() { return null; },
+    async saveSnapshot(_id: string, version: number) { saved.push(version); },
   };
   const estado = { abierta: true, centavos: 1, cerrada: false };
   for (let v = 0; v <= 4; v++) {
-    await cuentaFotografiar(flujo, "c1", v, estado);
+    await cuentaSnapshot(stream, "c1", v, estado);
   }
   // cada 2, y nunca en la version 0: una foto del estado inicial no cachea nada
-  assert.deepEqual(guardadas, [2, 4]);
+  assert.deepEqual(saved, [2, 4]);
 });
 
 test("reconstruir prepara la sombra, repone las fechas y cambia al final", async () => {
-  const orden: string[] = [];
-  const proyeccion = {
-    async preparar() { orden.push("preparar"); },
-    async intercambiar() { orden.push("intercambiar"); },
-    async aplicarCuentaAbiertaV1(e: any, pos: number) { orden.push(`abierta:${e.time}:${pos}`); },
-    async aplicarCuentaDepositadaV1(e: any, pos: number) { orden.push(`deposito:${e.data.centavos}:${pos}`); },
+  const order: string[] = [];
+  const projection = {
+    async prepare() { order.push("prepare"); },
+    async swap() { order.push("swap"); },
+    async applyCuentaAbiertaV1(e: any, pos: number) { order.push(`abierta:${e.time}:${pos}`); },
+    async applyCuentaDepositadaV1(e: any, pos: number) { order.push(`deposito:${e.data.centavos}:${pos}`); },
   };
-  const flujo = {
-    async flujos() { return ["c1"]; },
-    async leer() {
+  const stream = {
+    async streams() { return ["c1"]; },
+    async read() {
       return [
-        { version: 1, type: "cuenta.abierta@v1", data: { streamId: "c1" }, en: "2020-01-01T00:00:00.000Z" },
-        { version: 2, type: "cuenta.depositada@v1", data: { streamId: "c1", centavos: 500 }, en: "2020-01-02T00:00:00.000Z" },
+        { version: 1, type: "cuenta.abierta@v1", data: { streamId: "c1" }, at: "2020-01-01T00:00:00.000Z" },
+        { version: 2, type: "cuenta.depositada@v1", data: { streamId: "c1", centavos: 500 }, at: "2020-01-02T00:00:00.000Z" },
         // este NO es de la vista: la vista solo declara abierta y depositada
-        { version: 3, type: "cuenta.cerrada@v1", data: { streamId: "c1" }, en: "2020-01-03T00:00:00.000Z" },
+        { version: 3, type: "cuenta.cerrada@v1", data: { streamId: "c1" }, at: "2020-01-03T00:00:00.000Z" },
       ];
     },
     async append() { return 0; },
   };
-  const aplicados = await reconstruirSaldos(proyeccion, flujo);
+  const aplicados = await rebuildSaldos(projection, stream);
   // preparar va PRIMERO y el intercambio AL FINAL: hasta ese momento nadie ve
   // nada de la reconstruccion, que es todo el punto de la sombra
-  assert.equal(orden[0], "preparar");
-  assert.equal(orden[orden.length - 1], "intercambiar");
+  assert.equal(order[0], "prepare");
+  assert.equal(order[order.length - 1], "swap");
   // y la fecha es la del FLUJO, no la de ahora: rellenarla reescribiria el
   // historial en silencio
-  assert.deepEqual(orden.slice(1, -1), [
+  assert.deepEqual(order.slice(1, -1), [
     "abierta:2020-01-01T00:00:00.000Z:1",
     "deposito:500:2",
   ]);
@@ -3683,39 +3684,39 @@ test("reconstruir prepara la sombra, repone las fechas y cambia al final", async
 });
 
 test("la limpieza pide la version vigente, no una cualquiera", async () => {
-  let pedida = -1;
-  const flujo = {
-    async leer() { return []; },
+  let asked = -1;
+  const stream = {
+    async read() { return []; },
     async append() { return 0; },
-    async foto() { return null; },
-    async guardarFoto() {},
-    async limpiarFotos(reglas: number) { pedida = reglas; return 7; },
+    async snapshot() { return null; },
+    async saveSnapshot() {},
+    async pruneSnapshots(rules: number) { asked = rules; return 7; },
   };
-  const borradas = await limpiarCuenta(flujo);
+  const borradas = await pruneCuenta(stream);
   // Pedir otra version borraria justo las que SI se usan, y el sintoma seria
   // que todo reconstruye desde el flujo sin que nadie sepa por que.
-  assert.equal(pedida, cuentaFotoReglas);
+  assert.equal(asked, cuentaSnapshotRules);
   assert.equal(borradas, 7);
-  assert.equal(rutaLimpiezaCuenta, "POST /internal/aggregate/cuenta/limpiar");
+  assert.equal(pruneRouteCuenta, "POST /internal/aggregate/cuenta/prune");
 });
 
 test("la vista solo acepta los eventos que declara, y le llega la posicion", async () => {
   const vistas: string[] = [];
-  const proyeccion: SaldosProyeccion = {
-    async aplicarCuentaAbiertaV1(e, posicion) { vistas.push(`abierta:${posicion}`); },
-    async aplicarCuentaDepositadaV1(e, posicion) { vistas.push(`deposito:${e.data.centavos}:${posicion}`); },
+  const projection: SaldosProjection = {
+    async applyCuentaAbiertaV1(e, posicion) { vistas.push(`abierta:${posicion}`); },
+    async applyCuentaDepositadaV1(e, posicion) { vistas.push(`deposito:${e.data.centavos}:${posicion}`); },
   };
-  await saldosAplicar(proyeccion, newEnvelope("cuenta.abierta@v1", "p", { streamId: "c1" }), 11);
-  await saldosAplicar(proyeccion, newEnvelope("cuenta.depositada@v1", "p", { streamId: "c1", centavos: 300 }), 12);
+  await saldosApply(projection, newEnvelope("cuenta.abierta@v1", "p", { streamId: "c1" }), 11);
+  await saldosApply(projection, newEnvelope("cuenta.depositada@v1", "p", { streamId: "c1", centavos: 300 }), 12);
   assert.deepEqual(vistas, ["abierta:11", "deposito:300:12"]);
   // `cuenta.cerrada@v1` NO esta en la vista: llegar aqui seria una suscripcion
   // que nadie pidio
   await assert.rejects(
-    () => saldosAplicar(proyeccion, newEnvelope("cuenta.cerrada@v1", "p", {}), 13),
-    /no es un evento declarado de la vista/,
+    () => saldosApply(projection, newEnvelope("cuenta.cerrada@v1", "p", {}), 13),
+    /is not a declared event of the view/,
   );
-  assert.equal(saldosTabla, "vista_saldos");
-  assert.equal(saldosAtrasoMaximoMs, 3000);
+  assert.equal(saldosTable, "vista_saldos");
+  assert.equal(saldosMaxStalenessMs, 3000);
 });
 "#,
     )
