@@ -897,8 +897,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
 
     let known: IndexMap<&str, &Manifest> = ms.iter().map(|m| (m.service.as_str(), m)).collect();
 
-    // sagas: un paso sin compensacion no es una saga, es un dual-write con
-    // mas pasos y mas formas de quedarse a medias
+    // sagas: a step with no compensation is not a saga, it is a dual-write with
+    // more steps and more ways to end up half-done
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         for (nombre, sg) in &m.saga {
@@ -907,57 +907,58 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 continue;
             }
 
-            // El disparador tiene que existir: una saga que nadie arranca es
-            // codigo generado que nunca corre.
+            // The trigger has to exist: a saga nobody starts is generated code that
+            // never runs.
             match &sg.on {
                 None => errors.push(format!(
-                    "{svc}.{nombre}: sin `on`. Una saga la arranca un metodo propio o un \
-                     evento consumido, y sin decir cual el coordinador se genera y nunca corre"
+                    "{svc}.{nombre}: no `on`. A saga is started by a method of its own or by a \
+                     consumed event, and without saying which, the coordinator gets generated \
+                     and never runs"
                 )),
                 Some(on) => {
                     if !m.methods.contains_key(on) && !m.consumes.contains_key(on) {
                         errors.push(format!(
-                            "{svc}.{nombre}: la arranca `{on}`, que no es un metodo de `{svc}` \
-                             ni un evento que consuma"
+                            "{svc}.{nombre}: started by `{on}`, which is neither a method of `{svc}` \
+                             nor an event it consumes"
                         ));
                     }
                 }
             }
 
-            // El avance tiene que estar en disco. Un coordinador que pierde la
-            // saga a medias no la termina ni la compensa: los pasos ya hechos
-            // quedan aplicados para siempre y nadie sabe cuales fueron.
+            // The progress has to be on disk. A coordinator that loses a saga
+            // halfway neither finishes nor compensates it: the steps already
+            // taken stay applied forever and nobody knows which ones they were.
             let tabla = Saga::tabla(nombre);
             match esquemas.get(svc) {
                 None => errors.push(format!(
-                    "{svc}.{nombre}: sin migraciones, y la saga necesita la tabla `{tabla}` para \
-                     sobrevivir a un reinicio del coordinador"
+                    "{svc}.{nombre}: no migrations, and the saga needs the `{tabla}` table to \
+                     survive a restart of the coordinator"
                 )),
                 Some(tablas) => match tablas.get(&tabla) {
                     None => errors.push(format!(
-                        "{svc}.{nombre}: falta la tabla `{tabla}`. Sin ella un reinicio a mitad \
-                         de la saga deja los pasos ya hechos aplicados y sin registro de cuales \
-                         fueron: no se puede terminar ni compensar"
+                        "{svc}.{nombre}: the `{tabla}` table is missing. Without it, a restart mid-saga \
+                         leaves the steps already taken applied and with no record of which \
+                         ones: it can neither finish nor compensate"
                     )),
                     Some(t) => {
-                        // `datos` y `actualizado` no son adorno: sin el envelope
-                        // que la arranco no se puede reconstruir la llamada al
-                        // retomar, y sin la marca de tiempo el barrido no puede
-                        // distinguir una saga colgada de una que va en camino.
+                        // `datos` and `actualizado` are not decoration: without the
+                        // envelope that started it, the call cannot be rebuilt
+                        // on resume, and without the timestamp the sweep cannot
+                        // tell a stranded saga from one still on its way.
                         for (col, para) in [
-                            ("id", "el id del flujo"),
-                            ("paso", "hasta donde llego"),
-                            ("estado", "si el paso se intento o se completo"),
-                            ("datos", "el envelope que la arranco, para poder retomarla"),
-                            ("actualizado", "cuando avanzo por ultima vez, para el barrido"),
+                            ("id", "the flow's id"),
+                            ("paso", "how far it got"),
+                            ("estado", "whether the step was attempted or completed"),
+                            ("datos", "the envelope that started it, so it can be resumed"),
+                            ("actualizado", "when it last moved, for the sweep"),
                         ] {
                             match t.col(col) {
                                 None => errors.push(format!(
-                                    "{svc}.{nombre}: `{tabla}` sin columna `{col}`: ahi va {para}"
+                                    "{svc}.{nombre}: `{tabla}` has no `{col}` column: that is where {para} goes"
                                 )),
                                 Some(c) => {
-                                    // Un tipo equivocado no da error: da una
-                                    // comparacion que compila y compara mal.
+                                    // A wrong type raises no error: it gives a
+                                    // comparison that compiles and compares wrong.
                                     let esperado = match col {
                                         "datos" => "json",
                                         "actualizado" => "timestamp",
@@ -965,10 +966,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                                     };
                                     if !c.ty.to_lowercase().contains(esperado) {
                                         errors.push(format!(
-                                            "{svc}.{nombre}: `{tabla}.{col}` es `{}` y tiene que \
-                                             ser {esperado}. Comparar una fecha guardada como \
-                                             texto compila y ordena mal: el barrido se saltaria \
-                                             sagas colgadas sin decir nada",
+                                            "{svc}.{nombre}: `{tabla}.{col}` is `{}` and has to \
+                                             be {esperado}. Comparing a date stored as text \
+                                             compiles and sorts wrong: the sweep would skip \
+                                             stranded sagas without saying anything",
                                             c.ty
                                         ));
                                     }
@@ -982,43 +983,43 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             let ultimo = sg.steps.len() - 1;
             let mut presupuesto = 0u32;
             for (i, paso) in sg.steps.iter().enumerate() {
-                // Cada referencia se resuelve contra los manifiestos, no contra
-                // la buena fe: un `undo` mal escrito es una compensacion que no
-                // existe, y se descubre el dia que hay que compensar.
+                // Every reference is resolved against the manifests, not against
+                // good faith: a misspelled `undo` is a compensation that does
+                // not exist, and it gets discovered the day it is needed.
                 let mut resolver = |campo: &str, r: &str| -> Option<(u32, &Method)> {
                     let Some((s, met)) = Paso::partes(r) else {
                         errors.push(format!(
-                            "{svc}.{nombre}.{campo}: `{r}` no tiene la forma `servicio.metodo`"
+                            "{svc}.{nombre}.{campo}: `{r}` is not in `service.method` form"
                         ));
                         return None;
                     };
                     let Some(otro) = known.get(s) else {
                         errors.push(format!(
-                            "{svc}.{nombre}.{campo}: `{r}` apunta a `{s}`, que no existe"
+                            "{svc}.{nombre}.{campo}: `{r}` points at `{s}`, which does not exist"
                         ));
                         return None;
                     };
                     let Some(me) = otro.methods.get(met) else {
-                        errors.push(format!("{svc}.{nombre}.{campo}: `{s}` no ofrece `{met}`"));
+                        errors.push(format!("{svc}.{nombre}.{campo}: `{s}` does not offer `{met}`"));
                         return None;
                     };
-                    // El paso se invoca con el cliente generado, y ese cliente
-                    // existe solo si la dependencia esta declarada. Sin eso la
-                    // saga se genera y no tiene con que llamar.
+                    // The step is invoked with the generated client, and that client
+                    // exists only if the dependency is declared. Without it the
+                    // saga gets generated with nothing to call with.
                     let dep = m
                         .depends
                         .iter()
                         .find(|d| d.service.as_deref() == Some(s) && d.method == met);
                     if s != svc.as_str() && dep.is_none() {
                         errors.push(format!(
-                            "{svc}.{nombre}.{campo}: usa `{r}` sin declararlo en `[[depends]]`. \
-                             El cliente resiliente —timeout, reintentos, breaker— sale de ahi, y \
-                             sin el la saga no tiene con que llamar"
+                            "{svc}.{nombre}.{campo}: uses `{r}` without declaring it in \
+                             `[[depends]]`. The resilient client —timeout, retries, breaker— \
+                             comes from there, and without it the saga has nothing to call with"
                         ));
                     }
-                    // El presupuesto del paso es el del LLAMADOR, no el que el
-                    // otro servicio declara para si, y con los reintentos
-                    // dentro: el coordinador espera lo que dice `[[depends]]`.
+                    // The step's budget is the CALLER's, not the one the other
+                    // service declares for itself, and with the retries inside:
+                    // the coordinator waits for what `[[depends]]` says.
                     let unitario = dep.and_then(|d| d.timeout_ms).or(me.timeout_ms).unwrap_or(0);
                     let intentos = dep.map(|d| d.retries + 1).unwrap_or(1);
                     Some((unitario * intentos, me))
@@ -1029,29 +1030,29 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 }
 
                 match &paso.undo {
-                    // Carve-out deliberado: si el ULTIMO paso falla, no hay
-                    // nada suyo que deshacer. Exigirle compensacion seria un
-                    // falso positivo, y una regla con falsos positivos se
-                    // silencia entera.
+                    // A deliberate carve-out: if the LAST step fails, there is
+                    // nothing of its own to undo. Demanding a compensation for
+                    // it would be a false positive, and a rule with false
+                    // positives gets silenced wholesale.
                     None if i == ultimo => {}
                     None => errors.push(format!(
-                        "{svc}.{nombre}: el paso {} (`{}`) no tiene `undo`, y no es el ultimo. \
-                         Si falla un paso posterior, este queda aplicado para siempre: eso no es \
-                         una saga, es un dual-write con mas pasos",
+                        "{svc}.{nombre}: step {} (`{}`) has no `undo`, and it is not the \
+                         last one. If a later step fails, this one stays applied forever: that \
+                         is not a saga, it is a dual-write with more steps",
                         i + 1,
                         paso.hacer
                     )),
                     Some(u) => {
                         if let Some((ms, me)) = resolver("undo", u) {
-                            // La compensacion se reintenta hasta que entra: no
-                            // hay nada detras de ella. Una que no es idempotente
-                            // aplica el efecto dos veces.
+                            // The compensation gets retried until it lands: there
+                            // is nothing behind it. One that is not idempotent
+                            // applies the effect twice.
                             if !me.idempotent {
                                 errors.push(format!(
-                                    "{svc}.{nombre}: `{u}` compensa el paso {} y no es \
-                                     `idempotent`. Una compensacion se reintenta hasta que entra \
-                                     —no hay nada detras— y reintentar la que no es idempotente \
-                                     aplica el efecto dos veces",
+                                    "{svc}.{nombre}: `{u}` compensates step {} and is not \
+                                     `idempotent`. A compensation gets retried until it lands \
+                                     —there is nothing behind it— and retrying one that is not \
+                                     idempotent applies the effect twice",
                                     i + 1
                                 ));
                             }
@@ -1059,7 +1060,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         }
                         if *u == paso.hacer {
                             errors.push(format!(
-                                "{svc}.{nombre}: el paso {} se compensa consigo mismo",
+                                "{svc}.{nombre}: step {} compensates itself",
                                 i + 1
                             ));
                         }
@@ -1072,14 +1073,15 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // que ya estaban declarados.
             match sg.timeout_ms {
                 Some(tope) if presupuesto > tope => errors.push(format!(
-                    "{svc}.{nombre}: `timeout_ms = {tope}` y los pasos mas sus compensaciones \
-                     suman {presupuesto}ms. Rendirse mientras un paso sigue en vuelo deja al \
-                     coordinador compensando algo que despues tiene exito"
+                    "{svc}.{nombre}: `timeout_ms = {tope}` and the steps plus their \
+                     compensations add up to {presupuesto}ms. Giving up while a step is still \
+                     in flight leaves the coordinator compensating something that later \
+                     succeeds"
                 )),
                 Some(_) => {}
                 None => warnings.push(format!(
-                    "{svc}.{nombre}: sin `timeout_ms`. Una saga sin presupuesto de tiempo se \
-                     queda en vuelo hasta que alguien la mira"
+                    "{svc}.{nombre}: no `timeout_ms`. A saga with no time budget stays in \
+                     flight until somebody looks at it"
                 )),
             }
 
@@ -1089,9 +1091,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // que leer de una replica y prometer CP.
             if !m.cap.eventual() {
                 errors.push(format!(
-                    "{svc}.{nombre}: coordina una saga con `consistency = \"strong\"`. Entre el \
-                     primer paso y el ultimo hay estados intermedios visibles que ningun \
-                     invariante describe: la garantia real del flujo es eventual"
+                    "{svc}.{nombre}: coordinates a saga with `consistency = \"strong\"`. \
+                     Between the first step and the last there are visible intermediate states \
+                     no invariant describes: the real guarantee of the flow is eventual"
                 ));
             }
         }

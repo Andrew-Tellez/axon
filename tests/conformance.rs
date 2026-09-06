@@ -3267,8 +3267,8 @@ steps = [
 ]"#,
         TABLA,
     );
-    assert!(err.contains("no tiene `undo`, y no es el ultimo"), "{err}");
-    assert!(err.contains("dual-write con mas pasos"), "{err}");
+    assert!(err.contains("has no `undo`, and it is not the last one"), "{err}");
+    assert!(err.contains("dual-write with more steps"), "{err}");
 
     // una compensacion que no es idempotente
     let err = correr(
@@ -3281,8 +3281,8 @@ steps = [
 ]"#,
         TABLA,
     );
-    assert!(err.contains("no es `idempotent`"), "{err}");
-    assert!(err.contains("aplica el efecto dos veces"), "{err}");
+    assert!(err.contains("is not `idempotent`"), "{err}");
+    assert!(err.contains("applies the effect twice"), "{err}");
 
     // el presupuesto no cubre la suma de los pasos
     let err = correr(
@@ -3295,8 +3295,8 @@ steps = [
 ]"#,
         TABLA,
     );
-    assert!(err.contains("suman 11000ms"), "{err}");
-    assert!(err.contains("compensando algo que despues tiene exito"), "{err}");
+    assert!(err.contains("add up to 11000ms"), "{err}");
+    assert!(err.contains("compensating something that later succeeds"), "{err}");
 
     // sin la tabla del diario, un reinicio pierde la saga
     let err = correr(
@@ -3309,7 +3309,7 @@ steps = [
 ]"#,
         "CREATE TABLE otra (id uuid PRIMARY KEY);\n",
     );
-    assert!(err.contains("falta la tabla `saga_checkout`"), "{err}");
+    assert!(err.contains("the `saga_checkout` table is missing"), "{err}");
 
     // sin `datos` no se puede retomar: las acciones necesitan la llamada, y el
     // proceso que la tenia en memoria es el que se murio
@@ -3324,8 +3324,8 @@ steps = [
         "CREATE TABLE saga_checkout (\n  id uuid PRIMARY KEY,\n  paso int NOT NULL,\n  \
          estado text NOT NULL,\n  actualizado timestamptz NOT NULL\n);\n",
     );
-    assert!(err.contains("sin columna `datos`"), "{err}");
-    assert!(err.contains("para poder retomarla"), "{err}");
+    assert!(err.contains("has no `datos` column"), "{err}");
+    assert!(err.contains("goes"), "{err}");
 
     // y una fecha guardada como texto: la comparacion del barrido compila y
     // ordena mal, asi que se saltaria sagas colgadas sin decir nada
@@ -3341,8 +3341,8 @@ steps = [
          estado text NOT NULL,\n  datos jsonb NOT NULL,\n  \
          actualizado text NOT NULL\n);\n",
     );
-    assert!(err.contains("tiene que ser timestamp"), "{err}");
-    assert!(err.contains("se saltaria sagas colgadas"), "{err}");
+    assert!(err.contains("has to be timestamp"), "{err}");
+    assert!(err.contains("would skip stranded sagas"), "{err}");
 
     // un `undo` que no existe
     let err = correr(
@@ -3355,7 +3355,7 @@ steps = [
 ]"#,
         TABLA,
     );
-    assert!(err.contains("`banco` no ofrece `devolver`"), "{err}");
+    assert!(err.contains("`banco` does not offer `devolver`"), "{err}");
 
     // un paso que nadie declaro como dependencia: no hay con que llamarlo
     let dir2 = std::env::temp_dir().join("axon-saga-dep");
@@ -3388,8 +3388,8 @@ timeout_ms = 3000
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir2.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("sin declararlo en `[[depends]]`"), "{err}");
-    assert!(err.contains("El cliente resiliente"), "{err}");
+    assert!(err.contains("without declaring it in `[[depends]]`"), "{err}");
+    assert!(err.contains("The resilient client"), "{err}");
 
     // y una saga bajo `consistency = "strong"`
     let _ = std::fs::remove_dir_all(&dir);
@@ -3413,7 +3413,7 @@ steps = [
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("la garantia real del flujo es eventual"), "{err}");
+    assert!(err.contains("the real guarantee of the flow is eventual"), "{err}");
 }
 
 /// Un manifiesto con event sourcing y una vista. Lo usan el test del `fold` y
