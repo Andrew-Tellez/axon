@@ -9,6 +9,7 @@ import { CheckoutService, Clientes, rutasHttp, rutaBarridoCompra, correrCompra,
          type CheckoutIn, type CheckoutOut, type CompraAcciones, type CompraSalidas,
          type CompraReglas, type ConversionProyeccion, type Checkpoint,
          type Envelope, type FlujoConFotos, type Outbox, type SagaDiario, type SagaEstado,
+         type Sombra,
          type Transporte } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
 import { bus, conectar, esperarDb, outbox, relay, servir } from "../runtime.ts";
@@ -235,10 +236,61 @@ const reglasCompra: CompraReglas<Compra> = {
 /** La proyeccion. Cada `aplicar*` guarda la posicion en la MISMA transaccion
  *  que su efecto: en dos, un corte entre ellas deja la vista adelantada o
  *  atrasada respecto de lo que dice haber aplicado, y ninguna da un error. */
-class Conversion implements ConversionProyeccion, Checkpoint {
+class Conversion implements ConversionProyeccion, Checkpoint, Sombra {
   #db: pg.Pool;
-  constructor(db: pg.Pool) {
+  /** A que tabla escribe. La sombra es OTRA instancia, no un modo: un modo se
+   *  queda encendido y la siguiente proyeccion en vivo escribe en la sombra
+   *  sin que nada lo diga. */
+  #tabla: string;
+  #vista: string;
+  constructor(db: pg.Pool, sombra = false) {
     this.#db = db;
+    this.#tabla = sombra ? "vista_conversion_sombra" : "vista_conversion";
+    this.#vista = sombra ? "conversion_sombra" : "conversion";
+  }
+
+  /** Deja la sombra vacia, con su punto en cero. */
+  async preparar() {
+    const c = await this.#db.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query(`DELETE FROM ${this.#tabla}`);
+      await c.query(`DELETE FROM vista_conversion_checkpoint WHERE vista = $1`, [this.#vista]);
+      await c.query("COMMIT");
+    } catch (err) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      c.release();
+    }
+  }
+
+  /** Cambia la sombra por la viva, y su punto con ella, en UNA transaccion.
+   *
+   *  El intercambio son dos RENAME y el traspaso del punto. Postgres permite
+   *  DDL transaccional, asi que quien lee espera unos milisegundos en vez de
+   *  ver una vista a medias. En dos transacciones, un corte entre ellas deja la
+   *  tabla nueva con el punto de la vieja: se saltaria eventos o los
+   *  reprocesaria, y nada lo diria. */
+  async intercambiar() {
+    const c = await this.#db.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("ALTER TABLE vista_conversion RENAME TO vista_conversion_tmp");
+      await c.query("ALTER TABLE vista_conversion_sombra RENAME TO vista_conversion");
+      await c.query("ALTER TABLE vista_conversion_tmp RENAME TO vista_conversion_sombra");
+      await c.query("DELETE FROM vista_conversion_checkpoint WHERE vista = 'conversion'");
+      await c.query(
+        `UPDATE vista_conversion_checkpoint SET vista = 'conversion'
+          WHERE vista = 'conversion_sombra'`,
+      );
+      await c.query("COMMIT");
+    } catch (err) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      c.release();
+    }
   }
 
   async leer(vista: string, streamId: string) {
@@ -250,24 +302,9 @@ class Conversion implements ConversionProyeccion, Checkpoint {
     return rows[0] ? Number(rows[0].posicion) : 0;
   }
 
-  /** Vacia la vista Y pone el punto en cero, en una transaccion. En dos, una
-   *  reconstruccion interrumpida entre ellos deja una vista vacia que dice
-   *  estar al dia, y eso no da ningun error: da respuestas vacias. */
-  async vaciar() {
-    const c = await this.#db.connect();
-    try {
-      await c.query("BEGIN");
-      await c.query("DELETE FROM vista_conversion");
-      await c.query("DELETE FROM vista_conversion_checkpoint WHERE vista = 'conversion'");
-      await c.query("COMMIT");
-    } catch (err) {
-      await c.query("ROLLBACK").catch(() => {});
-      throw err;
-    } finally {
-      c.release();
-    }
-  }
-
+  /** El efecto de la vista y su punto, en la MISMA transaccion. En dos, un
+   *  corte entre ellas deja la vista adelantada o atrasada respecto de lo que
+   *  dice haber aplicado, y ninguna de las dos cosas da un error. */
   async #enUna(streamId: string, posicion: number, sql: string, args: unknown[]) {
     const c = await this.#db.connect();
     try {
@@ -275,7 +312,7 @@ class Conversion implements ConversionProyeccion, Checkpoint {
       await c.query(sql, args);
       await c.query(
         `INSERT INTO vista_conversion_checkpoint (vista, stream_id, posicion)
-         VALUES ('conversion', $1, $2)
+         VALUES ('${this.#vista}', $1, $2)
          ON CONFLICT (vista, stream_id)
          DO UPDATE SET posicion = GREATEST(vista_conversion_checkpoint.posicion, $2)`,
         [streamId, posicion],
@@ -290,10 +327,17 @@ class Conversion implements ConversionProyeccion, Checkpoint {
   }
 
   async aplicarCompraIniciadaV1(e: Envelope<any>, posicion: number) {
+    // Interruptor del demo: alarga la reconstruccion para poder MEDIR la
+    // ventana. Sin esto termina en milisegundos y "nadie vio nada" no se
+    // distingue de "nadie mirO".
+    const lento = Number(process.env.AXON_DEMO_RECONSTRUIR_LENTO_MS ?? 0);
+    if (lento > 0 && e.source === "reconstruccion") {
+      await new Promise((r) => setTimeout(r, lento));
+    }
     await this.#enUna(
       e.data.streamId,
       posicion,
-      `INSERT INTO vista_conversion (stream_id, estado, centavos, evento_en)
+      `INSERT INTO ${this.#tabla} (stream_id, estado, centavos, evento_en)
        VALUES ($1,'iniciada',$2,$3)
        ON CONFLICT (stream_id) DO UPDATE SET estado = 'iniciada', centavos = $2, evento_en = $3`,
       [e.data.streamId, e.data.amount.amount, e.time],
@@ -304,7 +348,7 @@ class Conversion implements ConversionProyeccion, Checkpoint {
     await this.#enUna(
       e.data.streamId,
       posicion,
-      `UPDATE vista_conversion SET estado = 'cobrada', payment_id = $2, evento_en = $3
+      `UPDATE ${this.#tabla} SET estado = 'cobrada', payment_id = $2, evento_en = $3
         WHERE stream_id = $1`,
       [e.data.streamId, e.data.paymentId, e.time],
     );
@@ -314,7 +358,7 @@ class Conversion implements ConversionProyeccion, Checkpoint {
     await this.#enUna(
       e.data.streamId,
       posicion,
-      `UPDATE vista_conversion SET estado = 'compensada', motivo = $2, evento_en = $3
+      `UPDATE ${this.#tabla} SET estado = 'compensada', motivo = $2, evento_en = $3
         WHERE stream_id = $1`,
       [e.data.streamId, e.data.motivo, e.time],
     );
@@ -355,11 +399,13 @@ class Checkout extends CheckoutService {
   #acciones: CompraAcciones;
   #flujo: Flujo;
   #vista: Conversion;
+  #sombra: Conversion;
   constructor(b: any, o: Outbox<pg.PoolClient>, db: pg.Pool) {
     super(b, o);
     this.#diario = new Diario(db);
     this.#flujo = new Flujo(db, o);
     this.#vista = new Conversion(db);
+    this.#sombra = new Conversion(db, true);
     this.#acciones = acciones(new Clientes(transporte()));
   }
 
@@ -368,6 +414,9 @@ class Checkout extends CheckoutService {
   }
   get vista() {
     return this.#vista;
+  }
+  get sombra() {
+    return this.#sombra;
   }
 
   /** Un evento al flujo, y de ahi a la vista.
@@ -454,7 +503,7 @@ async function main() {
       // Reconstruir no lleva cron: no es periodico, es una operacion que
       // alguien decide.
       [rutaReconstruirConversion]: async () => ({
-        aplicados: await reconstruirConversion(svc.vista, svc.flujo),
+        aplicados: await reconstruirConversion(svc.sombra, svc.flujo),
       }),
     },
     rutasHttp,

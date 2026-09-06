@@ -96,6 +96,7 @@ $ cd examples && ./demo.sh
   OK: una transaccion revertida no deja el evento suelto: 0 pagos, 0 eventos
   OK: sin ninguna foto el sistema sigue correcto, solo reconstruye mas
   OK: la vista ensuciada se reconstruye del flujo, con las fechas del flujo
+  OK: 24 lecturas durante la reconstruccion y nadie vio la vista a medias
 
 ==> reintentos declarados vs ocurridos
   OK: 3 llamadas = 1 + 2 reintentos, exactamente lo declarado

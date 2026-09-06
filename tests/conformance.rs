@@ -3454,6 +3454,15 @@ CREATE TABLE vista_saldos (
   posicion   bigint NOT NULL
 );
 
+-- La sombra: misma forma que la vista. `verify` comprueba que COINCIDAN, porque
+-- una sombra con una columna de menos deja una vista incompleta al intercambiar
+-- y eso se veria el dia de la reconstruccion.
+CREATE TABLE vista_saldos_sombra (
+  stream_id  uuid PRIMARY KEY,
+  centavos   bigint NOT NULL,
+  posicion   bigint NOT NULL
+);
+
 CREATE TABLE vista_saldos_checkpoint (
   vista      text NOT NULL,
   -- por FLUJO: la version de un evento es su posicion dentro de su flujo, asi
@@ -3637,10 +3646,11 @@ test("solo se fotografia en la cadencia declarada", async () => {
   assert.deepEqual(guardadas, [2, 4]);
 });
 
-test("reconstruir vacia primero y repone las fechas del flujo", async () => {
+test("reconstruir prepara la sombra, repone las fechas y cambia al final", async () => {
   const orden: string[] = [];
   const proyeccion = {
-    async vaciar() { orden.push("vaciar"); },
+    async preparar() { orden.push("preparar"); },
+    async intercambiar() { orden.push("intercambiar"); },
     async aplicarCuentaAbiertaV1(e: any, pos: number) { orden.push(`abierta:${e.time}:${pos}`); },
     async aplicarCuentaDepositadaV1(e: any, pos: number) { orden.push(`deposito:${e.data.centavos}:${pos}`); },
   };
@@ -3657,12 +3667,13 @@ test("reconstruir vacia primero y repone las fechas del flujo", async () => {
     async append() { return 0; },
   };
   const aplicados = await reconstruirSaldos(proyeccion, flujo);
-  // vaciar va PRIMERO: reconstruir encima de lo viejo mezcla dos versiones de
-  // la proyeccion en la misma tabla
-  assert.equal(orden[0], "vaciar");
+  // preparar va PRIMERO y el intercambio AL FINAL: hasta ese momento nadie ve
+  // nada de la reconstruccion, que es todo el punto de la sombra
+  assert.equal(orden[0], "preparar");
+  assert.equal(orden[orden.length - 1], "intercambiar");
   // y la fecha es la del FLUJO, no la de ahora: rellenarla reescribiria el
   // historial en silencio
-  assert.deepEqual(orden.slice(1), [
+  assert.deepEqual(orden.slice(1, -1), [
     "abierta:2020-01-01T00:00:00.000Z:1",
     "deposito:500:2",
   ]);
@@ -3783,6 +3794,24 @@ fn las_reglas_de_event_sourcing_bloquean() {
         .replace("max_staleness_ms = 5000\n", "");
     let err = correr(&fuerte, DDL_ES);
     assert!(err.contains("un dato viejo por definicion"), "{err}");
+
+    // la sombra que no coincide con la vista
+    let sombra_corta = DDL_ES.replace(
+        "CREATE TABLE vista_saldos_sombra (\n  stream_id  uuid PRIMARY KEY,\n  centavos   bigint NOT NULL,\n  posicion   bigint NOT NULL\n);",
+        "CREATE TABLE vista_saldos_sombra (\n  stream_id  uuid PRIMARY KEY,\n  posicion   bigint NOT NULL\n);",
+    );
+    // la guarda compara contra el original: el mismo texto tambien esta en la
+    // vista viva, asi que buscarlo suelto no dice si el reemplazo aplico
+    assert_ne!(sombra_corta, DDL_ES, "la variante no aplico");
+    let err = correr(MANIFIESTO_ES, &sombra_corta);
+    assert!(err.contains("`vista_saldos_sombra` sin la columna `centavos`"), "{err}");
+    assert!(err.contains("recien ahi se veria"), "{err}");
+
+    // y sin sombra: reconstruir en el sitio sirve una vista incompleta
+    let sin_sombra = DDL_ES.replace("CREATE TABLE vista_saldos_sombra", "CREATE TABLE otra_sombra");
+    let err = correr(MANIFIESTO_ES, &sin_sombra);
+    assert!(err.contains("falta `vista_saldos_sombra`"), "{err}");
+    assert!(err.contains("menos filas de las que hay"), "{err}");
 
     // el punto de la vista, sin flujo en la clave: un flujo pisa al otro
     let cp_global = DDL_ES.replace(

@@ -1328,6 +1328,59 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     }
                 }
             }
+            // Si la vista se puede reconstruir, hay una sombra, y una sombra
+            // con una columna de menos hace que el intercambio deje una vista
+            // incompleta. Eso se descubriria el dia de la reconstruccion, que
+            // es el peor dia.
+            let propia = !vi.on.is_empty()
+                && vi
+                    .on
+                    .iter()
+                    .all(|ev| m.aggregate.values().any(|a| a.events.contains(ev)));
+            if propia {
+                let sombra = format!("{}_sombra", tabla);
+                match (
+                    tablas.and_then(|t| t.get(&tabla)),
+                    tablas.and_then(|t| t.get(&sombra)),
+                ) {
+                    (Some(_), None) => errors.push(format!(
+                        "{svc}.{nombre}: se puede reconstruir y falta `{sombra}`. Reconstruir en \
+                         el sitio deja la vista incompleta mientras corre, y se sigue leyendo: \
+                         los que preguntan reciben menos filas de las que hay, sin un error"
+                    )),
+                    (Some(viva), Some(som)) => {
+                        for c in &viva.cols {
+                            match som.col(&c.name) {
+                                None => errors.push(format!(
+                                    "{svc}.{nombre}: `{sombra}` sin la columna `{}` que tiene \
+                                     `{tabla}`. El intercambio dejaria una vista sin ese dato, y \
+                                     recien ahi se veria",
+                                    c.name
+                                )),
+                                Some(o) if o.ty != c.ty => errors.push(format!(
+                                    "{svc}.{nombre}: `{sombra}.{}` es `{}` y en `{tabla}` es \
+                                     `{}`. Al intercambiar, la vista cambia de tipo sin que nada \
+                                     lo diga",
+                                    c.name, o.ty, c.ty
+                                )),
+                                _ => {}
+                            }
+                        }
+                        for c in &som.cols {
+                            if !viva.tiene(&c.name) {
+                                warnings.push(format!(
+                                    "{svc}.{nombre}: `{sombra}.{}` no esta en `{tabla}`. Sobra \
+                                     hasta el proximo intercambio, y despues es la vista la que \
+                                     la tiene",
+                                    c.name
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
             // Una vista es eventual por construccion: se llena DESPUES de que
             // el evento ocurrio. Prometer CP sobre ella es la misma
             // contradiccion que leer de una replica y prometer CP.

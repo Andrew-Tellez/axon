@@ -13,6 +13,13 @@ CHECKOUT="localhost:${AXON_PORT_checkout:-8081}"
 
 sql() { $COMPOSE exec -T db-checkout env PGPASSWORD=local psql -qtAX -U postgres -d checkout "$@"; }
 
+# Los interruptores del demo viajan por `.env.local`, que es el `env_file` que
+# el compose generado ya monta. Se restaura siempre, tambien si algo falla.
+ENVQ=.env.local
+cp "$ENVQ" "$ENVQ.es"
+restaurar_env() { mv -f "$ENVQ.es" "$ENVQ" 2>/dev/null || true; }
+trap 'restaurar_env' EXIT
+
 echo "  una compra: el flujo, no una fila"
 r=$(curl -sS --fail-with-body -m 60 -X POST "$CHECKOUT/v1/checkouts" \
   -H 'content-type: application/json' \
@@ -271,6 +278,49 @@ else
   exit 1
 fi
 
+# --- la sombra: nadie ve una vista a medias -----------------------------
+# Reconstruir en el sitio deja la vista incompleta mientras corre, y se sigue
+# leyendo: los que preguntan reciben menos filas de las que hay, sin ningun
+# error. Con sombra, la vista viva sigue respondiendo lo de antes hasta el
+# intercambio.
+#
+# Se mide alargando la reconstruccion a proposito y contando filas MIENTRAS
+# corre: sin el interruptor termina en milisegundos y "nadie vio nada" no se
+# distingue de "nadie miro".
+echo "  las lecturas mientras la vista se reconstruye"
+filas_antes=$(sql -c "SELECT count(*) FROM vista_conversion" | tr -d ' \r\n')
+[ "$filas_antes" -ge 3 ] || { echo "  FALLO: hacen falta filas para poder medir la ventana"; exit 1; }
+cp "$ENVQ" "$ENVQ.es"
+printf 'AXON_DEMO_RECONSTRUIR_LENTO_MS=150\n' >> "$ENVQ"
+$COMPOSE stop checkout > /dev/null 2>&1
+$COMPOSE up -d --wait checkout > /dev/null 2>&1
+
+curl -sS -m 180 -X POST "$CHECKOUT/internal/view/conversion/reconstruir" > /tmp/axon-recon.json &
+recon=$!
+minimo=$filas_antes
+i=0
+while kill -0 "$recon" 2>/dev/null; do
+  i=$((i + 1))
+  [ "$i" -gt 200 ] && break
+  n=$(sql -c "SELECT count(*) FROM vista_conversion" 2>/dev/null | tr -d ' \r\n')
+  case "$n" in ''|*[!0-9]*) continue ;; esac
+  [ "$n" -lt "$minimo" ] && minimo=$n
+done
+wait "$recon" || true
+aplicados=$(sed 's/.*"aplicados":\([0-9]*\).*/\1/' /tmp/axon-recon.json)
+filas_despues=$(sql -c "SELECT count(*) FROM vista_conversion" | tr -d ' \r\n')
+echo "    $i lecturas durante la reconstruccion; minimo visto: $minimo de $filas_antes"
+if [ "$i" -ge 3 ] && [ "$minimo" -ge "$filas_antes" ] && [ "$filas_despues" -ge "$filas_antes" ]; then
+  echo "  OK: nadie vio la vista a medias; $aplicados eventos aplicados en la sombra"
+  echo "  i reconstruyendo en el sitio, el minimo habria sido 0"
+else
+  echo "  FALLO: minimo=$minimo antes=$filas_antes despues=$filas_despues lecturas=$i"
+  exit 1
+fi
+restaurar_env
+$COMPOSE stop checkout > /dev/null 2>&1
+$COMPOSE up -d --wait checkout > /dev/null 2>&1
+
 # --- la limpieza de fotos -----------------------------------------------
 # `snapshot_version` invalida las fotos viejas pero no las quita, asi que la
 # tabla crece con cada version de reglas. La limpieza puede ser agresiva porque
@@ -319,10 +369,7 @@ esac
 # Esto estaba roto y se midio antes de arreglarlo: 0 pagos y 1 evento.
 echo "  una transaccion revertida despues de dejar el evento"
 sq() { $COMPOSE exec -T db-payments env PGPASSWORD=local psql -qtAX -U postgres -d payments -c "$1"; }
-ENVQ=.env.local
 cp "$ENVQ" "$ENVQ.es"
-restaurar_env() { mv -f "$ENVQ.es" "$ENVQ" 2>/dev/null || true; }
-trap 'restaurar_env' EXIT
 printf 'AXON_DEMO_ROMPER_TRAS_STAGE=1\n' >> "$ENVQ"
 $COMPOSE stop payments > /dev/null 2>&1
 $COMPOSE up -d --wait payments > /dev/null 2>&1

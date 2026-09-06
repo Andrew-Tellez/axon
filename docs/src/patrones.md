@@ -753,11 +753,44 @@ Y la limitación, escrita en el doc comment del código generado: el recorrido e
 y en orden de versión**. Una proyección cuyo resultado dependa del orden *entre* flujos
 necesita un orden total que el flujo no tiene.
 
-### Mientras corre, la vista está incompleta
+### La sombra: nadie ve una vista a medias
 
-Y se sigue leyendo. Eso no es invisible: el punto queda atrás y **el atraso lo delata**, que
-es exactamente para lo que sirve `max_staleness_ms`. Reconstruir en una tabla sombra y
-cambiarla de golpe sería mejor, y todavía no está.
+Reconstruir en el sitio deja la vista incompleta mientras corre, y se sigue leyendo: los
+que preguntan reciben **menos filas de las que hay, sin ningún error**. Así que la
+reconstrucción se hace en una sombra y se cambia de golpe al final.
+
+```ts
+export interface Sombra {
+  /** Deja la sombra vacia, con su punto en cero. */
+  preparar(): Promise<void>;
+  /** Cambia la sombra por la viva, y su punto con ella, en UNA transaccion. */
+  intercambiar(): Promise<void>;
+}
+```
+
+**La sombra es otra instancia de la proyección, no un modo.** Un modo se queda encendido, y
+la siguiente proyección en vivo escribiría en la sombra sin que nada lo diga. La instancia
+lleva su tabla y su nombre de vista, y no hay estado que olvidar de apagar.
+
+El intercambio son dos `RENAME` y el traspaso del punto, todo en una transacción — Postgres
+permite DDL transaccional, así que quien lee espera unos milisegundos en vez de ver una
+vista a medias. En dos transacciones, un corte entre ellas deja **la tabla nueva con el
+punto de la vieja**: se saltaría eventos o los reprocesaría, y nada lo diría.
+
+Lo que el tipo no puede impedir: pasarle a `reconstruir` una proyección apuntada a la vista
+**viva**. Eso sería una reconstrucción en el sitio con pasos extra — y por eso el demo mide
+la ventana en vez de confiar en la firma.
+
+```console
+  las lecturas mientras la vista se reconstruye
+    24 lecturas durante la reconstruccion; minimo visto: 18 de 18
+  OK: nadie vio la vista a medias; 43 eventos aplicados en la sombra
+  i reconstruyendo en el sitio, el minimo habria sido 0
+```
+
+Se mide alargando la reconstrucción a propósito: sin eso termina en milisegundos y «nadie
+vio nada» no se distingue de «nadie miró». Y el testkit fija el orden: `preparar` primero,
+`intercambiar` al final.
 
 ### Medido ensuciando la vista
 
@@ -789,6 +822,26 @@ PRIMARY KEY`**. Una clave añadida en una migración posterior era invisible, as
 regla sobre unicidad —la del flujo de eventos, las de reparto, esta misma— la daba por
 ausente y pasaba en silencio. Ya se pliega, y hay un test que lo fija.
 
+### Y `verify` comprueba que coincidan
+
+La sombra es una tabla más en las migraciones, escrita a mano. Una con una columna de menos
+hace que el intercambio deje una vista **incompleta**, y eso se descubriría el día de la
+reconstrucción:
+
+```console
+error  libro.saldos: `vista_saldos_sombra` sin la columna `centavos` que tiene
+       `vista_saldos`. El intercambio dejaria una vista sin ese dato, y recien ahi se veria
+error  libro.saldos: se puede reconstruir y falta `vista_saldos_sombra`. Reconstruir en el
+       sitio deja la vista incompleta mientras corre, y se sigue leyendo: los que
+       preguntan reciben menos filas de las que hay, sin un error
+```
+
+Y un tipo distinto entre las dos también es un error: al intercambiar, la vista cambia de
+tipo sin que nada lo diga. Una columna que sobra en la sombra es sólo un aviso — sobra hasta
+el próximo intercambio, y después es la vista la que la tiene.
+
 ## Lo que falta de event sourcing
 
-La tabla sombra para reconstruir sin servir una vista incompleta.
+Nada pendiente que sea un riesgo de corrección. Lo que queda es comodidad: hoy la sombra y
+su intercambio se escriben a mano en cada servicio, y podrían generarse para Postgres —
+`verify` ya conoce las dos tablas y sabe que coinciden.

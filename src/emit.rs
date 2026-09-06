@@ -823,13 +823,24 @@ pub fn vistas_ts(m: &Manifest) -> String {
         .collect();
     if !reconstruibles.is_empty() {
         o.push(
-            "/** Lo que la vista tiene que saber hacer para poder reconstruirse.\n \
+            "/** Una vista sombra: se construye aparte y se cambia por la viva de\n \
+             *  golpe.\n \
              *\n \
-             *  `vaciar` borra las filas Y pone el punto en cero: en dos pasos, una\n \
-             *  reconstruccion interrumpida entre ellos deja una vista vacia que dice\n \
-             *  estar al dia, y eso no da ningun error. */\n\
-             export interface Vaciable {\n  \
-               vaciar(): Promise<void>;\n\
+             *  Reconstruir en el sitio deja la vista incompleta mientras corre, y se\n \
+             *  sigue leyendo: los que preguntan reciben menos filas de las que hay,\n \
+             *  sin error. Con sombra, nadie ve un estado intermedio.\n \
+             *\n \
+             *  La proyeccion que se le pasa a `reconstruir` tiene que estar apuntada a\n \
+             *  la SOMBRA. Si apuntara a la viva, esto seria una reconstruccion en el\n \
+             *  sitio con pasos extra —y por eso el demo mide que las lecturas nunca\n \
+             *  bajen mientras corre. */\n\
+             export interface Sombra {\n  \
+               /** Deja la sombra vacia, con su punto en cero. */\n  \
+               preparar(): Promise<void>;\n  \
+               /** Cambia la sombra por la viva, y su punto con ella, en UNA\n   \
+                *  transaccion. En dos, un corte entre ellas deja la vista nueva con el\n   \
+                *  punto de la vieja: se saltaria eventos o los reprocesaria. */\n  \
+               intercambiar(): Promise<void>;\n\
              }\n\
              \n\
              /** Los flujos del agregado, para recorrerlos. */\n\
@@ -914,20 +925,19 @@ pub fn vistas_ts(m: &Manifest) -> String {
                  *  cambiar sin migracion: se cambia la proyeccion, se reconstruye, y no\n \
                  *  hay `ALTER TABLE` que preserve datos que se pueden recalcular.\n \
                  *\n \
-                 *  Mientras corre, la vista esta incompleta y se sigue leyendo. Eso NO\n \
-                 *  es invisible: el punto queda atras y el atraso lo delata, que es\n \
-                 *  exactamente para lo que sirve `max_staleness_ms`. Reconstruir en una\n \
-                 *  tabla sombra y cambiarla de golpe seria mejor, y todavia no esta.\n \
+                 *  Se construye en una SOMBRA y se cambia de golpe al final, asi que\n \
+                 *  nadie lee un estado intermedio: mientras corre, la vista viva sigue\n \
+                 *  respondiendo lo de antes. El intercambio toma un bloqueo breve.\n \
                  *\n \
                  *  El recorrido es por flujo y en orden de version. Una proyeccion cuyo\n \
                  *  resultado dependa del orden ENTRE flujos necesita un orden total que\n \
                  *  el flujo no tiene: ahi esto da un resultado distinto al de la\n \
                  *  proyeccion en vivo, y la comprobacion del demo lo veria. */\n\
                  export async function reconstruir{p}(\n  \
-                   proyeccion: {p}Proyeccion & Vaciable,\n  \
+                   sombra: {p}Proyeccion & Sombra,\n  \
                    flujo: FlujoEventos & FuenteDeFlujos,\n\
                  ): Promise<number> {{\n  \
-                   await proyeccion.vaciar();\n  \
+                   await sombra.preparar();\n  \
                    let aplicados = 0;\n  \
                    for (const streamId of await flujo.flujos()) {{\n    \
                      for (const ev of await flujo.leer(streamId)) {{\n      \
@@ -935,7 +945,7 @@ pub fn vistas_ts(m: &Manifest) -> String {
                        // la proyeccion necesita. El `time` es el del FLUJO, no el de\n      \
                        // ahora: rellenarlo reescribiria el historial en silencio.\n      \
                        if (!({c}Eventos as readonly string[]).includes(ev.type)) continue;\n      \
-                       await {c}Aplicar(proyeccion, {{\n        \
+                       await {c}Aplicar(sombra, {{\n        \
                          id: `${{streamId}}:${{ev.version}}`,\n        \
                          type: ev.type,\n        \
                          source: \"reconstruccion\",\n        \
@@ -948,6 +958,8 @@ pub fn vistas_ts(m: &Manifest) -> String {
                        aplicados++;\n    \
                      }}\n  \
                    }}\n  \
+                   // El cambio va al final: hasta aqui nadie vio nada de esto.\n  \
+                   await sombra.intercambiar();\n  \
                    return aplicados;\n\
                  }}\n"
             ));

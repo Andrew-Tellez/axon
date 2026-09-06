@@ -759,13 +759,24 @@ export interface Checkpoint {
   leer(vista: string, streamId: string): Promise<number>;
 }
 
-/** Lo que la vista tiene que saber hacer para poder reconstruirse.
+/** Una vista sombra: se construye aparte y se cambia por la viva de
+ *  golpe.
  *
- *  `vaciar` borra las filas Y pone el punto en cero: en dos pasos, una
- *  reconstruccion interrumpida entre ellos deja una vista vacia que dice
- *  estar al dia, y eso no da ningun error. */
-export interface Vaciable {
-  vaciar(): Promise<void>;
+ *  Reconstruir en el sitio deja la vista incompleta mientras corre, y se
+ *  sigue leyendo: los que preguntan reciben menos filas de las que hay,
+ *  sin error. Con sombra, nadie ve un estado intermedio.
+ *
+ *  La proyeccion que se le pasa a `reconstruir` tiene que estar apuntada a
+ *  la SOMBRA. Si apuntara a la viva, esto seria una reconstruccion en el
+ *  sitio con pasos extra —y por eso el demo mide que las lecturas nunca
+ *  bajen mientras corre. */
+export interface Sombra {
+  /** Deja la sombra vacia, con su punto en cero. */
+  preparar(): Promise<void>;
+  /** Cambia la sombra por la viva, y su punto con ella, en UNA
+   *  transaccion. En dos, un corte entre ellas deja la vista nueva con el
+   *  punto de la vieja: se saltaria eventos o los reprocesaria. */
+  intercambiar(): Promise<void>;
 }
 
 /** Los flujos del agregado, para recorrerlos. */
@@ -826,20 +837,19 @@ export const rutaReconstruirConversion = "POST /internal/view/conversion/reconst
  *  cambiar sin migracion: se cambia la proyeccion, se reconstruye, y no
  *  hay `ALTER TABLE` que preserve datos que se pueden recalcular.
  *
- *  Mientras corre, la vista esta incompleta y se sigue leyendo. Eso NO
- *  es invisible: el punto queda atras y el atraso lo delata, que es
- *  exactamente para lo que sirve `max_staleness_ms`. Reconstruir en una
- *  tabla sombra y cambiarla de golpe seria mejor, y todavia no esta.
+ *  Se construye en una SOMBRA y se cambia de golpe al final, asi que
+ *  nadie lee un estado intermedio: mientras corre, la vista viva sigue
+ *  respondiendo lo de antes. El intercambio toma un bloqueo breve.
  *
  *  El recorrido es por flujo y en orden de version. Una proyeccion cuyo
  *  resultado dependa del orden ENTRE flujos necesita un orden total que
  *  el flujo no tiene: ahi esto da un resultado distinto al de la
  *  proyeccion en vivo, y la comprobacion del demo lo veria. */
 export async function reconstruirConversion(
-  proyeccion: ConversionProyeccion & Vaciable,
+  sombra: ConversionProyeccion & Sombra,
   flujo: FlujoEventos & FuenteDeFlujos,
 ): Promise<number> {
-  await proyeccion.vaciar();
+  await sombra.preparar();
   let aplicados = 0;
   for (const streamId of await flujo.flujos()) {
     for (const ev of await flujo.leer(streamId)) {
@@ -847,7 +857,7 @@ export async function reconstruirConversion(
       // la proyeccion necesita. El `time` es el del FLUJO, no el de
       // ahora: rellenarlo reescribiria el historial en silencio.
       if (!(conversionEventos as readonly string[]).includes(ev.type)) continue;
-      await conversionAplicar(proyeccion, {
+      await conversionAplicar(sombra, {
         id: `${streamId}:${ev.version}`,
         type: ev.type,
         source: "reconstruccion",
@@ -860,6 +870,8 @@ export async function reconstruirConversion(
       aplicados++;
     }
   }
+  // El cambio va al final: hasta aqui nadie vio nada de esto.
+  await sombra.intercambiar();
   return aplicados;
 }
 
