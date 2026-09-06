@@ -30,6 +30,30 @@ steps = [
   { do = "payments.payoutMerchant" },
 ]
 
+# El historial de una compra: el estado ES esta secuencia. La fila de
+# `vista_conversion` es una proyeccion de esto, no la verdad.
+[emits."compra.iniciada@v1"]
+streamId = "uuid"
+orderId = "uuid"
+amount = "money"
+
+[emits."compra.cobrada@v1"]
+streamId = "uuid"
+paymentId = "uuid"
+
+[emits."compra.compensada@v1"]
+streamId = "uuid"
+motivo = "string"
+
+[aggregate.compra]
+events = ["compra.iniciada@v1", "compra.cobrada@v1", "compra.compensada@v1"]
+
+# El modelo de lectura. Se llena DESPUES de que el evento ocurrio, asi que su
+# atraso tiene que caber en el presupuesto que el servicio ya declaro (5000ms).
+[view.conversion]
+on = ["compra.iniciada@v1", "compra.cobrada@v1", "compra.compensada@v1"]
+max_staleness_ms = 3000
+
 [[depends]]
 service = "payments"
 method = "capturePayment"

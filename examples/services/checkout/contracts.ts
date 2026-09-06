@@ -43,6 +43,22 @@ export interface Outbox { stage(e: Envelope<unknown>): Promise<void>; }
  *  efecto ocurre una sola. `once` no reejecuta un id ya visto. */
 export interface Inbox { once(id: string, fn: () => Promise<void>): Promise<void>; }
 
+export interface CompraIniciadaV1 {
+  streamId: string;
+  orderId: string;
+  amount: { amount: number; currency: string };
+}
+
+export interface CompraCobradaV1 {
+  streamId: string;
+  paymentId: string;
+}
+
+export interface CompraCompensadaV1 {
+  streamId: string;
+  motivo: string;
+}
+
 export interface CheckoutIn {
   orderId: string;
   amount: { amount: number; currency: string };
@@ -59,7 +75,21 @@ export const manifest = {
   "tier": "1",
   "pii": [],
   "external": false,
-  "emits": {},
+  "emits": {
+    "compra.iniciada@v1": {
+      "streamId": "uuid",
+      "orderId": "uuid",
+      "amount": "money"
+    },
+    "compra.cobrada@v1": {
+      "streamId": "uuid",
+      "paymentId": "uuid"
+    },
+    "compra.compensada@v1": {
+      "streamId": "uuid",
+      "motivo": "string"
+    }
+  },
   "consumes": {},
   "methods": {
     "checkout": {
@@ -147,8 +177,28 @@ export const manifest = {
       "timeout_ms": 60000
     }
   },
-  "aggregate": {},
-  "view": {},
+  "aggregate": {
+    "compra": {
+      "events": [
+        "compra.iniciada@v1",
+        "compra.cobrada@v1",
+        "compra.compensada@v1"
+      ],
+      "machine": null,
+      "snapshot_every": 0
+    }
+  },
+  "view": {
+    "conversion": {
+      "on": [
+        "compra.iniciada@v1",
+        "compra.cobrada@v1",
+        "compra.compensada@v1"
+      ],
+      "table": null,
+      "max_staleness_ms": 3000
+    }
+  },
   "infra": {
     "state": "postgres",
     "runtime": "container",
@@ -192,8 +242,20 @@ export const manifest = {
 } as const;
 
 export abstract class CheckoutService {
-
+  protected readonly bus: Bus;
+  constructor(bus: Bus) {
+    this.bus = bus;
+  }
   static readonly wellKnown = "/.well-known/axon.json";
+  protected emitCompraIniciadaV1(data: CompraIniciadaV1, cause?: Envelope<unknown>) {
+    return this.bus.publish(newEnvelope("compra.iniciada@v1", "checkout", data, cause));
+  }
+  protected emitCompraCobradaV1(data: CompraCobradaV1, cause?: Envelope<unknown>) {
+    return this.bus.publish(newEnvelope("compra.cobrada@v1", "checkout", data, cause));
+  }
+  protected emitCompraCompensadaV1(data: CompraCompensadaV1, cause?: Envelope<unknown>) {
+    return this.bus.publish(newEnvelope("compra.compensada@v1", "checkout", data, cause));
+  }
   abstract checkout(input: CheckoutIn, e: Envelope<unknown>): Promise<CheckoutOut>;
 }
 
@@ -493,6 +555,149 @@ export function arrancarBarridoCompra(
   // que un barrido de fondo no mantenga el proceso vivo al apagarlo
   t.unref?.();
   return () => clearInterval(t);
+}
+
+
+/** El flujo de un agregado. Es la fuente de verdad: lo que hoy se
+ *  guarda en una fila es una PROYECCION de esto.
+ *
+ *  `append` recibe la version que el llamador creia vigente. Si otro
+ *  escribio en medio, tiene que fallar: eso es el UNIQUE (stream_id,
+ *  version) haciendo su trabajo, y `axon verify` comprueba que exista
+ *  porque sin el las dos escrituras entran y nadie ve un error. */
+export interface FlujoEventos {
+  /** Los eventos de un flujo, en orden. `desde` permite arrancar de una foto. */
+  leer(streamId: string, desde?: number): Promise<{ version: number; type: string; data: unknown }[]>;
+  /** Agrega al final. Rechaza si `esperada` ya no es la ultima version. */
+  append(streamId: string, esperada: number, e: Envelope<unknown>): Promise<number>;
+  /** La ultima foto, si hay fotos declaradas. */
+  foto?(streamId: string): Promise<{ version: number; estado: unknown } | null>;
+  guardarFoto?(streamId: string, version: number, estado: unknown): Promise<void>;
+}
+
+/** Otro escribio primero. No es un error de programa: es la condicion
+ *  normal de dos usuarios sobre el mismo agregado, y quien la recibe
+ *  vuelve a leer y reintenta. */
+export class VersionEnConflicto extends Error {
+  readonly streamId: string;
+  readonly esperada: number;
+  constructor(streamId: string, esperada: number) {
+    super(`${streamId}: la version ${esperada} ya no es la ultima`);
+    this.streamId = streamId;
+    this.esperada = esperada;
+  }
+}
+
+/** Los eventos que componen `compra`, declarados en el manifiesto. */
+export const compraEventos = ["compra.iniciada@v1", "compra.cobrada@v1", "compra.compensada@v1"] as const;
+export type CompraEvento = typeof compraEventos[number];
+
+/** El estado reconstruido. Su forma la define el dominio; lo que
+ *  impone el generador es que haya un caso por cada evento declarado. */
+export interface CompraReglas<CompraEstado> {
+  /** El estado antes del primer evento. */
+  inicial(streamId: string): CompraEstado;
+  aplicarCompraIniciadaV1(estado: CompraEstado, e: CompraIniciadaV1): CompraEstado;
+  aplicarCompraCobradaV1(estado: CompraEstado, e: CompraCobradaV1): CompraEstado;
+  aplicarCompraCompensadaV1(estado: CompraEstado, e: CompraCompensadaV1): CompraEstado;
+}
+
+/** Reconstruye el estado aplicando el flujo en orden. */
+export function compraFold<E>(
+  reglas: CompraReglas<E>,
+  streamId: string,
+  eventos: { version: number; type: string; data: unknown }[],
+  desde?: { version: number; estado: E },
+): { version: number; estado: E } {
+  let estado = desde ? desde.estado : reglas.inicial(streamId);
+  let version = desde ? desde.version : 0;
+  for (const ev of eventos) {
+    // El orden no se asume: un hueco en las versiones significa que
+    // falta un evento, y reconstruir sin el da un estado que nunca
+    // existio.
+    if (ev.version !== version + 1) {
+      throw new Error(`compra/${streamId}: se esperaba la version ${version + 1} y llego ${ev.version}`);
+    }
+    estado = compraAplicar(reglas, estado, ev);
+    version = ev.version;
+  }
+  return { version, estado };
+}
+
+function compraAplicar<E>(reglas: CompraReglas<E>, estado: E, ev: { type: string; data: unknown }): E {
+  switch (ev.type) {
+      case "compra.iniciada@v1":
+        return reglas.aplicarCompraIniciadaV1(estado, ev.data as CompraIniciadaV1);
+      case "compra.cobrada@v1":
+        return reglas.aplicarCompraCobradaV1(estado, ev.data as CompraCobradaV1);
+      case "compra.compensada@v1":
+        return reglas.aplicarCompraCompensadaV1(estado, ev.data as CompraCompensadaV1);
+    default:
+      // Un evento en el flujo que el manifiesto no declara: el estado
+      // que saldria de ignorarlo es incorrecto y nadie lo sabria.
+      throw new Error(`compra: `+ev.type+` no es un evento declarado del agregado`);
+  }
+}
+
+
+/** Donde una vista anota hasta donde llego.
+ *
+ *  Sin esto, un reinicio reprocesa desde el principio o se salta lo que no
+ *  alcanzo a aplicar. Las dos cosas dan una vista incorrecta, y ninguna da
+ *  un error: por eso `axon verify` exige la tabla. */
+export interface Checkpoint {
+  /** Desde donde retomar. La ESCRITURA no esta aqui a proposito: la
+   *  posicion tiene que guardarse en la misma transaccion que el efecto
+   *  de la vista, y esa transaccion es de la proyeccion, no del
+   *  framework. En dos transacciones, un corte entre ellas deja la vista
+   *  adelantada o atrasada respecto de lo que dice haber aplicado, y
+   *  ninguna de las dos da un error.
+   *
+   *  Por eso cada `aplicar*` recibe la posicion: la guarda quien puede
+   *  hacerlo junto con el resto. */
+  leer(vista: string): Promise<number>;
+}
+
+/** La vista `conversion`, en `vista_conversion`. Un metodo por evento declarado:
+ *  agregar uno al manifiesto rompe la compilacion en vez de dejar la
+ *  proyeccion vieja corriendo sin enterarse. */
+export interface ConversionProyeccion {
+  /** compra.iniciada@v1 · guarda `posicion` en la MISMA transaccion que el efecto */
+  aplicarCompraIniciadaV1(e: Envelope<CompraIniciadaV1>, posicion: number): Promise<void>;
+  /** compra.cobrada@v1 · guarda `posicion` en la MISMA transaccion que el efecto */
+  aplicarCompraCobradaV1(e: Envelope<CompraCobradaV1>, posicion: number): Promise<void>;
+  /** compra.compensada@v1 · guarda `posicion` en la MISMA transaccion que el efecto */
+  aplicarCompraCompensadaV1(e: Envelope<CompraCompensadaV1>, posicion: number): Promise<void>;
+}
+
+export const conversionTabla = "vista_conversion" as const;
+export const conversionEventos = ["compra.iniciada@v1", "compra.cobrada@v1", "compra.compensada@v1"] as const;
+/** Presupuesto de atraso declarado. Mas viejo que esto no se sirve. */
+export const conversionAtrasoMaximoMs = 3000;
+
+/** Rutea el evento al metodo de la vista. El `default` no es
+ *  defensivo: un evento que la vista no declara llegaria de una
+ *  suscripcion que nadie pidio. */
+export async function conversionAplicar(
+  proyeccion: ConversionProyeccion,
+  e: Envelope<unknown>,
+  posicion: number,
+): Promise<void> {
+  switch (e.type) {
+      case "compra.iniciada@v1":
+        return proyeccion.aplicarCompraIniciadaV1(e as Envelope<CompraIniciadaV1>, posicion);
+      case "compra.cobrada@v1":
+        return proyeccion.aplicarCompraCobradaV1(e as Envelope<CompraCobradaV1>, posicion);
+      case "compra.compensada@v1":
+        return proyeccion.aplicarCompraCompensadaV1(e as Envelope<CompraCompensadaV1>, posicion);
+    default:
+      throw new Error(`conversion: `+e.type+` no es un evento declarado de la vista`);
+  }
+}
+
+/** Cuanto atraso lleva la vista, para poder medirlo contra lo declarado. */
+export function conversionAtraso(ultimoEvento: Date, ahora = new Date()): number {
+  return ahora.getTime() - ultimoEvento.getTime();
 }
 
 

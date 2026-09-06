@@ -134,6 +134,9 @@ paso "aislamiento por inquilino a traves del pooler"
 paso "la saga: compensacion y retome, medidos"
 ./verificar-saga.sh
 
+paso "event sourcing y CQRS, medidos"
+./verificar-es.sh
+
 paso "reintentos declarados vs ocurridos"
 ./verificar-reintentos.sh
 

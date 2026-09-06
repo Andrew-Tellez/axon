@@ -496,10 +496,47 @@ que importan son los que un `switch` leído a ojo no distingue:
 | los eventos del agregado son los del manifiesto | |
 | **la vista sólo acepta los eventos que declara, y le llega la posición** | un evento de más vendría de una suscripción que nadie pidió |
 
+## En el demo, contra Postgres
+
+`checkout` declara `[aggregate.compra]` y `[view.conversion]`, y el demo mide las dos
+afirmaciones que un test unitario no puede sostener:
+
+```console
+==> event sourcing y CQRS, medidos
+  OK: una entro y la otra fue rechazada; queda 1 evento en la version 3
+  i el rechazo es el UNIQUE, no una comprobacion de la aplicacion
+  OK: la vista concuerda con el flujo
+  OK: 1061ms de atraso real; el evento sin proyectar se ve
+  OK: 0ms, dentro del presupuesto declarado de 3000ms
+```
+
+**La concurrencia optimista.** Dos `INSERT` a la misma versión, a la vez, con un
+`pg_sleep` dentro de cada transacción para solaparlas a propósito. Una entra, la otra la
+rechaza el UNIQUE — no una comprobación de la aplicación, que es la diferencia entre una
+garantía y una intención.
+
+**El atraso, medido del flujo y no de la vista.** Esto estaba mal en mi primera versión:
+medía la edad del evento que la vista ya había aplicado, y eso da siempre un número bonito
+—justo cuando la proyección está parada—. El atraso real es la edad del evento **más viejo
+que la proyección todavía no aplicó**, y sale del flujo.
+
+Y se mide en las dos direcciones, porque una medición que sólo se ha visto pasar no se ha
+visto funcionar: sobre un flujo con un evento inyectado sin pasar por la proyección tiene
+que **ver** el atraso, y sobre una compra al día tiene que caber en el presupuesto.
+
+### El flujo es el outbox
+
+Con event sourcing el orden correcto es anotar primero y publicar después: el flujo ya es
+durable, así que hace de outbox. Lo que falta en el ejemplo es que publique un **relay
+leyendo el flujo**, como hace `patterns.outbox`, en vez de la línea que publica en línea:
+publicar ahí deja una ventana en la que el evento está anotado y nadie lo recibió.
+
+Y una consecuencia de ese orden: la versión esperada sale de **leer** el flujo, no de un
+contador en memoria. Con dos instancias, un contador local se desincroniza y el UNIQUE es
+lo único que lo dice.
+
 ## Lo que falta de event sourcing
 
-Ni el agregado ni la vista están en `examples/`, así que lo medido es el `fold` y la
-proyección —corriéndolos— pero no un conflicto de versión contra un Postgres real ni el
-atraso de una vista medido contra su presupuesto. Las dos cosas son la continuación
-natural: el UNIQUE se prueba con dos escrituras concurrentes de verdad, y el atraso con el
-demo ya levantado.
+El relay sobre el flujo, y las fotos: `snapshot_every` se declara y `verify` exige la
+tabla, pero nada las escribe todavía — reconstruir siempre desde el principio funciona
+hasta que un flujo tiene cien mil eventos.

@@ -1,7 +1,10 @@
 # Gobernanza del equipo, versionada. `axon verify` la aplica.
 require_owner = true
 require_tier = true
-allowed_event_prefixes = ["order", "payment", "billing"]
+# El catalogo de dominios. Agregar uno es una decision que se revisa en un PR,
+# que es justo el punto: sin la lista, cada servicio inventa su prefijo y en un
+# ano nadie sabe que dominios existen.
+allowed_event_prefixes = ["order", "payment", "billing", "compra"]
 max_deps_per_service = 7
 
 # El layout del repo es del equipo, no de axon. `{service}` se sustituye.

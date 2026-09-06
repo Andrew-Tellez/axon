@@ -65,7 +65,7 @@ diagrama esté viejo: es que alguien rompió el manifiesto, y CI lo dice antes d
 
 `examples/` trae tres servicios que corren de verdad —uno sobre cuatro nodos de Postgres
 con [pgdog](https://pgdog.dev) delante, y otro coordinando una saga. `./demo.sh` levanta
-el sistema completo y comprueba **ocho** cosas contra la realidad:
+el sistema completo y comprueba **nueve** cosas contra la realidad:
 
 ```console
 $ cd examples && ./demo.sh
@@ -87,6 +87,10 @@ $ cd examples && ./demo.sh
 ==> la saga: compensacion y retome, medidos
   OK: el cobro se deshizo y al comercio no se le pago
   OK: retomada desde el diario, compensada, y el reembolso alcanzo al cobro
+
+==> event sourcing y CQRS, medidos
+  OK: dos escrituras a la misma version: una entro, el UNIQUE rechazo la otra
+  OK: 0ms de atraso de la vista, dentro del presupuesto declarado
 
 ==> reintentos declarados vs ocurridos
   OK: 3 llamadas = 1 + 2 reintentos, exactamente lo declarado

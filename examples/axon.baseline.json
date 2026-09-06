@@ -1,6 +1,28 @@
 {
   "nota": "Contratos publicados. Generado por `axon baseline`. Un cambio aqui es un cambio incompatible: se revisa en el PR como cualquier otro.",
   "events": {
+    "compra.cobrada@v1": {
+      "owner": "checkout",
+      "fields": {
+        "streamId": "uuid",
+        "paymentId": "uuid"
+      }
+    },
+    "compra.compensada@v1": {
+      "owner": "checkout",
+      "fields": {
+        "streamId": "uuid",
+        "motivo": "string"
+      }
+    },
+    "compra.iniciada@v1": {
+      "owner": "checkout",
+      "fields": {
+        "streamId": "uuid",
+        "orderId": "uuid",
+        "amount": "money"
+      }
+    },
     "order.placed@v1": {
       "owner": "orders",
       "fields": {

@@ -352,6 +352,9 @@ services:
       retries: 30
 
 # streams JetStream a crear al arrancar:
+#   nats stream add compra.cobrada.v1 --subjects compra.cobrada.v1
+#   nats stream add compra.compensada.v1 --subjects compra.compensada.v1
+#   nats stream add compra.iniciada.v1 --subjects compra.iniciada.v1
 #   nats stream add order.placed.v1 --subjects order.placed.v1
 #   nats stream add payment.captured.v1 --subjects payment.captured.v1
 # el log de envelopes cae en ./.axon/local.ndjson -> `axon trace .axon/local.ndjson`
