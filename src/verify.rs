@@ -1099,42 +1099,42 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
-    // event sourcing: el flujo es la verdad, asi que lo que se refuta es todo
-    // lo que lo convierte en algo que no es un flujo
+    // event sourcing: the stream is the truth, so what gets refuted is
+    // everything that turns it into something that is not a stream
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         for (nombre, ag) in &m.aggregate {
             if ag.events.is_empty() {
                 errors.push(format!(
-                    "{svc}.{nombre}: un agregado sin eventos no tiene estado que reconstruir"
+                    "{svc}.{nombre}: an aggregate with no events has no state to rebuild"
                 ));
             }
-            // Un agregado fundado en un evento que el servicio no emite es un
-            // agregado que nadie puede llenar.
+            // An aggregate founded on an event the service does not emit is an
+            // aggregate nobody can fill.
             for ev in &ag.events {
                 if !m.emits.contains_key(ev) {
                     errors.push(format!(
-                        "{svc}.{nombre}: se funda en `{ev}`, que este servicio no declara emitir. \
-                         El flujo lo escribe su dueno: si el evento es de otro, esto es una vista, \
-                         no un agregado"
+                        "{svc}.{nombre}: is founded on `{ev}`, which this service does not declare it \
+                         emits. The stream is written by its owner: if the event belongs to \
+                         someone else, this is a view, not an aggregate"
                     ));
                 }
             }
-            // La maquina, si se declara, tiene que existir y hablar de los
-            // mismos eventos: dos vocabularios para el mismo concepto se
-            // separan en el primer cambio.
+            // The machine, if declared, has to exist and speak of the same
+            // events: two vocabularies for the same concept drift apart at
+            // the first change.
             if let Some(mac) = &ag.machine {
                 match m.machine.get(mac) {
                     None => errors.push(format!(
-                        "{svc}.{nombre}: gobernado por `[machine.{mac}]`, que no existe"
+                        "{svc}.{nombre}: governed by `[machine.{mac}]`, which does not exist"
                     )),
                     Some(maq) => {
                         for ev in &ag.events {
                             if !maq.transitions.values().any(|t| t.emits.as_ref() == Some(ev)) {
                                 errors.push(format!(
-                                    "{svc}.{nombre}: `{ev}` es del agregado y ninguna transicion \
-                                     de `{mac}` lo emite. El `fold` generado no sabria a que \
-                                     estado llevarlo"
+                                    "{svc}.{nombre}: `{ev}` belongs to the aggregate and no \
+                                     transition of `{mac}` emits it. The generated `fold` \
+                                     would not know which state to take it to"
                                 ));
                             }
                         }
@@ -1142,26 +1142,26 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 }
             }
 
-            // Los eventos del agregado salen al bus, y el flujo ya es durable:
-            // publicar en linea despues de anotar deja una ventana en la que el
-            // evento esta en el flujo y nadie lo recibio. Y publicar ANTES de
-            // anotar es peor. El traspaso tiene que ser durable y en la misma
-            // transaccion que el append, y eso es el outbox.
+            // The aggregate's events go out on the bus, and the stream is already
+            // durable: publishing inline after recording leaves a window where
+            // the event is in the stream and nobody received it. And publishing
+            // BEFORE recording is worse. The handoff has to be durable and in
+            // the same transaction as the append — that is the outbox.
             if !ag.events.is_empty() && !m.patterns.outbox {
                 errors.push(format!(
-                    "{svc}.{nombre}: un agregado cuyos eventos se publican necesita \
-                     `[patterns] outbox = true`. El flujo ya es durable, asi que publicar en \
-                     linea deja una ventana en la que el evento esta anotado y nadie lo recibio, \
-                     y publicar antes de anotar deja lo contrario. El traspaso va en la MISMA \
-                     transaccion que el append"
+                    "{svc}.{nombre}: an aggregate whose events get published needs \
+                     `[patterns] outbox = true`. The stream is already durable, so publishing \
+                     inline leaves a window where the event is recorded and nobody received \
+                     it, and publishing before recording leaves the opposite. The handoff goes \
+                     in the SAME transaction as the append"
                 ));
             }
 
             let tabla = Aggregate::tabla(nombre);
             match esquemas.get(svc).and_then(|t| t.get(&tabla)) {
                 None => errors.push(format!(
-                    "{svc}.{nombre}: falta la tabla `{tabla}`. El estado ES el flujo, y sin la \
-                     tabla no hay donde ponerlo"
+                    "{svc}.{nombre}: the `{tabla}` table is missing. The state IS the stream, and \
+                     without the table there is nowhere to put it"
                 )),
                 Some(t) => {
                     for (col, para) in [
@@ -1176,10 +1176,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             ));
                         }
                     }
-                    // Sin el UNIQUE, dos escrituras concurrentes sobre el mismo
-                    // flujo se aceptan las dos con la misma version. Nadie ve un
-                    // error y el estado reconstruido depende del orden de
-                    // lectura.
+                    // Without the UNIQUE, two concurrent writes to the same stream
+                    // are both accepted with the same version. Nobody sees an
+                    // error and the rebuilt state depends on the read order.
                     let optimista = t.uniques.iter().any(|u| {
                         u.len() == 2
                             && u.iter().any(|c| c == "stream_id")
@@ -1187,24 +1186,24 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     });
                     if !optimista {
                         errors.push(format!(
-                            "{svc}.{nombre}: `{tabla}` sin UNIQUE sobre (stream_id, version). Dos \
-                             escrituras concurrentes sobre el mismo flujo entran las dos con la \
-                             misma version, sin un solo error, y el estado que se reconstruye \
-                             depende de en que orden se lean"
+                            "{svc}.{nombre}: `{tabla}` has no UNIQUE on (stream_id, version). Two \
+                             concurrent writes to the same stream both land with the same \
+                             version, with no error at all, and the state that gets rebuilt \
+                             depends on what order they are read in"
                         ));
                     }
                 }
             }
-            // Append-only, y no como recomendacion. Una migracion que
-            // actualiza o borra del flujo no rompe nada visible: deja un
-            // pasado que no ocurrio, y todo lo que se reconstruya despues sera
-            // consistente con esa mentira. No hay `.contract.sql` que lo
-            // habilite, a diferencia del resto de las tablas.
+            // Append-only, and not as a recommendation. A migration that updates
+            // or deletes from the stream breaks nothing visible: it leaves a
+            // past that did not happen, and everything rebuilt afterwards will
+            // be consistent with that lie. There is no `.contract.sql` that
+            // enables it, unlike every other table.
             for f in migrations_of(m) {
                 let texto = std::fs::read_to_string(&f).unwrap_or_default().to_lowercase();
                 let nombre_archivo = f.file_name().unwrap_or_default().to_string_lossy().to_string();
                 for verbo in ["update", "delete from", "truncate"] {
-                    // se busca el verbo Y la tabla en la misma sentencia
+                    // look for the verb AND the table in the same statement
                     for sent in texto.split(';') {
                         let limpio: String = sent
                             .lines()
@@ -1213,11 +1212,11 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             .join(" ");
                         if limpio.contains(verbo) && limpio.contains(&tabla) {
                             errors.push(format!(
-                                "{svc}/{nombre_archivo}: `{}` sobre `{tabla}`, que es el flujo de \
-                                 `{nombre}`. Un flujo es append-only: cambiar un evento pasado \
-                                 deja un pasado que no ocurrio, y todo lo que se reconstruya \
-                                 despues va a ser coherente con esa mentira. Para corregir se \
-                                 agrega un evento nuevo, no se edita el viejo",
+                                "{svc}/{nombre_archivo}: `{}` on `{tabla}`, which is the stream of \
+                                 `{nombre}`. A stream is append-only: changing a past event \
+                                 leaves a past that did not happen, and everything rebuilt \
+                                 afterwards will be consistent with that lie. To correct \
+                                 something you add a new event, you do not edit the old one",
                                 verbo.to_uppercase()
                             ));
                         }
@@ -1228,7 +1227,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 let fotos = Aggregate::fotos(nombre);
                 match esquemas.get(svc).and_then(|t| t.get(&fotos)) {
                     None => errors.push(format!(
-                        "{svc}.{nombre}: `snapshot_every = {}` sin la tabla `{fotos}`",
+                        "{svc}.{nombre}: `snapshot_every = {}` with no `{fotos}` table",
                         ag.snapshot_every
                     )),
                     Some(t) => {
@@ -1238,19 +1237,20 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             ("estado", "el estado calculado", "json"),
                             (
                                 "reglas",
-                                "con que version de las reglas se calculo: sin esta columna, \
-                                 una foto vieja se rehidrata con reglas nuevas y da un estado \
-                                 que ya no coincide con reproducir el flujo, sin ningun error",
+                                "which rules version it was computed with: without this column, \
+                                 an old snapshot gets rehydrated with new rules and gives a \
+                                 state that no longer matches replaying the stream, with no \
+                                 error at all",
                                 "",
                             ),
                         ] {
                             match t.col(col) {
                                 None => errors.push(format!(
-                                    "{svc}.{nombre}: `{fotos}` sin columna `{col}`: ahi va {para}"
+                                    "{svc}.{nombre}: `{fotos}` has no `{col}` column: that is where {para} goes"
                                 )),
                                 Some(c) if !tipo.is_empty() && !c.ty.to_lowercase().contains(tipo) => {
                                     errors.push(format!(
-                                        "{svc}.{nombre}: `{fotos}.{col}` es `{}` y tiene que ser \
+                                        "{svc}.{nombre}: `{fotos}.{col}` is `{}` and has to be \
                                          {tipo}",
                                         c.ty
                                     ))
@@ -1258,13 +1258,13 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                                 _ => {}
                             }
                         }
-                        // Una foto por cada evento no es una cache, es una
-                        // segunda copia del flujo con el doble de escrituras.
+                        // One snapshot per event is not a cache, it is a second
+                        // copy of the stream with twice the writes.
                         if ag.snapshot_every == 1 {
                             warnings.push(format!(
-                                "{svc}.{nombre}: `snapshot_every = 1` guarda una foto por evento: \
-                                 eso no es una cache, es una segunda copia del flujo con el doble \
-                                 de escrituras"
+                                "{svc}.{nombre}: `snapshot_every = 1` stores one snapshot per event: that \
+                                 is not a cache, it is a second copy of the stream with twice \
+                                 the writes"
                             ));
                         }
                     }
@@ -1272,29 +1272,29 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
         }
 
-        // Modelos de lectura.
+        // Read models.
         for (nombre, vi) in &m.view {
             if vi.on.is_empty() {
                 errors.push(format!(
-                    "{svc}.{nombre}: una vista sin eventos no se construye con nada"
+                    "{svc}.{nombre}: a view with no events is built from nothing"
                 ));
             }
             for ev in &vi.on {
-                // Puede consumir eventos propios o de otro; lo que no puede es
-                // consumir uno que nadie emite.
+                // It can consume its own events or another service's; what it
+                // cannot do is consume one nobody emits.
                 if !emitters.contains_key(ev.as_str()) {
                     errors.push(format!(
-                        "{svc}.{nombre}: se construye con `{ev}`, que nadie emite"
+                        "{svc}.{nombre}: is built from `{ev}`, which nobody emits"
                     ));
                 }
-                // Y si es de otro servicio, tiene que estar declarado en
-                // `[consumes]`: la entrega la arma `axon infra` desde ahi.
+                // And if it belongs to another service it has to be declared in
+                // `[consumes]`: `axon infra` builds the delivery from there.
                 let propio = m.emits.contains_key(ev.as_str());
                 if !propio && !m.consumes.contains_key(ev.as_str()) {
                     errors.push(format!(
-                        "{svc}.{nombre}: usa `{ev}`, de otro servicio, sin declararlo en \
-                         `[consumes]`. La suscripcion sale de ahi, y sin ella la vista se \
-                         genera y nunca recibe nada"
+                        "{svc}.{nombre}: uses `{ev}`, from another service, without declaring it in \
+                         `[consumes]`. The subscription comes from there, and without it the \
+                         view gets generated and never receives anything"
                     ));
                 }
             }
@@ -1302,15 +1302,15 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             let tabla = vi.tabla(nombre);
             if tablas.and_then(|t| t.get(&tabla)).is_none() {
                 errors.push(format!(
-                    "{svc}.{nombre}: falta la tabla `{tabla}`, donde vive la vista"
+                    "{svc}.{nombre}: the `{tabla}` table, where the view lives, is missing"
                 ));
             }
             let cp = View::checkpoint(nombre);
             match tablas.and_then(|t| t.get(&cp)) {
                 None => errors.push(format!(
-                    "{svc}.{nombre}: falta la tabla `{cp}`. Sin anotar hasta donde llego, un \
-                     reinicio reprocesa desde el principio o se salta lo que no alcanzo a \
-                     aplicar; las dos cosas dan una vista incorrecta y ninguna da un error"
+                    "{svc}.{nombre}: the `{cp}` table is missing. With nowhere to record how far it \
+                     got, a restart either reprocesses from the beginning or skips what it did \
+                     not get to apply; both give a wrong view and neither raises an error"
                 )),
                 Some(t) => {
                     for (col, para) in [
@@ -1320,31 +1320,30 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     ] {
                         if !t.tiene(col) {
                             errors.push(format!(
-                                "{svc}.{nombre}: `{cp}` sin columna `{col}`: ahi va {para}"
+                                "{svc}.{nombre}: `{cp}` has no `{col}` column: that is where {para} goes"
                             ));
                         }
                     }
-                    // Sin `stream_id` en la clave, un flujo pisa el punto de
-                    // otro. La version de un evento es su posicion dentro de SU
-                    // flujo: un solo numero para toda la vista parece funcionar
-                    // mientras haya un flujo, y deja de identificar nada en
-                    // cuanto hay dos.
+                    // Without `stream_id` in the key, one stream overwrites
+                    // another's position. An event's version is its position
+                    // inside ITS stream: a single number for the whole view
+                    // seems to work while there is one stream, and stops
+                    // identifying anything as soon as there are two.
                     let por_flujo = t.uniques.iter().any(|u| {
                         u.iter().any(|c| c == "stream_id") && u.iter().any(|c| c == "vista")
                     });
                     if !por_flujo && t.tiene("stream_id") {
                         errors.push(format!(
-                            "{svc}.{nombre}: `{cp}` sin clave sobre (vista, stream_id). Un flujo \
-                             pisaria el punto de otro, y la vista se saltaria eventos o los \
-                             reprocesaria sin que nada avise"
+                            "{svc}.{nombre}: `{cp}` has no key on (vista, stream_id). One stream would \
+                             overwrite another's position, and the view would skip events or \
+                             reprocess them without anything warning about it"
                         ));
                     }
                 }
             }
-            // Si la vista se puede reconstruir, hay una sombra, y una sombra
-            // con una columna de menos hace que el intercambio deje una vista
-            // incompleta. Eso se descubriria el dia de la reconstruccion, que
-            // es el peor dia.
+            // If the view can be rebuilt there is a shadow, and a shadow with a
+            // column missing makes the swap leave an incomplete view. That
+            // would get discovered on rebuild day, which is the worst day.
             let propia = !vi.on.is_empty()
                 && vi
                     .on
@@ -1357,23 +1356,23 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     tablas.and_then(|t| t.get(&sombra)),
                 ) {
                     (Some(_), None) => errors.push(format!(
-                        "{svc}.{nombre}: se puede reconstruir y falta `{sombra}`. Reconstruir en \
-                         el sitio deja la vista incompleta mientras corre, y se sigue leyendo: \
-                         los que preguntan reciben menos filas de las que hay, sin un error"
+                        "{svc}.{nombre}: it can be rebuilt and `{sombra}` is missing. Rebuilding in \
+                         place leaves the view incomplete while it runs, and it keeps being \
+                         read: whoever asks gets fewer rows than there are, with no error"
                     )),
                     (Some(viva), Some(som)) => {
                         for c in &viva.cols {
                             match som.col(&c.name) {
                                 None => errors.push(format!(
-                                    "{svc}.{nombre}: `{sombra}` sin la columna `{}` que tiene \
-                                     `{tabla}`. El intercambio dejaria una vista sin ese dato, y \
-                                     recien ahi se veria",
+                                    "{svc}.{nombre}: `{sombra}` has no `{}` column, which `{tabla}` \
+                                     does. The swap would leave a view without that data, and \
+                                     only then would it show",
                                     c.name
                                 )),
                                 Some(o) if o.ty != c.ty => errors.push(format!(
-                                    "{svc}.{nombre}: `{sombra}.{}` es `{}` y en `{tabla}` es \
-                                     `{}`. Al intercambiar, la vista cambia de tipo sin que nada \
-                                     lo diga",
+                                    "{svc}.{nombre}: `{sombra}.{}` is `{}` and in `{tabla}` it is \
+                                     `{}`. On the swap, the view changes type without anything \
+                                     saying so",
                                     c.name, o.ty, c.ty
                                 )),
                                 _ => {}
@@ -1382,9 +1381,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         for c in &som.cols {
                             if !viva.tiene(&c.name) {
                                 warnings.push(format!(
-                                    "{svc}.{nombre}: `{sombra}.{}` no esta en `{tabla}`. Sobra \
-                                     hasta el proximo intercambio, y despues es la vista la que \
-                                     la tiene",
+                                    "{svc}.{nombre}: `{sombra}.{}` is not in `{tabla}`. It is \
+                                     spare until the next swap, and after that the view is the \
+                                     one that has it",
                                     c.name
                                 ));
                             }
@@ -1394,25 +1393,24 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 }
             }
 
-            // Una vista es eventual por construccion: se llena DESPUES de que
-            // el evento ocurrio. Prometer CP sobre ella es la misma
-            // contradiccion que leer de una replica y prometer CP.
+            // A view is eventual by construction: it gets filled AFTER the event
+            // happened. Promising CP on top of it is the same contradiction as
+            // reading from a replica and promising CP.
             if !m.cap.eventual() {
                 errors.push(format!(
-                    "{svc}.{nombre}: un modelo de lectura con `consistency = \"strong\"`. La \
-                     vista se llena despues de que el evento ocurrio: lo que sirve es un dato \
-                     viejo por definicion"
+                    "{svc}.{nombre}: a read model with `consistency = \"strong\"`. The view gets \
+                     filled after the event happened: what it serves is stale by definition"
                 ));
             }
             match (vi.max_staleness_ms, m.cap.max_staleness_ms) {
                 (Some(v), Some(tope)) if v > tope => errors.push(format!(
-                    "{svc}.{nombre}: la vista admite {v}ms de atraso y el servicio declaro un \
-                     tope de {tope}ms. El servicio no puede cumplir lo que prometio sirviendo \
-                     de una vista mas vieja que su propio presupuesto"
+                    "{svc}.{nombre}: the view allows {v}ms of lag and the service declared a limit \
+                     of {tope}ms. The service cannot honour what it promised while serving \
+                     from a view older than its own budget"
                 )),
                 (None, _) => warnings.push(format!(
-                    "{svc}.{nombre}: sin `max_staleness_ms`. Sin presupuesto de atraso, nadie \
-                     puede decir si la vista que sirvio estaba aceptablemente vieja"
+                    "{svc}.{nombre}: no `max_staleness_ms`. With no lag budget, nobody can say \
+                     whether the view it served was acceptably stale"
                 )),
                 _ => {}
             }

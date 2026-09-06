@@ -3765,8 +3765,8 @@ fn las_reglas_de_event_sourcing_bloquean() {
     );
     assert!(!sin_unique.contains("UNIQUE"), "la variante no quito el UNIQUE");
     let err = correr(MANIFIESTO_ES, &sin_unique);
-    assert!(err.contains("sin UNIQUE sobre (stream_id, version)"), "{err}");
-    assert!(err.contains("depende de en que orden se lean"), "{err}");
+    assert!(err.contains("has no UNIQUE on (stream_id, version)"), "{err}");
+    assert!(err.contains("depends on what order they are read in"), "{err}");
 
     // un agregado fundado en un evento que el servicio no emite
     let ajeno = MANIFIESTO_ES.replace(
@@ -3774,27 +3774,27 @@ fn las_reglas_de_event_sourcing_bloquean() {
         r#"events = ["cuenta.abierta@v1", "otra.cosa@v1"]"#,
     );
     let err = correr(&ajeno, DDL_ES);
-    assert!(err.contains("no declara emitir"), "{err}");
-    assert!(err.contains("esto es una vista, no un agregado"), "{err}");
+    assert!(err.contains("does not declare it emits"), "{err}");
+    assert!(err.contains("this is a view, not an aggregate"), "{err}");
 
     // la vista sin donde anotar hasta donde llego
     let sin_cp = DDL_ES.replace("CREATE TABLE vista_saldos_checkpoint", "CREATE TABLE otra_tabla");
     let err = correr(MANIFIESTO_ES, &sin_cp);
     assert!(err.contains("vista_saldos_checkpoint"), "{err}");
-    assert!(err.contains("reprocesa desde el principio"), "{err}");
+    assert!(err.contains("reprocesses from the beginning"), "{err}");
 
     // una vista mas vieja que el presupuesto del servicio
     let vieja = MANIFIESTO_ES.replace("max_staleness_ms = 3000", "max_staleness_ms = 9000");
     let err = correr(&vieja, DDL_ES);
-    assert!(err.contains("admite 9000ms de atraso"), "{err}");
-    assert!(err.contains("no puede cumplir lo que prometio"), "{err}");
+    assert!(err.contains("allows 9000ms of lag"), "{err}");
+    assert!(err.contains("cannot honour what it promised"), "{err}");
 
     // y una vista bajo `consistency = "strong"`
     let fuerte = MANIFIESTO_ES
         .replace("consistency = \"eventual\"", "consistency = \"strong\"")
         .replace("max_staleness_ms = 5000\n", "");
     let err = correr(&fuerte, DDL_ES);
-    assert!(err.contains("un dato viejo por definicion"), "{err}");
+    assert!(err.contains("stale by definition"), "{err}");
 
     // la sombra que no coincide con la vista
     let sombra_corta = DDL_ES.replace(
@@ -3805,14 +3805,14 @@ fn las_reglas_de_event_sourcing_bloquean() {
     // vista viva, asi que buscarlo suelto no dice si el reemplazo aplico
     assert_ne!(sombra_corta, DDL_ES, "la variante no aplico");
     let err = correr(MANIFIESTO_ES, &sombra_corta);
-    assert!(err.contains("`vista_saldos_sombra` sin la columna `centavos`"), "{err}");
-    assert!(err.contains("recien ahi se veria"), "{err}");
+    assert!(err.contains("`vista_saldos_sombra` has no `centavos` column"), "{err}");
+    assert!(err.contains("only then would it show"), "{err}");
 
     // y sin sombra: reconstruir en el sitio sirve una vista incompleta
     let sin_sombra = DDL_ES.replace("CREATE TABLE vista_saldos_sombra", "CREATE TABLE otra_sombra");
     let err = correr(MANIFIESTO_ES, &sin_sombra);
-    assert!(err.contains("falta `vista_saldos_sombra`"), "{err}");
-    assert!(err.contains("menos filas de las que hay"), "{err}");
+    assert!(err.contains("`vista_saldos_sombra` is missing"), "{err}");
+    assert!(err.contains("fewer rows than there are"), "{err}");
 
     // el punto de la vista, sin flujo en la clave: un flujo pisa al otro
     let cp_global = DDL_ES.replace(
@@ -3821,19 +3821,19 @@ fn las_reglas_de_event_sourcing_bloquean() {
     );
     assert!(!cp_global.contains("PRIMARY KEY (vista, stream_id)"), "la variante no aplico");
     let err = correr(MANIFIESTO_ES, &cp_global);
-    assert!(err.contains("sin clave sobre (vista, stream_id)"), "{err}");
-    assert!(err.contains("Un flujo pisaria el punto de otro"), "{err}");
+    assert!(err.contains("has no key on (vista, stream_id)"), "{err}");
+    assert!(err.contains("One stream would overwrite another"), "{err}");
 
     // fotos declaradas sin tabla, y sin la columna que las hace seguras
     let sin_tabla = DDL_ES.replace("CREATE TABLE cuenta_snapshot", "CREATE TABLE otra_foto");
     let err = correr(MANIFIESTO_ES, &sin_tabla);
-    assert!(err.contains("sin la tabla `cuenta_snapshot`"), "{err}");
+    assert!(err.contains("with no `cuenta_snapshot` table"), "{err}");
 
     let sin_reglas = DDL_ES.replace("  reglas     int  NOT NULL,\n", "");
     let err = correr(MANIFIESTO_ES, &sin_reglas);
-    assert!(err.contains("sin columna `reglas`"), "{err}");
+    assert!(err.contains("has no `reglas` column"), "{err}");
     assert!(
-        err.contains("da un estado que ya no coincide con reproducir el flujo"),
+        err.contains("no longer matches replaying the stream"),
         "{err}"
     );
 
@@ -3847,7 +3847,7 @@ fn las_reglas_de_event_sourcing_bloquean() {
         axon(&["verify", dir.to_str().unwrap()])
     };
     assert!(
-        out.contains("una segunda copia del flujo"),
+        out.contains("a second copy of the stream"),
         "una foto por evento no aviso:\n{out}"
     );
 
@@ -3855,9 +3855,9 @@ fn las_reglas_de_event_sourcing_bloquean() {
     let sin_outbox = MANIFIESTO_ES.replace("outbox = true", "outbox = false");
     assert!(sin_outbox.contains("outbox = false"), "la variante no aplico");
     let err = correr(&sin_outbox, DDL_ES);
-    assert!(err.contains("necesita `[patterns] outbox = true`"), "{err}");
+    assert!(err.contains("needs `[patterns] outbox = true`"), "{err}");
     assert!(
-        err.contains("el evento esta anotado y nadie lo recibio"),
+        err.contains("the event is recorded and nobody received it"),
         "{err}"
     );
 
@@ -3866,8 +3866,8 @@ fn las_reglas_de_event_sourcing_bloquean() {
         MANIFIESTO_ES,
         &format!("{DDL_ES}\nUPDATE cuenta_event SET data = '{{}}'::jsonb WHERE version = 1;\n"),
     );
-    assert!(err.contains("es el flujo de `cuenta`"), "{err}");
-    assert!(err.contains("un pasado que no ocurrio"), "{err}");
+    assert!(err.contains("is the stream of `cuenta`"), "{err}");
+    assert!(err.contains("a past that did not happen"), "{err}");
     // y ni siquiera marcado como `.contract.sql`: para eso no hay permiso
     let dir2 = std::env::temp_dir().join("axon-es-append");
     let _ = std::fs::remove_dir_all(&dir2);
@@ -3881,7 +3881,7 @@ fn las_reglas_de_event_sourcing_bloquean() {
     std::fs::write(dir2.join("libro.toml"), MANIFIESTO_ES).unwrap();
     let (_, err, ok) = axon(&["verify", dir2.to_str().unwrap()]);
     assert!(!ok, "un DELETE sobre el flujo paso por estar en un .contract.sql");
-    assert!(err.contains("es el flujo de `cuenta`"), "{err}");
+    assert!(err.contains("is the stream of `cuenta`"), "{err}");
 
     // un evento del agregado que ninguna transicion de la maquina emite
     let maquina = MANIFIESTO_ES.replace(
@@ -3892,8 +3892,8 @@ fn las_reglas_de_event_sourcing_bloquean() {
          [aggregate.cuenta]\nmachine = \"cuenta\"",
     );
     let err = correr(&maquina, DDL_ES);
-    assert!(err.contains("ninguna transicion de `cuenta` lo emite"), "{err}");
-    assert!(err.contains("no sabria a que estado llevarlo"), "{err}");
+    assert!(err.contains("no transition of `cuenta` emits it"), "{err}");
+    assert!(err.contains("would not know which state to take it to"), "{err}");
 }
 
 /// El hueco que esto cierra: el esquema de la bodega se generaba para tres
