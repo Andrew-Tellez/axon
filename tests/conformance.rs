@@ -347,7 +347,7 @@ fn runtime_desconocido_no_se_ignora() {
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("solo hay `container`"), "{err}");
+    assert!(err.contains("only `container`"), "{err}");
 }
 
 #[test]
@@ -398,8 +398,8 @@ method = "charge"
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
     for esperado in [
-        "sin `owner`",
-        "sin `tier`",
+        "no `owner`",
+        "no `tier`",
         "sin version en la ruta",
         "sin `idempotent = true`",
         "sin `timeout_ms`",
@@ -756,10 +756,10 @@ fn import_asyncapi_3_y_2() {
     assert!(!ok);
     // un placeholder no es un valor: si esto pasa, el import produce mentiras
     assert!(
-        err.contains("sin `owner`"),
+        err.contains("no `owner`"),
         "TODO se acepto como owner:\n{err}"
     );
-    assert!(err.contains("sin `tier`"), "{err}");
+    assert!(err.contains("no `tier`"), "{err}");
 }
 
 /// El protocolo de plugins tiene que aguantar un generador de verdad, no solo
@@ -1079,11 +1079,11 @@ public = true
     assert!(!ok);
     let todo = format!("{out}{err}");
     for regla in [
-        "[A01] mal.pagar: ruta publica que muta en un servicio tier 0",
-        "[A04] mal.pagar: ruta publica sin `timeout_ms`",
-        "[A09] mal.perfil: devuelve `email`, declarado PII",
+        "[A01] mal.pagar: public mutating route on a tier 0 service",
+        "[A04] mal.pagar: public route with no `timeout_ms`",
+        "[A09] mal.perfil: returns `email`, declared PII",
         "[A02] mal: `sk_ESTO_NO_ES_UNA_LLAVE`",
-        "[A05] mal: bucket `abierto` publico y sin `retention_days`",
+        "[A05] mal: bucket `abierto` is public and has no `retention_days`",
     ] {
         assert!(todo.contains(regla), "falto `{regla}`:\n{todo}");
     }
@@ -2074,35 +2074,35 @@ fn los_flags_se_verifican() {
     // un flag sin fecha de muerte no muere
     let (msg, ok) = probar(&format!("{base}[flags.eterno]\nowner = \"e\"\n"));
     assert!(!ok);
-    assert!(msg.contains("sin `expires`"), "{msg}");
+    assert!(msg.contains("no `expires`"), "{msg}");
 
     // uno vencido no se ignora: se limpia o se renueva
     let (msg, ok) = probar(&format!(
         "{base}[flags.viejo]\nowner = \"e\"\nexpires = \"2024-01-15\"\n"
     ));
     assert!(!ok);
-    assert!(msg.contains("vencio el 2024-01-15"), "{msg}");
+    assert!(msg.contains("expired on 2024-01-15"), "{msg}");
 
     // sin dueno, nadie lo apaga
     let (msg, ok) = probar(&format!(
         "{base}[flags.huerfano]\nexpires = \"2099-01-01\"\n"
     ));
     assert!(!ok);
-    assert!(msg.contains("flag sin `owner`"), "{msg}");
+    assert!(msg.contains("flag with no `owner`"), "{msg}");
 
     // un rollout por peticion deja la misma entidad a medio migrar
     let (msg, ok) = probar(&format!(
         "{base}[flags.parcial]\nowner = \"e\"\nexpires = \"2099-01-01\"\nrollout = 25\n"
     ));
     assert!(!ok);
-    assert!(msg.contains("rollout al 25% sin `sticky_by`"), "{msg}");
+    assert!(msg.contains("rollout at 25% with no `sticky_by`"), "{msg}");
 
     // un kill switch se apaga entero: el error es propio, no el del sticky
     let (msg, ok) = probar(&format!(
         "{base}[flags.cortar]\nowner = \"e\"\nkill_switch = true\nrollout = 50\n"
     ));
     assert!(!ok);
-    assert!(msg.contains("`kill_switch` con `rollout`"), "{msg}");
+    assert!(msg.contains("`kill_switch` with `rollout`"), "{msg}");
 
     // fijarse por un campo que el servicio no recibe no fija nada
     let (msg, ok) = probar(&format!(
@@ -2186,7 +2186,7 @@ fn los_flags_se_verifican() {
          default_variant = \"no_existe\"\nvariants = {{ a = \"x\" }}\n"
     ));
     assert!(!ok);
-    assert!(msg.contains("no esta en `variants`"), "{msg}");
+    assert!(msg.contains("is not in `variants`"), "{msg}");
 
     // OpenFeature resuelve un tipo por flag, no uno por variante
     let (msg, ok) = probar(&format!(
@@ -2194,7 +2194,7 @@ fn los_flags_se_verifican() {
          default_variant = \"a\"\nvariants = {{ a = \"x\", b = 2 }}\n"
     ));
     assert!(!ok);
-    assert!(msg.contains("mezclan tipos"), "{msg}");
+    assert!(msg.contains("mix types"), "{msg}");
 }
 
 /// `axon cap` no repite lo que bloquea `verify`: explica las consecuencias.

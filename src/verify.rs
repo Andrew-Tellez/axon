@@ -96,31 +96,33 @@ fn pendiente(v: &Option<String>) -> bool {
 pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     let (mut errors, mut warnings) = (Vec::new(), Vec::new());
 
-    // gobernanza: nada sin dueno, nada sin criticidad, nombres bajo control
+    // governance: nothing without an owner, nothing without a criticality,
+    // names under control
     for m in ms.iter().filter(|m| !m.external) {
         if pol.require_owner && pendiente(&m.owner) {
             errors.push(format!(
-                "{}: sin `owner`; un servicio sin dueno no se despliega",
+                "{}: no `owner`; a service with no owner does not get deployed",
                 m.service
             ));
         }
         if pol.require_tier && pendiente(&m.tier) {
             errors.push(format!(
-                "{}: sin `tier`; la criticidad decide alertas y SLO",
+                "{}: no `tier`; criticality decides alerts and SLOs",
                 m.service
             ));
         }
         match m.infra.runtime.as_deref() {
             None | Some("container") => {}
             Some(other) => errors.push(format!(
-                "{}: `runtime = \"{other}\"` no existe; hoy solo hay `container`. \
-                 Otro modelo de ejecucion se agrega con un `axon-infra-*`",
+                "{}: `runtime = \"{other}\"` does not exist; today there is only `container`. \
+                 Another execution model gets added with an `axon-infra-*` plugin",
                 m.service
             )),
         }
         if m.depends.len() > pol.max_deps_per_service {
             warnings.push(format!(
-                "{}: {} dependencias sincronas (limite {}); revisa si algo deberia ser un evento",
+                "{}: {} synchronous dependencies (limit {}); check whether something should \
+                 be an event",
                 m.service,
                 m.depends.len(),
                 pol.max_deps_per_service
@@ -131,21 +133,21 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 let pre = ev.split('.').next().unwrap_or("");
                 if !pol.allowed_event_prefixes.iter().any(|p| p == pre) {
                     errors.push(format!(
-                        "{ev}: prefijo `{pre}` fuera del catalogo de dominios permitido",
+                        "{ev}: prefix `{pre}` is outside the allowed domain catalogue",
                     ));
                 }
             }
         }
     }
 
-    // un evento, un dueno, un esquema
+    // one event, one owner, one schema
     let mut emitters: IndexMap<&str, (&str, &Fields)> = IndexMap::new();
     for m in ms {
         for (ev, fields) in &m.emits {
             if let Some((owner, prev)) = emitters.get(ev.as_str()) {
                 if *prev != fields {
                     errors.push(format!(
-                        "{ev}: dos emisores con esquemas distintos ({owner} vs {})",
+                        "{ev}: two emitters with different schemas ({owner} vs {})",
                         m.service
                     ));
                 }
@@ -154,95 +156,98 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
-    // ---- seguridad. Cada regla cita su categoria del OWASP Top 10 (2021),
-    // porque un error que no dice por que importa se silencia con un allow.
+    // ---- security. Every rule cites its OWASP Top 10 (2021) category,
+    // because an error that does not say why it matters gets silenced with an
+    // allow-list entry.
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let pii = &m.pii;
 
         for (name, meth) in &m.methods {
-            let publico = meth.auth.as_deref() == Some("public");
-            // A01: control de acceso roto. Una ruta publica que muta en un
-            // servicio critico no es una decision que se toma sin pensarla.
-            if publico && meth.mutating() && m.tier.as_deref() == Some("0") {
+            let public = meth.auth.as_deref() == Some("public");
+            // A01: broken access control. A public mutating route on a critical
+            // service is not a decision anyone takes without meaning to.
+            if public && meth.mutating() && m.tier.as_deref() == Some("0") {
                 errors.push(format!(
-                    "[A01] {svc}.{name}: ruta publica que muta en un servicio tier 0; \
-                     ponla detras de `auth = \"required\"` o baja el tier con criterio"
+                    "[A01] {svc}.{name}: public mutating route on a tier 0 service; put it \
+                     behind `auth = \"required\"` or lower the tier deliberately"
                 ));
             }
-            // A04: diseno inseguro. Sin presupuesto de tiempo, una ruta
-            // publica es un agotamiento de recursos gratis.
-            if publico && meth.timeout_ms.is_none() {
+            // A04: insecure design. With no time budget, a public route is free
+            // resource exhaustion.
+            if public && meth.timeout_ms.is_none() {
                 errors.push(format!(
-                    "[A04] {svc}.{name}: ruta publica sin `timeout_ms`; una peticion sin \
-                     limite de tiempo es agotamiento de recursos"
+                    "[A04] {svc}.{name}: public route with no `timeout_ms`; a request with no \
+                     time limit is resource exhaustion"
                 ));
             }
-            // A09: fallos de registro. Un dato personal que sale por una ruta
-            // publica termina en un log, una cache y un CDN.
-            if publico {
-                for campo in meth.output.keys() {
-                    if es_pii(pii, campo) {
+            // A09: logging failures. Personal data that leaves through a public
+            // route ends up in a log, a cache and a CDN.
+            if public {
+                for field in meth.output.keys() {
+                    if es_pii(pii, field) {
                         errors.push(format!(
-                            "[A09] {svc}.{name}: devuelve `{campo}`, declarado PII, por una ruta publica"
+                            "[A09] {svc}.{name}: returns `{field}`, declared PII, through a \
+                             public route"
                         ));
                     }
                 }
             }
         }
 
-        // A02: fallos criptograficos. Un secreto en el manifiesto ya esta en
-        // el historial de git; declarar su nombre es lo unico que corresponde.
+        // A02: cryptographic failures. A secret in the manifest is already in
+        // git history; declaring its name is the only thing that belongs here.
         for k in &m.infra.secrets {
             if parece_secreto(k) {
                 errors.push(format!(
-                    "[A02] {svc}: `{k}` en `secrets` parece el valor y no el nombre; \
-                     ahi va la referencia, el valor vive en el vault"
+                    "[A02] {svc}: `{k}` in `secrets` looks like the value and not the name; \
+                     the reference goes there, the value lives in the vault"
                 ));
             }
         }
 
-        // A05: mala configuracion. Un bucket publico sin retencion crece para
-        // siempre y nadie sabe que hay dentro.
-        for (nombre, b) in &m.infra.buckets {
+        // A05: security misconfiguration. A public bucket with no retention
+        // grows forever and nobody knows what is inside it.
+        for (name, b) in &m.infra.buckets {
             if b.public && b.retention_days.is_none() {
                 warnings.push(format!(
-                    "[A05] {svc}: bucket `{nombre}` publico y sin `retention_days`; \
-                     nadie va a saber que quedo expuesto"
+                    "[A05] {svc}: bucket `{name}` is public and has no `retention_days`; \
+                     nobody will know what was left exposed"
                 ));
             }
         }
     }
 
-    // A01: la tabla que se olvida de la columna del inquilino no recibe
-    // politica, y una tabla sin politica no falla: devuelve las filas de todos.
+    // A01: a table that forgets the tenant column gets no policy, and a table
+    // with no policy does not fail: it returns everyone's rows.
     let esquemas = schemas(ms);
     for m in ms.iter().filter(|m| !m.external) {
         let Some(tenant) = &m.infra.tenant_column else {
             continue;
         };
-        let Some(tablas) = esquemas.get(&m.service) else {
+        let Some(tables) = esquemas.get(&m.service) else {
             continue;
         };
-        for (t, cols) in tablas {
+        for (t, cols) in tables {
             if ["outbox", "inbox_seen"].contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
                 continue;
             }
             if !cols.tiene(tenant) {
                 errors.push(format!(
-                    "[A01] {}.{t}: sin la columna `{tenant}`; se queda sin politica RLS y \
-                     devuelve filas de todos los inquilinos. Agregala o ponla en `tenant_exempt`",
+                    "[A01] {}.{t}: no `{tenant}` column; it ends up with no RLS policy and \
+                     returns rows from every tenant. Add it, or list the table in \
+                     `tenant_exempt`",
                     m.service
                 ));
             }
         }
     }
 
-    // ---- exportacion a la bodega ----
+    // ---- export to the warehouse ----
     for m in ms.iter().filter(|m| !m.external) {
         if !BODEGAS.contains(&m.analytics.warehouse.as_str()) {
             errors.push(format!(
-                "{}: `[analytics] warehouse = \"{}\"` no tiene dialecto. Hay: {}",
+                "{}: `[analytics] warehouse = \"{}\"` has no dialect. Available: {}",
                 m.service,
                 m.analytics.warehouse,
                 BODEGAS.join(", ")
@@ -250,52 +255,52 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
         match m.analytics.pii.as_str() {
             "exclude" | "hash" => {}
-            otro => errors.push(format!(
-                "{}: `[analytics] pii = \"{otro}\"` no existe; usa \"exclude\" o \"hash\"",
+            other => errors.push(format!(
+                "{}: `[analytics] pii = \"{other}\"` does not exist; use \"exclude\" or \"hash\"",
                 m.service
             )),
         }
-        // Exportar un dato personal hasheado sigue siendo exportarlo: el hash
-        // de un correo identifica a la misma persona en dos tablas distintas.
+        // Exporting hashed personal data is still exporting it: the hash of an
+        // email identifies the same person across two different tables.
         if m.analytics.pii == "hash" && m.analytics.export && !m.pii.is_empty() {
             warnings.push(format!(
-                "{}: exporta {} campos personales hasheados a la bodega. Un hash no es \
-                 anonimizacion: identifica a la misma persona entre tablas, asi que sirve \
-                 para contar y tambien para cruzar",
+                "{}: exports {} hashed personal fields to the warehouse. A hash is not \
+                 anonymisation: it identifies the same person across tables, so it works \
+                 for counting and for joining alike",
                 m.service,
                 m.pii.len()
             ));
         }
     }
 
-    // ---- feature flags: lo que nadie impone ----
+    // ---- feature flags: what nobody enforces ----
     let ahora = hoy();
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         for (nombre, f) in &m.flags {
             if f.owner.is_none() {
                 errors.push(format!(
-                    "{svc}.{nombre}: flag sin `owner`. El que lo prendio es el que lo apaga"
+                    "{svc}.{nombre}: flag with no `owner`. Whoever turned it on is who turns it off"
                 ));
             }
-            // Un codigo con doscientos flags viejos no tiene doscientas
-            // features: tiene doscientas ramas que nadie prueba.
+            // A codebase with two hundred old flags does not have two hundred
+            // features: it has two hundred branches nobody tests.
             match (&f.expires, f.kill_switch) {
                 (None, false) => errors.push(format!(
-                    "{svc}.{nombre}: flag sin `expires`. Un flag sin fecha de muerte no muere; \
-                     si de verdad es permanente, declaralo `kill_switch = true`"
+                    "{svc}.{nombre}: flag with no `expires`. A flag with no death date does not die; \
+                     if it really is permanent, declare it `kill_switch = true`"
                 )),
                 (Some(_), true) => warnings.push(format!(
-                    "{svc}.{nombre}: `kill_switch` con `expires`; un interruptor de emergencia \
-                     vive mientras exista lo que apaga"
+                    "{svc}.{nombre}: `kill_switch` with `expires`; an emergency switch lives as long as \
+                     the thing it turns off does"
                 )),
                 (Some(e), false) => match fecha(e) {
                     None => errors.push(format!(
-                        "{svc}.{nombre}: `expires = \"{e}\"` no tiene la forma YYYY-MM-DD"
+                        "{svc}.{nombre}: `expires = \"{e}\"` is not in YYYY-MM-DD form"
                     )),
                     Some(f) if f < ahora => errors.push(format!(
-                        "{svc}.{nombre}: vencio el {e}. O se limpia la rama muerta, o se renueva \
-                         la fecha con una decision explicita: dejarlo vencido no es ninguna de las dos"
+                        "{svc}.{nombre}: expired on {e}. Either the dead branch gets cleaned up or the date \
+                         gets renewed as an explicit decision: leaving it expired is neither"
                     )),
                     _ => {}
                 },
@@ -309,31 +314,31 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // no un caso del sticky que falta
             match f.rollout {
                 Some(_) if f.kill_switch => errors.push(format!(
-                    "{svc}.{nombre}: `kill_switch` con `rollout`. Un interruptor de emergencia se \
-                     apaga entero o no sirve de nada"
+                    "{svc}.{nombre}: `kill_switch` with `rollout`. An emergency switch turns everything \
+                     off or it is worth nothing"
                 )),
                 Some(p) if p > 100 => errors.push(format!(
-                    "{svc}.{nombre}: `rollout = {p}` no es un porcentaje"
+                    "{svc}.{nombre}: `rollout = {p}` is not a percentage"
                 )),
                 Some(p) if p > 0 && p < 100 && f.sticky_by.is_none() => errors.push(format!(
-                    "{svc}.{nombre}: rollout al {p}% sin `sticky_by`. Evaluado por peticion, la \
-                     misma entidad toma un camino y despues el otro, y queda a medio migrar"
+                    "{svc}.{nombre}: rollout at {p}% with no `sticky_by`. Evaluated per request, the same \
+                     entity takes one path and then the other, and ends up half-migrated"
                 )),
                 _ => {}
             }
-            // Una variante por defecto que no existe hace que la evaluacion
+            // A default variant that does not exist makes evaluation
             // caiga siempre al valor del codigo, y el flag deja de servir en
             // silencio: se ve como "el rollout no hace nada".
             let variantes = f.variantes();
             let defecto = f.variante_defecto();
             if !variantes.contains_key(&defecto) {
                 errors.push(format!(
-                    "{svc}.{nombre}: `default_variant = \"{defecto}\"` no esta en `variants` \
-                     ({}). La evaluacion caeria siempre al valor del codigo",
+                    "{svc}.{nombre}: `default_variant = \"{defecto}\"` is not in `variants` ({}). \
+                     Evaluation would always fall back to the value in the code",
                     variantes.keys().cloned().collect::<Vec<_>>().join(", ")
                 ));
             }
-            // Mezclar tipos entre variantes rompe la evaluacion: OpenFeature
+            // Mixing types across variants breaks evaluation: OpenFeature
             // resuelve un tipo por flag, no uno por variante.
             let tipos: std::collections::BTreeSet<&str> = variantes
                 .values()
@@ -346,15 +351,15 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 .collect();
             if tipos.len() > 1 {
                 errors.push(format!(
-                    "{svc}.{nombre}: las variantes mezclan tipos ({}). OpenFeature resuelve un \
-                     tipo por flag, no uno por variante",
+                    "{svc}.{nombre}: the variants mix types ({}). OpenFeature resolves one type per \
+                     flag, not one per variant",
                     tipos.into_iter().collect::<Vec<_>>().join(", ")
                 ));
             }
             if f.default && !f.kill_switch {
                 warnings.push(format!(
-                    "{svc}.{nombre}: `default = true` en un flag que no es kill switch. Un flag \
-                     nuevo prendido por defecto no es un rollout gradual: es un despliegue"
+                    "{svc}.{nombre}: `default = true` on a flag that is not a kill switch. A new flag on \
+                     by default is not a gradual rollout: it is a deploy"
                 ));
             }
             // El campo por el que se fija tiene que existir en algun contrato,
