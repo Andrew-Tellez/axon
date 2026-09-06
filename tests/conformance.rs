@@ -2466,7 +2466,7 @@ fn las_reglas_de_reparto_bloquean() {
     );
     assert!(!ok);
     assert!(
-        msg.contains("`UNIQUE (handle)` no incluye `tenant_id`"),
+        msg.contains("`UNIQUE (handle)` does not include `tenant_id`"),
         "{msg}"
     );
 
@@ -2490,7 +2490,7 @@ fn las_reglas_de_reparto_bloquean() {
     );
     assert!(!ok);
     assert!(
-        msg.contains("se genera de una secuencia (`bigserial`)"),
+        msg.contains("generated from a sequence (`bigserial`)"),
         "{msg}"
     );
 
@@ -2505,7 +2505,7 @@ fn las_reglas_de_reparto_bloquean() {
     );
     assert!(!ok);
     assert!(
-        msg.contains("se aisla por `cliente_id` y se reparte por `tenant_id`"),
+        msg.contains("isolates by `cliente_id` and shards by `tenant_id`"),
         "{msg}"
     );
 
@@ -2516,7 +2516,7 @@ fn las_reglas_de_reparto_bloquean() {
     );
     assert!(!ok);
     assert!(
-        msg.contains("no existe un punto de recuperacion consistente"),
+        msg.contains("no consistent recovery point"),
         "{msg}"
     );
 }

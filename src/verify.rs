@@ -643,14 +643,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
-    // ---- reparto entre nodos ----
+    // ---- sharding across nodes ----
     //
-    // Estas reglas son ciertas contra Postgres a secas con reparto en la
-    // aplicacion, que es como lo hace la mayoria de quien reparte de verdad.
-    // Y no las impone nadie: el validador de esquema de PgDog esta en su
-    // roadmap sin empezar, y Citus solo falla en tiempo de ejecucion al
-    // distribuir la tabla. Cada una describe una fuga o una colision que no
-    // da error, solo datos mal.
+    // These rules hold against plain Postgres with sharding in the application,
+    // which is how most of the people who really shard do it. And nobody
+    // enforces them: PgDog's schema validator is on its roadmap and not
+    // started, and Citus only fails at runtime when distributing the table.
+    // Every one of them describes a leak or a collision that raises no error,
+    // just wrong data.
     let esquemas_shard = schemas(ms);
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
@@ -661,25 +661,24 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             continue;
         };
 
-        // Aislar por una columna y repartir por otra hace que toda consulta de
-        // un inquilino toque todos los nodos: el reparto deja de servir.
+        // Isolating by one column and sharding by another makes every query from
+        // one tenant touch every node: the sharding stops being worth anything.
         if let Some(inq) = &m.infra.tenant_column {
             if inq != clave {
                 errors.push(format!(
-                    "{svc}: se aisla por `{inq}` y se reparte por `{clave}`. Toda consulta de un \
-                     inquilino tocaria todos los nodos, asi que el reparto no compra nada"
+                    "{svc}: isolates by `{inq}` and shards by `{clave}`. Every query from one \
+                     tenant would touch every node, so the sharding buys nothing"
                 ));
             }
         }
 
-        // N nodos son N lineas de tiempo: no hay punto de recuperacion global.
-        // Restaurar a un instante deja las transacciones que cruzaron nodos
-        // partidas por la mitad.
+        // N nodes are N timelines: there is no global recovery point. Restoring
+        // to an instant leaves the transactions that crossed nodes cut in half.
         if m.infra.pitr == Some(true) {
             errors.push(format!(
-                "{svc}: `pitr = true` con `shard_key`. Cada nodo tiene su propia linea de tiempo: \
-                 no existe un punto de recuperacion consistente para el conjunto, y restaurar \
-                 deja partidas las transacciones que cruzaron nodos"
+                "{svc}: `pitr = true` with `shard_key`. Each node has its own timeline: there \
+                 is no consistent recovery point for the set, and restoring leaves the \
+                 transactions that crossed nodes cut in half"
             ));
         }
 
@@ -695,20 +694,20 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
             if !repartidas.contains(&t) {
                 errors.push(format!(
-                    "{svc}.{t}: sin la columna `{clave}`, asi que no se puede repartir. Agregala \
-                     o saca la tabla del esquema repartido"
+                    "{svc}.{t}: no `{clave}` column, so it cannot be sharded. Add it, or \
+                     take the table out of the sharded schema"
                 ));
                 continue;
             }
 
-            // Cada nodo cumple una UNIQUE localmente; el conjunto no. Si la
-            // restriccion no incluye la clave de reparto, dos nodos pueden
-            // aceptar el mismo valor y nadie da error.
+            // Each node satisfies a UNIQUE locally; the set does not. If the
+            // constraint does not include the shard key, two nodes can accept
+            // the same value and nobody raises an error.
             for u in &tb.uniques {
-                // Un uuid es unico por construccion en todo el mundo, asi que
-                // que cada nodo lo cumpla por separado ALCANZA. Sin esta
-                // excepcion la regla marca toda PK uuid y se vuelve ruido, y
-                // una regla con falsos positivos se silencia.
+                // A uuid is unique by construction everywhere, so each node
+                // satisfying it separately IS ENOUGH. Without this exception the
+                // rule flags every uuid PK and turns into noise — and a rule
+                // with false positives gets silenced.
                 let global =
                     u.len() == 1 && tb.col(&u[0]).is_some_and(|c| c.ty.starts_with("uuid"));
                 if global {
@@ -716,20 +715,21 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 }
                 if !u.iter().any(|c| c == clave) {
                     errors.push(format!(
-                        "{svc}.{t}: `UNIQUE ({})` no incluye `{clave}`. Cada nodo la cumple por \
-                         separado y el conjunto no: dos nodos aceptan el mismo valor sin error. \
-                         Agregá la clave a la restriccion, o la unicidad es una ilusion",
+                        "{svc}.{t}: `UNIQUE ({})` does not include `{clave}`. Each node \
+                         satisfies it separately and the set does not: two nodes accept the \
+                         same value with no error. Add the key to the constraint, or the \
+                         uniqueness is an illusion",
                         u.join(", ")
                     ));
                 }
             }
 
-            // Cada nodo tiene su propia secuencia, arrancando en 1.
+            // Each node has its own sequence, starting at 1.
             for c in tb.cols.iter().filter(|c| c.serial) {
                 errors.push(format!(
-                    "{svc}.{t}.{}: se genera de una secuencia (`{}`) en un esquema repartido. \
-                     Cada nodo tiene la suya y los valores colisionan: usá un uuid o un \
-                     generador que lleve el nodo dentro",
+                    "{svc}.{t}.{}: generated from a sequence (`{}`) in a sharded schema. \
+                     Each node has its own and the values collide: use a uuid, or a generator \
+                     that carries the node inside it",
                     c.name, c.ty
                 ));
             }
@@ -738,8 +738,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 let Some(fk) = &c.fk else { continue };
                 if tablas.contains_key(fk) && !repartidas.contains(&fk) {
                     errors.push(format!(
-                        "{svc}.{t}.{}: FK a `{fk}`, que no lleva `{clave}`. Una FK entre una tabla \
-                         repartida y una que no lo esta cruza nodos, y eso no se puede garantizar",
+                        "{svc}.{t}.{}: FK to `{fk}`, which does not carry `{clave}`. A FK \
+                         between a sharded table and one that is not crosses nodes, and that \
+                         cannot be guaranteed",
                         c.name
                     ));
                 }
