@@ -524,19 +524,51 @@ Y se mide en las dos direcciones, porque una medición que sólo se ha visto pas
 visto funcionar: sobre un flujo con un evento inyectado sin pasar por la proyección tiene
 que **ver** el atraso, y sobre una compra al día tiene que caber en el presupuesto.
 
-### El flujo es el outbox
+### El relay, y por qué `verify` lo exige
 
-Con event sourcing el orden correcto es anotar primero y publicar después: el flujo ya es
-durable, así que hace de outbox. Lo que falta en el ejemplo es que publique un **relay
-leyendo el flujo**, como hace `patterns.outbox`, en vez de la línea que publica en línea:
-publicar ahí deja una ventana en la que el evento está anotado y nadie lo recibió.
+Con event sourcing el flujo ya es durable, así que **nadie publica en línea**:
 
-Y una consecuencia de ese orden: la versión esperada sale de **leer** el flujo, no de un
+```console
+$ axon verify manifests/
+error  checkout.compra: un agregado cuyos eventos se publican necesita `[patterns] outbox
+       = true`. El flujo ya es durable, asi que publicar en linea deja una ventana en la
+       que el evento esta anotado y nadie lo recibio, y publicar antes de anotar deja lo
+       contrario. El traspaso va en la MISMA transaccion que el append
+```
+
+Las dos filas —el evento del flujo y la del outbox— entran en **una** transacción, o no
+entra ninguna. El flujo es la verdad; el outbox es la entrega. Y como el outbox no es el
+flujo, el relay puede marcar lo publicado sin violar el append-only: por eso hacen falta
+las dos tablas y no una con una columna `publicado`.
+
+Al escribirlo apareció algo que el generador todavía no resuelve: **el `Outbox` generado no
+sirve aquí**, porque `stage` abre su propia conexión, y una segunda transacción es
+exactamente el problema que esto evita. En el ejemplo, `append` escribe las dos filas él
+mismo.
+
+Y una consecuencia del orden: la versión esperada sale de **leer** el flujo, no de un
 contador en memoria. Con dos instancias, un contador local se desincroniza y el UNIQUE es
 lo único que lo dice.
 
+Lo que eso compra, medido: un evento anotado **con el relay caído** se publica cuando
+vuelve, y nadie tiene que reintentarlo a mano.
+
+```console
+  un evento anotado con el relay caido
+    1 evento(s) anotado(s) y sin publicar
+  OK: el relay volvio y lo publico; nadie tuvo que reintentarlo a mano
+```
+
+El demo lo comprueba en las dos mitades: que la fila del outbox quede marcada, **y** que el
+envelope aparezca en el log del bus. Marcar sin publicar es el fallo silencioso que un
+`published_at` a solas no distingue.
+
 ## Lo que falta de event sourcing
 
-El relay sobre el flujo, y las fotos: `snapshot_every` se declara y `verify` exige la
-tabla, pero nada las escribe todavía — reconstruir siempre desde el principio funciona
-hasta que un flujo tiene cien mil eventos.
+Las fotos: `snapshot_every` se declara y `verify` exige la tabla, pero nada las escribe
+todavía — reconstruir siempre desde el principio funciona hasta que un flujo tiene cien
+mil eventos.
+
+Y un `Outbox` que acepte la conexión de quien lo llama, para que el `append` generado
+pueda hacer las dos escrituras en una transacción sin que cada servicio lo escriba a
+mano.

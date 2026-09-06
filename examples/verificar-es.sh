@@ -117,3 +117,40 @@ else
   echo "  FALLO: ${al_dia}ms contra un presupuesto de ${tope}ms"
   exit 1
 fi
+
+# --- el relay: nadie publica en linea -----------------------------------
+# El flujo es la verdad y el outbox es la entrega, escritos en UNA transaccion.
+# Lo que se mide es lo que eso compra: un evento anotado mientras el relay esta
+# caido se publica cuando vuelve, sin que nadie lo reintente a mano.
+echo "  un evento anotado con el relay caido"
+$COMPOSE stop checkout > /dev/null 2>&1
+HUERFANO=$(sql -c "SELECT gen_random_uuid()" | tr -d ' \r\n')
+ultima=$(sql -c "SELECT max(version) FROM compra_event WHERE stream_id = '$NUEVO'" | tr -d ' \r\n')
+# Las dos filas, en una transaccion, igual que hace `append`.
+sql -v ON_ERROR_STOP=1 -c "BEGIN;
+  INSERT INTO compra_event (id, stream_id, version, type, data)
+  VALUES ('$HUERFANO', '$NUEVO', $((ultima + 1)), 'compra.compensada@v1',
+          '{\"streamId\":\"$NUEVO\",\"motivo\":\"relay caido\"}'::jsonb);
+  INSERT INTO outbox (id, type, source, time, traceparent, correlation_id, causation_id, data)
+  VALUES ('$HUERFANO', 'compra.compensada@v1', 'checkout', now()::text,
+          '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01', '$NUEVO', NULL,
+          '{\"streamId\":\"$NUEVO\",\"motivo\":\"relay caido\"}'::jsonb);
+  COMMIT;" > /dev/null
+pendientes=$(sql -c "SELECT count(*) FROM outbox WHERE published_at IS NULL" | tr -d ' \r\n')
+[ "$pendientes" -ge 1 ] || { echo "  FALLO: el evento no quedo pendiente"; $COMPOSE up -d --wait checkout > /dev/null 2>&1; exit 1; }
+echo "    $pendientes evento(s) anotado(s) y sin publicar"
+
+$COMPOSE up -d --wait checkout > /dev/null 2>&1
+i=0
+while [ "$(sql -c "SELECT count(*) FROM outbox WHERE id = '$HUERFANO' AND published_at IS NOT NULL" | tr -d ' \r\n')" -eq 0 ]; do
+  i=$((i + 1))
+  [ "$i" -gt 30 ] && { echo "  FALLO: el relay volvio y no publico lo pendiente"; exit 1; }
+  sleep 1
+done
+# y llego al bus de verdad, no solo se marco
+if grep -q "$HUERFANO" .axon/local.ndjson 2>/dev/null; then
+  echo "  OK: el relay volvio y lo publico; nadie tuvo que reintentarlo a mano"
+else
+  echo "  FALLO: se marco como publicado y no aparece en el log de envelopes"
+  exit 1
+fi

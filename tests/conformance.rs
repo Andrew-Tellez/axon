@@ -3403,6 +3403,11 @@ centavos = "int"
 [emits."cuenta.cerrada@v1"]
 streamId = "uuid"
 
+# Los eventos del agregado se publican, y el flujo ya es durable: el traspaso al
+# bus va en la misma transaccion que el append. `verify` lo exige.
+[patterns]
+outbox = true
+
 [aggregate.cuenta]
 events = ["cuenta.abierta@v1", "cuenta.depositada@v1", "cuenta.cerrada@v1"]
 
@@ -3591,6 +3596,16 @@ fn las_reglas_de_event_sourcing_bloquean() {
         .replace("max_staleness_ms = 5000\n", "");
     let err = correr(&fuerte, DDL_ES);
     assert!(err.contains("un dato viejo por definicion"), "{err}");
+
+    // un agregado que publica sin outbox: el dual-write que el flujo evitaba
+    let sin_outbox = MANIFIESTO_ES.replace("outbox = true", "outbox = false");
+    assert!(sin_outbox.contains("outbox = false"), "la variante no aplico");
+    let err = correr(&sin_outbox, DDL_ES);
+    assert!(err.contains("necesita `[patterns] outbox = true`"), "{err}");
+    assert!(
+        err.contains("el evento esta anotado y nadie lo recibio"),
+        "{err}"
+    );
 
     // el flujo es append-only, y no como recomendacion
     let err = correr(

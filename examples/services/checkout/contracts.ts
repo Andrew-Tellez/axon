@@ -138,7 +138,7 @@ export const manifest = {
     }
   ],
   "patterns": {
-    "outbox": false
+    "outbox": true
   },
   "cap": {
     "consistency": "eventual",
@@ -243,18 +243,20 @@ export const manifest = {
 
 export abstract class CheckoutService {
   protected readonly bus: Bus;
-  constructor(bus: Bus) {
+  protected readonly outbox: Outbox;
+  constructor(bus: Bus, outbox: Outbox) {
     this.bus = bus;
+    this.outbox = outbox;
   }
   static readonly wellKnown = "/.well-known/axon.json";
   protected emitCompraIniciadaV1(data: CompraIniciadaV1, cause?: Envelope<unknown>) {
-    return this.bus.publish(newEnvelope("compra.iniciada@v1", "checkout", data, cause));
+    return this.outbox.stage(newEnvelope("compra.iniciada@v1", "checkout", data, cause));
   }
   protected emitCompraCobradaV1(data: CompraCobradaV1, cause?: Envelope<unknown>) {
-    return this.bus.publish(newEnvelope("compra.cobrada@v1", "checkout", data, cause));
+    return this.outbox.stage(newEnvelope("compra.cobrada@v1", "checkout", data, cause));
   }
   protected emitCompraCompensadaV1(data: CompraCompensadaV1, cause?: Envelope<unknown>) {
-    return this.bus.publish(newEnvelope("compra.compensada@v1", "checkout", data, cause));
+    return this.outbox.stage(newEnvelope("compra.compensada@v1", "checkout", data, cause));
   }
   abstract checkout(input: CheckoutIn, e: Envelope<unknown>): Promise<CheckoutOut>;
 }

@@ -9,7 +9,7 @@ import { CheckoutService, Clientes, rutasHttp, rutaBarridoCompra, correrCompra,
          type Envelope, type FlujoEventos, type SagaDiario, type SagaEstado,
          type Transporte } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
-import { bus, conectar, esperarDb, servir } from "../runtime.ts";
+import { bus, conectar, esperarDb, outbox, relay, servir } from "../runtime.ts";
 import type pg from "pg";
 
 /** HTTP contra los servicios declarados. El framework no elige transporte: el
@@ -131,20 +131,38 @@ class Flujo implements FlujoEventos {
     }));
   }
 
+  /** Anota el evento en el flujo Y lo deja listo para publicar, en UNA
+   *  transaccion. Es lo que hace que no haya dual-write: el flujo es la verdad,
+   *  el outbox es la entrega, y las dos filas entran o no entra ninguna.
+   *
+   *  El `Outbox` generado no sirve aqui porque `stage` abre su propia conexion,
+   *  y una segunda transaccion es exactamente el problema que esto evita. */
   async append(streamId: string, esperada: number, e: Envelope<unknown>) {
     const version = esperada + 1;
+    const c = await this.#db.connect();
     try {
-      await this.#db.query(
+      await c.query("BEGIN");
+      await c.query(
         `INSERT INTO compra_event (id, stream_id, version, type, data)
          VALUES ($1,$2,$3,$4,$5)`,
         [e.id, streamId, version, e.type, JSON.stringify(e.data)],
       );
+      await c.query(
+        `INSERT INTO outbox (id, type, source, time, traceparent, correlation_id, causation_id, data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [e.id, e.type, e.source, e.time, e.traceparent, e.correlationId, e.causationId,
+         JSON.stringify(e.data)],
+      );
+      await c.query("COMMIT");
     } catch (err: any) {
+      await c.query("ROLLBACK").catch(() => {});
       // 23505: unique_violation. Otro escribio esta version primero, y eso no
       // es un error de programa: es la condicion normal de dos usuarios sobre
       // el mismo agregado.
       if (err?.code === "23505") throw new VersionEnConflicto(streamId, esperada);
       throw err;
+    } finally {
+      c.release();
     }
     return version;
   }
@@ -264,8 +282,8 @@ class Checkout extends CheckoutService {
   #acciones: CompraAcciones;
   #flujo: Flujo;
   #vista: Conversion;
-  constructor(b: any, db: pg.Pool) {
-    super(b);
+  constructor(b: any, o: any, db: pg.Pool) {
+    super(b, o);
     this.#diario = new Diario(db);
     this.#flujo = new Flujo(db);
     this.#vista = new Conversion(db);
@@ -287,14 +305,12 @@ class Checkout extends CheckoutService {
   async #anotar<T>(streamId: string, tipo: string, data: T, causa: Envelope<unknown>) {
     const eventos = await this.#flujo.leer(streamId);
     const { version } = compraFold(reglasCompra, streamId, eventos);
-    // El envelope se construye ANTES de escribirlo: con event sourcing el
-    // flujo es el outbox, asi que el orden correcto es anotar primero y
-    // publicar despues. Lo ideal seria que publicara un relay leyendo el
-    // flujo —como hace `patterns.outbox`— y no esta linea: publicar aqui deja
-    // una ventana en la que el evento esta anotado y nadie lo recibio.
+    // El envelope se construye ANTES de escribirlo. Nadie publica aqui: el
+    // append deja la fila en el outbox en la misma transaccion, y de ahi
+    // publica el relay. Un `publish` en esta linea seria el dual-write que
+    // todo esto evita.
     const e = newEnvelope(tipo, "checkout", data, causa);
     const nueva = await this.#flujo.append(streamId, version, e);
-    await this.bus.publish(e);
     // La proyeccion se aplica aqui mismo. En un sistema mas grande la haria un
     // consumidor aparte, y el checkpoint es justo lo que permite separarlos sin
     // reprocesar todo.
@@ -334,7 +350,12 @@ if (process.env.NODE_TEST_CONTEXT === undefined) await main();
 async function main() {
   arrancarTelemetria();
   const db = await esperarDb();
-  const svc = new Checkout(bus(await conectar()), db);
+  const b = bus(await conectar());
+  const svc = new Checkout(b, outbox(db), db);
+
+  // El relay: lo unico que publica. Sin el, los eventos quedan anotados en el
+  // flujo y en el outbox, y nadie los recibe.
+  relay(db, b);
 
   // Dentro del proceso Y por la ruta que golpea el programador que despliega
   // `axon infra`: un servicio escalado a cero no barre nada por su cuenta.

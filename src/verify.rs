@@ -1129,6 +1129,21 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 }
             }
 
+            // Los eventos del agregado salen al bus, y el flujo ya es durable:
+            // publicar en linea despues de anotar deja una ventana en la que el
+            // evento esta en el flujo y nadie lo recibio. Y publicar ANTES de
+            // anotar es peor. El traspaso tiene que ser durable y en la misma
+            // transaccion que el append, y eso es el outbox.
+            if !ag.events.is_empty() && !m.patterns.outbox {
+                errors.push(format!(
+                    "{svc}.{nombre}: un agregado cuyos eventos se publican necesita \
+                     `[patterns] outbox = true`. El flujo ya es durable, asi que publicar en \
+                     linea deja una ventana en la que el evento esta anotado y nadie lo recibio, \
+                     y publicar antes de anotar deja lo contrario. El traspaso va en la MISMA \
+                     transaccion que el append"
+                ));
+            }
+
             let tabla = Aggregate::tabla(nombre);
             match esquemas.get(svc).and_then(|t| t.get(&tabla)) {
                 None => errors.push(format!(

@@ -91,6 +91,7 @@ $ cd examples && ./demo.sh
 ==> event sourcing y CQRS, medidos
   OK: dos escrituras a la misma version: una entro, el UNIQUE rechazo la otra
   OK: 0ms de atraso de la vista, dentro del presupuesto declarado
+  OK: el relay volvio y publico lo pendiente; nadie lo reintento a mano
 
 ==> reintentos declarados vs ocurridos
   OK: 3 llamadas = 1 + 2 reintentos, exactamente lo declarado

@@ -48,6 +48,13 @@ motivo = "string"
 [aggregate.compra]
 events = ["compra.iniciada@v1", "compra.cobrada@v1", "compra.compensada@v1"]
 
+# El traspaso al bus, en la misma transaccion que el append. `verify` lo exige
+# para un agregado cuyos eventos se publican: el flujo ya es durable, asi que
+# publicar en linea deja una ventana en la que el evento esta anotado y nadie lo
+# recibio.
+[patterns]
+outbox = true
+
 # El modelo de lectura. Se llena DESPUES de que el evento ocurrio, asi que su
 # atraso tiene que caber en el presupuesto que el servicio ya declaro (5000ms).
 [view.conversion]
