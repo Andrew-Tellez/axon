@@ -61,7 +61,8 @@ esperado=$(sql -c "SELECT replace(split_part(type, '.', 2), '@v1', '')
                     ORDER BY version DESC LIMIT 1" | tr -d ' \r\n')
 en_vista=$(sql -c "SELECT estado FROM vista_conversion WHERE stream_id = '$STREAM'" | tr -d ' \r\n')
 # la carrera anterior anoto un evento que la vista no vio: se reproyecta
-posicion=$(sql -c "SELECT posicion FROM vista_conversion_checkpoint WHERE vista = 'conversion'" | tr -d ' \r\n')
+posicion=$(sql -c "SELECT coalesce(posicion, 0) FROM vista_conversion_checkpoint
+                    WHERE vista = 'conversion' AND stream_id = '$STREAM'" | tr -d ' \r\n')
 echo "    flujo dice '$esperado', vista dice '$en_vista', checkpoint en $posicion"
 if [ "$esperado" = "$en_vista" ]; then
   echo "  OK: la vista concuerda con el flujo"
@@ -69,7 +70,7 @@ else
   # No es un fallo del sistema: la carrera de arriba escribio DIRECTO al flujo,
   # sin pasar por la proyeccion. Lo que importa es que el checkpoint lo diga.
   ultima=$(sql -c "SELECT max(version) FROM compra_event WHERE stream_id = '$STREAM'" | tr -d ' \r\n')
-  if [ "$posicion" -lt "$ultima" ]; then
+  if [ "${posicion:-0}" -lt "$ultima" ]; then
     echo "  OK: la vista esta atrasada Y el checkpoint lo dice ($posicion de $ultima)"
     echo "  i un evento escrito al flujo sin pasar por la proyeccion deja la vista"
     echo "    atras, y el checkpoint es lo unico que permite saberlo y retomar"
@@ -86,10 +87,14 @@ fi
 # viejo que la proyeccion todavia no aplico.
 echo "  el atraso de la vista contra su presupuesto"
 tope=$(sed -n 's/.*conversionAtrasoMaximoMs = \([0-9]*\).*/\1/p' services/checkout/contracts.ts | head -1)
+# El punto es POR FLUJO: la version de un evento es su posicion dentro de su
+# flujo, asi que un solo numero para toda la vista no identifica nada en cuanto
+# hay mas de un flujo. Con uno parecia funcionar.
 atraso() {
   sql -c "SELECT coalesce(max(extract(epoch from (now() - e.en)) * 1000)::bigint, 0)
             FROM compra_event e
-            LEFT JOIN vista_conversion_checkpoint c ON c.vista = 'conversion'
+            LEFT JOIN vista_conversion_checkpoint c
+              ON c.vista = 'conversion' AND c.stream_id = e.stream_id
            WHERE e.stream_id = '$1' AND e.version > coalesce(c.posicion, 0)" | tr -d ' \r\n'
 }
 
@@ -209,6 +214,60 @@ if [ "$malas" -ge 1 ] && [ "$buenas" -ge 1 ] && [ "$centavos" -gt 0 ]; then
   echo "    es lo que convierte 'la foto quedo mal' en 'la foto se reconstruye'"
 else
   echo "  FALLO: buenas=$buenas malas=$malas centavos=$centavos"
+  exit 1
+fi
+
+# --- la reconstruccion de la vista --------------------------------------
+# Es lo que convierte un modelo de lectura en algo cuya FORMA se puede cambiar
+# sin migracion: se cambia la proyeccion, se reconstruye, y no hay ALTER TABLE
+# que preserve datos que se pueden recalcular.
+#
+# Se mide ensuciando la vista a proposito: si la reconstruccion no arreglara la
+# basura, no estaria reconstruyendo nada.
+echo "  la vista, ensuciada a proposito y reconstruida"
+sql -v ON_ERROR_STOP=1 -c "UPDATE vista_conversion SET estado = 'basura', centavos = -1" > /dev/null
+sucias=$(sql -c "SELECT count(*) FROM vista_conversion WHERE estado = 'basura'" | tr -d ' \r\n')
+[ "$sucias" -ge 1 ] || { echo "  FALLO: no habia nada que ensuciar"; exit 1; }
+echo "    $sucias filas con basura"
+
+aplicados=$(curl -sS --fail-with-body -m 120 -X POST "$CHECKOUT/internal/view/conversion/reconstruir" \
+  | sed 's/.*"aplicados":\([0-9]*\).*/\1/')
+en_flujo=$(sql -c "SELECT count(*) FROM compra_event" | tr -d ' \r\n')
+quedan=$(sql -c "SELECT count(*) FROM vista_conversion WHERE estado = 'basura' OR centavos < 0" | tr -d ' \r\n')
+if [ "$quedan" -eq 0 ] && [ "$aplicados" -ge 1 ]; then
+  echo "  OK: aplico $aplicados eventos de los $en_flujo del flujo, y no quedo basura"
+else
+  echo "  FALLO: quedan $quedan filas sucias, aplicados=$aplicados"
+  exit 1
+fi
+
+# Y lo reconstruido coincide con el flujo, evento por evento: si difiriera, la
+# reconstruccion estaria dando otra respuesta que la proyeccion en vivo.
+distintas=$(sql -c "
+  WITH ultimo AS (
+    SELECT stream_id, replace(split_part(type, '.', 2), '@v1', '') AS estado,
+           row_number() OVER (PARTITION BY stream_id ORDER BY version DESC) AS r
+      FROM compra_event
+  )
+  SELECT count(*) FROM ultimo u
+    JOIN vista_conversion v ON v.stream_id = u.stream_id
+   WHERE u.r = 1 AND v.estado <> u.estado" | tr -d ' \r\n')
+if [ "$distintas" -eq 0 ]; then
+  echo "  OK: cada fila reconstruida coincide con el ultimo evento de su flujo"
+else
+  echo "  FALLO: $distintas filas no coinciden con el flujo"
+  exit 1
+fi
+
+# Las fechas son las del FLUJO, no las de la reconstruccion. Rellenarlas con
+# `now()` reescribiria el historial y el atraso medido despues seria falso.
+futuras=$(sql -c "SELECT count(*) FROM vista_conversion v
+                   WHERE v.evento_en > (SELECT max(en) FROM compra_event
+                                         WHERE stream_id = v.stream_id)" | tr -d ' \r\n')
+if [ "$futuras" -eq 0 ]; then
+  echo "  OK: las fechas salieron del flujo, no de la hora de reconstruir"
+else
+  echo "  FALLO: $futuras filas con fecha posterior a su ultimo evento"
   exit 1
 fi
 

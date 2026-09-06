@@ -932,6 +932,31 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                                 }),
                             });
                         }
+                        // Una clave anadida en una migracion POSTERIOR era
+                        // invisible: toda regla sobre unicidad —la del flujo de
+                        // eventos, las de reparto, el punto de una vista— la
+                        // daba por ausente y pasaba en silencio.
+                        AlterTableOperation::AddConstraint { constraint, .. } => {
+                            let entrada = into.entry(tabla.clone()).or_default();
+                            let claves = |cs: &[sqlparser::ast::IndexColumn]| -> Vec<String> {
+                                cs.iter()
+                                    .map(|k| k.to_string().trim_matches('"').to_lowercase())
+                                    .collect()
+                            };
+                            match constraint {
+                                TableConstraint::PrimaryKey(pk) => {
+                                    let cols = claves(&pk.columns);
+                                    for c in &cols {
+                                        marcar(&mut entrada.cols, c, |x| x.pk = true);
+                                    }
+                                    entrada.uniques.push(cols);
+                                }
+                                TableConstraint::Unique(u) => {
+                                    entrada.uniques.push(claves(&u.columns));
+                                }
+                                _ => {}
+                            }
+                        }
                         AlterTableOperation::DropColumn { column_names, .. } => {
                             if let Some(tb) = into.get_mut(&tabla) {
                                 let fuera: Vec<String> = column_names.iter().map(ident).collect();

@@ -577,9 +577,19 @@ export function arrancarBarridoCompra(
  *  escribio en medio, tiene que fallar: eso es el UNIQUE (stream_id,
  *  version) haciendo su trabajo, y `axon verify` comprueba que exista
  *  porque sin el las dos escrituras entran y nadie ve un error. */
+/** Un evento tal como esta en el flujo. `en` es CUANDO OCURRIO, y viaja
+ *  porque al reconstruir una vista hay que volver a ponerlo: rellenarlo con
+ *  la hora de la reconstruccion reescribe el historial en silencio. */
+export interface EventoDelFlujo {
+  version: number;
+  type: string;
+  data: unknown;
+  en: string;
+}
+
 export interface FlujoEventos {
   /** Los eventos de un flujo, en orden. `desde` permite arrancar de una foto. */
-  leer(streamId: string, desde?: number): Promise<{ version: number; type: string; data: unknown }[]>;
+  leer(streamId: string, desde?: number): Promise<EventoDelFlujo[]>;
   /** Agrega al final. Rechaza si `esperada` ya no es la ultima version. */
   append(streamId: string, esperada: number, e: Envelope<unknown>): Promise<number>;
   /** Las fotos van en `FlujoConFotos`, que solo se genera si el
@@ -741,8 +751,26 @@ export interface Checkpoint {
    *  ninguna de las dos da un error.
    *
    *  Por eso cada `aplicar*` recibe la posicion: la guarda quien puede
-   *  hacerlo junto con el resto. */
-  leer(vista: string): Promise<number>;
+   *  hacerlo junto con el resto.
+   *
+   *  Y es POR FLUJO. La version de un evento es su posicion dentro de su
+   *  flujo, asi que un solo numero para toda la vista no identifica nada
+   *  en cuanto hay mas de un flujo: con uno parecia funcionar. */
+  leer(vista: string, streamId: string): Promise<number>;
+}
+
+/** Lo que la vista tiene que saber hacer para poder reconstruirse.
+ *
+ *  `vaciar` borra las filas Y pone el punto en cero: en dos pasos, una
+ *  reconstruccion interrumpida entre ellos deja una vista vacia que dice
+ *  estar al dia, y eso no da ningun error. */
+export interface Vaciable {
+  vaciar(): Promise<void>;
+}
+
+/** Los flujos del agregado, para recorrerlos. */
+export interface FuenteDeFlujos {
+  flujos(): Promise<string[]>;
 }
 
 /** La vista `conversion`, en `vista_conversion`. Un metodo por evento declarado:
@@ -785,6 +813,54 @@ export async function conversionAplicar(
 /** Cuanto atraso lleva la vista, para poder medirlo contra lo declarado. */
 export function conversionAtraso(ultimoEvento: Date, ahora = new Date()): number {
   return ahora.getTime() - ultimoEvento.getTime();
+}
+
+/** La ruta que reconstruye la vista. NO lleva cron: reconstruir no es
+ *  periodico, es una operacion que alguien decide. */
+export const rutaReconstruirConversion = "POST /internal/view/conversion/reconstruir" as const;
+
+/** Tira la vista y la vuelve a construir del flujo. Devuelve cuantos
+ *  eventos aplico.
+ *
+ *  Es lo que convierte un modelo de lectura en algo cuya FORMA se puede
+ *  cambiar sin migracion: se cambia la proyeccion, se reconstruye, y no
+ *  hay `ALTER TABLE` que preserve datos que se pueden recalcular.
+ *
+ *  Mientras corre, la vista esta incompleta y se sigue leyendo. Eso NO
+ *  es invisible: el punto queda atras y el atraso lo delata, que es
+ *  exactamente para lo que sirve `max_staleness_ms`. Reconstruir en una
+ *  tabla sombra y cambiarla de golpe seria mejor, y todavia no esta.
+ *
+ *  El recorrido es por flujo y en orden de version. Una proyeccion cuyo
+ *  resultado dependa del orden ENTRE flujos necesita un orden total que
+ *  el flujo no tiene: ahi esto da un resultado distinto al de la
+ *  proyeccion en vivo, y la comprobacion del demo lo veria. */
+export async function reconstruirConversion(
+  proyeccion: ConversionProyeccion & Vaciable,
+  flujo: FlujoEventos & FuenteDeFlujos,
+): Promise<number> {
+  await proyeccion.vaciar();
+  let aplicados = 0;
+  for (const streamId of await flujo.flujos()) {
+    for (const ev of await flujo.leer(streamId)) {
+      // Los eventos del flujo no son envelopes: se arma el minimo que
+      // la proyeccion necesita. El `time` es el del FLUJO, no el de
+      // ahora: rellenarlo reescribiria el historial en silencio.
+      if (!(conversionEventos as readonly string[]).includes(ev.type)) continue;
+      await conversionAplicar(proyeccion, {
+        id: `${streamId}:${ev.version}`,
+        type: ev.type,
+        source: "reconstruccion",
+        time: ev.en,
+        traceparent: "",
+        correlationId: streamId,
+        causationId: null,
+        data: ev.data,
+      }, ev.version);
+      aplicados++;
+    }
+  }
+  return aplicados;
 }
 
 

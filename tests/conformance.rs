@@ -253,6 +253,40 @@ CREATE INDEX ledger_entry_account_idx ON "ledger_entry" (account_id, posted_at D
     assert!(err.contains("no se pudo parsear"), "{err}");
 }
 
+/// Una clave anadida en una migracion POSTERIOR tiene que contar. Era invisible,
+/// y con eso toda regla sobre unicidad —la del flujo de eventos, las de reparto,
+/// el punto de una vista— la daba por ausente y pasaba en silencio.
+#[test]
+fn una_clave_anadida_despues_cuenta() {
+    let dir = std::env::temp_dir().join("axon-alter-pk");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(
+        dir.join("sql/001_init.expand.sql"),
+        "CREATE TABLE punto (vista text NOT NULL, posicion bigint NOT NULL);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sql/002_clave.expand.sql"),
+        "ALTER TABLE punto ADD COLUMN stream_id uuid NOT NULL;\n\
+         ALTER TABLE punto ADD PRIMARY KEY (vista, stream_id);\n\
+         ALTER TABLE punto ADD CONSTRAINT punto_pos UNIQUE (posicion);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("s.toml"),
+        "service = \"s\"\nversion = \"1.0.0\"\nowner = \"e\"\ntier = \"1\"\n\n\
+         [analytics]\nexport = false\n\n[infra]\nstate = \"postgres\"\nmigrations = \"sql/\"\n",
+    )
+    .unwrap();
+    // el ER es la proyeccion mas simple del esquema plegado
+    let (er, err, ok) = axon(&["er", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    // la columna anadida esta, y la PK marcada
+    assert!(er.contains("stream_id"), "{er}");
+    assert!(er.contains("PK"), "la PK anadida despues no se marco:\n{er}");
+}
+
 #[test]
 fn el_mismo_plan_en_cuatro_targets() {
     for (target, marca) in [
@@ -3421,8 +3455,13 @@ CREATE TABLE vista_saldos (
 );
 
 CREATE TABLE vista_saldos_checkpoint (
-  vista      text PRIMARY KEY,
-  posicion   bigint NOT NULL
+  vista      text NOT NULL,
+  -- por FLUJO: la version de un evento es su posicion dentro de su flujo, asi
+  -- que un solo numero para toda la vista no identifica nada en cuanto hay mas
+  -- de un flujo
+  stream_id  uuid NOT NULL,
+  posicion   bigint NOT NULL,
+  PRIMARY KEY (vista, stream_id)
 );
 ";
 
@@ -3498,7 +3537,7 @@ fn el_fold_generado_reconstruye_y_se_niega() {
         r#"import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cuentaFold, cuentaEventos, cuentaCargar, cuentaFotografiar, cuentaFotoReglas,
-         limpiarCuenta, rutaLimpiezaCuenta,
+         limpiarCuenta, rutaLimpiezaCuenta, reconstruirSaldos,
          saldosAplicar, saldosTabla, saldosAtrasoMaximoMs,
          newEnvelope, type CuentaReglas, type SaldosProyeccion,
          type CuentaAbiertaV1, type CuentaDepositadaV1 } from "./contratos.ts";
@@ -3598,6 +3637,40 @@ test("solo se fotografia en la cadencia declarada", async () => {
   assert.deepEqual(guardadas, [2, 4]);
 });
 
+test("reconstruir vacia primero y repone las fechas del flujo", async () => {
+  const orden: string[] = [];
+  const proyeccion = {
+    async vaciar() { orden.push("vaciar"); },
+    async aplicarCuentaAbiertaV1(e: any, pos: number) { orden.push(`abierta:${e.time}:${pos}`); },
+    async aplicarCuentaDepositadaV1(e: any, pos: number) { orden.push(`deposito:${e.data.centavos}:${pos}`); },
+  };
+  const flujo = {
+    async flujos() { return ["c1"]; },
+    async leer() {
+      return [
+        { version: 1, type: "cuenta.abierta@v1", data: { streamId: "c1" }, en: "2020-01-01T00:00:00.000Z" },
+        { version: 2, type: "cuenta.depositada@v1", data: { streamId: "c1", centavos: 500 }, en: "2020-01-02T00:00:00.000Z" },
+        // este NO es de la vista: la vista solo declara abierta y depositada
+        { version: 3, type: "cuenta.cerrada@v1", data: { streamId: "c1" }, en: "2020-01-03T00:00:00.000Z" },
+      ];
+    },
+    async append() { return 0; },
+  };
+  const aplicados = await reconstruirSaldos(proyeccion, flujo);
+  // vaciar va PRIMERO: reconstruir encima de lo viejo mezcla dos versiones de
+  // la proyeccion en la misma tabla
+  assert.equal(orden[0], "vaciar");
+  // y la fecha es la del FLUJO, no la de ahora: rellenarla reescribiria el
+  // historial en silencio
+  assert.deepEqual(orden.slice(1), [
+    "abierta:2020-01-01T00:00:00.000Z:1",
+    "deposito:500:2",
+  ]);
+  // el evento que la vista no declara se salta, no revienta: esta en el flujo
+  // por derecho propio
+  assert.equal(aplicados, 2);
+});
+
 test("la limpieza pide la version vigente, no una cualquiera", async () => {
   let pedida = -1;
   const flujo = {
@@ -3650,7 +3723,7 @@ test("la vista solo acepta los eventos que declara, y le llega la posicion", asy
         out.status.success(),
         "el fold generado no reconstruye como dice:\n{salida}"
     );
-    assert!(salida.contains("pass 9"), "{salida}");
+    assert!(salida.contains("pass 10"), "{salida}");
 }
 
 /// Las reglas de event sourcing y CQRS: cada una bloquea una forma de tener un
@@ -3710,6 +3783,16 @@ fn las_reglas_de_event_sourcing_bloquean() {
         .replace("max_staleness_ms = 5000\n", "");
     let err = correr(&fuerte, DDL_ES);
     assert!(err.contains("un dato viejo por definicion"), "{err}");
+
+    // el punto de la vista, sin flujo en la clave: un flujo pisa al otro
+    let cp_global = DDL_ES.replace(
+        "  vista      text NOT NULL,\n  -- por FLUJO: la version de un evento es su posicion dentro de su flujo, asi\n  -- que un solo numero para toda la vista no identifica nada en cuanto hay mas\n  -- de un flujo\n  stream_id  uuid NOT NULL,\n  posicion   bigint NOT NULL,\n  PRIMARY KEY (vista, stream_id)\n",
+        "  vista      text PRIMARY KEY,\n  stream_id  uuid NOT NULL,\n  posicion   bigint NOT NULL\n",
+    );
+    assert!(!cp_global.contains("PRIMARY KEY (vista, stream_id)"), "la variante no aplico");
+    let err = correr(MANIFIESTO_ES, &cp_global);
+    assert!(err.contains("sin clave sobre (vista, stream_id)"), "{err}");
+    assert!(err.contains("Un flujo pisaria el punto de otro"), "{err}");
 
     // fotos declaradas sin tabla, y sin la columna que las hace seguras
     let sin_tabla = DDL_ES.replace("CREATE TABLE cuenta_snapshot", "CREATE TABLE otra_foto");

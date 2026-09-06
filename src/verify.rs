@@ -1300,12 +1300,31 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                      aplicar; las dos cosas dan una vista incorrecta y ninguna da un error"
                 )),
                 Some(t) => {
-                    for col in ["vista", "posicion"] {
+                    for (col, para) in [
+                        ("vista", "cual de las vistas es"),
+                        ("stream_id", "de que flujo"),
+                        ("posicion", "hasta que version de ESE flujo llego"),
+                    ] {
                         if !t.tiene(col) {
                             errors.push(format!(
-                                "{svc}.{nombre}: `{cp}` sin columna `{col}`"
+                                "{svc}.{nombre}: `{cp}` sin columna `{col}`: ahi va {para}"
                             ));
                         }
+                    }
+                    // Sin `stream_id` en la clave, un flujo pisa el punto de
+                    // otro. La version de un evento es su posicion dentro de SU
+                    // flujo: un solo numero para toda la vista parece funcionar
+                    // mientras haya un flujo, y deja de identificar nada en
+                    // cuanto hay dos.
+                    let por_flujo = t.uniques.iter().any(|u| {
+                        u.iter().any(|c| c == "stream_id") && u.iter().any(|c| c == "vista")
+                    });
+                    if !por_flujo && t.tiene("stream_id") {
+                        errors.push(format!(
+                            "{svc}.{nombre}: `{cp}` sin clave sobre (vista, stream_id). Un flujo \
+                             pisaria el punto de otro, y la vista se saltaria eventos o los \
+                             reprocesaria sin que nada avise"
+                        ));
                     }
                 }
             }

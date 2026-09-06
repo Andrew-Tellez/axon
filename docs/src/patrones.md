@@ -712,8 +712,83 @@ Esa última línea es la que sostiene todo lo demás: el demo **borra todas las 
 otra compra. Si el sistema dependiera de ellas, dejaría de funcionar; como son una cache,
 sólo reconstruye más.
 
+## Reconstruir la vista desde cero
+
+Es la operación que convierte un modelo de lectura en algo cuya **forma** se puede cambiar
+sin migración: se cambia la proyección, se reconstruye, y no hay `ALTER TABLE` que preserve
+datos que se pueden recalcular.
+
+```ts
+export const rutaReconstruirConversion = "POST /internal/view/conversion/reconstruir" as const;
+export async function reconstruirConversion(
+  proyeccion: ConversionProyeccion & Vaciable,
+  flujo: FlujoEventos & FuenteDeFlujos,
+): Promise<number>
+```
+
+**No lleva cron**, a diferencia del barrido de sagas y de la limpieza de fotos: reconstruir
+no es periódico, es una operación que alguien decide.
+
+### Sólo se genera si se puede
+
+La función existe **únicamente** cuando todos los eventos de la vista son de un agregado
+propio. Los que llegaron por el bus ya no están —se consumieron— así que una vista sobre
+eventos ajenos no se puede reconstruir de nada local. Su ausencia es la respuesta a «¿se
+puede reconstruir esta vista?», en tiempo de compilación en vez de el día que hace falta.
+
+### Tres decisiones, y una limitación dicha
+
+**`vaciar` borra las filas Y pone el punto en cero, en una transacción.** En dos pasos, una
+reconstrucción interrumpida entre ellos deja una vista vacía que dice estar al día — y eso
+no da ningún error, da respuestas vacías.
+
+**Las fechas son las del flujo.** Rellenar `evento_en` con la hora de la reconstrucción
+reescribiría el historial en silencio, así que `EventoDelFlujo` lleva su `en` y la
+reconstrucción lo repone. El testkit lo comprueba con una fecha de 2020.
+
+**El evento que la vista no declara se salta, no revienta**: está en el flujo por derecho
+propio, y una vista se construye con los que declara.
+
+Y la limitación, escrita en el doc comment del código generado: el recorrido es **por flujo
+y en orden de versión**. Una proyección cuyo resultado dependa del orden *entre* flujos
+necesita un orden total que el flujo no tiene.
+
+### Mientras corre, la vista está incompleta
+
+Y se sigue leyendo. Eso no es invisible: el punto queda atrás y **el atraso lo delata**, que
+es exactamente para lo que sirve `max_staleness_ms`. Reconstruir en una tabla sombra y
+cambiarla de golpe sería mejor, y todavía no está.
+
+### Medido ensuciando la vista
+
+```console
+  la vista, ensuciada a proposito y reconstruida
+    10 filas con basura
+  OK: aplico 25 eventos de los 25 del flujo, y no quedo basura
+  OK: cada fila reconstruida coincide con el ultimo evento de su flujo
+  OK: las fechas salieron del flujo, no de la hora de reconstruir
+```
+
+Si la reconstrucción no arreglara la basura, no estaría reconstruyendo nada.
+
+## El punto de una vista es por flujo
+
+Esto salió de correr el demo **dos veces seguidas**, y era un defecto de diseño mío: el
+punto guardaba un solo número para toda la vista, y la versión de un evento es su posición
+dentro de **su** flujo. Con un flujo parecía funcionar; con varios no identifica nada, y la
+vista se salta eventos o los reprocesa sin que nada avise.
+
+```console
+error  checkout.conversion: `vista_conversion_checkpoint` sin clave sobre (vista,
+       stream_id). Un flujo pisaria el punto de otro, y la vista se saltaria eventos o los
+       reprocesaria sin que nada avise
+```
+
+Y al arreglarlo apareció un hueco mayor: **el lector de esquema no plegaba `ALTER TABLE ADD
+PRIMARY KEY`**. Una clave añadida en una migración posterior era invisible, así que *toda*
+regla sobre unicidad —la del flujo de eventos, las de reparto, esta misma— la daba por
+ausente y pasaba en silencio. Ya se pliega, y hay un test que lo fija.
+
 ## Lo que falta de event sourcing
 
-Nada bloqueante hoy. Lo siguiente en la lista sería reconstruir una vista desde cero
-—tirarla y reproyectar el flujo entero— que es la operación que convierte un modelo de
-lectura en algo que se puede cambiar de forma sin migración.
+La tabla sombra para reconstruir sin servir una vista incompleta.

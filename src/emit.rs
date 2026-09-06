@@ -579,9 +579,19 @@ pub fn agregados_ts(m: &Manifest) -> String {
          *  escribio en medio, tiene que fallar: eso es el UNIQUE (stream_id,\n \
          *  version) haciendo su trabajo, y `axon verify` comprueba que exista\n \
          *  porque sin el las dos escrituras entran y nadie ve un error. */\n\
+         /** Un evento tal como esta en el flujo. `en` es CUANDO OCURRIO, y viaja\n \
+ *  porque al reconstruir una vista hay que volver a ponerlo: rellenarlo con\n \
+ *  la hora de la reconstruccion reescribe el historial en silencio. */\n\
+         export interface EventoDelFlujo {\n  \
+           version: number;\n  \
+           type: string;\n  \
+           data: unknown;\n  \
+           en: string;\n\
+         }\n\
+         \n\
          export interface FlujoEventos {\n  \
            /** Los eventos de un flujo, en orden. `desde` permite arrancar de una foto. */\n  \
-           leer(streamId: string, desde?: number): Promise<{ version: number; type: string; data: unknown }[]>;\n  \
+           leer(streamId: string, desde?: number): Promise<EventoDelFlujo[]>;\n  \
            /** Agrega al final. Rechaza si `esperada` ya no es la ultima version. */\n  \
            append(streamId: string, esperada: number, e: Envelope<unknown>): Promise<number>;\n  \
            /** Las fotos van en `FlujoConFotos`, que solo se genera si el\n   \
@@ -786,11 +796,49 @@ pub fn vistas_ts(m: &Manifest) -> String {
             *  ninguna de las dos da un error.\n   \
             *\n   \
             *  Por eso cada `aplicar*` recibe la posicion: la guarda quien puede\n   \
-            *  hacerlo junto con el resto. */\n  \
-           leer(vista: string): Promise<number>;\n\
+            *  hacerlo junto con el resto.\n   \
+            *\n   \
+            *  Y es POR FLUJO. La version de un evento es su posicion dentro de su\n   \
+            *  flujo, asi que un solo numero para toda la vista no identifica nada\n   \
+            *  en cuanto hay mas de un flujo: con uno parecia funcionar. */\n  \
+           leer(vista: string, streamId: string): Promise<number>;\n\
          }\n"
             .to_string(),
     ];
+    // Reconstruir una vista solo es posible si sus eventos estan LOCALMENTE. Los
+    // que llegaron por el bus ya no estan: se consumieron. Asi que la funcion se
+    // genera solo cuando todos los eventos de la vista son de un agregado
+    // propio, y su ausencia es la respuesta a "se puede reconstruir".
+    let reconstruibles: Vec<&String> = m
+        .view
+        .iter()
+        .filter(|(_, vi)| {
+            !vi.on.is_empty()
+                && vi
+                    .on
+                    .iter()
+                    .all(|ev| m.aggregate.values().any(|a| a.events.contains(ev)))
+        })
+        .map(|(n, _)| n)
+        .collect();
+    if !reconstruibles.is_empty() {
+        o.push(
+            "/** Lo que la vista tiene que saber hacer para poder reconstruirse.\n \
+             *\n \
+             *  `vaciar` borra las filas Y pone el punto en cero: en dos pasos, una\n \
+             *  reconstruccion interrumpida entre ellos deja una vista vacia que dice\n \
+             *  estar al dia, y eso no da ningun error. */\n\
+             export interface Vaciable {\n  \
+               vaciar(): Promise<void>;\n\
+             }\n\
+             \n\
+             /** Los flujos del agregado, para recorrerlos. */\n\
+             export interface FuenteDeFlujos {\n  \
+               flujos(): Promise<string[]>;\n\
+             }\n"
+                .to_string(),
+        );
+    }
     for (nombre, vi) in &m.view {
         let p = pascal(nombre);
         let c = camel(nombre);
@@ -853,6 +901,57 @@ pub fn vistas_ts(m: &Manifest) -> String {
              }}\n",
             aplica = aplica.join("\n"),
         ));
+        if reconstruibles.contains(&nombre) {
+            o.push(format!(
+                "/** La ruta que reconstruye la vista. NO lleva cron: reconstruir no es\n \
+                 *  periodico, es una operacion que alguien decide. */\n\
+                 export const rutaReconstruir{p} = \"POST /internal/view/{nombre}/reconstruir\" as const;\n\
+                 \n\
+                 /** Tira la vista y la vuelve a construir del flujo. Devuelve cuantos\n \
+                 *  eventos aplico.\n \
+                 *\n \
+                 *  Es lo que convierte un modelo de lectura en algo cuya FORMA se puede\n \
+                 *  cambiar sin migracion: se cambia la proyeccion, se reconstruye, y no\n \
+                 *  hay `ALTER TABLE` que preserve datos que se pueden recalcular.\n \
+                 *\n \
+                 *  Mientras corre, la vista esta incompleta y se sigue leyendo. Eso NO\n \
+                 *  es invisible: el punto queda atras y el atraso lo delata, que es\n \
+                 *  exactamente para lo que sirve `max_staleness_ms`. Reconstruir en una\n \
+                 *  tabla sombra y cambiarla de golpe seria mejor, y todavia no esta.\n \
+                 *\n \
+                 *  El recorrido es por flujo y en orden de version. Una proyeccion cuyo\n \
+                 *  resultado dependa del orden ENTRE flujos necesita un orden total que\n \
+                 *  el flujo no tiene: ahi esto da un resultado distinto al de la\n \
+                 *  proyeccion en vivo, y la comprobacion del demo lo veria. */\n\
+                 export async function reconstruir{p}(\n  \
+                   proyeccion: {p}Proyeccion & Vaciable,\n  \
+                   flujo: FlujoEventos & FuenteDeFlujos,\n\
+                 ): Promise<number> {{\n  \
+                   await proyeccion.vaciar();\n  \
+                   let aplicados = 0;\n  \
+                   for (const streamId of await flujo.flujos()) {{\n    \
+                     for (const ev of await flujo.leer(streamId)) {{\n      \
+                       // Los eventos del flujo no son envelopes: se arma el minimo que\n      \
+                       // la proyeccion necesita. El `time` es el del FLUJO, no el de\n      \
+                       // ahora: rellenarlo reescribiria el historial en silencio.\n      \
+                       if (!({c}Eventos as readonly string[]).includes(ev.type)) continue;\n      \
+                       await {c}Aplicar(proyeccion, {{\n        \
+                         id: `${{streamId}}:${{ev.version}}`,\n        \
+                         type: ev.type,\n        \
+                         source: \"reconstruccion\",\n        \
+                         time: ev.en,\n        \
+                         traceparent: \"\",\n        \
+                         correlationId: streamId,\n        \
+                         causationId: null,\n        \
+                         data: ev.data,\n      \
+                       }}, ev.version);\n      \
+                       aplicados++;\n    \
+                     }}\n  \
+                   }}\n  \
+                   return aplicados;\n\
+                 }}\n"
+            ));
+        }
     }
     o.join("\n")
 }

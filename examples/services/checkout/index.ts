@@ -4,7 +4,8 @@
 import { CheckoutService, Clientes, rutasHttp, rutaBarridoCompra, correrCompra,
          barrerCompra, arrancarBarridoCompra, compraFold, compraCargar,
          compraFotografiar, conversionAplicar, limpiarCompra, newEnvelope,
-         rutaLimpiezaCompra, VersionEnConflicto,
+         rutaLimpiezaCompra, reconstruirConversion, rutaReconstruirConversion,
+         VersionEnConflicto,
          type CheckoutIn, type CheckoutOut, type CompraAcciones, type CompraSalidas,
          type CompraReglas, type ConversionProyeccion, type Checkpoint,
          type Envelope, type FlujoConFotos, type Outbox, type SagaDiario, type SagaEstado,
@@ -162,7 +163,7 @@ class Flujo implements FlujoConFotos {
 
   async leer(streamId: string, desde = 0) {
     const { rows } = await this.#db.query(
-      `SELECT version, type, data FROM compra_event
+      `SELECT version, type, data, en FROM compra_event
         WHERE stream_id = $1 AND version > $2 ORDER BY version`,
       [streamId, desde],
     );
@@ -170,7 +171,18 @@ class Flujo implements FlujoConFotos {
       version: Number(r.version),
       type: r.type as string,
       data: r.data as unknown,
+      // cuando OCURRIO. Al reconstruir la vista se vuelve a poner este, no la
+      // hora de la reconstruccion.
+      en: new Date(r.en).toISOString(),
     }));
+  }
+
+  /** Los flujos que existen, para poder recorrerlos al reconstruir. */
+  async flujos() {
+    const { rows } = await this.#db.query(
+      `SELECT DISTINCT stream_id FROM compra_event ORDER BY stream_id`,
+    );
+    return rows.map((r: any) => r.stream_id as string);
   }
 
   /** Anota el evento en el flujo Y lo deja listo para publicar, en UNA
@@ -229,23 +241,44 @@ class Conversion implements ConversionProyeccion, Checkpoint {
     this.#db = db;
   }
 
-  async leer(vista: string) {
+  async leer(vista: string, streamId: string) {
     const { rows } = await this.#db.query(
-      `SELECT posicion FROM vista_conversion_checkpoint WHERE vista = $1`,
-      [vista],
+      `SELECT posicion FROM vista_conversion_checkpoint
+        WHERE vista = $1 AND stream_id = $2`,
+      [vista, streamId],
     );
     return rows[0] ? Number(rows[0].posicion) : 0;
   }
 
-  async #enUna(posicion: number, sql: string, args: unknown[]) {
+  /** Vacia la vista Y pone el punto en cero, en una transaccion. En dos, una
+   *  reconstruccion interrumpida entre ellos deja una vista vacia que dice
+   *  estar al dia, y eso no da ningun error: da respuestas vacias. */
+  async vaciar() {
+    const c = await this.#db.connect();
+    try {
+      await c.query("BEGIN");
+      await c.query("DELETE FROM vista_conversion");
+      await c.query("DELETE FROM vista_conversion_checkpoint WHERE vista = 'conversion'");
+      await c.query("COMMIT");
+    } catch (err) {
+      await c.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      c.release();
+    }
+  }
+
+  async #enUna(streamId: string, posicion: number, sql: string, args: unknown[]) {
     const c = await this.#db.connect();
     try {
       await c.query("BEGIN");
       await c.query(sql, args);
       await c.query(
-        `INSERT INTO vista_conversion_checkpoint (vista, posicion) VALUES ('conversion', $1)
-         ON CONFLICT (vista) DO UPDATE SET posicion = GREATEST(vista_conversion_checkpoint.posicion, $1)`,
-        [posicion],
+        `INSERT INTO vista_conversion_checkpoint (vista, stream_id, posicion)
+         VALUES ('conversion', $1, $2)
+         ON CONFLICT (vista, stream_id)
+         DO UPDATE SET posicion = GREATEST(vista_conversion_checkpoint.posicion, $2)`,
+        [streamId, posicion],
       );
       await c.query("COMMIT");
     } catch (err) {
@@ -258,6 +291,7 @@ class Conversion implements ConversionProyeccion, Checkpoint {
 
   async aplicarCompraIniciadaV1(e: Envelope<any>, posicion: number) {
     await this.#enUna(
+      e.data.streamId,
       posicion,
       `INSERT INTO vista_conversion (stream_id, estado, centavos, evento_en)
        VALUES ($1,'iniciada',$2,$3)
@@ -268,6 +302,7 @@ class Conversion implements ConversionProyeccion, Checkpoint {
 
   async aplicarCompraCobradaV1(e: Envelope<any>, posicion: number) {
     await this.#enUna(
+      e.data.streamId,
       posicion,
       `UPDATE vista_conversion SET estado = 'cobrada', payment_id = $2, evento_en = $3
         WHERE stream_id = $1`,
@@ -277,6 +312,7 @@ class Conversion implements ConversionProyeccion, Checkpoint {
 
   async aplicarCompraCompensadaV1(e: Envelope<any>, posicion: number) {
     await this.#enUna(
+      e.data.streamId,
       posicion,
       `UPDATE vista_conversion SET estado = 'compensada', motivo = $2, evento_en = $3
         WHERE stream_id = $1`,
@@ -415,6 +451,11 @@ async function main() {
       [rutaBarridoCompra]: () => barrerCompra(svc.pasos, svc.diario),
       // la ruta que golpea el cron que despliega `axon infra`
       [rutaLimpiezaCompra]: async () => ({ borradas: await limpiarCompra(svc.flujo) }),
+      // Reconstruir no lleva cron: no es periodico, es una operacion que
+      // alguien decide.
+      [rutaReconstruirConversion]: async () => ({
+        aplicados: await reconstruirConversion(svc.vista, svc.flujo),
+      }),
     },
     rutasHttp,
   );
