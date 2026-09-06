@@ -3,7 +3,8 @@
 // inverso y el barrido los genero axon.
 import { CheckoutService, Clientes, rutasHttp, rutaBarridoCompra, correrCompra,
          barrerCompra, arrancarBarridoCompra, compraFold, compraCargar,
-         compraFotografiar, conversionAplicar, newEnvelope, VersionEnConflicto,
+         compraFotografiar, conversionAplicar, limpiarCompra, newEnvelope,
+         rutaLimpiezaCompra, VersionEnConflicto,
          type CheckoutIn, type CheckoutOut, type CompraAcciones, type CompraSalidas,
          type CompraReglas, type ConversionProyeccion, type Checkpoint,
          type Envelope, type FlujoConFotos, type Outbox, type SagaDiario, type SagaEstado,
@@ -139,6 +140,24 @@ class Flujo implements FlujoConFotos {
        ON CONFLICT (stream_id, version, reglas) DO NOTHING`,
       [streamId, version, reglas, JSON.stringify(estado)],
     );
+  }
+
+  /** Borra lo que la version vigente no usa: las fotos de otra version de
+   *  reglas, y todas menos la mas nueva de cada flujo.
+   *
+   *  Una sola sentencia: en dos —primero las viejas, despues las de otra
+   *  version— una limpieza interrumpida a la mitad deja un estado que nadie
+   *  penso. Y puede ser agresiva porque una foto es una cache: lo peor que
+   *  pasa es reconstruir desde el flujo. */
+  async limpiarFotos(reglas: number) {
+    const { rowCount } = await this.#db.query(
+      `DELETE FROM compra_snapshot s
+        WHERE s.reglas <> $1
+           OR s.version < (SELECT max(version) FROM compra_snapshot
+                            WHERE stream_id = s.stream_id AND reglas = $1)`,
+      [reglas],
+    );
+    return rowCount ?? 0;
   }
 
   async leer(streamId: string, desde = 0) {
@@ -394,6 +413,8 @@ async function main() {
     {
       "POST /v1/checkouts": (body, e) => svc.checkout(body, e),
       [rutaBarridoCompra]: () => barrerCompra(svc.pasos, svc.diario),
+      // la ruta que golpea el cron que despliega `axon infra`
+      [rutaLimpiezaCompra]: async () => ({ borradas: await limpiarCompra(svc.flujo) }),
     },
     rutasHttp,
   );

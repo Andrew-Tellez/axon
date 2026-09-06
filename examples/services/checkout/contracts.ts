@@ -614,6 +614,18 @@ export class VersionEnConflicto extends Error {
 export interface FlujoConFotos extends FlujoEventos {
   foto(streamId: string, reglas: number): Promise<{ version: number; estado: unknown } | null>;
   guardarFoto(streamId: string, version: number, reglas: number, estado: unknown): Promise<void>;
+  /** Borra las fotos que la version vigente no usa: las de OTRA version
+   *  de reglas, y todas menos la mas nueva de cada flujo. Devuelve
+   *  cuantas borro.
+   *
+   *  Puede ser agresiva justamente porque una foto es una CACHE: lo
+   *  peor que puede pasar es reconstruir desde el flujo, que es lento y
+   *  correcto. Borrar de mas no rompe nada; no borrar nunca hace crecer
+   *  la tabla con cada version de reglas.
+   *
+   *  Y no hay carrera con quien rehidrata: `foto` devuelve el estado por
+   *  valor, asi que borrar la fila despues no le quita nada. */
+  limpiarFotos(reglas: number): Promise<number>;
 }
 
 /** Los eventos que componen `compra`, declarados en el manifiesto. */
@@ -701,6 +713,17 @@ export async function compraFotografiar<E>(
   if (version === 0 || version % compraFotoCada !== 0) return false;
   await flujo.guardarFoto(streamId, version, compraFotoReglas, estado);
   return true;
+}
+
+/** La ruta que golpea el programador para limpiar las fotos viejas.
+ *  `axon infra` la despliega en los cuatro targets. */
+export const rutaLimpiezaCompra = "POST /internal/aggregate/compra/limpiar" as const;
+
+/** Una pasada de limpieza. Devuelve cuantas fotos borro, para poder
+ *  medirlo: una limpieza que no reporta nada es indistinguible de una
+ *  que no corre, y lo que se nota entonces es el tamano de la tabla. */
+export async function limpiarCompra(flujo: FlujoConFotos): Promise<number> {
+  return flujo.limpiarFotos(compraFotoReglas);
 }
 
 

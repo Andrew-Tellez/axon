@@ -2864,6 +2864,25 @@ fn el_barrido_se_despliega_en_los_cuatro_targets() {
         2,
         "la etiqueta va en el pod y en la politica, no en uno solo"
     );
+    // La limpieza de fotos tambien se despliega, y por la misma razon: un
+    // `snapshot_version` que invalida fotos y nada que las borre hace crecer la
+    // tabla con cada version de reglas.
+    let es = fixture_es("cron");
+    for (target, marca) in [
+        ("local", "/internal/aggregate/cuenta/limpiar"),
+        ("gcp", "resource \"google_cloud_scheduler_job\""),
+        ("aws", "resource \"aws_scheduler_schedule\""),
+        ("k8s", "kind: CronJob"),
+    ] {
+        let (out, err, ok) = axon(&["infra", es.to_str().unwrap(), "--target", target]);
+        assert!(ok, "{target}: {err}");
+        assert!(out.contains(marca), "{target} no despliega la limpieza de fotos");
+        assert!(
+            out.contains("/internal/aggregate/cuenta/limpiar"),
+            "{target} no apunta a la ruta de limpieza"
+        );
+    }
+
     // El intervalo sale del presupuesto declarado, y con 1 minuto la unidad de
     // EventBridge va en singular: `rate(1 minutes)` no valida.
     let (a, _, _) = axon(&["infra", f, "--target", "aws"]);
@@ -3412,6 +3431,12 @@ version = "1.0.0"
 owner = "equipo"
 tier = "1"
 
+# Este fixture prueba el flujo, la vista y las fotos, no la bodega: sin esto
+# `axon infra` rechaza el plan porque la bodega por defecto no tiene camino de
+# ingesta en todos los targets.
+[analytics]
+export = false
+
 [cap]
 consistency = "eventual"
 on_partition = "reject"
@@ -3473,6 +3498,7 @@ fn el_fold_generado_reconstruye_y_se_niega() {
         r#"import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cuentaFold, cuentaEventos, cuentaCargar, cuentaFotografiar, cuentaFotoReglas,
+         limpiarCuenta, rutaLimpiezaCuenta,
          saldosAplicar, saldosTabla, saldosAtrasoMaximoMs,
          newEnvelope, type CuentaReglas, type SaldosProyeccion,
          type CuentaAbiertaV1, type CuentaDepositadaV1 } from "./contratos.ts";
@@ -3572,6 +3598,23 @@ test("solo se fotografia en la cadencia declarada", async () => {
   assert.deepEqual(guardadas, [2, 4]);
 });
 
+test("la limpieza pide la version vigente, no una cualquiera", async () => {
+  let pedida = -1;
+  const flujo = {
+    async leer() { return []; },
+    async append() { return 0; },
+    async foto() { return null; },
+    async guardarFoto() {},
+    async limpiarFotos(reglas: number) { pedida = reglas; return 7; },
+  };
+  const borradas = await limpiarCuenta(flujo);
+  // Pedir otra version borraria justo las que SI se usan, y el sintoma seria
+  // que todo reconstruye desde el flujo sin que nadie sepa por que.
+  assert.equal(pedida, cuentaFotoReglas);
+  assert.equal(borradas, 7);
+  assert.equal(rutaLimpiezaCuenta, "POST /internal/aggregate/cuenta/limpiar");
+});
+
 test("la vista solo acepta los eventos que declara, y le llega la posicion", async () => {
   const vistas: string[] = [];
   const proyeccion: SaldosProyeccion = {
@@ -3607,7 +3650,7 @@ test("la vista solo acepta los eventos que declara, y le llega la posicion", asy
         out.status.success(),
         "el fold generado no reconstruye como dice:\n{salida}"
     );
-    assert!(salida.contains("pass 8"), "{salida}");
+    assert!(salida.contains("pass 9"), "{salida}");
 }
 
 /// Las reglas de event sourcing y CQRS: cada una bloquea una forma de tener un

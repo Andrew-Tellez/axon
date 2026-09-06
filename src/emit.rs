@@ -618,7 +618,19 @@ pub fn agregados_ts(m: &Manifest) -> String {
              *  lento y correcto —en ese orden. */\n\
              export interface FlujoConFotos extends FlujoEventos {\n  \
                foto(streamId: string, reglas: number): Promise<{ version: number; estado: unknown } | null>;\n  \
-               guardarFoto(streamId: string, version: number, reglas: number, estado: unknown): Promise<void>;\n\
+               guardarFoto(streamId: string, version: number, reglas: number, estado: unknown): Promise<void>;\n  \
+               /** Borra las fotos que la version vigente no usa: las de OTRA version\n   \
+                *  de reglas, y todas menos la mas nueva de cada flujo. Devuelve\n   \
+                *  cuantas borro.\n   \
+                *\n   \
+                *  Puede ser agresiva justamente porque una foto es una CACHE: lo\n   \
+                *  peor que puede pasar es reconstruir desde el flujo, que es lento y\n   \
+                *  correcto. Borrar de mas no rompe nada; no borrar nunca hace crecer\n   \
+                *  la tabla con cada version de reglas.\n   \
+                *\n   \
+                *  Y no hay carrera con quien rehidrata: `foto` devuelve el estado por\n   \
+                *  valor, asi que borrar la fila despues no le quita nada. */\n  \
+               limpiarFotos(reglas: number): Promise<number>;\n\
              }\n"
                 .to_string(),
         );
@@ -739,6 +751,18 @@ pub fn agregados_ts(m: &Manifest) -> String {
                  }}\n",
                 cada = ag.snapshot_every,
                 reglas = ag.snapshot_version,
+            ));
+            o.push(format!(
+                "/** La ruta que golpea el programador para limpiar las fotos viejas.\n \
+                 *  `axon infra` la despliega en los cuatro targets. */\n\
+                 export const rutaLimpieza{p} = \"POST /internal/aggregate/{nombre}/limpiar\" as const;\n\
+                 \n\
+                 /** Una pasada de limpieza. Devuelve cuantas fotos borro, para poder\n \
+                 *  medirlo: una limpieza que no reporta nada es indistinguible de una\n \
+                 *  que no corre, y lo que se nota entonces es el tamano de la tabla. */\n\
+                 export async function limpiar{p}(flujo: FlujoConFotos): Promise<number> {{\n  \
+                   return flujo.limpiarFotos({c}FotoReglas);\n\
+                 }}\n"
             ));
         }
     }

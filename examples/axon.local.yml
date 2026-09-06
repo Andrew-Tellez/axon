@@ -332,6 +332,12 @@ services:
       - traefik.enable=true
       - traefik.http.routers.payments.rule=PathPrefix(`/v1/payments`) || PathPrefix(`/v1/payouts`)
       - traefik.http.services.payments.loadbalancer.server.port=8080
+  cron-fotos_compra:
+    image: curlimages/curl:8.11.1
+    depends_on: { checkout: { condition: service_started } }
+    # `while` y no `sleep` de una vez: un job que corre una sola vez y termina
+    # deja a `up --wait` contando un contenedor caido
+    command: ["sh", "-c", "while :; do sleep 3600; curl -fsS -m 10 -X POST http://checkout:8080/internal/aggregate/compra/limpiar || true; done"]
   cron-saga_compra:
     image: curlimages/curl:8.11.1
     depends_on: { checkout: { condition: service_started } }

@@ -94,6 +94,7 @@ $ cd examples && ./demo.sh
   OK: el relay volvio y publico lo pendiente; nadie lo reintento a mano
   OK: la foto dice lo mismo que la proyeccion, que se construyo sin usarla
   OK: una transaccion revertida no deja el evento suelto: 0 pagos, 0 eventos
+  OK: sin ninguna foto el sistema sigue correcto, solo reconstruye mas
 
 ==> reintentos declarados vs ocurridos
   OK: 3 llamadas = 1 + 2 reintentos, exactamente lo declarado

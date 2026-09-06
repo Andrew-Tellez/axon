@@ -193,6 +193,22 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 max_attempts: 5,
             });
         }
+        for (nombre, ag) in &m.aggregate {
+            if ag.snapshot_every == 0 {
+                continue;
+            }
+            crons.push(Cron {
+                service: svc.clone(),
+                name: format!("fotos.{nombre}"),
+                path: format!("/internal/aggregate/{nombre}/limpiar"),
+                port: m.infra.port.unwrap_or(8080),
+                // Cada hora, y este numero NO sale del manifiesto porque no hay
+                // nada ahi de donde derivarlo: la cadencia de fotos se mide en
+                // eventos, no en tiempo. Lo que importa es que corra alguna vez;
+                // atrasarse solo cuesta espacio.
+                every_ms: 3_600_000,
+            });
+        }
         for (nombre, sg) in &m.saga {
             crons.push(Cron {
                 service: svc.clone(),

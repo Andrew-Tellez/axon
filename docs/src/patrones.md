@@ -674,8 +674,46 @@ diría 99999 centavos, y el estado tiene que salir del flujo entero: 750.
 `snapshot_every = 1` es un aviso, no un error: guardar una foto por evento no es una cache,
 es una segunda copia del flujo con el doble de escrituras.
 
+### Borrar las viejas
+
+`snapshot_version` invalida las fotos viejas pero no las quita, así que la tabla crece con
+cada versión de reglas. La limpieza borra **lo que la versión vigente no usa**: las de otra
+versión de reglas, y todas menos la más nueva de cada flujo.
+
+```ts
+export const rutaLimpiezaCompra = "POST /internal/aggregate/compra/limpiar" as const;
+export async function limpiarCompra(flujo: FlujoConFotos): Promise<number>
+```
+
+Y `axon infra` la despliega en los cuatro targets, con la misma maquinaria que el barrido
+de sagas. El intervalo —una hora— **no sale del manifiesto**, y eso es deliberado: no hay
+nada ahí de donde derivarlo, porque la cadencia de fotos se mide en eventos y no en tiempo.
+Atrasarse sólo cuesta espacio.
+
+Puede ser agresiva por una razón concreta: **una foto es una cache, así que la limpieza no
+puede romper la corrección, sólo el rendimiento.** Lo peor que pasa es reconstruir desde el
+flujo, que es lento y correcto. Borrar de más no rompe nada; no borrar nunca hace crecer la
+tabla para siempre.
+
+Un detalle: es **una sola sentencia**. En dos —primero las de otra versión, después las
+viejas— una limpieza interrumpida a la mitad deja un estado que nadie pensó. Y no hay
+carrera con quien está rehidratando, porque `foto()` devuelve el estado **por valor**:
+borrar la fila después no le quita nada.
+
+```console
+  la limpieza de fotos que la version vigente no usa
+    10 fotos, borro 2, quedan 8
+  OK: las de otra version se fueron, y de cada flujo queda solo la mas nueva
+  y el estado despues de quedarse sin fotos
+  OK: sin ninguna foto el sistema sigue correcto, solo reconstruye mas
+```
+
+Esa última línea es la que sostiene todo lo demás: el demo **borra todas las fotos** y hace
+otra compra. Si el sistema dependiera de ellas, dejaría de funcionar; como son una cache,
+sólo reconstruye más.
+
 ## Lo que falta de event sourcing
 
-Borrar las fotos viejas: `snapshot_version` las invalida pero no las quita, así que la
-tabla crece con cada versión de reglas. Es una tarea de limpieza, no un riesgo de
-corrección — pero alguien va a preguntar por ese espacio.
+Nada bloqueante hoy. Lo siguiente en la lista sería reconstruir una vista desde cero
+—tirarla y reproyectar el flujo entero— que es la operación que convierte un modelo de
+lectura en algo que se puede cambiar de forma sin migración.

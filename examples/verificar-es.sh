@@ -212,6 +212,45 @@ else
   exit 1
 fi
 
+# --- la limpieza de fotos -----------------------------------------------
+# `snapshot_version` invalida las fotos viejas pero no las quita, asi que la
+# tabla crece con cada version de reglas. La limpieza puede ser agresiva porque
+# una foto es una cache: lo peor que pasa es reconstruir desde el flujo.
+echo "  la limpieza de fotos que la version vigente no usa"
+antes=$(sql -c "SELECT count(*) FROM compra_snapshot" | tr -d ' \r\n')
+viejas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE reglas <> $reglas" | tr -d ' \r\n')
+[ "$viejas" -ge 1 ] || { echo "  FALLO: el montaje no dejo ninguna foto de otra version"; exit 1; }
+borradas=$(curl -sS --fail-with-body -m 30 -X POST "$CHECKOUT/internal/aggregate/compra/limpiar" \
+  | sed 's/.*"borradas":\([0-9]*\).*/\1/')
+despues=$(sql -c "SELECT count(*) FROM compra_snapshot" | tr -d ' \r\n')
+quedan_viejas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE reglas <> $reglas" | tr -d ' \r\n')
+echo "    $antes fotos, borro $borradas, quedan $despues"
+if [ "$quedan_viejas" -eq 0 ] && [ "$borradas" -ge "$viejas" ] && [ "$despues" -lt "$antes" ]; then
+  echo "  OK: las de otra version se fueron, y de cada flujo queda solo la mas nueva"
+else
+  echo "  FALLO: quedan $quedan_viejas de otra version; $antes -> $despues, borradas=$borradas"
+  exit 1
+fi
+
+# Una por flujo como maximo: mas de una es espacio que nadie lee, porque
+# `foto()` toma siempre la mas nueva.
+duplicadas=$(sql -c "SELECT coalesce(max(n), 0) FROM (
+                       SELECT count(*) AS n FROM compra_snapshot GROUP BY stream_id
+                     ) t" | tr -d ' \r\n')
+[ "$duplicadas" -le 1 ] || { echo "  FALLO: un flujo quedo con $duplicadas fotos"; exit 1; }
+
+# Y lo que hace segura a la limpieza: el estado sigue siendo correcto. La foto
+# se rehace en el proximo evento, y mientras tanto se reconstruye del flujo.
+echo "  y el estado despues de quedarse sin fotos"
+sql -v ON_ERROR_STOP=1 -c "DELETE FROM compra_snapshot" > /dev/null
+r=$(curl -sS --fail-with-body -m 60 -X POST "$CHECKOUT/v1/checkouts" \
+  -H 'content-type: application/json' \
+  -d '{"orderId":"55555555-5555-4555-8555-555555555555","amount":{"amount":700,"currency":"MXN"}}')
+case "$r" in
+  *completada*) echo "  OK: sin ninguna foto el sistema sigue correcto, solo reconstruye mas" ;;
+  *) echo "  FALLO: sin fotos la compra dio $r"; exit 1 ;;
+esac
+
 # --- el outbox, de verdad transaccional ---------------------------------
 # La promesa del patron es que el evento y el cambio de estado entran juntos o
 # no entra ninguno. Si el `stage` abriera su propia conexion, una transaccion
