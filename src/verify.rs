@@ -820,7 +820,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         ));
     }
 
-    // patrones de API: lo que separa un endpoint de uno que aguanta produccion
+    // API patterns: what separates an endpoint from one that survives production
     let mut routes: IndexMap<String, String> = IndexMap::new();
     for m in ms.iter().filter(|m| !m.external) {
         for (name, meth) in &m.methods {
@@ -830,51 +830,51 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
             match meth.path() {
                 Some(p) if !p.starts_with("/v") => errors.push(format!(
-                    "{}.{name}: `{p}` sin version en la ruta; usa /v1/...",
+                    "{}.{name}: `{p}` has no version in the path; use /v1/...",
                     m.service
                 )),
                 _ => {}
             }
             if meth.mutating() && !meth.idempotent {
                 errors.push(format!(
-                    "{}.{name}: {http} muta sin `idempotent = true`; un reintento del cliente \
-                     duplicaria el efecto",
+                    "{}.{name}: {http} mutates with no `idempotent = true`; a client retry \
+                     would duplicate the effect",
                     m.service
                 ));
             }
-            // El gateway falla cerrado: una ruta expuesta sin decidir quien
-            // puede llamarla no se despliega. No hay default seguro para esto.
+            // The gateway fails closed: a route exposed without deciding who may
+            // call it does not get deployed. There is no safe default here.
             match meth.auth.as_deref() {
                 Some("public") | Some("required") => {}
                 Some(otro) => errors.push(format!(
-                    "{}.{name}: `auth = \"{otro}\"` no existe; usa \"public\" o \"required\"",
+                    "{}.{name}: `auth = \"{otro}\"` does not exist; use \"public\" or \"required\"",
                     m.service
                 )),
                 None => errors.push(format!(
-                    "{}.{name}: {http} expuesta sin `auth`; declara \"public\" o \"required\"",
+                    "{}.{name}: {http} is exposed with no `auth`; declare \"public\" or \"required\"",
                     m.service
                 )),
             }
             if meth.auth.as_deref() == Some("public") && meth.rate_limit.is_none() {
                 errors.push(format!(
-                    "{}.{name}: {http} es publica y sin `rate_limit`; el edge no tiene \
-                     con que frenar un abuso",
+                    "{}.{name}: {http} is public and has no `rate_limit`; the edge has \
+                     nothing to throttle abuse with",
                     m.service
                 ));
             }
             if meth.paginated && !meth.output.contains_key("cursor") {
                 errors.push(format!(
-                    "{}.{name}: paginada pero no devuelve `cursor`; offset se rompe al crecer",
+                    "{}.{name}: paginated but does not return a `cursor`; offset breaks as it grows",
                     m.service
                 ));
             }
         }
     }
 
-    // Una bodega por plataforma. Los eventos de un mismo flujo tienen que caer
-    // en el mismo lugar: repartidos entre dos bodegas, el embudo —que es lo que
-    // hace util exportar— no se puede armar con una sola consulta, y nadie ve
-    // un error porque cada tabla existe y tiene filas.
+    // One warehouse per platform. The events of one flow have to land in the
+    // same place: split across two warehouses, the funnel —which is what makes
+    // exporting worth anything— cannot be built with a single query, and nobody
+    // sees an error because every table exists and has rows.
     let exportan: Vec<&Manifest> = ms
         .iter()
         .filter(|m| !m.external && m.analytics.export)
@@ -883,9 +883,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         for otro in exportan.iter().skip(1) {
             if otro.analytics.warehouse != primero.analytics.warehouse {
                 errors.push(format!(
-                    "{} exporta a `{}` y {} a `{}`. Los eventos de un mismo flujo tienen que \
-                     caer en la misma bodega o el embudo no se puede armar, y cada tabla \
-                     existiria con filas sin que nada avise",
+                    "{} exports to `{}` and {} to `{}`. The events of one flow have to land \
+                     in the same warehouse or the funnel cannot be built, and every table \
+                     would exist with rows without anything warning about it",
                     primero.service,
                     primero.analytics.warehouse,
                     otro.service,

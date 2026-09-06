@@ -400,8 +400,8 @@ method = "charge"
     for esperado in [
         "no `owner`",
         "no `tier`",
-        "sin version en la ruta",
-        "sin `idempotent = true`",
+        "has no version in the path",
+        "mutates with no `idempotent = true`",
         "sin `timeout_ms`",
     ] {
         assert!(
@@ -1036,8 +1036,8 @@ out = { b = "int" }
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("expuesta sin `auth`"), "{err}");
-    assert!(err.contains("publica y sin `rate_limit`"), "{err}");
+    assert!(err.contains("is exposed with no `auth`"), "{err}");
+    assert!(err.contains("is public and has no `rate_limit`"), "{err}");
 }
 
 /// Las reglas de seguridad citan su categoria del OWASP Top 10, porque un
