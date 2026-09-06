@@ -39,7 +39,7 @@ declarado() {
 }
 # el presupuesto de la SAGA, no el del metodo: los dos se llaman `timeout_ms`
 # en el manifiesto, y el generado deja solo uno de los dos en el coordinador
-presupuesto=$(sed -n 's/.*const limite = Date.now() + \([0-9]*\);.*/\1/p' \
+presupuesto=$(sed -n 's/.*const deadline = Date.now() + \([0-9]*\);.*/\1/p' \
   services/checkout/contracts.ts | head -1)
 
 r_payout=$(declarado payoutMerchant)
@@ -75,7 +75,7 @@ else
   echo "  FALLO: ${transcurrido}ms supera el presupuesto de ${presupuesto}ms"
   exit 1
 fi
-case "$r" in *compensada*) : ;; *) echo "  FALLO: agotar los reintentos no compenso"; exit 1 ;; esac
+case "$r" in *compensated*) : ;; *) echo "  FALLO: agotar los reintentos no compenso"; exit 1 ;; esac
 
 # --- que los reintentos de la COMPENSACION sean lo que la salva ------------
 # El reembolso falla las dos primeras veces. Con $r_refund reintentos
@@ -91,7 +91,7 @@ echo "    $r"
 pago=$(sql_pagos -c "SELECT id FROM payment WHERE order_id = '$ORDEN' LIMIT 1" | tr -d ' \r\n')
 reintentos=$(sql_pagos -c "SELECT count(*) FROM intento WHERE metodo = 'refund' AND payment_id = '$pago'")
 estado=$(sql_pagos -c "SELECT status FROM payment WHERE id = '$pago'")
-if [ "$r" != "${r%compensada*}" ] && [ "$reintentos" -eq 3 ] && [ "$estado" = "refunded" ]; then
+if [ "$r" != "${r%compensated*}" ] && [ "$reintentos" -eq 3 ] && [ "$estado" = "refunded" ]; then
   echo "  OK: 3 llamadas al reembolso (2 fallos y la que entro), y el cobro quedo deshecho"
   echo "  i sin los $r_refund reintentos declarados, esta saga terminaba ATASCADA"
 else
@@ -113,7 +113,7 @@ echo "    HTTP $r"
 pago=$(sql_pagos -c "SELECT id FROM payment WHERE order_id = '$ORDEN' LIMIT 1" | tr -d ' \r\n')
 llamadas=$(sql_pagos -c "SELECT count(*) FROM intento WHERE metodo = 'refund' AND payment_id = '$pago'")
 atascada=$($COMPOSE exec -T db-checkout env PGPASSWORD=local psql -qtAX -U postgres -d checkout \
-  -c "SELECT count(*) FROM saga_compra WHERE estado = 'atascada'")
+  -c "SELECT count(*) FROM saga_compra WHERE estado = 'stuck'")
 if [ "$r" = "500" ] && [ "$llamadas" -eq $((r_refund + 1)) ] && [ "$atascada" -ge 1 ]; then
   echo "  OK: $llamadas llamadas, la saga quedo ATASCADA y la respuesta no lo oculto"
 else

@@ -25,7 +25,7 @@ r=$(curl -sS --fail-with-body -m 60 -X POST "$CHECKOUT/v1/checkouts" \
   -H 'content-type: application/json' \
   -d "{\"orderId\":\"$FELIZ\",\"amount\":{\"amount\":2500,\"currency\":\"MXN\"}}")
 echo "    $r"
-case "$r" in *completada*) : ;; *) echo "  FALLO: la compra no se completo"; exit 1 ;; esac
+case "$r" in *completed*) : ;; *) echo "  FALLO: la compra no se completo"; exit 1 ;; esac
 # y al comercio SI se le pago, para este pedido
 pagado=$(sql_pagos -c "SELECT count(*) FROM payout p JOIN payment m ON m.id = p.payment_id WHERE m.order_id = '$FELIZ'")
 [ "$pagado" -eq 1 ] || { echo "  FALLO: payouts=$pagado para la compra feliz"; exit 1; }
@@ -37,7 +37,7 @@ r=$(curl -sS --fail-with-body -m 60 -X POST "$CHECKOUT/v1/checkouts" \
   -H 'content-type: application/json' \
   -d "{\"orderId\":\"$ROTA\",\"amount\":{\"amount\":$((TOPE + 1)),\"currency\":\"MXN\"}}")
 echo "    $r"
-case "$r" in *compensada*) : ;; *) echo "  FALLO: no compenso"; exit 1 ;; esac
+case "$r" in *compensated*) : ;; *) echo "  FALLO: no compenso"; exit 1 ;; esac
 # El invariante, no el conteo: de este pedido no queda NINGUN cobro en pie, y
 # al comercio no se le pago nada.
 en_pie=$(sql_pagos -c "SELECT count(*) FROM payment WHERE order_id = '$ROTA' AND status <> 'refunded'")
@@ -51,7 +51,7 @@ else
 fi
 # y el diario lo dice
 estado=$(sql -c "SELECT estado FROM saga_compra ORDER BY actualizado DESC LIMIT 1")
-[ "$estado" = "compensada" ] || { echo "  FALLO: el diario dice '$estado'"; exit 1; }
+[ "$estado" = "compensated" ] || { echo "  FALLO: el diario dice '$estado'"; exit 1; }
 
 # --- el retome, que es lo que el diario hace posible ---------------------
 # Una saga que arranco en otro proceso: el paso 1 quedo `hecho` y el proceso
@@ -67,7 +67,7 @@ pago=$(printf '%s' "$cobro" | sed 's/.*"paymentId":"\([^"]*\)".*/\1/')
 
 SAGA=$(sql -c "SELECT gen_random_uuid()")
 sql -v ON_ERROR_STOP=1 -c "INSERT INTO saga_compra (id, paso, estado, datos, salidas, actualizado)
-  VALUES ('$SAGA', 1, 'hecho',
+  VALUES ('$SAGA', 1, 'done',
     '{\"id\":\"$SAGA\",\"type\":\"POST /v1/checkouts\",\"source\":\"demo\",\"time\":\"2026-01-01T00:00:00Z\",
       \"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\",
       \"correlationId\":\"$SAGA\",\"causationId\":null,
@@ -75,22 +75,22 @@ sql -v ON_ERROR_STOP=1 -c "INSERT INTO saga_compra (id, paso, estado, datos, sal
     jsonb_build_object('1', jsonb_build_object('paymentId', '$pago')),
     now() - interval '10 minutes')" > /dev/null
 
-barrido=$(curl -sS --fail-with-body -m 90 -X POST "$CHECKOUT/internal/saga/compra/barrer")
+barrido=$(curl -sS --fail-with-body -m 90 -X POST "$CHECKOUT/internal/saga/compra/sweep")
 echo "    $barrido"
 case "$barrido" in
-  *'"compensadas":1'*) : ;;
+  *'"compensated":1'*) : ;;
   *) echo "  FALLO: el barrido no compenso la colgada"; exit 1 ;;
 esac
 # el reembolso salio del paymentId que el DIARIO guardo, no de una variable
 estado=$(sql_pagos -c "SELECT status FROM payment WHERE id = '$pago'")
 [ "$estado" = "refunded" ] || { echo "  FALLO: el pago quedo en '$estado'"; exit 1; }
 final=$(sql -c "SELECT estado FROM saga_compra WHERE id = '$SAGA'")
-[ "$final" = "compensada" ] || { echo "  FALLO: el diario dice '$final'"; exit 1; }
+[ "$final" = "compensated" ] || { echo "  FALLO: el diario dice '$final'"; exit 1; }
 echo "  OK: retomada desde el diario, compensada, y el reembolso alcanzo al cobro"
 
 # y no la vuelve a tomar
-otra=$(curl -sS -m 60 -X POST "$CHECKOUT/internal/saga/compra/barrer")
+otra=$(curl -sS -m 60 -X POST "$CHECKOUT/internal/saga/compra/sweep")
 case "$otra" in
-  *'"reclamadas":0'*) echo "  OK: una saga cerrada no se vuelve a barrer" ;;
+  *'"claimed":0'*) echo "  OK: una saga cerrada no se vuelve a barrer" ;;
   *) echo "  FALLO: el barrido reclamo una saga ya cerrada: $otra"; exit 1 ;;
 esac

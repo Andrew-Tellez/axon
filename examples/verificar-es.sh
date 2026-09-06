@@ -356,7 +356,7 @@ r=$(curl -sS --fail-with-body -m 60 -X POST "$CHECKOUT/v1/checkouts" \
   -H 'content-type: application/json' \
   -d '{"orderId":"55555555-5555-4555-8555-555555555555","amount":{"amount":700,"currency":"MXN"}}')
 case "$r" in
-  *completada*) echo "  OK: sin ninguna foto el sistema sigue correcto, solo reconstruye mas" ;;
+  *completed*) echo "  OK: sin ninguna foto el sistema sigue correcto, solo reconstruye mas" ;;
   *) echo "  FALLO: sin fotos la compra dio $r"; exit 1 ;;
 esac
 

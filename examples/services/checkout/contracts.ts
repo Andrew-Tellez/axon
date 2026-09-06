@@ -272,299 +272,303 @@ export abstract class CheckoutService {
 }
 
 
-/** El diario de una saga: donde vive el avance. Sin el, un reinicio a
- *  mitad de camino deja los pasos ya hechos aplicados y sin registro de
- *  cuales fueron: no se puede terminar ni compensar.
+/** A saga's journal: where its progress lives. Without it, a restart
+ *  halfway through leaves the steps already taken applied and with no
+ *  record of which ones: the saga can neither finish nor compensate.
  *
- *  `intentando` se escribe ANTES de la llamada y `hecho` DESPUES. Un paso
- *  que quedo en `intentando` puede haber ocurrido o no, asi que al retomar
- *  se COMPENSA, no se reintenta: por eso toda compensacion tiene que
- *  tolerar que no haya nada que deshacer.
+ *  `attempting` is written BEFORE the call and `done` AFTER. A step left
+ *  at `attempting` may or may not have happened, so on resume it gets
+ *  COMPENSATED, not retried — which is why every compensation has to
+ *  tolerate there being nothing to undo.
  *
- *  Guarda tambien el envelope que la arranco. Retomar sin el es imposible:
- *  las acciones necesitan los datos de la llamada, y el proceso que los
- *  tenia en memoria es justo el que se murio. */
-export interface SagaDiario {
-  abrir(id: string, saga: string, e: Envelope<unknown>): Promise<void>;
-  marcar(id: string, paso: number, estado: "intentando" | "hecho" | "deshecho", salida?: unknown): Promise<void>;
-  cerrar(id: string, estado: SagaEstado): Promise<void>;
-  /** Hasta donde llego, y lo que devolvio cada paso. `null` si es nueva.
+ *  It also stores the envelope that started the saga. Resuming without it
+ *  is impossible: the actions need the call's data, and the process that
+ *  held it in memory is precisely the one that died. */
+export interface SagaJournal {
+  open(id: string, saga: string, e: Envelope<unknown>): Promise<void>;
+  mark(id: string, step: number, status: "attempting" | "done" | "undone", output?: unknown): Promise<void>;
+  close(id: string, status: SagaStatus): Promise<void>;
+  /** How far it got, and what each step returned. `null` if it is new.
    *
-   *  Las salidas hacen falta para COMPENSAR: deshacer un paso suele
-   *  necesitar el id que ESE paso devolvio, y tras un reinicio ese valor
-   *  no esta en ninguna variable —el proceso que lo tenia es justo el
-   *  que se murio—. Guardarlo en el diario es lo que mantiene la
-   *  compensacion posible. */
-  leer(id: string): Promise<{ paso: number; estado: string; salidas: Record<number, unknown> } | null>;
-  /** Reclama hasta `limite` sagas abiertas que no avanzan desde `antesDe`,
-   *  y devuelve el envelope de cada una.
+   *  The outputs are needed to COMPENSATE: undoing a step usually needs
+   *  the id THAT step returned, and after a restart that value is in no
+   *  variable — the process that held it is the one that died. Storing it
+   *  in the journal is what keeps compensation possible. */
+  read(id: string): Promise<{ step: number; status: string; outputs: Record<number, unknown> } | null>;
+  /** Claims up to `limit` open sagas that have not moved since
+   *  `olderThan`, and returns each one's envelope.
    *
-   *  RECLAMA, no lista: dos instancias del servicio barren a la vez, y dos
-   *  coordinadores sobre la misma saga compensan los mismos pasos dos
-   *  veces. En Postgres el reclamo y el filtro son la misma sentencia:
+   *  It CLAIMS, it does not list: two instances of the service sweep at
+   *  the same time, and two coordinators on the same saga compensate the
+   *  same steps twice. In Postgres the claim and the filter are the same
+   *  statement:
    *
-   *    UPDATE saga_<nombre> SET actualizado = now()
-   *     WHERE estado IN ('intentando','hecho') AND actualizado < $1
-   *     RETURNING id, datos
+   *    UPDATE saga_<name> SET updated_at = now()
+   *     WHERE status IN ('attempting','done') AND updated_at < $1
+   *     RETURNING id, data
    *    LIMIT $2
    *
-   *  Tocar `actualizado` es el reclamo: el otro barredor ya no la ve. Y si
-   *  este proceso muere a mitad, vuelve a ser elegible en la siguiente
-   *  ventana sin que nadie la desbloquee a mano. */
-  reclamar(saga: string, antesDe: Date, limite: number): Promise<{ id: string; datos: Envelope<unknown> }[]>;
+   *  Touching `updated_at` IS the claim: the other sweeper no longer sees
+   *  it. And if this process dies halfway, the saga becomes eligible again
+   *  in the next window with nobody unlocking it by hand. */
+  claim(saga: string, olderThan: Date, limit: number): Promise<{ id: string; data: Envelope<unknown> }[]>;
 }
 
-export type SagaEstado = "completada" | "compensada" | "atascada";
+export type SagaStatus = "completed" | "compensated" | "stuck";
 
-/** Una compensacion que falla no tiene nada detras: la saga queda a
- *  medias y necesita una persona. Se lanza para que eso no pase
- *  desapercibido. */
-export class SagaAtascada extends Error {
+/** A compensation that fails has nothing behind it: the saga is left
+ *  half-done and needs a person. It is thrown so that does not go
+ *  unnoticed. */
+export class SagaStuck extends Error {
   readonly saga: string;
-  readonly paso: number;
-  readonly causa: unknown;
-  constructor(saga: string, paso: number, causa: unknown) {
-    super(`${saga}: la compensacion del paso ${paso} fallo; la saga quedo a medias`);
+  readonly step: number;
+  readonly reason: unknown;
+  constructor(saga: string, step: number, reason: unknown) {
+    super(`${saga}: compensating step ${step} failed; the saga is half-done`);
     this.saga = saga;
-    this.paso = paso;
-    this.causa = causa;
+    this.step = step;
+    this.reason = reason;
   }
 }
 
-/** Lo que hizo una pasada del barrido. Se devuelve para que se pueda
- *  medir: un barrido que no reporta nada es indistinguible de uno que no
- *  corre. */
-export interface SagaBarrido {
-  reclamadas: number;
-  completadas: number;
-  compensadas: number;
-  /** Necesitan una persona. El barrido NO las reintenta. */
-  atascadas: number;
-  /** Quedaron para la proxima pasada porque se alcanzo el limite. */
-  pendientes: boolean;
+/** What one sweep pass did. It is returned so it can be measured: a
+ *  sweep that reports nothing is indistinguishable from one that does not
+ *  run. */
+export interface SweepReport {
+  claimed: number;
+  completed: number;
+  compensated: number;
+  /** These need a person. The sweep does NOT retry them. */
+  stuck: number;
+  /** Left for the next pass because the limit was reached. */
+  pending: boolean;
 }
 
-/** La ruta que golpea el programador para correr una pasada del
- *  barrido. `axon infra` la despliega en los cuatro targets, asi que el
- *  arranque tiene que servirla llamando a `barrerCompra`: un programador
- *  apuntando a un 404 se aplica sin error y no barre nada.
+/** The route the scheduler hits to run one sweep pass. `axon infra`
+ *  deploys it on all four targets, so startup has to serve it by calling
+ *  `sweepCompra`: a scheduler pointed at a 404 applies without an error and
+ *  sweeps nothing.
  *
- *  NO es un metodo declarado, asi que no sale por el gateway. Dispara
- *  compensaciones: no puede ser publica. */
-export const rutaBarridoCompra = "POST /internal/saga/compra/barrer" as const;
+ *  It is NOT a declared method, so it does not go out through the
+ *  gateway. It triggers compensations: it cannot be public. */
+export const sweepRouteCompra = "POST /internal/saga/compra/sweep" as const;
 
-/** Los pasos declarados en el manifiesto. Generado: no editar. */
-export const compraPasos = [
-  { paso: 1, hacer: "payments.capturePayment", deshacer: "payments.refundPayment" },
-  // el ultimo paso no lleva compensacion: si falla, no hay nada suyo que deshacer
-  { paso: 2, hacer: "payments.payoutMerchant", deshacer: null },
+/** The steps declared in the manifest. Generated: do not edit. */
+export const compraSteps = [
+  { step: 1, run: "payments.capturePayment", undo: "payments.refundPayment" },
+  // the last step carries no compensation: if it fails, there is
+  // nothing of its own to undo
+  { step: 2, run: "payments.payoutMerchant", undo: null },
 ] as const;
 
-/** Lo que devolvio cada paso, guardado en el diario. Es lo que hace
- *  posible compensar despues de un reinicio: deshacer un paso suele
- *  necesitar el id que ese paso devolvio, y una variable en memoria no
- *  sobrevive al proceso que la tenia. */
-export interface CompraSalidas {
-  paso1?: PaymentsCapturePaymentOut;
-  paso2?: PaymentsPayoutMerchantOut;
+/** What each step returned, stored in the journal. It is what makes
+ *  compensating possible after a restart: undoing a step usually needs
+ *  the id that step returned, and a variable in memory does not survive
+ *  the process that held it. */
+export interface CompraOutputs {
+  step1?: PaymentsCapturePaymentOut;
+  step2?: PaymentsPayoutMerchantOut;
 }
 
-/** Un metodo por paso y uno por compensacion. Los implementa quien
- *  conoce los datos: el coordinador sabe el orden, no el contenido. */
-export interface CompraAcciones {
-  /** paso 1 · payments.capturePayment */
-  paso1CapturePayment(e: Envelope<unknown>, previas: CompraSalidas): Promise<PaymentsCapturePaymentOut>;
-  /** deshace el paso 1 · payments.refundPayment · recibe lo que devolvieron los pasos
-   *  anteriores, y tiene que tolerar que no haya nada que deshacer */
-  deshacer1RefundPayment(e: Envelope<unknown>, previas: CompraSalidas): Promise<void>;
-  /** paso 2 · payments.payoutMerchant */
-  paso2PayoutMerchant(e: Envelope<unknown>, previas: CompraSalidas): Promise<PaymentsPayoutMerchantOut>;
+/** One method per step and one per compensation. They are implemented
+ *  by whoever knows the data: the coordinator knows the order, not the
+ *  contents. */
+export interface CompraActions {
+  /** step 1 · payments.capturePayment */
+  step1CapturePayment(e: Envelope<unknown>, prior: CompraOutputs): Promise<PaymentsCapturePaymentOut>;
+  /** undoes step 1 · payments.refundPayment · receives what the earlier steps returned,
+   *  and has to tolerate there being nothing to undo */
+  undo1RefundPayment(e: Envelope<unknown>, prior: CompraOutputs): Promise<void>;
+  /** step 2 · payments.payoutMerchant */
+  step2PayoutMerchant(e: Envelope<unknown>, prior: CompraOutputs): Promise<PaymentsPayoutMerchantOut>;
 }
 
-/** Corre la saga `compra`.
+/** Runs the `compra` saga.
  *
- *  Hacia adelante hasta que un paso falla o se agota el presupuesto; de
- *  ahi en orden INVERSO deshaciendo solo lo que se intento. El orden
- *  inverso no es estetica: compensar hacia adelante deshace un paso
- *  cuyo efecto otro paso posterior ya uso.
+ *  Forward until a step fails or the budget runs out; from there in
+ *  REVERSE order, undoing only what was attempted. Reverse order is not
+ *  aesthetics: compensating forward undoes a step whose effect a later
+ *  step already used.
  *
- *  Si `id` ya tiene diario, retoma: el paso que quedo en `intentando`
- *  se compensa, porque no se sabe si ocurrio. */
-export async function correrCompra(
+ *  If `id` already has a journal, it resumes: the step left at
+ *  `attempting` gets compensated, because there is no telling whether it
+ *  happened. */
+export async function runCompra(
   id: string,
-  acciones: CompraAcciones,
-  diario: SagaDiario,
+  actions: CompraActions,
+  journal: SagaJournal,
   e: Envelope<unknown>,
-): Promise<{ estado: SagaEstado; hasta: number; error?: unknown }> {
+): Promise<{ status: SagaStatus; upTo: number; error?: unknown }> {
   const total = 2;
-  // presupuesto declarado en el manifiesto; `axon verify` ya comprobo
-  // que cubre la suma de los pasos y sus compensaciones
-  const limite = Date.now() + 60000;
-  const previo = await diario.leer(id);
-  if (!previo) await diario.abrir(id, "compra", e);
-  // Rehidratado del diario, no de una variable: al retomar, esto es lo
-  // unico que queda de lo que hicieron los pasos anteriores.
+  // The budget declared in the manifest; `axon verify` already checked
+  // that it covers the sum of the steps and their compensations.
+  const deadline = Date.now() + 60000;
+  const previous = await journal.read(id);
+  if (!previous) await journal.open(id, "compra", e);
+  // Rehydrated from the journal, not from a variable: on resume this is
+  // all that is left of what the earlier steps did.
   //
-  // El diario las guarda por NUMERO de paso y aca se nombran: un cast
-  // de una forma a la otra compila y deja todo en `undefined`, asi que
-  // la traduccion es explicita, campo por campo.
-  const guardadas = previo?.salidas ?? {};
-  const previas: CompraSalidas = {
-    paso1: guardadas[1] as PaymentsCapturePaymentOut | undefined,
-    paso2: guardadas[2] as PaymentsPayoutMerchantOut | undefined,
+  // The journal stores them by step NUMBER and here they are named: a
+  // cast from one shape to the other compiles and leaves everything
+  // `undefined`, so the translation is explicit, field by field.
+  const saved = previous?.outputs ?? {};
+  const prior: CompraOutputs = {
+    step1: saved[1] as PaymentsCapturePaymentOut | undefined,
+    step2: saved[2] as PaymentsPayoutMerchantOut | undefined,
   };
-  // un paso a medio intentar no se reintenta: se deshace
-  let hecho = previo ? (previo.estado === "hecho" ? previo.paso : previo.paso - 1) : 0;
-  const dudoso = previo?.estado === "intentando" ? previo.paso : 0;
-  // El paso que FALLO tambien se deshace: un timeout no dice que no
-  // paso nada del otro lado. Compensar solo hasta el ultimo exito
-  // deja ese efecto aplicado para siempre.
-  let intentado = dudoso;
-  let fallo: unknown = dudoso ? new Error("retomada con un paso en duda") : undefined;
-  if (!dudoso) {
-    for (let paso = hecho + 1; paso <= total; paso++) {
-      if (Date.now() > limite) {
-        fallo = new Error(`compra: presupuesto agotado antes del paso ${paso}`);
+  // a half-attempted step is not retried: it is undone
+  let done = previous ? (previous.status === "done" ? previous.step : previous.step - 1) : 0;
+  const doubtful = previous?.status === "attempting" ? previous.step : 0;
+  // The step that FAILED gets undone too: a timeout does not say that
+  // nothing happened on the other side. Compensating only up to the last
+  // success leaves that effect applied forever.
+  let attempted = doubtful;
+  let failure: unknown = doubtful ? new Error("resumed with a step in doubt") : undefined;
+  if (!doubtful) {
+    for (let step = done + 1; step <= total; step++) {
+      if (Date.now() > deadline) {
+        failure = new Error(`compra: budget exhausted before step ${step}`);
         break;
       }
-      intentado = paso;
+      attempted = step;
       try {
-        await pasoCompra(paso, acciones, diario, e, id, previas);
-        hecho = paso;
+        await runStepCompra(step, actions, journal, e, id, prior);
+        done = step;
       } catch (err) {
-        fallo = err;
+        failure = err;
         break;
       }
     }
   }
-  if (!fallo) {
-    await diario.cerrar(id, "completada");
-    return { estado: "completada", hasta: total };
+  if (!failure) {
+    await journal.close(id, "completed");
+    return { status: "completed", upTo: total };
   }
-  // de vuelta: todo lo que se INTENTO, en orden inverso
-  for (let paso = intentado; paso >= 1; paso--) {
+  // back again: everything that was ATTEMPTED, in reverse order
+  for (let step = attempted; step >= 1; step--) {
     try {
-      await deshacerCompra(paso, acciones, e, previas);
-      await diario.marcar(id, paso, "deshecho");
+      await undoStepCompra(step, actions, e, prior);
+      await journal.mark(id, step, "undone");
     } catch (err) {
-      await diario.cerrar(id, "atascada");
-      throw new SagaAtascada("compra", paso, err);
+      await journal.close(id, "stuck");
+      throw new SagaStuck("compra", step, err);
     }
   }
-  await diario.cerrar(id, "compensada");
-  return { estado: "compensada", hasta: hecho, error: fallo };
+  await journal.close(id, "compensated");
+  return { status: "compensated", upTo: done, error: failure };
 }
 
-async function pasoCompra(
-  paso: number,
-  acciones: CompraAcciones,
-  diario: SagaDiario,
+async function runStepCompra(
+  step: number,
+  actions: CompraActions,
+  journal: SagaJournal,
   e: Envelope<unknown>,
   id: string,
-  previas: CompraSalidas,
+  prior: CompraOutputs,
 ): Promise<void> {
-  switch (paso) {
+  switch (step) {
       case 1:
-        await diario.marcar(id, 1, "intentando");
-        previas.paso1 = await acciones.paso1CapturePayment(e, previas);
-        // la salida se guarda CON el `hecho`: en dos escrituras, un
-        // corte entre las dos deja el paso hecho y su resultado perdido
-        await diario.marcar(id, 1, "hecho", previas.paso1);
+        await journal.mark(id, 1, "attempting");
+        prior.step1 = await actions.step1CapturePayment(e, prior);
+        // the output is stored WITH the `done`: in two writes, a crash
+        // between them leaves the step done and its result lost
+        await journal.mark(id, 1, "done", prior.step1);
         break;
       case 2:
-        await diario.marcar(id, 2, "intentando");
-        previas.paso2 = await acciones.paso2PayoutMerchant(e, previas);
-        // la salida se guarda CON el `hecho`: en dos escrituras, un
-        // corte entre las dos deja el paso hecho y su resultado perdido
-        await diario.marcar(id, 2, "hecho", previas.paso2);
+        await journal.mark(id, 2, "attempting");
+        prior.step2 = await actions.step2PayoutMerchant(e, prior);
+        // the output is stored WITH the `done`: in two writes, a crash
+        // between them leaves the step done and its result lost
+        await journal.mark(id, 2, "done", prior.step2);
         break;
     default:
-      throw new Error(`compra: paso ${paso} no declarado en el manifiesto`);
+      throw new Error(`compra: step ${step} is not declared in the manifest`);
   }
 }
 
-async function deshacerCompra(paso: number, acciones: CompraAcciones, e: Envelope<unknown>, previas: CompraSalidas): Promise<void> {
-  switch (paso) {
+async function undoStepCompra(step: number, actions: CompraActions, e: Envelope<unknown>, prior: CompraOutputs): Promise<void> {
+  switch (step) {
       case 1:
-        await acciones.deshacer1RefundPayment(e, previas);
+        await actions.undo1RefundPayment(e, prior);
         break;
       case 2:
-        break; // sin compensacion declarada: es el ultimo paso
+        break; // no compensation declared: this is the last step
     default:
-      throw new Error(`compra: paso ${paso} no declarado en el manifiesto`);
+      throw new Error(`compra: step ${step} is not declared in the manifest`);
   }
 }
 
-/** Una pasada del barrido: retoma las sagas `compra` que no avanzan.
+/** One sweep pass: resumes the `compra` sagas that are not moving.
  *
- *  Solo toca las que llevan mas de su PRESUPUESTO sin moverse (60000ms).
- *  Ese umbral no es una heuristica: `axon verify` ya comprobo que el
- *  presupuesto cubre la suma de los pasos y sus compensaciones, asi que
- *  una saga mas vieja que eso no esta en camino, esta colgada. Barrer
- *  antes seria correr un segundo coordinador sobre una saga viva.
+ *  It only touches those idle for longer than their own BUDGET
+ *  (60000ms). That threshold is not a heuristic: `axon verify` already
+ *  checked that the budget covers the sum of the steps and their
+ *  compensations, so a saga older than that is not on its way — it is
+ *  stranded. Sweeping sooner would mean running a second coordinator over
+ *  a live saga.
  *
- *  Una que quedo `atascada` NO se reintenta: se cuenta y se deja. Una
- *  compensacion que ya fallo necesita una persona, y reintentarla en
- *  silencio esconde justo eso. */
-export async function barrerCompra(
-  acciones: CompraAcciones,
-  diario: SagaDiario,
-  limite = 50,
-): Promise<SagaBarrido> {
-  const antesDe = new Date(Date.now() - 60000);
-  const colgadas = await diario.reclamar("compra", antesDe, limite);
-  const r: SagaBarrido = {
-    reclamadas: colgadas.length,
-    completadas: 0,
-    compensadas: 0,
-    atascadas: 0,
-    // si se lleno el limite hay mas esperando, y decirlo es la
-    // diferencia entre un barrido que va al dia y uno que no alcanza
-    pendientes: colgadas.length >= limite,
+ *  One left `stuck` is NOT retried: it is counted and left alone. A
+ *  compensation that already failed needs a person, and retrying it
+ *  quietly hides exactly that. */
+export async function sweepCompra(
+  actions: CompraActions,
+  journal: SagaJournal,
+  limit = 50,
+): Promise<SweepReport> {
+  const olderThan = new Date(Date.now() - 60000);
+  const stranded = await journal.claim("compra", olderThan, limit);
+  const r: SweepReport = {
+    claimed: stranded.length,
+    completed: 0,
+    compensated: 0,
+    stuck: 0,
+    // If the limit filled up there are more waiting, and saying so is
+    // the difference between a sweep that keeps up and one that does not.
+    pending: stranded.length >= limit,
   };
-  for (const { id, datos } of colgadas) {
+  for (const { id, data } of stranded) {
     try {
-      const salida = await correrCompra(id, acciones, diario, datos);
-      if (salida.estado === "completada") r.completadas++;
-      else r.compensadas++;
+      const out = await runCompra(id, actions, journal, data);
+      if (out.status === "completed") r.completed++;
+      else r.compensated++;
     } catch (err) {
-      // una saga atascada no aborta la pasada: las demas siguen
-      // colgadas y este es el unico que las va a mirar
-      if (err instanceof SagaAtascada) r.atascadas++;
+      // A stuck saga does not abort the pass: the others are still
+      // stranded and this is the only thing that will look at them.
+      if (err instanceof SagaStuck) r.stuck++;
       else throw err;
     }
   }
   return r;
 }
 
-/** Arranca el barrido periodico y devuelve como pararlo.
+/** Starts the periodic sweep and returns how to stop it.
  *
- *  El intervalo sale del presupuesto declarado: nada se vuelve elegible
- *  antes, asi que barrer mas seguido es trabajo sin resultado. Es seguro
- *  con varias instancias porque `reclamar` reclama.
+ *  The interval comes from the declared budget: nothing becomes eligible
+ *  sooner, so sweeping more often is work without a result. It is safe
+ *  with several instances because `claim` claims.
  *
- *  `alTerminar` recibe cada pasada. Conectalo a las metricas: un barrido
- *  que no reporta es indistinguible de uno que no corre, y este es el
- *  unico lugar desde donde se ve que una saga quedo atascada. */
-export function arrancarBarridoCompra(
-  acciones: CompraAcciones,
-  diario: SagaDiario,
-  alTerminar: (r: SagaBarrido) => void,
-  intervaloMs = 60000,
+ *  `onPass` receives every pass. Wire it to your metrics: a sweep that
+ *  reports nothing is indistinguishable from one that does not run, and
+ *  this is the only place from which a stuck saga becomes visible. */
+export function startSweepCompra(
+  actions: CompraActions,
+  journal: SagaJournal,
+  onPass: (r: SweepReport) => void,
+  intervalMs = 60000,
 ): () => void {
-  let corriendo = false;
+  let running = false;
   const t = setInterval(async () => {
-    // sin esto, una pasada lenta se solapa con la siguiente en el
-    // mismo proceso y las dos reclaman
-    if (corriendo) return;
-    corriendo = true;
+    // Without this, a slow pass overlaps the next one in the same
+    // process and both of them claim.
+    if (running) return;
+    running = true;
     try {
-      alTerminar(await barrerCompra(acciones, diario));
+      onPass(await sweepCompra(actions, journal));
     } finally {
-      corriendo = false;
+      running = false;
     }
-  }, intervaloMs);
-  // que un barrido de fondo no mantenga el proceso vivo al apagarlo
+  }, intervalMs);
+  // a background sweep should not keep the process alive on shutdown
   t.unref?.();
   return () => clearInterval(t);
 }

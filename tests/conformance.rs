@@ -2956,45 +2956,45 @@ fn la_saga_generada_compensa_al_reves() {
         destino.join("axon.saga.test.ts"),
         r#"import { test } from "node:test";
 import assert from "node:assert/strict";
-import { correrCheckout, barrerCheckout, newEnvelope, checkoutPasos, SagaAtascada,
-         type CheckoutAcciones, type CheckoutSalidas, type Envelope,
-         type SagaDiario, type SagaEstado } from "./axon.saga.contratos.ts";
+import { runCheckout, sweepCheckout, newEnvelope, checkoutSteps, SagaStuck,
+         type CheckoutActions, type CheckoutOutputs, type Envelope,
+         type SagaJournal, type SagaStatus } from "./axon.saga.contratos.ts";
 
-/** Un diario en memoria, con el mismo contrato que el de Postgres. */
-class Diario implements SagaDiario {
-  marcas: string[] = [];
-  final: SagaEstado | null = null;
-  filas = new Map<string, { paso: number; estado: string; datos: any; actualizado: number; salidas?: Record<number, unknown> }>();
-  async abrir(id: string, saga: string, e: Envelope<unknown>) {
-    this.marcas.push(`abrir ${saga}`);
-    this.filas.set(id, { paso: 0, estado: "abierta", datos: e, actualizado: Date.now() });
+/** An in-memory journal, with the same contract as the Postgres one. */
+class Journal implements SagaJournal {
+  marks: string[] = [];
+  final: SagaStatus | null = null;
+  rows = new Map<string, { step: number; status: string; data: any; updatedAt: number; outputs?: Record<number, unknown> }>();
+  async open(id: string, saga: string, e: Envelope<unknown>) {
+    this.marks.push(`open ${saga}`);
+    this.rows.set(id, { step: 0, status: "open", data: e, updatedAt: Date.now() });
   }
-  async marcar(id: string, paso: number, estado: "intentando" | "hecho" | "deshecho", salida?: unknown) {
-    this.marcas.push(`${paso}:${estado}`);
-    const f = this.filas.get(id)!;
-    const salidas = salida === undefined ? f.salidas : { ...f.salidas, [paso]: salida };
-    this.filas.set(id, { ...f, paso, estado, salidas, actualizado: Date.now() });
+  async mark(id: string, step: number, status: "attempting" | "done" | "undone", output?: unknown) {
+    this.marks.push(`${step}:${status}`);
+    const f = this.rows.get(id)!;
+    const outputs = output === undefined ? f.outputs : { ...f.outputs, [step]: output };
+    this.rows.set(id, { ...f, step, status, outputs, updatedAt: Date.now() });
   }
-  async cerrar(id: string, estado: SagaEstado) {
-    this.final = estado;
-    const f = this.filas.get(id);
-    if (f) this.filas.set(id, { ...f, estado, actualizado: Date.now() });
+  async close(id: string, status: SagaStatus) {
+    this.final = status;
+    const f = this.rows.get(id);
+    if (f) this.rows.set(id, { ...f, status, updatedAt: Date.now() });
   }
-  async leer(id: string) {
-    const f = this.filas.get(id);
-    return f && f.estado !== "abierta"
-      ? { paso: f.paso, estado: f.estado, salidas: f.salidas ?? {} }
+  async read(id: string) {
+    const f = this.rows.get(id);
+    return f && f.status !== "open"
+      ? { step: f.step, status: f.status, outputs: f.outputs ?? {} }
       : null;
   }
-  /** Reclama tocando `actualizado`, igual que el UPDATE ... RETURNING. */
-  async reclamar(saga: string, antesDe: Date, limite: number) {
-    const out: { id: string; datos: Envelope<unknown> }[] = [];
-    for (const [id, f] of this.filas) {
-      if (out.length >= limite) break;
-      if (!["intentando", "hecho"].includes(f.estado)) continue;
-      if (f.actualizado >= antesDe.getTime()) continue;
-      this.filas.set(id, { ...f, actualizado: Date.now() });
-      out.push({ id, datos: f.datos });
+  /** Claims by touching `updatedAt`, exactly as the UPDATE ... RETURNING does. */
+  async claim(saga: string, olderThan: Date, limit: number) {
+    const out: { id: string; data: Envelope<unknown> }[] = [];
+    for (const [id, f] of this.rows) {
+      if (out.length >= limit) break;
+      if (!["attempting", "done"].includes(f.status)) continue;
+      if (f.updatedAt >= olderThan.getTime()) continue;
+      this.rows.set(id, { ...f, updatedAt: Date.now() });
+      out.push({ id, data: f.data });
     }
     return out;
   }
@@ -3003,19 +3003,19 @@ class Diario implements SagaDiario {
 /** Acciones de mentira: registran el orden y fallan cuando se les dice. */
 function acciones(rompe: string[]) {
   const hechas: string[] = [];
-  const a: CheckoutAcciones = {
-    async paso1Cobrar() {
+  const a: CheckoutActions = {
+    async step1Cobrar() {
       if (rompe.includes("cobrar")) throw new Error("cobrar");
       hechas.push("cobrar");
       return { ok: "cobrado" };
     },
-    async deshacer1Reembolsar(_e: Envelope<unknown>, previas: CheckoutSalidas) {
+    async undo1Reembolsar(_e: Envelope<unknown>, prior: CheckoutOutputs) {
       if (rompe.includes("reembolsar")) throw new Error("reembolsar");
       // el sufijo es lo que prueba que la compensacion recibio la salida del
       // paso 1 —y tras un retome, que salio del diario y no de una variable
-      hechas.push(`reembolsar:${previas.paso1?.ok ?? "sin-cobro"}`);
+      hechas.push(`reembolsar:${prior.step1?.ok ?? "sin-cobro"}`);
     },
-    async paso2PagarProveedor() {
+    async step2PagarProveedor() {
       if (rompe.includes("pagar")) throw new Error("pagar");
       hechas.push("pagar");
       return { ok: "pagado" };
@@ -3026,129 +3026,129 @@ function acciones(rompe: string[]) {
 
 test("el camino feliz no compensa nada", async () => {
   const { a, hechas } = acciones([]);
-  const d = new Diario();
-  const r = await correrCheckout("s1", a, d, newEnvelope("x@v1", "prueba", {}));
-  assert.equal(r.estado, "completada");
+  const d = new Journal();
+  const r = await runCheckout("s1", a, d, newEnvelope("x@v1", "prueba", {}));
+  assert.equal(r.status, "completed");
   assert.deepEqual(hechas, ["cobrar", "pagar"]);
-  assert.equal(d.final, "completada");
+  assert.equal(d.final, "completed");
 });
 
 test("si el paso 2 falla, el paso 1 se deshace", async () => {
   const { a, hechas } = acciones(["pagar"]);
-  const d = new Diario();
-  const r = await correrCheckout("s2", a, d, newEnvelope("x@v1", "prueba", {}));
-  assert.equal(r.estado, "compensada");
+  const d = new Journal();
+  const r = await runCheckout("s2", a, d, newEnvelope("x@v1", "prueba", {}));
+  assert.equal(r.status, "compensated");
   // el orden importa: primero se hizo cobrar, y lo ultimo que corrio fue su inversa
   // el sufijo prueba que la compensacion RECIBIO lo que devolvio el paso 1
   assert.deepEqual(hechas, ["cobrar", "reembolsar:cobrado"]);
-  assert.equal(d.final, "compensada");
+  assert.equal(d.final, "compensated");
 });
 
 test("si el paso 1 falla, no hay nada hecho que deshacer", async () => {
   const { a, hechas } = acciones(["cobrar"]);
-  const d = new Diario();
-  const r = await correrCheckout("s3", a, d, newEnvelope("x@v1", "prueba", {}));
-  assert.equal(r.estado, "compensada");
+  const d = new Journal();
+  const r = await runCheckout("s3", a, d, newEnvelope("x@v1", "prueba", {}));
+  assert.equal(r.status, "compensated");
   // se intento, asi que se deshace igual: la compensacion tolera que no haya nada
   assert.deepEqual(hechas, ["reembolsar:sin-cobro"]);
 });
 
 test("una compensacion que falla deja la saga atascada, y se nota", async () => {
   const { a } = acciones(["pagar", "reembolsar"]);
-  const d = new Diario();
+  const d = new Journal();
   await assert.rejects(
-    () => correrCheckout("s4", a, d, newEnvelope("x@v1", "prueba", {})),
-    (err: unknown) => err instanceof SagaAtascada && err.paso === 1,
+    () => runCheckout("s4", a, d, newEnvelope("x@v1", "prueba", {})),
+    (err: unknown) => err instanceof SagaStuck && err.step === 1,
   );
-  assert.equal(d.final, "atascada");
+  assert.equal(d.final, "stuck");
 });
 
 test("el barrido retoma una saga colgada y la compensa", async () => {
-  const d = new Diario();
+  const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", { orderId: "o-1" });
   // una saga que quedo con el paso 1 en `intentando`: el proceso que la tenia
   // en vuelo se murio justo despues de llamar y antes de anotar el resultado
-  d.filas.set("colgada", { paso: 1, estado: "intentando", datos: e, actualizado: 0 });
+  d.rows.set("colgada", { step: 1, status: "attempting", data: e, updatedAt: 0 });
   const { a, hechas } = acciones([]);
-  const r = await barrerCheckout(a, d);
-  assert.equal(r.reclamadas, 1);
-  assert.equal(r.compensadas, 1);
-  assert.equal(r.completadas, 0);
-  assert.equal(r.pendientes, false);
+  const r = await sweepCheckout(a, d);
+  assert.equal(r.claimed, 1);
+  assert.equal(r.compensated, 1);
+  assert.equal(r.completed, 0);
+  assert.equal(r.pending, false);
   // un paso en duda no se reintenta: se deshace
   assert.deepEqual(hechas, ["reembolsar:sin-cobro"]);
 });
 
 test("al retomar, la compensacion recibe lo que el diario guardo", async () => {
-  const d = new Diario();
+  const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", {});
   // el paso 1 quedo HECHO en otro proceso, y su salida esta en el diario
-  d.filas.set("colgada", {
-    paso: 1, estado: "hecho", datos: e, actualizado: 0,
-    salidas: { 1: { ok: "cobrado" } },
+  d.rows.set("colgada", {
+    step: 1, status: "done", data: e, updatedAt: 0,
+    outputs: { 1: { ok: "cobrado" } },
   });
   // el paso 2 falla, asi que hay que deshacer el 1 con lo que el 1 devolvio
   const { a, hechas } = acciones(["pagar"]);
-  const r = await barrerCheckout(a, d);
-  assert.equal(r.compensadas, 1);
+  const r = await sweepCheckout(a, d);
+  assert.equal(r.compensated, 1);
   // "sin-cobro" aqui querria decir que el cast del diario dejo todo undefined
   assert.deepEqual(hechas, ["reembolsar:cobrado"]);
 });
 
 test("el barrido no toca una saga que va en camino", async () => {
-  const d = new Diario();
+  const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", {});
-  d.filas.set("viva", { paso: 1, estado: "intentando", datos: e, actualizado: Date.now() });
+  d.rows.set("viva", { step: 1, status: "attempting", data: e, updatedAt: Date.now() });
   const { a, hechas } = acciones([]);
-  const r = await barrerCheckout(a, d);
+  const r = await sweepCheckout(a, d);
   // barrer una saga viva seria un segundo coordinador sobre los mismos pasos
-  assert.equal(r.reclamadas, 0);
+  assert.equal(r.claimed, 0);
   assert.deepEqual(hechas, []);
 });
 
 test("reclamar reclama: el segundo barredor no ve la misma saga", async () => {
-  const d = new Diario();
+  const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", {});
-  d.filas.set("colgada", { paso: 1, estado: "hecho", datos: e, actualizado: 0 });
+  d.rows.set("colgada", { step: 1, status: "done", data: e, updatedAt: 0 });
   const antes = new Date(Date.now() - 20000);
-  const primero = await d.reclamar("checkout", antes, 50);
-  const segundo = await d.reclamar("checkout", antes, 50);
+  const primero = await d.claim("checkout", antes, 50);
+  const segundo = await d.claim("checkout", antes, 50);
   assert.equal(primero.length, 1);
   assert.equal(segundo.length, 0);
 });
 
 test("una saga atascada se cuenta y no se reintenta", async () => {
-  const d = new Diario();
+  const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", {});
-  d.filas.set("colgada", { paso: 1, estado: "intentando", datos: e, actualizado: 0 });
+  d.rows.set("colgada", { step: 1, status: "attempting", data: e, updatedAt: 0 });
   const { a, hechas } = acciones(["reembolsar"]);
-  const r = await barrerCheckout(a, d);
+  const r = await sweepCheckout(a, d);
   // la pasada no aborta: cuenta la atascada y sigue
-  assert.equal(r.atascadas, 1);
-  assert.equal(d.final, "atascada");
+  assert.equal(r.stuck, 1);
+  assert.equal(d.final, "stuck");
   assert.deepEqual(hechas, []);
   // y ya cerrada como atascada, el barrido siguiente no la vuelve a tomar
-  const otra = await barrerCheckout(a, d);
-  assert.equal(otra.reclamadas, 0);
+  const other = await sweepCheckout(a, d);
+  assert.equal(other.claimed, 0);
 });
 
 test("si se llena el limite, el barrido lo dice", async () => {
-  const d = new Diario();
+  const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", {});
   for (const id of ["a", "b", "c"]) {
-    d.filas.set(id, { paso: 1, estado: "intentando", datos: e, actualizado: 0 });
+    d.rows.set(id, { step: 1, status: "attempting", data: e, updatedAt: 0 });
   }
   const { a } = acciones([]);
-  const r = await barrerCheckout(a, d, 2);
-  assert.equal(r.reclamadas, 2);
+  const r = await sweepCheckout(a, d, 2);
+  assert.equal(r.claimed, 2);
   // un tope silencioso se lee como "no habia mas"
-  assert.equal(r.pendientes, true);
+  assert.equal(r.pending, true);
 });
 
 test("el ultimo paso no lleva compensacion, y el resto si", () => {
-  assert.equal(checkoutPasos.length, 2);
-  assert.equal(checkoutPasos[0].deshacer, "banco.reembolsar");
-  assert.equal(checkoutPasos[1].deshacer, null);
+  assert.equal(checkoutSteps.length, 2);
+  assert.equal(checkoutSteps[0].undo, "banco.reembolsar");
+  assert.equal(checkoutSteps[1].undo, null);
 });
 "#,
     )

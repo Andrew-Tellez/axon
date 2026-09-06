@@ -1196,376 +1196,380 @@ pub fn machines_ts(m: &Manifest) -> String {
     o.join("\n")
 }
 
-/// El coordinador de cada saga.
+/// The coordinator for each saga.
 ///
-/// Lo que se genera es el CAMINO: el orden de los pasos, el diario, la
-/// compensacion en orden inverso y el presupuesto de tiempo. Lo que no se
-/// genera son las entradas de cada llamada, porque son datos de negocio: eso
-/// es la interfaz que se implementa. Asi que un paso sin implementar no
-/// compila, y un paso implementado no puede correr fuera de orden.
+/// What gets generated is the PATH: the order of the steps, the journal, the
+/// compensation in reverse order and the time budget. What does not get
+/// generated is the input to each call, because that is business data — that is
+/// the interface someone implements. So a step left unimplemented does not
+/// compile, and an implemented step cannot run out of order.
 pub fn sagas_ts(m: &Manifest) -> String {
     let mut o = vec![
-        "\n/** El diario de una saga: donde vive el avance. Sin el, un reinicio a\n \
-         *  mitad de camino deja los pasos ya hechos aplicados y sin registro de\n \
-         *  cuales fueron: no se puede terminar ni compensar.\n \
+        "\n/** A saga's journal: where its progress lives. Without it, a restart\n \
+         *  halfway through leaves the steps already taken applied and with no\n \
+         *  record of which ones: the saga can neither finish nor compensate.\n \
          *\n \
-         *  `intentando` se escribe ANTES de la llamada y `hecho` DESPUES. Un paso\n \
-         *  que quedo en `intentando` puede haber ocurrido o no, asi que al retomar\n \
-         *  se COMPENSA, no se reintenta: por eso toda compensacion tiene que\n \
-         *  tolerar que no haya nada que deshacer.\n \
+         *  `attempting` is written BEFORE the call and `done` AFTER. A step left\n \
+         *  at `attempting` may or may not have happened, so on resume it gets\n \
+         *  COMPENSATED, not retried — which is why every compensation has to\n \
+         *  tolerate there being nothing to undo.\n \
          *\n \
-         *  Guarda tambien el envelope que la arranco. Retomar sin el es imposible:\n \
-         *  las acciones necesitan los datos de la llamada, y el proceso que los\n \
-         *  tenia en memoria es justo el que se murio. */\n\
-         export interface SagaDiario {\n  \
-           abrir(id: string, saga: string, e: Envelope<unknown>): Promise<void>;\n  \
-           marcar(id: string, paso: number, estado: \"intentando\" | \"hecho\" | \"deshecho\", salida?: unknown): Promise<void>;\n  \
-           cerrar(id: string, estado: SagaEstado): Promise<void>;\n  \
-           /** Hasta donde llego, y lo que devolvio cada paso. `null` si es nueva.\n   \
+         *  It also stores the envelope that started the saga. Resuming without it\n \
+         *  is impossible: the actions need the call's data, and the process that\n \
+         *  held it in memory is precisely the one that died. */\n\
+         export interface SagaJournal {\n  \
+           open(id: string, saga: string, e: Envelope<unknown>): Promise<void>;\n  \
+           mark(id: string, step: number, status: \"attempting\" | \"done\" | \"undone\", output?: unknown): Promise<void>;\n  \
+           close(id: string, status: SagaStatus): Promise<void>;\n  \
+           /** How far it got, and what each step returned. `null` if it is new.\n   \
             *\n   \
-            *  Las salidas hacen falta para COMPENSAR: deshacer un paso suele\n   \
-            *  necesitar el id que ESE paso devolvio, y tras un reinicio ese valor\n   \
-            *  no esta en ninguna variable —el proceso que lo tenia es justo el\n   \
-            *  que se murio—. Guardarlo en el diario es lo que mantiene la\n   \
-            *  compensacion posible. */\n  \
-           leer(id: string): Promise<{ paso: number; estado: string; salidas: Record<number, unknown> } | null>;\n  \
-           /** Reclama hasta `limite` sagas abiertas que no avanzan desde `antesDe`,\n   \
-            *  y devuelve el envelope de cada una.\n   \
+            *  The outputs are needed to COMPENSATE: undoing a step usually needs\n   \
+            *  the id THAT step returned, and after a restart that value is in no\n   \
+            *  variable — the process that held it is the one that died. Storing it\n   \
+            *  in the journal is what keeps compensation possible. */\n  \
+           read(id: string): Promise<{ step: number; status: string; outputs: Record<number, unknown> } | null>;\n  \
+           /** Claims up to `limit` open sagas that have not moved since\n   \
+            *  `olderThan`, and returns each one's envelope.\n   \
             *\n   \
-            *  RECLAMA, no lista: dos instancias del servicio barren a la vez, y dos\n   \
-            *  coordinadores sobre la misma saga compensan los mismos pasos dos\n   \
-            *  veces. En Postgres el reclamo y el filtro son la misma sentencia:\n   \
+            *  It CLAIMS, it does not list: two instances of the service sweep at\n   \
+            *  the same time, and two coordinators on the same saga compensate the\n   \
+            *  same steps twice. In Postgres the claim and the filter are the same\n   \
+            *  statement:\n   \
             *\n   \
-            *    UPDATE saga_<nombre> SET actualizado = now()\n   \
-            *     WHERE estado IN ('intentando','hecho') AND actualizado < $1\n   \
-            *     RETURNING id, datos\n   \
+            *    UPDATE saga_<name> SET updated_at = now()\n   \
+            *     WHERE status IN ('attempting','done') AND updated_at < $1\n   \
+            *     RETURNING id, data\n   \
             *    LIMIT $2\n   \
             *\n   \
-            *  Tocar `actualizado` es el reclamo: el otro barredor ya no la ve. Y si\n   \
-            *  este proceso muere a mitad, vuelve a ser elegible en la siguiente\n   \
-            *  ventana sin que nadie la desbloquee a mano. */\n  \
-           reclamar(saga: string, antesDe: Date, limite: number): Promise<{ id: string; datos: Envelope<unknown> }[]>;\n\
+            *  Touching `updated_at` IS the claim: the other sweeper no longer sees\n   \
+            *  it. And if this process dies halfway, the saga becomes eligible again\n   \
+            *  in the next window with nobody unlocking it by hand. */\n  \
+           claim(saga: string, olderThan: Date, limit: number): Promise<{ id: string; data: Envelope<unknown> }[]>;\n\
          }\n\
          \n\
-         export type SagaEstado = \"completada\" | \"compensada\" | \"atascada\";\n\
+         export type SagaStatus = \"completed\" | \"compensated\" | \"stuck\";\n\
          \n\
-         /** Una compensacion que falla no tiene nada detras: la saga queda a\n \
-         *  medias y necesita una persona. Se lanza para que eso no pase\n \
-         *  desapercibido. */\n\
-         export class SagaAtascada extends Error {\n  \
+         /** A compensation that fails has nothing behind it: the saga is left\n \
+         *  half-done and needs a person. It is thrown so that does not go\n \
+         *  unnoticed. */\n\
+         export class SagaStuck extends Error {\n  \
            readonly saga: string;\n  \
-           readonly paso: number;\n  \
-           readonly causa: unknown;\n  \
-           constructor(saga: string, paso: number, causa: unknown) {\n    \
-             super(`${saga}: la compensacion del paso ${paso} fallo; la saga quedo a medias`);\n    \
+           readonly step: number;\n  \
+           readonly reason: unknown;\n  \
+           constructor(saga: string, step: number, reason: unknown) {\n    \
+             super(`${saga}: compensating step ${step} failed; the saga is half-done`);\n    \
              this.saga = saga;\n    \
-             this.paso = paso;\n    \
-             this.causa = causa;\n  \
+             this.step = step;\n    \
+             this.reason = reason;\n  \
            }\n\
          }\n\
          \n\
-         /** Lo que hizo una pasada del barrido. Se devuelve para que se pueda\n \
-         *  medir: un barrido que no reporta nada es indistinguible de uno que no\n \
-         *  corre. */\n\
-         export interface SagaBarrido {\n  \
-           reclamadas: number;\n  \
-           completadas: number;\n  \
-           compensadas: number;\n  \
-           /** Necesitan una persona. El barrido NO las reintenta. */\n  \
-           atascadas: number;\n  \
-           /** Quedaron para la proxima pasada porque se alcanzo el limite. */\n  \
-           pendientes: boolean;\n\
+         /** What one sweep pass did. It is returned so it can be measured: a\n \
+         *  sweep that reports nothing is indistinguishable from one that does not\n \
+         *  run. */\n\
+         export interface SweepReport {\n  \
+           claimed: number;\n  \
+           completed: number;\n  \
+           compensated: number;\n  \
+           /** These need a person. The sweep does NOT retry them. */\n  \
+           stuck: number;\n  \
+           /** Left for the next pass because the limit was reached. */\n  \
+           pending: boolean;\n\
          }\n"
             .to_string(),
     ];
-    for (nombre, sg) in &m.saga {
-        let p = pascal(nombre);
-        let c = camel(nombre);
-        let mut acciones = Vec::new();
-        let mut salidas = Vec::new();
-        let mut tabla = Vec::new();
-        for (i, paso) in sg.steps.iter().enumerate() {
+    for (name, sg) in &m.saga {
+        let p = pascal(name);
+        let c = camel(name);
+        let mut actions = Vec::new();
+        let mut outputs = Vec::new();
+        let mut table = Vec::new();
+        for (i, step) in sg.steps.iter().enumerate() {
             let n = i + 1;
-            let met = Paso::partes(&paso.hacer).map(|(_, x)| x).unwrap_or("?");
-            salidas.push(format!("  paso{n}?: {};", salida_de(m, &paso.hacer)));
-            acciones.push(format!(
-                "  /** paso {n} · {} */\n  paso{n}{}(e: Envelope<unknown>, previas: {p}Salidas): Promise<{s}>;",
-                paso.hacer,
+            let met = Paso::partes(&step.hacer).map(|(_, x)| x).unwrap_or("?");
+            outputs.push(format!("  step{n}?: {};", salida_de(m, &step.hacer)));
+            actions.push(format!(
+                "  /** step {n} · {} */\n  step{n}{}(e: Envelope<unknown>, prior: {p}Outputs): Promise<{s}>;",
+                step.hacer,
                 pascal(met),
                 p = p,
-                s = salida_de(m, &paso.hacer)
+                s = salida_de(m, &step.hacer)
             ));
-            match &paso.undo {
+            match &step.undo {
                 Some(u) => {
                     let umet = Paso::partes(u).map(|(_, x)| x).unwrap_or("?");
-                    acciones.push(format!(
-                        "  /** deshace el paso {n} · {u} · recibe lo que devolvieron los pasos\n   \
-                         *  anteriores, y tiene que tolerar que no haya nada que deshacer */\n  \
-                         deshacer{n}{}(e: Envelope<unknown>, previas: {p}Salidas): Promise<void>;",
+                    actions.push(format!(
+                        "  /** undoes step {n} · {u} · receives what the earlier steps returned,\n   \
+                         *  and has to tolerate there being nothing to undo */\n  \
+                         undo{n}{}(e: Envelope<unknown>, prior: {p}Outputs): Promise<void>;",
                         pascal(umet),
                         p = p
                     ));
-                    tabla.push(format!(
-                        "  {{ paso: {n}, hacer: \"{}\", deshacer: \"{u}\" }},",
-                        paso.hacer
+                    table.push(format!(
+                        "  {{ step: {n}, run: \"{}\", undo: \"{u}\" }},",
+                        step.hacer
                     ));
                 }
-                None => tabla.push(format!(
-                    "  // el ultimo paso no lleva compensacion: si falla, no hay nada suyo que deshacer\n  \
-                     {{ paso: {n}, hacer: \"{}\", deshacer: null }},",
-                    paso.hacer
+                None => table.push(format!(
+                    "  // the last step carries no compensation: if it fails, there is\n  \
+                     // nothing of its own to undo\n  \
+                     {{ step: {n}, run: \"{}\", undo: null }},",
+                    step.hacer
                 )),
             }
         }
         o.push(format!(
-            "/** La ruta que golpea el programador para correr una pasada del\n \
-             *  barrido. `axon infra` la despliega en los cuatro targets, asi que el\n \
-             *  arranque tiene que servirla llamando a `barrer{p}`: un programador\n \
-             *  apuntando a un 404 se aplica sin error y no barre nada.\n \
+            "/** The route the scheduler hits to run one sweep pass. `axon infra`\n \
+             *  deploys it on all four targets, so startup has to serve it by calling\n \
+             *  `sweep{p}`: a scheduler pointed at a 404 applies without an error and\n \
+             *  sweeps nothing.\n \
              *\n \
-             *  NO es un metodo declarado, asi que no sale por el gateway. Dispara\n \
-             *  compensaciones: no puede ser publica. */\n\
-             export const rutaBarrido{p} = \"POST /internal/saga/{nombre}/barrer\" as const;\n"
+             *  It is NOT a declared method, so it does not go out through the\n \
+             *  gateway. It triggers compensations: it cannot be public. */\n\
+             export const sweepRoute{p} = \"POST /internal/saga/{name}/sweep\" as const;\n"
         ));
         o.push(format!(
-            "/** Los pasos declarados en el manifiesto. Generado: no editar. */\n\
-             export const {c}Pasos = [\n{}\n] as const;\n",
-            tabla.join("\n")
+            "/** The steps declared in the manifest. Generated: do not edit. */\n\
+             export const {c}Steps = [\n{}\n] as const;\n",
+            table.join("\n")
         ));
         o.push(format!(
-            "/** Lo que devolvio cada paso, guardado en el diario. Es lo que hace\n \
-             *  posible compensar despues de un reinicio: deshacer un paso suele\n \
-             *  necesitar el id que ese paso devolvio, y una variable en memoria no\n \
-             *  sobrevive al proceso que la tenia. */\n\
-             export interface {p}Salidas {{\n{}\n}}\n",
-            salidas.join("\n")
+            "/** What each step returned, stored in the journal. It is what makes\n \
+             *  compensating possible after a restart: undoing a step usually needs\n \
+             *  the id that step returned, and a variable in memory does not survive\n \
+             *  the process that held it. */\n\
+             export interface {p}Outputs {{\n{}\n}}\n",
+            outputs.join("\n")
         ));
         o.push(format!(
-            "/** Un metodo por paso y uno por compensacion. Los implementa quien\n \
-             *  conoce los datos: el coordinador sabe el orden, no el contenido. */\n\
-             export interface {p}Acciones {{\n{}\n}}\n",
-            acciones.join("\n")
+            "/** One method per step and one per compensation. They are implemented\n \
+             *  by whoever knows the data: the coordinator knows the order, not the\n \
+             *  contents. */\n\
+             export interface {p}Actions {{\n{}\n}}\n",
+            actions.join("\n")
         ));
 
-        // el cuerpo: hacia adelante hasta que algo falla, y de vuelta
-        let mut adelante = Vec::new();
-        let mut atras = Vec::new();
-        let mut rehidrata = Vec::new();
-        for (i, paso) in sg.steps.iter().enumerate() {
+        // the body: forward until something fails, and back again
+        let mut forward = Vec::new();
+        let mut backward = Vec::new();
+        let mut rehydrate = Vec::new();
+        for (i, step) in sg.steps.iter().enumerate() {
             let n = i + 1;
-            let met = Paso::partes(&paso.hacer).map(|(_, x)| x).unwrap_or("?");
-            rehidrata.push(format!(
-                "    paso{n}: guardadas[{n}] as {} | undefined,",
-                salida_de(m, &paso.hacer)
+            let met = Paso::partes(&step.hacer).map(|(_, x)| x).unwrap_or("?");
+            rehydrate.push(format!(
+                "    step{n}: saved[{n}] as {} | undefined,",
+                salida_de(m, &step.hacer)
             ));
-            adelante.push(format!(
+            forward.push(format!(
                 "      case {n}:\n        \
-                   await diario.marcar(id, {n}, \"intentando\");\n        \
-                   previas.paso{n} = await acciones.paso{n}{}(e, previas);\n        \
-                   // la salida se guarda CON el `hecho`: en dos escrituras, un\n        \
-                   // corte entre las dos deja el paso hecho y su resultado perdido\n        \
-                   await diario.marcar(id, {n}, \"hecho\", previas.paso{n});\n        \
+                   await journal.mark(id, {n}, \"attempting\");\n        \
+                   prior.step{n} = await actions.step{n}{}(e, prior);\n        \
+                   // the output is stored WITH the `done`: in two writes, a crash\n        \
+                   // between them leaves the step done and its result lost\n        \
+                   await journal.mark(id, {n}, \"done\", prior.step{n});\n        \
                    break;",
                 pascal(met)
             ));
-            if let Some(u) = &paso.undo {
+            if let Some(u) = &step.undo {
                 let umet = Paso::partes(u).map(|(_, x)| x).unwrap_or("?");
-                atras.push(format!(
+                backward.push(format!(
                     "      case {n}:\n        \
-                       await acciones.deshacer{n}{}(e, previas);\n        \
+                       await actions.undo{n}{}(e, prior);\n        \
                        break;",
                     pascal(umet)
                 ));
             } else {
-                atras.push(format!(
+                backward.push(format!(
                     "      case {n}:\n        \
-                       break; // sin compensacion declarada: es el ultimo paso"
+                       break; // no compensation declared: this is the last step"
                 ));
             }
         }
-        let plazo = match sg.timeout_ms {
+        let budget = match sg.timeout_ms {
             Some(ms) => format!("{ms}"),
             None => "Number.POSITIVE_INFINITY".to_string(),
         };
         o.push(format!(
-            "/** Corre la saga `{nombre}`.\n \
+            "/** Runs the `{name}` saga.\n \
              *\n \
-             *  Hacia adelante hasta que un paso falla o se agota el presupuesto; de\n \
-             *  ahi en orden INVERSO deshaciendo solo lo que se intento. El orden\n \
-             *  inverso no es estetica: compensar hacia adelante deshace un paso\n \
-             *  cuyo efecto otro paso posterior ya uso.\n \
+             *  Forward until a step fails or the budget runs out; from there in\n \
+             *  REVERSE order, undoing only what was attempted. Reverse order is not\n \
+             *  aesthetics: compensating forward undoes a step whose effect a later\n \
+             *  step already used.\n \
              *\n \
-             *  Si `id` ya tiene diario, retoma: el paso que quedo en `intentando`\n \
-             *  se compensa, porque no se sabe si ocurrio. */\n\
-             export async function correr{p}(\n  \
+             *  If `id` already has a journal, it resumes: the step left at\n \
+             *  `attempting` gets compensated, because there is no telling whether it\n \
+             *  happened. */\n\
+             export async function run{p}(\n  \
                id: string,\n  \
-               acciones: {p}Acciones,\n  \
-               diario: SagaDiario,\n  \
+               actions: {p}Actions,\n  \
+               journal: SagaJournal,\n  \
                e: Envelope<unknown>,\n\
-             ): Promise<{{ estado: SagaEstado; hasta: number; error?: unknown }}> {{\n  \
+             ): Promise<{{ status: SagaStatus; upTo: number; error?: unknown }}> {{\n  \
                const total = {total};\n  \
-               // presupuesto declarado en el manifiesto; `axon verify` ya comprobo\n  \
-               // que cubre la suma de los pasos y sus compensaciones\n  \
-               const limite = Date.now() + {plazo};\n  \
-               const previo = await diario.leer(id);\n  \
-               if (!previo) await diario.abrir(id, \"{nombre}\", e);\n  \
-               // Rehidratado del diario, no de una variable: al retomar, esto es lo\n  \
-               // unico que queda de lo que hicieron los pasos anteriores.\n  \
+               // The budget declared in the manifest; `axon verify` already checked\n  \
+               // that it covers the sum of the steps and their compensations.\n  \
+               const deadline = Date.now() + {budget};\n  \
+               const previous = await journal.read(id);\n  \
+               if (!previous) await journal.open(id, \"{name}\", e);\n  \
+               // Rehydrated from the journal, not from a variable: on resume this is\n  \
+               // all that is left of what the earlier steps did.\n  \
                //\n  \
-               // El diario las guarda por NUMERO de paso y aca se nombran: un cast\n  \
-               // de una forma a la otra compila y deja todo en `undefined`, asi que\n  \
-               // la traduccion es explicita, campo por campo.\n  \
-               const guardadas = previo?.salidas ?? {{}};\n  \
-               const previas: {p}Salidas = {{\n{rehidrata}\n  \
+               // The journal stores them by step NUMBER and here they are named: a\n  \
+               // cast from one shape to the other compiles and leaves everything\n  \
+               // `undefined`, so the translation is explicit, field by field.\n  \
+               const saved = previous?.outputs ?? {{}};\n  \
+               const prior: {p}Outputs = {{\n{rehydrate}\n  \
                }};\n  \
-               // un paso a medio intentar no se reintenta: se deshace\n  \
-               let hecho = previo ? (previo.estado === \"hecho\" ? previo.paso : previo.paso - 1) : 0;\n  \
-               const dudoso = previo?.estado === \"intentando\" ? previo.paso : 0;\n  \
-               // El paso que FALLO tambien se deshace: un timeout no dice que no\n  \
-               // paso nada del otro lado. Compensar solo hasta el ultimo exito\n  \
-               // deja ese efecto aplicado para siempre.\n  \
-               let intentado = dudoso;\n  \
-               let fallo: unknown = dudoso ? new Error(\"retomada con un paso en duda\") : undefined;\n  \
-               if (!dudoso) {{\n    \
-                 for (let paso = hecho + 1; paso <= total; paso++) {{\n      \
-                   if (Date.now() > limite) {{\n        \
-                     fallo = new Error(`{nombre}: presupuesto agotado antes del paso ${{paso}}`);\n        \
+               // a half-attempted step is not retried: it is undone\n  \
+               let done = previous ? (previous.status === \"done\" ? previous.step : previous.step - 1) : 0;\n  \
+               const doubtful = previous?.status === \"attempting\" ? previous.step : 0;\n  \
+               // The step that FAILED gets undone too: a timeout does not say that\n  \
+               // nothing happened on the other side. Compensating only up to the last\n  \
+               // success leaves that effect applied forever.\n  \
+               let attempted = doubtful;\n  \
+               let failure: unknown = doubtful ? new Error(\"resumed with a step in doubt\") : undefined;\n  \
+               if (!doubtful) {{\n    \
+                 for (let step = done + 1; step <= total; step++) {{\n      \
+                   if (Date.now() > deadline) {{\n        \
+                     failure = new Error(`{name}: budget exhausted before step ${{step}}`);\n        \
                      break;\n      \
                    }}\n      \
-                   intentado = paso;\n      \
+                   attempted = step;\n      \
                    try {{\n        \
-                     await paso{p}(paso, acciones, diario, e, id, previas);\n        \
-                     hecho = paso;\n      \
+                     await runStep{p}(step, actions, journal, e, id, prior);\n        \
+                     done = step;\n      \
                    }} catch (err) {{\n        \
-                     fallo = err;\n        \
+                     failure = err;\n        \
                      break;\n      \
                    }}\n    \
                  }}\n  \
                }}\n  \
-               if (!fallo) {{\n    \
-                 await diario.cerrar(id, \"completada\");\n    \
-                 return {{ estado: \"completada\", hasta: total }};\n  \
+               if (!failure) {{\n    \
+                 await journal.close(id, \"completed\");\n    \
+                 return {{ status: \"completed\", upTo: total }};\n  \
                }}\n  \
-               // de vuelta: todo lo que se INTENTO, en orden inverso\n  \
-               for (let paso = intentado; paso >= 1; paso--) {{\n    \
+               // back again: everything that was ATTEMPTED, in reverse order\n  \
+               for (let step = attempted; step >= 1; step--) {{\n    \
                  try {{\n      \
-                   await deshacer{p}(paso, acciones, e, previas);\n      \
-                   await diario.marcar(id, paso, \"deshecho\");\n    \
+                   await undoStep{p}(step, actions, e, prior);\n      \
+                   await journal.mark(id, step, \"undone\");\n    \
                  }} catch (err) {{\n      \
-                   await diario.cerrar(id, \"atascada\");\n      \
-                   throw new SagaAtascada(\"{nombre}\", paso, err);\n    \
+                   await journal.close(id, \"stuck\");\n      \
+                   throw new SagaStuck(\"{name}\", step, err);\n    \
                  }}\n  \
                }}\n  \
-               await diario.cerrar(id, \"compensada\");\n  \
-               return {{ estado: \"compensada\", hasta: hecho, error: fallo }};\n\
+               await journal.close(id, \"compensated\");\n  \
+               return {{ status: \"compensated\", upTo: done, error: failure }};\n\
              }}\n\
              \n\
-             async function paso{p}(\n  \
-               paso: number,\n  \
-               acciones: {p}Acciones,\n  \
-               diario: SagaDiario,\n  \
+             async function runStep{p}(\n  \
+               step: number,\n  \
+               actions: {p}Actions,\n  \
+               journal: SagaJournal,\n  \
                e: Envelope<unknown>,\n  \
                id: string,\n  \
-               previas: {p}Salidas,\n\
+               prior: {p}Outputs,\n\
              ): Promise<void> {{\n  \
-               switch (paso) {{\n\
-             {adelante}\n    \
+               switch (step) {{\n\
+             {forward}\n    \
                  default:\n      \
-                   throw new Error(`{nombre}: paso ${{paso}} no declarado en el manifiesto`);\n  \
+                   throw new Error(`{name}: step ${{step}} is not declared in the manifest`);\n  \
                }}\n\
              }}\n\
              \n\
-             async function deshacer{p}(paso: number, acciones: {p}Acciones, e: Envelope<unknown>, previas: {p}Salidas): Promise<void> {{\n  \
-               switch (paso) {{\n\
-             {atras}\n    \
+             async function undoStep{p}(step: number, actions: {p}Actions, e: Envelope<unknown>, prior: {p}Outputs): Promise<void> {{\n  \
+               switch (step) {{\n\
+             {backward}\n    \
                  default:\n      \
-                   throw new Error(`{nombre}: paso ${{paso}} no declarado en el manifiesto`);\n  \
+                   throw new Error(`{name}: step ${{step}} is not declared in the manifest`);\n  \
                }}\n\
              }}\n",
             total = sg.steps.len(),
-            adelante = adelante.join("\n"),
-            atras = atras.join("\n"),
-            rehidrata = rehidrata.join("\n"),
+            forward = forward.join("\n"),
+            backward = backward.join("\n"),
+            rehydrate = rehydrate.join("\n"),
         ));
 
-        // El barrido: quien vuelve a llamar a la saga que quedo colgada.
+        // The sweep: whoever calls back a saga that got stranded.
         //
-        // El coordinador ya sabe retomar, pero nadie lo llama: el proceso que
-        // la tenia en vuelo es el que se murio. Sin esto, una saga con un paso
-        // en `intentando` se queda ahi para siempre, y el diario la registra sin
-        // que nadie lo lea.
-        let ventana = sg.timeout_ms.unwrap_or(60_000);
+        // The coordinator already knows how to resume, but nobody calls it: the
+        // process that had it in flight is the one that died. Without this, a
+        // saga with a step at `attempting` stays there forever, and the journal
+        // records it with nobody reading it.
+        let window = sg.timeout_ms.unwrap_or(60_000);
         o.push(format!(
-            "/** Una pasada del barrido: retoma las sagas `{nombre}` que no avanzan.\n \
+            "/** One sweep pass: resumes the `{name}` sagas that are not moving.\n \
              *\n \
-             *  Solo toca las que llevan mas de su PRESUPUESTO sin moverse ({ventana}ms).\n \
-             *  Ese umbral no es una heuristica: `axon verify` ya comprobo que el\n \
-             *  presupuesto cubre la suma de los pasos y sus compensaciones, asi que\n \
-             *  una saga mas vieja que eso no esta en camino, esta colgada. Barrer\n \
-             *  antes seria correr un segundo coordinador sobre una saga viva.\n \
+             *  It only touches those idle for longer than their own BUDGET\n \
+             *  ({window}ms). That threshold is not a heuristic: `axon verify` already\n \
+             *  checked that the budget covers the sum of the steps and their\n \
+             *  compensations, so a saga older than that is not on its way — it is\n \
+             *  stranded. Sweeping sooner would mean running a second coordinator over\n \
+             *  a live saga.\n \
              *\n \
-             *  Una que quedo `atascada` NO se reintenta: se cuenta y se deja. Una\n \
-             *  compensacion que ya fallo necesita una persona, y reintentarla en\n \
-             *  silencio esconde justo eso. */\n\
-             export async function barrer{p}(\n  \
-               acciones: {p}Acciones,\n  \
-               diario: SagaDiario,\n  \
-               limite = 50,\n\
-             ): Promise<SagaBarrido> {{\n  \
-               const antesDe = new Date(Date.now() - {ventana});\n  \
-               const colgadas = await diario.reclamar(\"{nombre}\", antesDe, limite);\n  \
-               const r: SagaBarrido = {{\n    \
-                 reclamadas: colgadas.length,\n    \
-                 completadas: 0,\n    \
-                 compensadas: 0,\n    \
-                 atascadas: 0,\n    \
-                 // si se lleno el limite hay mas esperando, y decirlo es la\n    \
-                 // diferencia entre un barrido que va al dia y uno que no alcanza\n    \
-                 pendientes: colgadas.length >= limite,\n  \
+             *  One left `stuck` is NOT retried: it is counted and left alone. A\n \
+             *  compensation that already failed needs a person, and retrying it\n \
+             *  quietly hides exactly that. */\n\
+             export async function sweep{p}(\n  \
+               actions: {p}Actions,\n  \
+               journal: SagaJournal,\n  \
+               limit = 50,\n\
+             ): Promise<SweepReport> {{\n  \
+               const olderThan = new Date(Date.now() - {window});\n  \
+               const stranded = await journal.claim(\"{name}\", olderThan, limit);\n  \
+               const r: SweepReport = {{\n    \
+                 claimed: stranded.length,\n    \
+                 completed: 0,\n    \
+                 compensated: 0,\n    \
+                 stuck: 0,\n    \
+                 // If the limit filled up there are more waiting, and saying so is\n    \
+                 // the difference between a sweep that keeps up and one that does not.\n    \
+                 pending: stranded.length >= limit,\n  \
                }};\n  \
-               for (const {{ id, datos }} of colgadas) {{\n    \
+               for (const {{ id, data }} of stranded) {{\n    \
                  try {{\n      \
-                   const salida = await correr{p}(id, acciones, diario, datos);\n      \
-                   if (salida.estado === \"completada\") r.completadas++;\n      \
-                   else r.compensadas++;\n    \
+                   const out = await run{p}(id, actions, journal, data);\n      \
+                   if (out.status === \"completed\") r.completed++;\n      \
+                   else r.compensated++;\n    \
                  }} catch (err) {{\n      \
-                   // una saga atascada no aborta la pasada: las demas siguen\n      \
-                   // colgadas y este es el unico que las va a mirar\n      \
-                   if (err instanceof SagaAtascada) r.atascadas++;\n      \
+                   // A stuck saga does not abort the pass: the others are still\n      \
+                   // stranded and this is the only thing that will look at them.\n      \
+                   if (err instanceof SagaStuck) r.stuck++;\n      \
                    else throw err;\n    \
                  }}\n  \
                }}\n  \
                return r;\n\
              }}\n\
              \n\
-             /** Arranca el barrido periodico y devuelve como pararlo.\n \
+             /** Starts the periodic sweep and returns how to stop it.\n \
              *\n \
-             *  El intervalo sale del presupuesto declarado: nada se vuelve elegible\n \
-             *  antes, asi que barrer mas seguido es trabajo sin resultado. Es seguro\n \
-             *  con varias instancias porque `reclamar` reclama.\n \
+             *  The interval comes from the declared budget: nothing becomes eligible\n \
+             *  sooner, so sweeping more often is work without a result. It is safe\n \
+             *  with several instances because `claim` claims.\n \
              *\n \
-             *  `alTerminar` recibe cada pasada. Conectalo a las metricas: un barrido\n \
-             *  que no reporta es indistinguible de uno que no corre, y este es el\n \
-             *  unico lugar desde donde se ve que una saga quedo atascada. */\n\
-             export function arrancarBarrido{p}(\n  \
-               acciones: {p}Acciones,\n  \
-               diario: SagaDiario,\n  \
-               alTerminar: (r: SagaBarrido) => void,\n  \
-               intervaloMs = {ventana},\n\
+             *  `onPass` receives every pass. Wire it to your metrics: a sweep that\n \
+             *  reports nothing is indistinguishable from one that does not run, and\n \
+             *  this is the only place from which a stuck saga becomes visible. */\n\
+             export function startSweep{p}(\n  \
+               actions: {p}Actions,\n  \
+               journal: SagaJournal,\n  \
+               onPass: (r: SweepReport) => void,\n  \
+               intervalMs = {window},\n\
              ): () => void {{\n  \
-               let corriendo = false;\n  \
+               let running = false;\n  \
                const t = setInterval(async () => {{\n    \
-                 // sin esto, una pasada lenta se solapa con la siguiente en el\n    \
-                 // mismo proceso y las dos reclaman\n    \
-                 if (corriendo) return;\n    \
-                 corriendo = true;\n    \
+                 // Without this, a slow pass overlaps the next one in the same\n    \
+                 // process and both of them claim.\n    \
+                 if (running) return;\n    \
+                 running = true;\n    \
                  try {{\n      \
-                   alTerminar(await barrer{p}(acciones, diario));\n    \
+                   onPass(await sweep{p}(actions, journal));\n    \
                  }} finally {{\n      \
-                   corriendo = false;\n    \
+                   running = false;\n    \
                  }}\n  \
-               }}, intervaloMs);\n  \
-               // que un barrido de fondo no mantenga el proceso vivo al apagarlo\n  \
+               }}, intervalMs);\n  \
+               // a background sweep should not keep the process alive on shutdown\n  \
                t.unref?.();\n  \
                return () => clearInterval(t);\n\
              }}\n"

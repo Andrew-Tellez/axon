@@ -1,14 +1,14 @@
 // El coordinador de la saga. Lo unico escrito a mano son las ENTRADAS de cada
 // paso —datos de negocio— y el diario. El orden, la compensacion en orden
 // inverso y el barrido los genero axon.
-import { CheckoutService, Clients, httpRoutes, rutaBarridoCompra, correrCompra,
-         barrerCompra, arrancarBarridoCompra, compraFold, compraCargar,
+import { CheckoutService, Clients, httpRoutes, sweepRouteCompra, runCompra,
+         sweepCompra, startSweepCompra, compraFold, compraCargar,
          compraFotografiar, conversionAplicar, limpiarCompra, newEnvelope,
          rutaLimpiezaCompra, reconstruirConversion, rutaReconstruirConversion,
          VersionEnConflicto,
-         type CheckoutIn, type CheckoutOut, type CompraAcciones, type CompraSalidas,
+         type CheckoutIn, type CheckoutOut, type CompraActions, type CompraOutputs,
          type CompraReglas, type ConversionProyeccion, type Checkpoint,
-         type Envelope, type FlujoConFotos, type Outbox, type SagaDiario, type SagaEstado,
+         type Envelope, type FlujoConFotos, type Outbox, type SagaJournal, type SagaStatus,
          type Sombra,
          type Transport } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
@@ -42,21 +42,21 @@ function transport(): Transport {
  *  barren a la vez, y si esto LISTARA las colgadas, las dos tomarian la misma y
  *  compensarian los mismos pasos. El reclamo y el filtro son la misma
  *  sentencia. */
-class Diario implements SagaDiario {
+class Journal implements SagaJournal {
   #db: pg.Pool;
   constructor(db: pg.Pool) {
     this.#db = db;
   }
 
-  async abrir(id: string, _saga: string, e: Envelope<unknown>) {
+  async open(id: string, _saga: string, e: Envelope<unknown>) {
     await this.#db.query(
-      `INSERT INTO saga_compra (id, paso, estado, datos) VALUES ($1, 0, 'abierta', $2)
+      `INSERT INTO saga_compra (id, paso, estado, datos) VALUES ($1, 0, 'open', $2)
        ON CONFLICT (id) DO NOTHING`,
       [id, JSON.stringify(e)],
     );
   }
 
-  async marcar(id: string, paso: number, estado: string, salida?: unknown) {
+  async mark(id: string, step: number, status: string, output?: unknown) {
     // la salida se guarda en la MISMA sentencia que el estado: en dos, un corte
     // entre ellas deja el paso hecho y su resultado perdido
     await this.#db.query(
@@ -67,45 +67,45 @@ class Diario implements SagaDiario {
               salidas = CASE WHEN $5::jsonb IS NULL THEN salidas
                              ELSE coalesce(salidas, '{}'::jsonb) || jsonb_build_object($4::text, $5::jsonb) END
         WHERE id = $1`,
-      [id, paso, estado, String(paso), salida === undefined ? null : JSON.stringify(salida)],
+      [id, step, status, String(step), output === undefined ? null : JSON.stringify(output)],
     );
   }
 
-  async cerrar(id: string, estado: SagaEstado) {
+  async close(id: string, status: SagaStatus) {
     await this.#db.query(
       `UPDATE saga_compra SET estado = $2, actualizado = now() WHERE id = $1`,
-      [id, estado],
+      [id, status],
     );
   }
 
-  async leer(id: string) {
+  async read(id: string) {
     const { rows } = await this.#db.query(
       `SELECT paso, estado, coalesce(salidas, '{}'::jsonb) AS salidas
-         FROM saga_compra WHERE id = $1 AND estado <> 'abierta'`,
+         FROM saga_compra WHERE id = $1 AND estado <> 'open'`,
       [id],
     );
     if (!rows[0]) return null;
     return {
-      paso: Number(rows[0].paso),
-      estado: rows[0].estado as string,
-      salidas: rows[0].salidas as Record<number, unknown>,
+      step: Number(rows[0].paso),
+      status: rows[0].estado as string,
+      outputs: rows[0].salidas as Record<number, unknown>,
     };
   }
 
-  async reclamar(_saga: string, antesDe: Date, limite: number) {
+  async claim(_saga: string, olderThan: Date, limit: number) {
     const { rows } = await this.#db.query(
       `UPDATE saga_compra SET actualizado = now()
         WHERE id IN (
           SELECT id FROM saga_compra
-           WHERE estado IN ('abierta','intentando','hecho') AND actualizado < $1
+           WHERE estado IN ('open','attempting','done') AND actualizado < $1
            ORDER BY actualizado
            LIMIT $2
            FOR UPDATE SKIP LOCKED
         )
         RETURNING id, datos`,
-      [antesDe, limite],
+      [olderThan, limit],
     );
-    return rows.map((r: any) => ({ id: r.id as string, datos: r.datos as Envelope<unknown> }));
+    return rows.map((r: any) => ({ id: r.id as string, data: r.datos as Envelope<unknown> }));
   }
 }
 
@@ -368,26 +368,26 @@ class Conversion implements ConversionProyeccion, Checkpoint, Sombra {
 /** Las entradas de cada paso: lo unico que el generador no puede saber. El
  *  orden lo sabe el coordinador; el contenido, no.
  *
- *  Todo sale del envelope y de `previas`, nunca de una variable de este
+ *  Todo sale del envelope y de `prior`, nunca de una variable de este
  *  proceso: el barrido corre estas mismas acciones sobre una saga que arranco
  *  en OTRO proceso, y ahi una closure no existe. */
-function acciones(clientes: Clients): CompraAcciones {
+function actions(clients: Clients): CompraActions {
   const entrada = (e: Envelope<unknown>) => e.data as CheckoutIn;
   return {
-    async paso1CapturePayment(e) {
+    async step1CapturePayment(e) {
       const { orderId, amount } = entrada(e);
-      return clientes.paymentsCapturePayment({ orderId, amount }, e);
+      return clients.paymentsCapturePayment({ orderId, amount }, e);
     },
-    async deshacer1RefundPayment(e, previas) {
+    async undo1RefundPayment(e, prior) {
       // sin cobro no hay nada que deshacer, y eso no es un error: el
       // coordinador compensa tambien el paso que quedo en duda
-      if (!previas.paso1) return;
-      await clientes.paymentsRefundPayment({ paymentId: previas.paso1.paymentId }, e);
+      if (!prior.step1) return;
+      await clients.paymentsRefundPayment({ paymentId: prior.step1.paymentId }, e);
     },
-    async paso2PayoutMerchant(e, previas) {
-      if (!previas.paso1) throw new Error("no hay cobro que pagar");
-      return clientes.paymentsPayoutMerchant(
-        { paymentId: previas.paso1.paymentId, amount: entrada(e).amount },
+    async step2PayoutMerchant(e, prior) {
+      if (!prior.step1) throw new Error("no hay cobro que pagar");
+      return clients.paymentsPayoutMerchant(
+        { paymentId: prior.step1.paymentId, amount: entrada(e).amount },
         e,
       );
     },
@@ -395,18 +395,18 @@ function acciones(clientes: Clients): CompraAcciones {
 }
 
 class Checkout extends CheckoutService {
-  #diario: SagaDiario;
-  #acciones: CompraAcciones;
+  #journal: SagaJournal;
+  #actions: CompraActions;
   #flujo: Flujo;
   #vista: Conversion;
   #sombra: Conversion;
   constructor(b: any, o: Outbox<pg.PoolClient>, db: pg.Pool) {
     super(b, o);
-    this.#diario = new Diario(db);
+    this.#journal = new Journal(db);
     this.#flujo = new Flujo(db, o);
     this.#vista = new Conversion(db);
     this.#sombra = new Conversion(db, true);
-    this.#acciones = acciones(new Clients(transport()));
+    this.#actions = actions(new Clients(transport()));
   }
 
   get flujo() {
@@ -447,11 +447,11 @@ class Checkout extends CheckoutService {
     return e;
   }
 
-  get diario() {
-    return this.#diario;
+  get journal() {
+    return this.#journal;
   }
-  get pasos() {
-    return this.#acciones;
+  get steps() {
+    return this.#actions;
   }
 
   async checkout(input: CheckoutIn, e: Envelope<unknown>): Promise<CheckoutOut> {
@@ -460,17 +460,17 @@ class Checkout extends CheckoutService {
     const stream = e.correlationId;
     await this.#anotar(stream, "compra.iniciada@v1",
       { streamId: stream, orderId: input.orderId, amount: input.amount }, e);
-    const r = await correrCompra(stream, this.#acciones, this.#diario, e);
-    if (r.estado === "completada") {
-      const salidas = (await this.#diario.leer(stream))?.salidas ?? {};
-      const paso1 = salidas[1] as { paymentId: string } | undefined;
+    const r = await runCompra(stream, this.#actions, this.#journal, e);
+    if (r.status === "completed") {
+      const outputs = (await this.#journal.read(stream))?.outputs ?? {};
+      const step1 = outputs[1] as { paymentId: string } | undefined;
       await this.#anotar(stream, "compra.cobrada@v1",
-        { streamId: stream, paymentId: paso1?.paymentId ?? stream }, e);
+        { streamId: stream, paymentId: step1?.paymentId ?? stream }, e);
     } else {
       await this.#anotar(stream, "compra.compensada@v1",
         { streamId: stream, motivo: String(r.error ?? "sin motivo") }, e);
     }
-    return { estado: r.estado };
+    return { estado: r.status };
   }
 }
 
@@ -488,16 +488,16 @@ async function main() {
 
   // Dentro del proceso Y por la ruta que golpea el programador que despliega
   // `axon infra`: un servicio escalado a cero no barre nada por su cuenta.
-  arrancarBarridoCompra(svc.pasos, svc.diario, (r) => {
-    if (r.reclamadas) console.log(`[checkout] barrido ${JSON.stringify(r)}`);
-    if (r.atascadas) console.error(`[checkout] ${r.atascadas} sagas ATASCADAS`);
+  startSweepCompra(svc.steps, svc.journal, (r) => {
+    if (r.claimed) console.log(`[checkout] barrido ${JSON.stringify(r)}`);
+    if (r.stuck) console.error(`[checkout] ${r.stuck} sagas ATASCADAS`);
   });
 
   servir(
     Number(process.env.PORT ?? 8080),
     {
       "POST /v1/checkouts": (body, e) => svc.checkout(body, e),
-      [rutaBarridoCompra]: () => barrerCompra(svc.pasos, svc.diario),
+      [sweepRouteCompra]: () => sweepCompra(svc.steps, svc.journal),
       // la ruta que golpea el cron que despliega `axon infra`
       [rutaLimpiezaCompra]: async () => ({ borradas: await limpiarCompra(svc.flujo) }),
       // Reconstruir no lleva cron: no es periodico, es una operacion que
