@@ -748,60 +748,61 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
-    // ---- CAP: la particion no se elige, que hacer mientras dura si ----
+    // ---- CAP: the partition is not a choice, what to do during one is ----
     let lado: IndexMap<&str, &Cap> = ms.iter().map(|m| (m.service.as_str(), &m.cap)).collect();
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let cap = &m.cap;
         if !cap.declarado {
             warnings.push(format!(
-                "{svc}: sin `[cap]`; asumido CP (strong/reject), que falla cerrado. \
-                 Declaralo para que la eleccion sea de alguien y no del default"
+                "{svc}: no `[cap]`; assumed CP (strong/reject), which fails closed. \
+                 Declare it so the choice belongs to someone and not to the default"
             ));
         }
         match cap.consistency.as_str() {
             "strong" | "eventual" => {}
             otro => errors.push(format!(
-                "{svc}: `consistency = \"{otro}\"` no existe; usa \"strong\" o \"eventual\""
+                "{svc}: `consistency = \"{otro}\"` does not exist; use \"strong\" or \"eventual\""
             )),
         }
         match cap.on_partition.as_str() {
             "reject" | "degrade" => {}
             otro => errors.push(format!(
-                "{svc}: `on_partition = \"{otro}\"` no existe; usa \"reject\" o \"degrade\""
+                "{svc}: `on_partition = \"{otro}\"` does not exist; use \"reject\" or \"degrade\""
             )),
         }
-        // "eventual" sin un numero es una palabra, no una garantia
+        // "eventual" with no number is a word, not a guarantee
         if cap.eventual() && cap.max_staleness_ms.is_none() {
             errors.push(format!(
-                "{svc}: `consistency = \"eventual\"` sin `max_staleness_ms`; sin un presupuesto \
-                 de obsolescencia nadie puede decir si el dato que sirvio era aceptable"
+                "{svc}: `consistency = \"eventual\"` with no `max_staleness_ms`; with no \
+                 staleness budget nobody can say whether the data it served was acceptable"
             ));
         }
-        // no se puede ser CP y servir algo viejo: es la contradiccion del teorema
+        // you cannot be CP and serve something stale: that is the theorem's own
+        // contradiction
         if !cap.eventual() && cap.degrada() {
             errors.push(format!(
-                "{svc}: `strong` con `on_partition = \"degrade\"` se contradice; servir un dato \
-                 viejo ES elegir disponibilidad sobre consistencia"
+                "{svc}: `strong` with `on_partition = \"degrade\"` contradicts itself; \
+                 serving stale data IS choosing availability over consistency"
             ));
         }
-        // tu garantia es la del eslabon mas debil de la ruta sincrona
+        // your guarantee is that of the weakest link on the synchronous path
         for d in &m.depends {
             if !cap.eventual() && lado.get(d.target()).is_some_and(|c| c.eventual()) {
                 warnings.push(format!(
-                    "{svc} es `strong` y llama a {} que es `eventual`: la garantia de la ruta \
-                     es la del mas debil, no la tuya",
+                    "{svc} is `strong` and calls {}, which is `eventual`: the guarantee of \
+                     the path is the weaker one, not yours",
                     d.target()
                 ));
             }
         }
-        // decidir con consistencia fuerte a partir de una entrada que no la tiene
+        // deciding with strong consistency from an input that does not have it
         for (nombre, mac) in &m.machine {
             for (act, t) in &mac.transitions {
                 if !cap.eventual() && m.consumes.contains_key(&t.on) {
                     warnings.push(format!(
-                        "{svc}.{nombre}.{act}: transicion `strong` disparada por el evento `{}`, \
-                         que llega eventualmente; el estado puede haber cambiado antes",
+                        "{svc}.{nombre}.{act}: `strong` transition triggered by the event \
+                         `{}`, which arrives eventually; the state may have changed first",
                         t.on
                     ));
                 }
@@ -809,12 +810,12 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
-    // A08: fallos de integridad. Una etiqueta es mutable: lo que se despliega
-    // hoy no es lo que se auditó ayer.
+    // A08: integrity failures. A tag is mutable: what gets deployed today is
+    // not what was audited yesterday.
     if pol.ci.image.contains(":latest") || !pol.ci.image.contains('@') {
         warnings.push(format!(
-            "[A08] [ci].image `{}` no fija un digest; una etiqueta es mutable y \
-             el deploy deja de ser reproducible",
+            "[A08] [ci].image `{}` does not pin a digest; a tag is mutable and the deploy \
+             stops being reproducible",
             pol.ci.image
         ));
     }

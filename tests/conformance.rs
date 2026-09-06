@@ -1613,7 +1613,7 @@ on_partition = "reject"
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("sin `max_staleness_ms`"), "{err}");
+    assert!(err.contains("with no `max_staleness_ms`"), "{err}");
 
     // la contradiccion del teorema: CP que sirve algo viejo
     std::fs::write(
@@ -1623,7 +1623,7 @@ on_partition = "reject"
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("se contradice"), "{err}");
+    assert!(err.contains("contradicts itself"), "{err}");
 
     // sin declararlo, se asume el par que falla cerrado, y se avisa
     std::fs::write(
@@ -1633,12 +1633,12 @@ on_partition = "reject"
     .unwrap();
     let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(ok);
-    assert!(out.contains("sin `[cap]`; asumido CP"), "{out}");
+    assert!(out.contains("no `[cap]`; assumed CP"), "{out}");
 
     // la garantia de una ruta sincrona es la del eslabon mas debil
     let (out, _, _) = axon(&["verify", "examples"]);
     assert!(
-        out.contains("es `strong` y llama a orders que es `eventual`"),
+        out.contains("is `strong` and calls orders, which is `eventual`"),
         "{out}"
     );
 }
