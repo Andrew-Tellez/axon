@@ -39,8 +39,17 @@ export function newEnvelope<T>(type: string, source: string, data: T, cause?: En
 export interface Bus { publish(e: Envelope<unknown>): Promise<void>; }
 
 /** Transactional outbox: el evento se guarda en la misma transaccion que el
- *  cambio de estado, y un relay lo publica despues. Sin dual-write. */
-export interface Outbox { stage(e: Envelope<unknown>): Promise<void>; }
+ *  cambio de estado, y un relay lo publica despues.
+ *
+ *  `tx` es la transaccion de QUIEN LLAMA, y es obligatoria. Con una conexion
+ *  propia, un `stage` se confirma solo: si la transaccion de quien llama se
+ *  revierte, el cambio de estado no ocurre y el evento SI, y el relay publica
+ *  algo que nunca paso. Eso es exactamente el dual-write que el outbox
+ *  existe para evitar, y no se ve en ninguna parte hasta que alguien pregunta
+ *  por un evento sin su fila.
+ *
+ *  El tipo queda abierto porque el framework no elige cliente de base. */
+export interface Outbox<Tx = unknown> { stage(e: Envelope<unknown>, tx: Tx): Promise<void>; }
 
 /** Inbox / consumidor idempotente: el broker entrega al menos una vez, el
  *  efecto ocurre una sola. `once` no reejecuta un id ya visto. */
@@ -149,13 +158,24 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         "  static readonly wellKnown = \"/.well-known/axon.json\";".to_string(),
     ];
     for ev in m.emits.keys() {
+        // Con outbox, la transaccion es un parametro OBLIGATORIO: es lo que
+        // hace imposible escribir el evento fuera de la transaccion que cambia
+        // el estado. Sin outbox no hay transaccion que compartir.
+        let (firma, paso) = if m.patterns.outbox {
+            (
+                "data: {}, tx: unknown, cause?: Envelope<unknown>",
+                ", tx",
+            )
+        } else {
+            ("data: {}, cause?: Envelope<unknown>", "")
+        };
         cls.push(format!(
-            "  protected {}(data: {}, cause?: Envelope<unknown>) {{",
+            "  protected {}({}) {{",
             camel(&format!("emit.{ev}")),
-            pascal(ev)
+            firma.replace("{}", &pascal(ev))
         ));
         cls.push(format!(
-            "    return {sink}(newEnvelope(\"{ev}\", \"{svc}\", data, cause));"
+            "    return {sink}(newEnvelope(\"{ev}\", \"{svc}\", data, cause){paso});"
         ));
         cls.push("  }".to_string());
     }

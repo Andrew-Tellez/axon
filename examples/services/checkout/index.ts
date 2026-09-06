@@ -6,7 +6,7 @@ import { CheckoutService, Clientes, rutasHttp, rutaBarridoCompra, correrCompra,
          compraFotografiar, conversionAplicar, newEnvelope, VersionEnConflicto,
          type CheckoutIn, type CheckoutOut, type CompraAcciones, type CompraSalidas,
          type CompraReglas, type ConversionProyeccion, type Checkpoint,
-         type Envelope, type FlujoConFotos, type SagaDiario, type SagaEstado,
+         type Envelope, type FlujoConFotos, type Outbox, type SagaDiario, type SagaEstado,
          type Transporte } from "./contracts.ts";
 import { arrancarTelemetria } from "../telemetria.ts";
 import { bus, conectar, esperarDb, outbox, relay, servir } from "../runtime.ts";
@@ -114,8 +114,10 @@ class Diario implements SagaDiario {
  *  entrarian y el estado reconstruido dependeria del orden de lectura. */
 class Flujo implements FlujoConFotos {
   #db: pg.Pool;
-  constructor(db: pg.Pool) {
+  #outbox: Outbox<pg.PoolClient>;
+  constructor(db: pg.Pool, o: Outbox<pg.PoolClient>) {
     this.#db = db;
+    this.#outbox = o;
   }
 
   /** Solo las fotos de la version de reglas vigente. Una de otra version se
@@ -156,8 +158,8 @@ class Flujo implements FlujoConFotos {
    *  transaccion. Es lo que hace que no haya dual-write: el flujo es la verdad,
    *  el outbox es la entrega, y las dos filas entran o no entra ninguna.
    *
-   *  El `Outbox` generado no sirve aqui porque `stage` abre su propia conexion,
-   *  y una segunda transaccion es exactamente el problema que esto evita. */
+   *  El `stage` del outbox generado recibe esta transaccion, asi que la fila del
+   *  outbox no se puede confirmar sin el evento. */
   async append(streamId: string, esperada: number, e: Envelope<unknown>) {
     const version = esperada + 1;
     const c = await this.#db.connect();
@@ -168,12 +170,7 @@ class Flujo implements FlujoConFotos {
          VALUES ($1,$2,$3,$4,$5)`,
         [e.id, streamId, version, e.type, JSON.stringify(e.data)],
       );
-      await c.query(
-        `INSERT INTO outbox (id, type, source, time, traceparent, correlation_id, causation_id, data)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-        [e.id, e.type, e.source, e.time, e.traceparent, e.correlationId, e.causationId,
-         JSON.stringify(e.data)],
-      );
+      await this.#outbox.stage(e, c);
       await c.query("COMMIT");
     } catch (err: any) {
       await c.query("ROLLBACK").catch(() => {});
@@ -303,10 +300,10 @@ class Checkout extends CheckoutService {
   #acciones: CompraAcciones;
   #flujo: Flujo;
   #vista: Conversion;
-  constructor(b: any, o: any, db: pg.Pool) {
+  constructor(b: any, o: Outbox<pg.PoolClient>, db: pg.Pool) {
     super(b, o);
     this.#diario = new Diario(db);
-    this.#flujo = new Flujo(db);
+    this.#flujo = new Flujo(db, o);
     this.#vista = new Conversion(db);
     this.#acciones = acciones(new Clientes(transporte()));
   }
@@ -379,7 +376,7 @@ async function main() {
   arrancarTelemetria();
   const db = await esperarDb();
   const b = bus(await conectar());
-  const svc = new Checkout(b, outbox(db), db);
+  const svc = new Checkout(b, outbox(), db);
 
   // El relay: lo unico que publica. Sin el, los eventos quedan anotados en el
   // flujo y en el outbox, y nadie los recibe.

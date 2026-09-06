@@ -93,6 +93,7 @@ $ cd examples && ./demo.sh
   OK: 0ms de atraso de la vista, dentro del presupuesto declarado
   OK: el relay volvio y publico lo pendiente; nadie lo reintento a mano
   OK: la foto dice lo mismo que la proyeccion, que se construyo sin usarla
+  OK: una transaccion revertida no deja el evento suelto: 0 pagos, 0 eventos
 
 ==> reintentos declarados vs ocurridos
   OK: 3 llamadas = 1 + 2 reintentos, exactamente lo declarado

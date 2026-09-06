@@ -16,7 +16,9 @@ export interface Envelope<T> {
   traceparent: string; correlationId: string; causationId: string | null; data: T;
 }
 export interface Bus { publish(e: Envelope<unknown>): Promise<void>; }
-export interface Outbox { stage(e: Envelope<unknown>): Promise<void>; }
+// `tx` obligatorio: es lo que hace imposible escribir el evento fuera de la
+// transaccion que cambia el estado. Ver `outbox()` mas abajo.
+export interface Outbox<Tx = unknown> { stage(e: Envelope<unknown>, tx: Tx): Promise<void>; }
 export interface Inbox { once(id: string, fn: () => Promise<void>): Promise<void>; }
 
 const sc = StringCodec();
@@ -101,20 +103,25 @@ export function inbox(db: pg.Pool): Inbox {
   };
 }
 
-/** Outbox: el evento entra en la misma transaccion que el cambio de estado. */
-export function outbox(db: pg.Pool): Outbox {
+/** El outbox escribe en la transaccion de quien llama, no en una propia.
+ *
+ *  Antes recibia el pool y `stage` abria su propia conexion: el evento se
+ *  confirmaba solo, asi que una transaccion revertida dejaba el evento sin su
+ *  fila y el relay publicaba algo que nunca paso. Medido, no supuesto: 0 pagos
+ *  y 1 evento en el outbox. */
+export function outbox(): Outbox<pg.PoolClient> {
   return {
-    async stage(e) {
+    async stage(e, tx) {
       // el outbox guarda el traceparent del productor, para que lo que publique
       // el relay siga colgando de quien lo genero
       await enProductor(`stage ${e.type}`, e, { "messaging.operation": "create" }, () =>
-        guardar(db, e),
+        guardar(tx, e),
       );
     },
   };
 }
 
-async function guardar(db: pg.Pool, e: Envelope<unknown>) {
+async function guardar(db: pg.Pool | pg.PoolClient, e: Envelope<unknown>) {
   {
       await db.query(
         `INSERT INTO outbox (id, type, source, time, traceparent, correlation_id, causation_id, data)

@@ -6,7 +6,7 @@ Si no está en el código generado, no está.
 
 | Patrón | Se declara | Qué produce |
 | --- | --- | --- |
-| **Transactional outbox** | `[patterns] outbox = true` | Los emisores escriben en el outbox; `bus.publish` **desaparece** del código generado. Adiós dual-write. |
+| **Transactional outbox** | `[patterns] outbox = true` | Los emisores escriben en el outbox y reciben la transacción de quien llama como parámetro **obligatorio**; `bus.publish` desaparece del código generado. Ver [abajo](#el-outbox-y-la-transacción-de-quien-llama). |
 | **Consumidor idempotente** | siempre | `dispatch()` deduplica por id de envelope antes de rutear. |
 | **Cadena causal** | siempre | `traceparent` + `correlationId` + `causationId` propagados por el emisor. |
 | **Dead letter** | siempre | Suscripción con DLQ en los cuatro targets. No hay forma de declarar un consumidor sin ella. |
@@ -23,6 +23,41 @@ Los patrones GoF viven un nivel abajo, en el código que escribe el equipo — p
 está [`gof-patterns`](https://github.com/Andrew-Tellez/patterns), en seis lenguajes.
 axon se ocupa de los **arquitectónicos**: los que cruzan procesos y que ninguna
 librería dentro de un lenguaje puede garantizar sola.
+
+## El outbox y la transacción de quien llama
+
+```ts
+export interface Outbox<Tx = unknown> {
+  stage(e: Envelope<unknown>, tx: Tx): Promise<void>;
+}
+
+// y el emisor generado, cuando hay outbox:
+protected emitPaymentCapturedV1(data: PaymentCapturedV1, tx: unknown, cause?: Envelope<unknown>)
+```
+
+`tx` es **obligatorio**, y eso es todo el punto: hace imposible escribir el evento fuera de
+la transacción que cambia el estado. El tipo queda abierto porque el framework no elige
+cliente de base.
+
+### Esto estaba roto, y así se midió
+
+La primera versión recibía el pool y abría su propia conexión. El resultado: el `stage` se
+confirmaba solo, así que una transacción revertida dejaba el evento **sin su fila**, y el
+relay publicaba un cobro que nunca ocurrió. Medido contra los contenedores, con un
+interruptor que revienta después del `stage` y antes del `COMMIT`:
+
+| | pagos | eventos en el outbox |
+| --- | --- | --- |
+| antes, con conexión propia | 0 | **1** |
+| ahora, con la transacción de quien llama | 0 | 0 |
+
+Un evento sin su fila no se ve en ninguna parte hasta que alguien pregunta por un cobro que
+nadie hizo. Era exactamente el dual-write que el patrón existe para eliminar, en el código
+que lo anunciaba como resuelto.
+
+La comprobación se quedó en el demo como guardia de regresión, y el testkit exige el
+parámetro en el código generado: un servicio con outbox tiene que pedir la transacción, y
+uno sin outbox no —pedirla ahí sería ruido, porque no hay transacción que compartir.
 
 ## Saga
 
@@ -641,9 +676,6 @@ es una segunda copia del flujo con el doble de escrituras.
 
 ## Lo que falta de event sourcing
 
-Un `Outbox` que acepte la conexión de quien lo llama, para que el `append` generado pueda
-hacer las dos escrituras en una transacción sin que cada servicio lo escriba a mano.
-
-Y borrar las fotos viejas: `snapshot_version` las invalida pero no las quita, así que la
+Borrar las fotos viejas: `snapshot_version` las invalida pero no las quita, así que la
 tabla crece con cada versión de reglas. Es una tarea de limpieza, no un riesgo de
 corrección — pero alguien va a preguntar por ese espacio.

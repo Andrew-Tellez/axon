@@ -211,3 +211,38 @@ else
   echo "  FALLO: buenas=$buenas malas=$malas centavos=$centavos"
   exit 1
 fi
+
+# --- el outbox, de verdad transaccional ---------------------------------
+# La promesa del patron es que el evento y el cambio de estado entran juntos o
+# no entra ninguno. Si el `stage` abriera su propia conexion, una transaccion
+# revertida dejaria el evento SIN su fila y el relay publicaria algo que nunca
+# paso. Nadie lo ve hasta que alguien pregunta por un evento sin su pago.
+#
+# Esto estaba roto y se midio antes de arreglarlo: 0 pagos y 1 evento.
+echo "  una transaccion revertida despues de dejar el evento"
+sq() { $COMPOSE exec -T db-payments env PGPASSWORD=local psql -qtAX -U postgres -d payments -c "$1"; }
+ENVQ=.env.local
+cp "$ENVQ" "$ENVQ.es"
+restaurar_env() { mv -f "$ENVQ.es" "$ENVQ" 2>/dev/null || true; }
+trap 'restaurar_env' EXIT
+printf 'AXON_DEMO_ROMPER_TRAS_STAGE=1\n' >> "$ENVQ"
+$COMPOSE stop payments > /dev/null 2>&1
+$COMPOSE up -d --wait payments > /dev/null 2>&1
+
+ORDEN=$(sq "SELECT gen_random_uuid()" | tr -d ' \r\n')
+codigo=$(curl -sS -o /dev/null -w '%{http_code}' -m 30 -X POST "localhost:${AXON_PORT_payments:-8082}/v1/payments" \
+  -H 'content-type: application/json' \
+  -d "{\"orderId\":\"$ORDEN\",\"amount\":{\"amount\":500,\"currency\":\"MXN\"}}")
+pagos=$(sq "SELECT count(*) FROM payment WHERE order_id = '$ORDEN'" | tr -d ' \r\n')
+eventos=$(sq "SELECT count(*) FROM outbox WHERE data->>'orderId' = '$ORDEN'" | tr -d ' \r\n')
+restaurar_env
+$COMPOSE stop payments > /dev/null 2>&1
+$COMPOSE up -d --wait payments > /dev/null 2>&1
+if [ "$codigo" = "500" ] && [ "$pagos" -eq 0 ] && [ "$eventos" -eq 0 ]; then
+  echo "  OK: 0 pagos y 0 eventos; el evento no sobrevive a la reversion"
+  echo "  i con el \`stage\` en su propia conexion esto daba 0 y 1: un cobro"
+  echo "    publicado que nunca ocurrio, y nada que lo dijera"
+else
+  echo "  FALLO: http=$codigo pagos=$pagos eventos=$eventos"
+  exit 1
+fi

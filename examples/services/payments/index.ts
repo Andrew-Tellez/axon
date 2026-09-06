@@ -45,7 +45,20 @@ export class Payments extends PaymentsService {
         [paymentId, input.orderId, input.amount.amount, estado],
       );
       // Misma transaccion que el cambio de estado: eso es el outbox.
-      await this.emitPaymentCapturedV1({ paymentId, orderId: input.orderId, amount: input.amount }, e);
+      // `cliente` es la MISMA transaccion que el INSERT de arriba: el
+      // parametro es obligatorio justamente para que no se pueda escribir el
+      // evento fuera de ella
+      await this.emitPaymentCapturedV1(
+        { paymentId, orderId: input.orderId, amount: input.amount },
+        cliente,
+        e,
+      );
+      // Interruptor del demo: revienta DESPUES de dejar el evento y ANTES del
+      // COMMIT. Sirve para medir si el outbox es de verdad transaccional: si no
+      // lo fuera, el pago no existiria y el evento si.
+      if (process.env.AXON_DEMO_ROMPER_TRAS_STAGE === "1") {
+        throw new Error("roto a proposito despues del stage");
+      }
       await cliente.query("COMMIT");
     } catch (err) {
       await cliente.query("ROLLBACK");
@@ -126,7 +139,7 @@ await arrancarFlags();
 const db = await esperarDb();
 const nc = await conectar();
 const b = bus(nc);
-const svc = new Payments(b, inbox(db), outbox(db), db);
+const svc = new Payments(b, inbox(db), outbox(), db);
 
 // El outbox no publica: publica el relay.
 relay(db, b);

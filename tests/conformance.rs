@@ -135,6 +135,22 @@ fn trazabilidad_no_es_opcional() {
     // outbox declarado -> el emisor no toca el bus (sin dual-write)
     assert!(ts.contains("this.outbox.stage(newEnvelope"));
     assert!(!ts.contains("this.bus.publish(newEnvelope"));
+    // Y la transaccion de quien llama es OBLIGATORIA: con una conexion propia,
+    // el `stage` se confirma solo, asi que una transaccion revertida deja el
+    // evento sin su fila y el relay publica algo que nunca paso. Medido contra
+    // los contenedores antes de arreglarlo: 0 pagos y 1 evento.
+    assert!(
+        ts.contains("tx: unknown, cause?: Envelope<unknown>"),
+        "el emisor con outbox no exige la transaccion:\n{ts}"
+    );
+    assert!(ts.contains("stage(newEnvelope(\"payment.captured@v1\", \"payments\", data, cause), tx)"));
+    // sin outbox no hay transaccion que compartir, y pedirla seria ruido
+    let (sin, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
+    assert!(sin.contains("this.bus.publish(newEnvelope"));
+    assert!(
+        !sin.contains("tx: unknown"),
+        "un servicio sin outbox no tiene transaccion que pasar"
+    );
     // consumidor idempotente por defecto, no por disciplina
     assert!(ts.contains("this.inbox.once(e.id"));
     assert!(ts.contains(r#"case "order.placed@v1""#));
