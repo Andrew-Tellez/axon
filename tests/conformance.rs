@@ -1906,8 +1906,8 @@ fn el_escalado_de_la_base_se_verifica() {
          pool_size = 20\nmax_connections = 100\nmax_instances = 10\n",
     );
     assert!(!ok);
-    assert!(msg.contains("20 conexiones x 10 instancias = 200"), "{msg}");
-    assert!(msg.contains("supera el tope de 100"), "{msg}");
+    assert!(msg.contains("20 connections x 10 instances = 200"), "{msg}");
+    assert!(msg.contains("exceeds the limit of 100"), "{msg}");
 
     // una replica va con retraso: leer de ella y prometer consistencia fuerte
     // es la contradiccion del teorema escrita en dos lugares
@@ -1916,15 +1916,15 @@ fn el_escalado_de_la_base_se_verifica() {
          [infra]\nstate = \"postgres\"\nread_replicas = 2\n",
     );
     assert!(!ok);
-    assert!(msg.contains("lee de 2 replicas y declara"), "{msg}");
+    assert!(msg.contains("reads from 2 replicas and declares"), "{msg}");
 
     // alta disponibilidad no es fallback: el standby replica el DROP TABLE
     let (msg, ok) = escribir(
         "service = \"s\"\nowner = \"x\"\ntier = \"0\"\n[infra]\nstate = \"postgres\"\nha = true\n",
     );
     assert!(!ok);
-    assert!(msg.contains("sin `backup_retention_days`"), "{msg}");
-    assert!(msg.contains("no es respaldo"), "{msg}");
+    assert!(msg.contains("with no `backup_retention_days`"), "{msg}");
+    assert!(msg.contains("is not a backup"), "{msg}");
 
     // un tier 0 sin failover no es un tier 0
     let (msg, ok) = escribir(
@@ -1932,7 +1932,7 @@ fn el_escalado_de_la_base_se_verifica() {
          backup_retention_days = 30\n",
     );
     assert!(!ok);
-    assert!(msg.contains("sin `ha = true`"), "{msg}");
+    assert!(msg.contains("with no `ha = true`"), "{msg}");
 
     // y los recursos: standby, respaldos y replicas salen del manifiesto
     let (g, _, _) = axon(&["infra", &fuente("gcp"), "--target", "gcp"]);
