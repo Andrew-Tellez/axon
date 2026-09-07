@@ -12,10 +12,10 @@ import { OFREPProvider } from "@openfeature/ofrep-provider";
 // declara aca porque un modulo compartido no puede importar un contrato que es
 // por servicio; el tipado estructural hace que encajen.
 export interface Flags {
-  evaluar<T extends boolean | string | number | object>(
+  evaluate<T extends boolean | string | number | object>(
     nombre: string,
-    porDefecto: T,
-    contexto: Record<string, string>,
+    fallback: T,
+    context: Record<string, string>,
   ): Promise<T>;
 }
 
@@ -39,19 +39,19 @@ export async function arrancarFlags() {
  *  flagd caido no debe cambiar el comportamiento, y el valor seguro ya esta
  *  elegido en la declaracion. */
 export const flags: Flags = {
-  async evaluar(nombre, porDefecto, contexto) {
-    if (!cliente) return porDefecto;
+  async evaluate(nombre, fallback, context) {
+    if (!cliente) return fallback;
     // OpenFeature resuelve un tipo por flag, asi que el accesor correcto sale
     // del tipo del valor por defecto —que el manifiesto ya declaro.
-    switch (typeof porDefecto) {
+    switch (typeof fallback) {
       case "boolean":
-        return (await cliente.getBooleanValue(nombre, porDefecto, contexto)) as typeof porDefecto;
+        return (await cliente.getBooleanValue(nombre, fallback, context)) as typeof fallback;
       case "string":
-        return (await cliente.getStringValue(nombre, porDefecto, contexto)) as typeof porDefecto;
+        return (await cliente.getStringValue(nombre, fallback, context)) as typeof fallback;
       case "number":
-        return (await cliente.getNumberValue(nombre, porDefecto, contexto)) as typeof porDefecto;
+        return (await cliente.getNumberValue(nombre, fallback, context)) as typeof fallback;
       default:
-        return (await cliente.getObjectValue(nombre, porDefecto as never, contexto)) as typeof porDefecto;
+        return (await cliente.getObjectValue(nombre, fallback as never, context)) as typeof fallback;
     }
   },
 };

@@ -64,9 +64,9 @@ fn iface(name: &str, fields: &Fields) -> String {
     format!("export interface {name} {{\n{body}}}\n")
 }
 
-/// `all` son los demas manifiestos: el tipo de un evento consumido lo declara
-/// su EMISOR, no quien lo recibe. Es la misma razon por la que las fixtures de
-/// prueba salen del emisor — ahi es donde aparece el drift.
+/// `all` is the other manifests: the type of a consumed event is declared by
+/// its EMITTER, not by whoever receives it. Same reason the test fixtures come
+/// from the emitter — that is where the drift shows up.
 pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     let svc = &m.service;
     let mut out = vec![
@@ -91,13 +91,13 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
             .find_map(|o| o.emits.get(ev).map(|f| (&o.service, f)))
         {
             Some((owner, fields)) => {
-                out.push(format!("// {ev}: esquema declarado por {owner}, su dueno"));
+                out.push(format!("// {ev}: schema declared by {owner}, its owner"));
                 out.push(iface(&pascal(ev), fields));
             }
             None => {
                 return Err(format!(
-                    "{}: consume `{ev}` y no se encontro quien lo emite. Pasa los demas \
-                     manifiestos: `axon build {} manifests/`",
+                    "{}: consumes `{ev}` and whoever emits it was not found. Pass the other \
+                     manifests: `axon build {} manifests/`",
                     m.service,
                     m.origin.display()
                 ))
@@ -114,10 +114,10 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     ));
 
     // Campos explicitos, no parameter properties: son TS puro y no sobreviven
-    // al type-stripping de Node ni a un port directo a otro lenguaje.
-    // Solo los colaboradores que el servicio USA. Pedirle un bus a un
-    // coordinador que no emite nada obliga a fabricar uno de mentira, y un
-    // objeto de mentira en el constructor es una dependencia que nadie revisa.
+    // Node's type stripping nor a direct port to another language.
+    // Only the collaborators the service USES. Asking a coordinator that emits
+    // nothing for a bus forces making a fake one up, and a fake object in the
+    // constructor is a dependency nobody reviews.
     let mut campos = Vec::new();
     let mut params = Vec::new();
     let mut asigna = Vec::new();
@@ -158,10 +158,10 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         "  static readonly wellKnown = \"/.well-known/axon.json\";".to_string(),
     ];
     for ev in m.emits.keys() {
-        // Con outbox, la transaccion es un parametro OBLIGATORIO: es lo que
-        // hace imposible escribir el evento fuera de la transaccion que cambia
-        // el estado. Sin outbox no hay transaccion que compartir.
-        let (firma, step) = if m.patterns.outbox {
+        // With an outbox, the transaction is a MANDATORY parameter: it is what
+        // makes it impossible to write the event outside the transaction that
+        // changes the state. Without an outbox there is no transaction to share.
+        let (signature, step) = if m.patterns.outbox {
             (
                 "data: {}, tx: unknown, cause?: Envelope<unknown>",
                 ", tx",
@@ -172,7 +172,7 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         cls.push(format!(
             "  protected {}({}) {{",
             camel(&format!("emit.{ev}")),
-            firma.replace("{}", &pascal(ev))
+            signature.replace("{}", &pascal(ev))
         ));
         cls.push(format!(
             "    return {sink}(newEnvelope(\"{ev}\", \"{svc}\", data, cause){step});"
@@ -196,7 +196,7 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     }
     if !m.consumes.is_empty() {
         cls.push(
-            "  /** Punto de entrada unico: rutea por tipo y deduplica por id de envelope. */"
+            "  /** Single entry point: routes by type and deduplicates by envelope id. */"
                 .into(),
         );
         cls.push("  dispatch(e: Envelope<unknown>): Promise<void> {".into());
@@ -210,7 +210,7 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
             ));
         }
         cls.push(format!(
-            "        default: throw new Error(`{svc}: tipo no declarado en el manifiesto: ${{e.type}}`);"
+            "        default: throw new Error(`{svc}: type not declared in the manifest: ${{e.type}}`);"
         ));
         cls.push("      }\n    });\n  }".into());
     }
@@ -293,12 +293,12 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
 
 // ---------- CI/CD ----------
 
-/// El pipeline tambien es una proyeccion. Los gates los sabe axon; el layout
-/// del repo lo dice `axon.policy.toml`, y el despliegue depende del target,
-/// igual que la infraestructura. Nada de un cloud hardcodeado.
+/// The pipeline is a projection too. axon knows the gates; the repo layout is
+/// stated by `axon.policy.toml`, and the deploy depends on the target, same as
+/// the infrastructure. No hardcoded cloud.
 pub fn build_ci(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String {
     let svc = &m.service;
-    let en = |campo: &String| ci.para(campo, svc);
+    let en = |field: &String| ci.para(field, svc);
     let (dir, test, contracts, image, manifests) = (
         en(&ci.service_dir),
         en(&ci.test_cmd),
@@ -311,8 +311,8 @@ pub fn build_ci(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String {
     if !migrations_of(m).is_empty() {
         let ruta = m.infra.migrations.clone().unwrap_or_default();
         gates.push_str(&format!(
-            "      # gate: expand -> migrate -> contract. Un `.contract.sql` en el mismo
-      # deploy que el codigo que deja de usar la columna rompe el rollback.
+            "      # gate: expand -> migrate -> contract. A `.contract.sql` in the same
+      # deploy as the code that stops using the column breaks the rollback.
       - name: migraciones (dry-run)
         run: |
           flyway -url=$DB_URL -locations=filesystem:./{ruta} \\
@@ -327,8 +327,8 @@ pub fn build_ci(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String {
             "      - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{{{ vars.WIF_PROVIDER }}}}
-      # la infra va antes que el codigo: el topic tiene que existir cuando
-      # arranque el primer pod que publica en el
+      # infra goes before code: the topic has to exist by the time the first
+      # pod that publishes to it starts
       - run: axon infra {manifests}/ --target gcp --env prod > infra/generated.tf
       - run: terraform apply -auto-approve
       - run: gcloud run deploy {svc} --image {image} --region ${{{{ vars.REGION }}}}
@@ -354,9 +354,9 @@ pub fn build_ci(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String {
 "
         ),
         _ => format!(
-            "      # Sin target de despliegue. `axon ci --target gcp|aws|k8s` lo genera,
-      # o pone aqui el comando de tu plataforma: los gates de arriba son la
-      # parte que axon puede saber, esta es la que sabe tu equipo.
+            "      # No deploy target. `axon ci --target gcp|aws|k8s` generates one, or put
+      # your platform's command here: the gates above are the part axon can
+      # know, this is the part your team knows.
       - run: echo \"despliega {svc} aqui\" && exit 1
 "
         ),
@@ -379,7 +379,7 @@ concurrency:
 
 permissions:
   contents: read
-  id-token: write   # OIDC: sin llaves de servicio en secrets
+  id-token: write   # OIDC: no service keys in secrets
 
 jobs:
   contratos:
@@ -387,10 +387,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
-      # el gate que importa: este manifiesto contra TODOS los demas, y contra
-      # los contratos que ya estan publicados
+      # the gate that matters: this manifest against ALL the others, and
+      # against the contracts already published
       - run: axon verify {manifests}/
-      - name: codigo generado al dia
+      - name: generated code up to date
         run: |
           axon build {manifests}/{svc}.toml {manifests}/ --lang ts > {contracts}
           git diff --exit-code || {{
@@ -412,8 +412,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
-      # se despliega por digest, no por etiqueta: una etiqueta es mutable y el
-      # deploy deja de ser reproducible y auditable
+      # deployed by digest, not by tag: a tag is mutable and the deploy stops
+      # being reproducible and auditable
       - uses: docker/build-push-action@v6
         id: imagen
         with:
@@ -421,7 +421,7 @@ jobs:
           push: true
           tags: ${{{{ vars.REGISTRY }}}}/{svc}:${{{{ github.sha }}}}
           provenance: true
-{despliegue}      # verificacion contra lo desplegado, no contra el repo
+{despliegue}      # checked against what is deployed, not against the repo
       - run: axon verify https://{svc}.internal
 "#
     )
@@ -550,12 +550,12 @@ pub fn build_er(ms: &[Manifest]) -> String {
     out.join("\n")
 }
 
-/// El tipo TypeScript de la salida de un paso. Es el mismo nombre que ya emite
-/// el cliente de la dependencia, asi que el contexto de la saga queda tipado
-/// sin inventar tipos nuevos.
+/// The TypeScript type of a step's output. It is the same name the dependency's
+/// client already emits, so the saga's context ends up typed without inventing
+/// new types.
 fn salida_de(m: &Manifest, r: &str) -> String {
     match Step::parts(r) {
-        // un paso sobre el propio servicio usa sus tipos, sin prefijo
+        // a step on the service itself uses its own types, with no prefix
         Some((s, met)) if s == m.service => format!("{}Out", pascal(met)),
         Some((s, met)) => format!("{}{}Out", pascal(s), pascal(met)),
         None => "unknown".to_string(),
@@ -975,10 +975,10 @@ pub fn views_ts(m: &Manifest) -> String {
     o.join("\n")
 }
 
-/// La saga como diagrama: el camino de ida y, en la misma imagen, la vuelta.
+/// The saga as a diagram: the way out and, in the same picture, the way back.
 ///
-/// Que la compensacion se dibuje sola es la mitad del valor de declararla: en
-/// una revision, un paso sin flecha de vuelta se ve.
+/// That the compensation draws itself is half the value of declaring it: in a
+/// review, a step with no arrow back is visible.
 fn seq_saga(m: &Manifest, name: &str, sg: &Saga) -> String {
     let mut o = vec![
         "sequenceDiagram".to_string(),
@@ -1000,7 +1000,7 @@ fn seq_saga(m: &Manifest, name: &str, sg: &Saga) -> String {
         "  Note over coord: presupuesto {}",
         match sg.timeout_ms {
             Some(ms) => format!("{ms}ms"),
-            None => "sin declarar".to_string(),
+            None => "undeclared".to_string(),
         }
     ));
     for (i, step) in sg.steps.iter().enumerate() {
@@ -1009,10 +1009,10 @@ fn seq_saga(m: &Manifest, name: &str, sg: &Saga) -> String {
             o.push(format!("  {svc}-->>coord: ok"));
         }
     }
-    o.push("  Note over coord: hasta aca, el camino feliz".to_string());
-    // la vuelta: en orden inverso, que es el unico correcto
+    o.push("  Note over coord: up to here, the happy path".to_string());
+    // the way back: in reverse order, which is the only correct one
     o.push("  rect rgba(200,80,80,0.12)".to_string());
-    o.push("  Note over coord: si un paso falla, se deshace lo intentado en orden INVERSO".into());
+    o.push("  Note over coord: if a step fails, what was attempted is undone in REVERSE order".into());
     for (i, step) in sg.steps.iter().enumerate().rev() {
         match &step.undo {
             Some(u) => {
@@ -1022,7 +1022,7 @@ fn seq_saga(m: &Manifest, name: &str, sg: &Saga) -> String {
                 }
             }
             None => o.push(format!(
-                "  Note over coord: paso {} sin compensacion: es el ultimo",
+                "  Note over coord: step {} with no compensation: it is the last one",
                 i + 1
             )),
         }
@@ -1031,8 +1031,8 @@ fn seq_saga(m: &Manifest, name: &str, sg: &Saga) -> String {
     o.join("\n")
 }
 
-/// Flujo causal esperado. Lo que DEBERIA pasar; el causationId de los
-/// envelopes reales dice lo que paso.
+/// The expected causal flow. What SHOULD happen; the causationId of the real
+/// envelopes says what did.
 pub fn build_seq(ms: &[Manifest], root: &str, solo_eventos: bool) -> Result<String, String> {
     let emitter: IndexMap<&str, &str> = ms
         .iter()
@@ -1042,8 +1042,8 @@ pub fn build_seq(ms: &[Manifest], root: &str, solo_eventos: bool) -> Result<Stri
                 .map(move |ev| (ev.as_str(), m.service.as_str()))
         })
         .collect();
-    // Una saga tambien es un flujo, y el suyo tiene una rama que ningun
-    // diagrama de eventos muestra: la compensacion.
+    // A saga is a flow too, and its own has a branch no event diagram shows:
+    // the compensation.
     if let Some((m, sg)) = ms
         .iter()
         .find_map(|m| m.saga.get(root).map(|sg| (m, sg)))
@@ -1057,7 +1057,7 @@ pub fn build_seq(ms: &[Manifest], root: &str, solo_eventos: bool) -> Result<Stri
             .flat_map(|m| m.saga.keys().map(|k| k.as_str()))
             .collect();
         return Err(format!(
-            "{root}: nadie lo emite y ninguna saga se llama asi. Eventos: {}. Sagas: {}",
+            "{root}: nobody emits it and no saga is called that. Events: {}. Sagas: {}",
             known.join(", "),
             if sagas.is_empty() {
                 "ninguna".to_string()
@@ -1073,8 +1073,8 @@ pub fn build_seq(ms: &[Manifest], root: &str, solo_eventos: bool) -> Result<Stri
     let mut out = vec!["sequenceDiagram".to_string(), "  autonumber".to_string()];
     let mut seen = BTreeSet::new();
     if solo_eventos {
-        // Misma forma que `axon trace --seq`: la cadena causal de eventos, sin
-        // las llamadas sincronas, que la traza de envelopes no puede ver.
+        // Same shape as `axon trace --seq`: the causal chain of events, without
+        // the synchronous calls, which the envelope trace cannot see.
         out.push(format!("  client->>{}: {root}", emitter[root]));
         eventos(ms, &emitter, root, 0, &mut seen, &mut out);
     } else {
@@ -1141,7 +1141,7 @@ fn walk(
         }
         for nxt in m.emits.keys() {
             out.push(format!(
-                "  Note over {dst}: emite {nxt} (causationId = id de {ev})"
+                "  Note over {dst}: emits {nxt} (causationId = id of {ev})"
             ));
             walk(ms, emitter, external, nxt, depth + 1, seen, out);
         }
@@ -1149,10 +1149,10 @@ fn walk(
     }
 }
 
-// ---------- maquinas de estado ----------
+// ---------- state machines ----------
 
-/// Tabla de transiciones exhaustiva y tipada. Un estado ilegal no compila
-/// donde el lenguaje lo permite, y falla ruidosamente donde no.
+/// An exhaustive, typed transition table. An illegal state does not compile
+/// where the language allows it, and fails loudly where it does not.
 pub fn machines_ts(m: &Manifest) -> String {
     let mut o = Vec::new();
     for (name, mac) in &m.machine {
@@ -1171,7 +1171,7 @@ pub fn machines_ts(m: &Manifest) -> String {
                 .join(", ")
         ));
         o.push(format!(
-            "/** Transiciones declaradas en el manifiesto. Generado: no editar. */\n\
+            "/** Transitions declared in the manifest. Generated: do not edit. */\n\
              export const {}Transitions: Record<{p}Action, {{ from: readonly {p}State[]; to: {p}State; on: string }}> = {{",
             camel(name)
         ));
@@ -1191,7 +1191,7 @@ pub fn machines_ts(m: &Manifest) -> String {
         o.push(format!(
             "export function {c}Next(state: {p}State, action: {p}Action): {p}State {{\n  \
              const t = {c}Transitions[action];\n  \
-             if (!t.from.includes(state)) throw new Error(`{name}: ${{action}} no es legal from_ ${{state}}`);\n  \
+             if (!t.from.includes(state)) throw new Error(`{name}: ${{action}} is not legal from ${{state}}`);\n  \
              return t.to;\n}}",
             c = camel(name)
         ));
@@ -1790,51 +1790,51 @@ fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
 
 // ---------- feature flags ----------
 
-/// Accesores tipados y la interfaz del proveedor.
+/// Typed accessors and the provider interface.
 ///
-/// La interfaz tiene la forma de OpenFeature a proposito: axon no trae un SDK
-/// de flags ni inventa un protocolo, igual que no trae uno de trazas. Lo que
-/// aporta es que el nombre del flag, su valor seguro y el campo por el que se
-/// fija salgan del manifiesto y no de una cadena suelta en el codigo.
+/// The interface has OpenFeature's shape on purpose: axon ships no flag SDK
+/// and invents no protocol, same as it ships none for traces. What it adds is
+/// that the flag's name, its safe value and the field it is pinned by come out
+/// of the manifest and not out of a loose string in the code.
 fn flags_ts(m: &Manifest) -> String {
     if m.flags.is_empty() {
         return String::new();
     }
-    // La interfaz cubre los cuatro tipos de OpenFeature. Un flag no es solo un
-    // booleano: el estandar admite string, numero y objeto, y un rollout de
-    // configuracion —un limite, un proveedor, un umbral— necesita justamente eso.
+    // The interface covers OpenFeature's four types. A flag is not just a
+    // boolean: the standard allows string, number and object, and a config
+    // rollout —a limit, a provider, a threshold— needs exactly that.
     let mut o = vec![
-        "\n/** Proveedor de flags, con la forma de OpenFeature: `evaluar` recibe el\n \
-         *  name, el valor por defecto y el contexto por el que se fija. Los cuatro\n \
-         *  tipos del estandar, para que el SDK real encaje sin traduccion. */\n\
+        "\n/** Flag provider, with OpenFeature's shape: `evaluate` takes the name,\n \
+         *  the default value and the context it is pinned by. The standard's four\n \
+         *  types, so the real SDK fits with no translation. */\n\
          export interface Flags {\n  \
-           evaluar<T extends boolean | string | number | object>(\n    \
-             name: string,\n    porDefecto: T,\n    contexto: Record<string, string>,\n  \
+           evaluate<T extends boolean | string | number | object>(\n    \
+             name: string,\n    fallback: T,\n    context: Record<string, string>,\n  \
            ): Promise<T>;\n\
          }\n"
         .to_string(),
     ];
-    let mut nombres = Vec::new();
+    let mut names = Vec::new();
     for (name, f) in &m.flags {
-        nombres.push(format!("\"{name}\""));
-        let variantes = f.all_variants();
-        let defecto = f.default_variant();
-        let valor = variantes
-            .get(&defecto)
+        names.push(format!("\"{name}\""));
+        let variants = f.all_variants();
+        let default_name = f.default_variant();
+        let value = variants
+            .get(&default_name)
             .map(|v| v.to_string())
             .unwrap_or_else(|| "false".into());
-        let tipo = match f.kind() {
+        let kind = match f.kind() {
             "boolean" => "boolean".to_string(),
             "string" => "string".to_string(),
             "number" => "number".to_string(),
-            // el tipo del objeto sale del propio valor por defecto declarado
+            // the object's type comes from the declared default value itself
             _ => format!("typeof {}", camel(&format!("valor.{name}"))),
         };
-        let mut doc = vec![format!("/** `{name}`: {} de OpenFeature.", f.kind())];
-        if variantes.len() > 2 || !f.variants.is_empty() {
+        let mut doc = vec![format!("/** `{name}`: OpenFeature {}.", f.kind())];
+        if variants.len() > 2 || !f.variants.is_empty() {
             doc.push(format!(
                 " *  Variantes: {}.",
-                variantes
+                variants
                     .iter()
                     .map(|(k, v)| format!("`{k}` = {v}"))
                     .collect::<Vec<_>>()
@@ -1843,55 +1843,55 @@ fn flags_ts(m: &Manifest) -> String {
         }
         if let Some(c) = &f.sticky_by {
             doc.push(format!(
-                " *  Se fija por `{c}`: la misma entidad toma siempre el mismo camino."
+                " *  Pinned by `{c}`: the same entity always takes the same path."
             ));
         }
         doc.push(" */".into());
 
         if f.kind() == "object" {
             o.push(format!(
-                "const {} = {valor} as const;",
+                "const {} = {value} as const;",
                 camel(&format!("valor.{name}"))
             ));
         }
-        let firma = match &f.sticky_by {
+        let signature = match &f.sticky_by {
             Some(c) => format!("(flags: Flags, {c}: string)"),
             None => "(flags: Flags)".to_string(),
         };
-        let contexto = match &f.sticky_by {
+        let context = match &f.sticky_by {
             Some(c) => format!("{{ targetingKey: {c}, {c} }}"),
             None => "{}".to_string(),
         };
-        let por_defecto = if f.kind() == "object" {
+        let fallback = if f.kind() == "object" {
             camel(&format!("valor.{name}"))
         } else {
-            valor.clone()
+            value.clone()
         };
         o.push(format!(
-            "{}\nexport const {} = {firma}: Promise<{tipo}> =>\n  \
-               flags.evaluar(\"{name}\", {por_defecto}, {contexto});\n",
+            "{}\nexport const {} = {signature}: Promise<{kind}> =>\n  \
+               flags.evaluate(\"{name}\", {fallback}, {context});\n",
             doc.join("\n"),
             camel(&format!("flag.{name}")),
         ));
     }
     o.push(format!(
-        "/** Los flags que declara el manifiesto. Un flag que no esta aca no existe. */\n\
-         export const flagsDeclarados = [{}] as const;\n",
-        nombres.join(", ")
+        "/** The flags the manifest declares. A flag that is not here does not exist. */\n\
+         export const declaredFlags = [{}] as const;\n",
+        names.join(", ")
     ));
     o.join("\n")
 }
 
-/// Configuracion de flagd, que es la implementacion de referencia de
-/// OpenFeature y lee exactamente este JSON. El rollout gradual se expresa con
-/// su `fractional`, fijado por el campo declarado en `sticky_by`.
+/// flagd's config: it is OpenFeature's reference implementation and reads
+/// exactly this JSON. The gradual rollout is expressed with its `fractional`,
+/// pinned by the field declared in `sticky_by`.
 pub fn build_flagd(ms: &[Manifest]) -> String {
     let mut flags = Vec::new();
     for m in ms.iter().filter(|m| !m.external) {
         for (name, f) in &m.flags {
-            // Las variantes declaradas, no un on/off fijo: OpenFeature admite
-            // string, numero y objeto, y flagd los resuelve igual.
-            let variantes = format!(
+            // The declared variants, not a fixed on/off: OpenFeature allows
+            // string, number and object, and flagd resolves them the same.
+            let variants = format!(
                 "{{ {} }}",
                 f.all_variants()
                     .iter()
@@ -1899,21 +1899,22 @@ pub fn build_flagd(ms: &[Manifest]) -> String {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            let por_defecto = f.default_variant();
+            let fallback = f.default_variant();
             let objetivo = match (f.rollout, &f.sticky_by) {
-                (Some(p), Some(campo)) if p > 0 && p < 100 => {
-                    // el rollout reparte entre la variante por defecto y la
-                    // otra; con mas de dos variantes hay que declararlo a mano
+                (Some(p), Some(field)) if p > 0 && p < 100 => {
+                    // the rollout splits between the default variant and the
+                    // other one; with more than two variants it has to be
+                    // declared by hand
                     let destino = f
                         .all_variants()
                         .keys()
-                        .find(|k| **k != por_defecto)
+                        .find(|k| **k != fallback)
                         .cloned()
                         .unwrap_or_else(|| "on".into());
                     format!(
                         ",\n      \"targeting\": {{\n        \"fractional\": [\n          \
-                         {{ \"var\": \"{campo}\" }},\n          [\"{destino}\", {p}],\n          \
-                         [\"{por_defecto}\", {}]\n        ]\n      }}",
+                         {{ \"var\": \"{field}\" }},\n          [\"{destino}\", {p}],\n          \
+                         [\"{fallback}\", {}]\n        ]\n      }}",
                         100 - p
                     )
                 }
@@ -1921,7 +1922,7 @@ pub fn build_flagd(ms: &[Manifest]) -> String {
             };
             flags.push(format!(
                 "    \"{}\": {{\n      \"state\": \"ENABLED\",\n      \
-                 \"variants\": {variantes},\n      \"defaultVariant\": \"{por_defecto}\"{objetivo}\n    }}",
+                 \"variants\": {variants},\n      \"defaultVariant\": \"{fallback}\"{objetivo}\n    }}",
                 name
             ));
         }

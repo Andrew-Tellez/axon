@@ -544,8 +544,8 @@ fn el_typescript_generado_typechequea() {
 fn build_sin_fuentes_falla_claro() {
     let (_, err, ok) = axon(&["build", "examples/payments.toml"]);
     assert!(!ok);
-    assert!(err.contains("no se encontro quien lo emite"), "{err}");
-    assert!(err.contains("Pasa los demas manifiestos"), "{err}");
+    assert!(err.contains("whoever emits it was not found"), "{err}");
+    assert!(err.contains("Pass the other manifests"), "{err}");
 }
 
 /// `terraform fmt` solo dice que el HCL parsea. `validate` con los providers
@@ -2215,11 +2215,11 @@ fn los_flags_se_verifican() {
         "{ts}"
     );
     assert!(
-        ts.contains(r#"flags.evaluar("cobro_v2", false, { targetingKey: tenant_id, tenant_id })"#),
+        ts.contains(r#"flags.evaluate("cobro_v2", false, { targetingKey: tenant_id, tenant_id })"#),
         "{ts}"
     );
     assert!(
-        ts.contains(r#"export const flagsDeclarados = ["cobro_v2""#),
+        ts.contains(r#"export const declaredFlags = ["cobro_v2""#),
         "{ts}"
     );
 
@@ -2232,7 +2232,7 @@ fn los_flags_se_verifican() {
         "sin accesor tipado para un flag de tipo string:\n{ts}"
     );
     assert!(
-        ts.contains(r#"flags.evaluar("proveedor_de_cobro", "stripe", "#),
+        ts.contains(r#"flags.evaluate("proveedor_de_cobro", "stripe", "#),
         "{ts}"
     );
     assert!(
@@ -2241,7 +2241,7 @@ fn los_flags_se_verifican() {
     );
     // la interfaz cubre los cuatro tipos del estandar
     assert!(
-        ts.contains("evaluar<T extends boolean | string | number | object>"),
+        ts.contains("evaluate<T extends boolean | string | number | object>"),
         "{ts}"
     );
 

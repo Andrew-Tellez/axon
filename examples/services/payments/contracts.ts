@@ -58,7 +58,7 @@ export interface PaymentCapturedV1 {
   amount: { amount: number; currency: string };
 }
 
-// order.placed@v1: esquema declarado por orders, su dueno
+// order.placed@v1: schema declared by orders, its owner
 export interface OrderPlacedV1 {
   orderId: string;
   customerId: string;
@@ -384,12 +384,12 @@ export abstract class PaymentsService {
   abstract capturePayment(input: CapturePaymentIn, e: Envelope<unknown>): Promise<CapturePaymentOut>;
   abstract refundPayment(input: RefundPaymentIn, e: Envelope<unknown>): Promise<RefundPaymentOut>;
   abstract payoutMerchant(input: PayoutMerchantIn, e: Envelope<unknown>): Promise<PayoutMerchantOut>;
-  /** Punto de entrada unico: rutea por tipo y deduplica por id de envelope. */
+  /** Single entry point: routes by type and deduplicates by envelope id. */
   dispatch(e: Envelope<unknown>): Promise<void> {
     return this.inbox.once(e.id, async () => {
       switch (e.type) {
         case "order.placed@v1": return this.onOrderPlaced(e as Envelope<OrderPlacedV1>);
-        default: throw new Error(`payments: tipo no declarado en el manifiesto: ${e.type}`);
+        default: throw new Error(`payments: type not declared in the manifest: ${e.type}`);
       }
     });
   }
@@ -398,7 +398,7 @@ export abstract class PaymentsService {
 export type PaymentState = "pending" | "captured" | "failed" | "refunded";
 export type PaymentAction = "capture" | "fail" | "refund";
 export const paymentFinal: readonly PaymentState[] = ["refunded", "failed"];
-/** Transiciones declaradas en el manifiesto. Generado: no editar. */
+/** Transitions declared in the manifest. Generated: do not edit. */
 export const paymentTransitions: Record<PaymentAction, { from: readonly PaymentState[]; to: PaymentState; on: string }> = {
   capture: { from: ["pending"], to: "captured", on: "capturePayment" },
   fail: { from: ["pending"], to: "failed", on: "capturePayment" },
@@ -406,7 +406,7 @@ export const paymentTransitions: Record<PaymentAction, { from: readonly PaymentS
 };
 export function paymentNext(state: PaymentState, action: PaymentAction): PaymentState {
   const t = paymentTransitions[action];
-  if (!t.from.includes(state)) throw new Error(`payment: ${action} no es legal from_ ${state}`);
+  if (!t.from.includes(state)) throw new Error(`payment: ${action} is not legal from ${state}`);
   return t.to;
 }
 export const paymentCan = (state: PaymentState, action: PaymentAction) => paymentTransitions[action].from.includes(state);
@@ -422,43 +422,43 @@ export const httpRoutes = ["POST /v1/payments", "POST /v1/payments/{paymentId}/r
 export const isolationLevel = "SERIALIZABLE" as const;
 
 
-/** Proveedor de flags, con la forma de OpenFeature: `evaluar` recibe el
- *  name, el valor por defecto y el contexto por el que se fija. Los cuatro
- *  tipos del estandar, para que el SDK real encaje sin traduccion. */
+/** Flag provider, with OpenFeature's shape: `evaluate` takes the name,
+ *  the default value and the context it is pinned by. The standard's four
+ *  types, so the real SDK fits with no translation. */
 export interface Flags {
-  evaluar<T extends boolean | string | number | object>(
+  evaluate<T extends boolean | string | number | object>(
     name: string,
-    porDefecto: T,
-    contexto: Record<string, string>,
+    fallback: T,
+    context: Record<string, string>,
   ): Promise<T>;
 }
 
-/** `cobro_v2`: boolean de OpenFeature.
- *  Se fija por `tenant_id`: la misma entidad toma siempre el mismo camino.
+/** `cobro_v2`: OpenFeature boolean.
+ *  Pinned by `tenant_id`: the same entity always takes the same path.
  */
 export const flagCobroV2 = (flags: Flags, tenant_id: string): Promise<boolean> =>
-  flags.evaluar("cobro_v2", false, { targetingKey: tenant_id, tenant_id });
+  flags.evaluate("cobro_v2", false, { targetingKey: tenant_id, tenant_id });
 
-/** `cortar_stripe`: boolean de OpenFeature.
+/** `cortar_stripe`: OpenFeature boolean.
  */
 export const flagCortarStripe = (flags: Flags): Promise<boolean> =>
-  flags.evaluar("cortar_stripe", false, {});
+  flags.evaluate("cortar_stripe", false, {});
 
-/** `proveedor_de_cobro`: string de OpenFeature.
+/** `proveedor_de_cobro`: OpenFeature string.
  *  Variantes: `stripe` = "stripe", `adyen` = "adyen".
- *  Se fija por `tenant_id`: la misma entidad toma siempre el mismo camino.
+ *  Pinned by `tenant_id`: the same entity always takes the same path.
  */
 export const flagProveedorDeCobro = (flags: Flags, tenant_id: string): Promise<string> =>
-  flags.evaluar("proveedor_de_cobro", "stripe", { targetingKey: tenant_id, tenant_id });
+  flags.evaluate("proveedor_de_cobro", "stripe", { targetingKey: tenant_id, tenant_id });
 
-/** `limite_de_reintentos`: number de OpenFeature.
+/** `limite_de_reintentos`: OpenFeature number.
  *  Variantes: `normal` = 3, `degradado` = 0.
  */
 export const flagLimiteDeReintentos = (flags: Flags): Promise<number> =>
-  flags.evaluar("limite_de_reintentos", 3, {});
+  flags.evaluate("limite_de_reintentos", 3, {});
 
-/** Los flags que declara el manifiesto. Un flag que no esta aca no existe. */
-export const flagsDeclarados = ["cobro_v2", "cortar_stripe", "proveedor_de_cobro", "limite_de_reintentos"] as const;
+/** The flags the manifest declares. A flag that is not here does not exist. */
+export const declaredFlags = ["cobro_v2", "cortar_stripe", "proveedor_de_cobro", "limite_de_reintentos"] as const;
 
 
 /** Everything needed to reach another service. Implemented by whoever
