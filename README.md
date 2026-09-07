@@ -169,12 +169,12 @@ every release. It is written in Spanish for now.
 
 | | |
 | --- | --- |
-| [Your first manifest](https://andrew-tellez.github.io/axon/primeros-pasos.html) | Ten minutes, from zero to verified |
-| [Manifest reference](https://andrew-tellez.github.io/axon/manifiesto.html) | Every field and why it exists |
-| [Patterns](https://andrew-tellez.github.io/axon/patrones.html) | Declared, not remembered: outbox, idempotent inbox, **saga**, **event sourcing**, **CQRS** |
+| [Your first manifest](https://andrew-tellez.github.io/axon/getting-started.html) | Ten minutes, from zero to verified |
+| [Manifest reference](https://andrew-tellez.github.io/axon/manifest.html) | Every field and why it exists |
+| [Patterns](https://andrew-tellez.github.io/axon/patterns.html) | Declared, not remembered: outbox, idempotent inbox, **saga**, **event sourcing**, **CQRS** |
 | [CAP and resilience](https://andrew-tellez.github.io/axon/cap.html) | The side you do get to choose |
-| [Rules and drift](https://andrew-tellez.github.io/axon/verificacion.html) | Everything `verify` blocks |
-| [Security](https://andrew-tellez.github.io/axon/seguridad.html) | OWASP, RLS, masking |
+| [Rules and drift](https://andrew-tellez.github.io/axon/verification.html) | Everything `verify` blocks |
+| [Security](https://andrew-tellez.github.io/axon/security.html) | OWASP, RLS, masking |
 | [Plugins](https://andrew-tellez.github.io/axon/plugins.html) | Any `axon-*` executable |
 
 The manifest examples in that documentation **are not text**: the suite extracts every
@@ -184,7 +184,7 @@ block and runs `axon verify` over it, so they cannot go stale in silence.
 
 Preview. The command surface is stable; the manifest format can still change before
 `v1`. See the [changelog](CHANGELOG.md) and
-[what gets checked](https://andrew-tellez.github.io/axon/garantias.html).
+[what gets checked](https://andrew-tellez.github.io/axon/guarantees.html).
 
 ## Development
 

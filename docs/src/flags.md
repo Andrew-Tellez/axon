@@ -1,114 +1,116 @@
 # Feature flags
 
-Lo que aporta declarar los flags **no es el SDK** — [OpenFeature](https://openfeature.dev)
-y [flagd](https://flagd.dev) ya existen y son mejores en eso. Lo que aporta es que el
-compilador imponga lo que nadie impone.
+What declaring the flags adds is **not the SDK** — [OpenFeature](https://openfeature.dev)
+and [flagd](https://flagd.dev) already exist and are better at that. What it adds is that
+the compiler enforces what nobody enforces.
 
 ```toml
-[flags.cobro_v2]
-owner      = "equipo-pagos"   # el que lo prendió es el que lo apaga
-expires    = "2026-12-31"     # un flag sin fecha de muerte no muere
-rollout    = 10               # por ciento
-sticky_by  = "tenant_id"      # obligatorio con rollout parcial
+[flags.charge_v2]
+owner      = "payments-team"  # whoever turned it on is who turns it off
+expires    = "2026-12-31"     # a flag with no death date does not die
+rollout    = 10               # per cent
+sticky_by  = "tenant_id"      # mandatory with a partial rollout
 
-[flags.cortar_stripe]
-owner       = "equipo-pagos"
-kill_switch = true            # vive mientras exista lo que apaga
+[flags.stripe_kill]
+owner       = "payments-team"
+kill_switch = true            # it lives as long as what it switches off
 ```
 
-## Un flag sin fecha de muerte no muere
+## A flag with no death date does not die
 
-Un código con doscientos flags viejos no tiene doscientas features: tiene **doscientas
-ramas que nadie prueba**. Así que `expires` es obligatorio, y pasada esa fecha `verify`
-falla:
+Code with two hundred stale flags does not have two hundred features: it has **two
+hundred branches nobody tests**. So `expires` is mandatory, and past that date `verify`
+fails:
 
 ```console
 $ axon verify manifests/
-error  payments.cobro_v2: expired on 2026-12-31. Either the dead branch gets cleaned
+error  payments.charge_v2: expired on 2026-12-31. Either the dead branch gets cleaned
        up or the date gets renewed as an explicit decision: leaving it expired is
        neither
 ```
 
-Si de verdad es permanente —un interruptor de emergencia, un corte por región— se
-declara `kill_switch = true` y queda exento. Esa es la diferencia entre un flag temporal
-y un control operativo, y conviene que esté escrita.
+If it really is permanent —an emergency switch, a per-region cut-off— you declare
+`kill_switch = true` and it is exempt. That is the difference between a temporary flag
+and an operational control, and it is worth having in writing.
 
-## El rollout tiene que ser fijo
+## The rollout has to be sticky
 
-Un porcentaje sin `sticky_by` se evalúa **por petición**: la misma entidad toma un camino
-en una llamada y el otro en la siguiente, y con estado de por medio queda a medio migrar.
+A percentage with no `sticky_by` is evaluated **per request**: the same entity takes one
+path on one call and the other on the next, and with state involved it ends up half
+migrated.
 
 ```console
-error  payments.cobro_v2: rollout at 10% with no `sticky_by`. Evaluated per request,
+error  payments.charge_v2: rollout at 10% with no `sticky_by`. Evaluated per request,
        the same entity takes one path and then the other, and ends up half-migrated
 ```
 
-Y el campo por el que se fija tiene que **existir en algún contrato** —una entrada de
-método, un campo de un evento que emite o consume, o la columna del inquilino—; si no, la
-decisión se fija por un dato que el servicio nunca recibe.
+And the field it is pinned by has to **exist in some contract** —a method input, a field
+of an event it emits or consumes, or the tenant column—; otherwise the decision is pinned
+by data the service never receives.
 
-El accesor generado lo exige en la firma, así que no se puede evaluar por petición
-aunque uno quiera:
+The generated accessor requires it in the signature, so it cannot be evaluated per
+request even if somebody wanted to:
 
 ```ts
-export const flagCobroV2 = (flags: Flags, tenant_id: string): Promise<boolean> =>
-  flags.evaluate("cobro_v2", false, { targetingKey: tenant_id, tenant_id });
+export const flagChargeV2 = (flags: Flags, tenant_id: string): Promise<boolean> =>
+  flags.evaluate("charge_v2", false, { targetingKey: tenant_id, tenant_id });
 ```
 
-Un `kill_switch` con `rollout` también es un error: se apaga entero o no sirve de nada.
+A `kill_switch` with a `rollout` is an error too: it goes off whole or it is worth
+nothing.
 
-## Los cuatro tipos de OpenFeature
+## OpenFeature's four types
 
-Un flag no es solo un booleano. OpenFeature resuelve `boolean`, `string`, `number` y
-`object`, y un rollout de *configuración* —un límite, un proveedor, un umbral— necesita
-justamente eso:
+A flag is not just a boolean. OpenFeature resolves `boolean`, `string`, `number` and
+`object`, and a *configuration* rollout —a limit, a provider, a threshold— needs exactly
+that:
 
 ```toml
-[flags.proveedor_de_cobro]
-owner           = "equipo-pagos"
+[flags.charge_provider]
+owner           = "payments-team"
 expires         = "2027-06-30"
 sticky_by       = "tenant_id"
 rollout         = 20
 default_variant = "stripe"
 variants        = { stripe = "stripe", adyen = "adyen" }
 
-[flags.limite_de_reintentos]
-owner           = "equipo-pagos"
+[flags.retry_limit]
+owner           = "payments-team"
 kill_switch     = true
 default_variant = "normal"
-variants        = { normal = 3, degradado = 0 }
+variants        = { normal = 3, degraded = 0 }
 ```
 
-Sin `variants`, el flag es el caso booleano y las variantes son `on` y `off` — que es lo
-que necesita la mayoría y no vale la pena escribir.
+Without `variants`, the flag is the boolean case and the variants are `on` and `off` —
+which is what most need and is not worth writing.
 
-El accesor sale con el tipo correcto:
+The accessor comes out with the right type:
 
 ```ts
-export const flagProveedorDeCobro = (flags: Flags, tenant_id: string): Promise<string> =>
-  flags.evaluate("proveedor_de_cobro", "stripe", { targetingKey: tenant_id, tenant_id });
+export const flagChargeProvider = (flags: Flags, tenant_id: string): Promise<string> =>
+  flags.evaluate("charge_provider", "stripe", { targetingKey: tenant_id, tenant_id });
 
-export const flagLimiteDeReintentos = (flags: Flags): Promise<number> =>
-  flags.evaluate("limite_de_reintentos", 3, {});
+export const flagRetryLimit = (flags: Flags): Promise<number> =>
+  flags.evaluate("retry_limit", 3, {});
 ```
 
-Y `verify` bloquea dos errores propios de las variantes: un `default_variant` que no
-existe en `variants` —la evaluación caería siempre al valor del código, y el flag
-dejaría de servir en silencio— y variantes que **mezclan tipos**, porque OpenFeature
-resuelve un tipo por flag, no uno por variante.
+And `verify` blocks two errors specific to variants: a `default_variant` that does not
+exist in `variants` —evaluation would always fall back to the code's value, and the flag
+would silently stop working— and variants that **mix types**, because OpenFeature
+resolves one type per flag, not one per variant.
 
-## La configuración, generada
+## The configuration, generated
 
 ```sh
 axon flags manifests/ > flags.json
 ```
 
-Sale la configuración de flagd, con el rollout expresado en su `fractional` y fijado por
-el campo declarado:
+Out comes flagd's configuration, with the rollout expressed in its `fractional` and
+pinned by the declared field:
 
 ```json
 {
-  "proveedor_de_cobro": {
+  "charge_provider": {
     "state": "ENABLED",
     "variants": { "stripe": "stripe", "adyen": "adyen" },
     "defaultVariant": "stripe",
@@ -119,30 +121,30 @@ el campo declarado:
 }
 ```
 
-El target `local` levanta flagd con esa configuración y le pasa `AXON_FLAGS_URL` a cada
-servicio, así que el flag existe en tu máquina igual que en producción.
+The `local` target brings flagd up with that configuration and passes `AXON_FLAGS_URL` to
+each service, so the flag exists on your machine just as it does in production.
 
-## Por qué OFREP y no el proveedor de flagd
+## Why OFREP and not flagd's own provider
 
-El [ejemplo](https://github.com/Andrew-Tellez/axon/tree/main/examples/services/flags.ts)
-usa el SDK de OpenFeature con el proveedor **OFREP**, que es el protocolo REST estándar
-del proyecto: habla con flagd hoy y con cualquier otro backend que lo implemente, sin
-cambiar una línea.
+The [example](https://github.com/Andrew-Tellez/axon/tree/main/examples/services/flags.ts)
+uses the OpenFeature SDK with the **OFREP** provider, which is the project's standard
+REST protocol: it talks to flagd today and to any other backend that implements it,
+without changing a line.
 
-El proveedor gRPC de flagd pide la ruta vieja del servicio de evaluación, y flagd v0.12
-ya sirve solo la nueva. Eso lo encontró la prueba, no la documentación — y es la razón
-por la que preferir el protocolo estándar sobre el cliente específico no es una cuestión
-de gusto.
+flagd's gRPC provider asks for the old evaluation-service path, and flagd v0.12 already
+serves only the new one. The test found that out, not the documentation — and it is the
+reason preferring the standard protocol over the specific client is not a matter of
+taste.
 
-## Verificado, no supuesto
+## Verified, not assumed
 
-El `demo.sh` comprueba las dos propiedades que importan, contra flagd corriendo:
+`demo.sh` checks the two properties that matter, against a running flagd:
 
 ```console
-==> rollout declarado vs aplicado
-  declarado 10%  medido 10.7%  (32 de 300)
-  OK: estable por inquilino, y el porcentaje aplica
+==> declared vs applied rollout
+  declared 10%  measured 10.7%  (32 of 300)
+  OK: sticky per tenant, and the percentage applies
 ```
 
-El porcentaje se aplica, y **la misma entidad recibe siempre la misma respuesta**. Sin lo
-segundo, un pago tomaría el camino nuevo en una llamada y el viejo en la siguiente.
+The percentage applies, and **the same entity always gets the same answer**. Without the
+second, a payment would take the new path on one call and the old one on the next.

@@ -1,36 +1,36 @@
-# Resumen
+# Summary
 
-[axon](./introduccion.md)
+[axon](./introduction.md)
 
-# Empezar
+# Getting started
 
-- [Instalar](./instalar.md)
-- [Tu primer manifiesto](./primeros-pasos.md)
-- [Entrar sin reescribir nada](./importar.md)
+- [Install](./install.md)
+- [Your first manifest](./getting-started.md)
+- [Getting in without rewriting anything](./importing.md)
 
-# El manifiesto
+# The manifest
 
-- [Referencia](./manifiesto.md)
-- [Patrones](./patrones.md)
-- [CAP y resiliencia](./cap.md)
+- [Reference](./manifest.md)
+- [Patterns](./patterns.md)
+- [CAP and resilience](./cap.md)
 - [Feature flags](./flags.md)
 
-# Lo que se genera
+# What gets generated
 
-- [Infraestructura](./infraestructura.md)
-- [Trazabilidad](./trazabilidad.md)
-- [Escalado y carga](./escalado.md)
-- [Seguridad](./seguridad.md)
-- [Bodega y métricas](./analitica.md)
+- [Infrastructure](./infrastructure.md)
+- [Traceability](./traceability.md)
+- [Scaling and load](./scaling.md)
+- [Security](./security.md)
+- [Warehouse and metrics](./analytics.md)
 
-# Verificación
+# Verification
 
-- [Reglas y drift](./verificacion.md)
-- [Gobernanza](./gobernanza.md)
-- [Qué se comprueba](./garantias.md)
+- [Rules and drift](./verification.md)
+- [Governance](./governance.md)
+- [What gets checked](./guarantees.md)
 
-# Extender
+# Extending
 
 - [Plugins](./plugins.md)
-- [Referencia de comandos](./cli.md)
-- [Contribuir](./contribuir.md)
+- [Command reference](./cli.md)
+- [Contributing](./contributing.md)

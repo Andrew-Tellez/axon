@@ -1,48 +1,47 @@
 # Plugins
 
-Un plugin es **cualquier ejecutable en el `PATH` llamado `axon-*`**. Recibe JSON por
-stdin, escribe por stdout. Sin ABI, sin cargar librerías, sin versiones que casen:
-el modelo de `git` y de `protoc`. Puede ser un binario de Go o tres líneas de shell.
+A plugin is **any executable on the `PATH` called `axon-*`**. It takes JSON on stdin and
+writes on stdout. No ABI, no library loading, no versions to match: `git`'s and
+`protoc`'s model. It can be a Go binary or three lines of shell.
 
-| Clase | Se invoca con | Recibe | Devuelve |
+| Kind | Invoked by | Receives | Returns |
 | --- | --- | --- | --- |
-| `axon-gen-<lang>` | `axon build --lang go` | `{manifest, peers}` | código fuente |
-| `axon-infra-<target>` | `axon infra --target pulumi` | el plan neutral | IaC |
-| `axon-check-<regla>` | `axon verify` (todos, siempre) | todos los manifiestos | `[{level, message}]` |
+| `axon-gen-<lang>` | `axon build --lang go` | `{manifest, peers}` | source code |
+| `axon-infra-<target>` | `axon infra --target pulumi` | the neutral plan | IaC |
+| `axon-check-<rule>` | `axon verify` (all of them, always) | every manifest | `[{level, message}]` |
 
-Una regla de gobernanza propia, completa:
+A governance rule of your own, complete:
 
 ```sh
 #!/bin/sh
-# axon-check-nombres — ningún servicio se llama "service" o "api"
+# axon-check-names — no service is called "service" or "api"
 jq -c '[.[] | select(.service|test("^(service|api)$"))
-        | {level:"error", message:("\(.service): nombre genérico prohibido")}]'
+        | {level:"error", message:("\(.service): generic name not allowed")}]'
 ```
 
 ```console
-$ chmod +x axon-check-nombres && mv axon-check-nombres ~/.local/bin/
+$ chmod +x axon-check-names && mv axon-check-names ~/.local/bin/
 $ axon verify manifests/
-error: [axon-check-nombres] api: nombre generico prohibido
+error: [axon-check-names] api: generic name not allowed
 ```
 
-Bloquea el pipeline exactamente igual que una regla nativa.
+It blocks the pipeline exactly like a native rule.
 
-## `axon-gen-go`, el generador de referencia
+## `axon-gen-go`, the reference generator
 
-[`plugins/axon-gen-go`](plugins/axon-gen-go) es un generador completo escrito **en Go**
-— no importa nada de axon, su único contrato es el JSON de stdin. Sirve de plantilla
-para cualquier otro lenguaje:
+[`plugins/axon-gen-go`](https://github.com/Andrew-Tellez/axon/tree/main/plugins/axon-gen-go)
+is a complete generator written **in Go** — it imports nothing from axon, its only
+contract is the JSON on stdin. It works as a template for any other language:
 
 ```sh
 go build -o ~/.local/bin/axon-gen-go ./plugins/axon-gen-go
 axon build manifests/payments.toml manifests/ --lang go > payments/axon.go
 ```
 
-Produce Go idiomático, no TypeScript traducido: interfaz de handlers en vez de herencia,
-`ctx` primero y `error` al final, `OrderID` y no `OrderId`, y la salida pasa por
-`go/format` antes de salir — un generador no debería dejar código que alguien tenga que
-formatear después. El suite comprueba que lo generado pase `go vet`.
+It produces idiomatic Go, not translated TypeScript: a handler interface instead of
+inheritance, `ctx` first and `error` last, `OrderID` and not `OrderId`, and the output
+goes through `go/format` before coming out — a generator should not leave code somebody
+has to format afterwards. The suite checks that what it generates passes `go vet`.
 
-Recibe `{manifest, peers}` porque el esquema de un evento consumido lo declara su
-emisor: sin los demás manifiestos, ningún generador puede tipar lo que su servicio
-recibe.
+It receives `{manifest, peers}` because a consumed event's schema is declared by its
+emitter: without the other manifests, no generator can type what its service receives.

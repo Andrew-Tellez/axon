@@ -1,34 +1,34 @@
-# CAP y resiliencia
+# CAP and resilience
 
-El manifiesto es diseño de alto nivel — límites de servicio, topología, qué garantiza
-cada uno. El compilador lo baja a diseño de bajo nivel: nivel de aislamiento, política
-de reintentos, firmas de método. **Eso es todo el proyecto en una frase.**
+The manifest is high-level design — service boundaries, topology, what each one
+guarantees. The compiler lowers it into low-level design: isolation level, retry policy,
+method signatures. **That is the whole project in one sentence.**
 
 ```toml
 [[depends]]
 service    = "orders"
 method     = "getOrder"
-timeout_ms = 1000        # obligatorio
-retries    = 3           # solo si el otro método es idempotente
+timeout_ms = 1000        # mandatory
+retries    = 3           # only if the other method is idempotent
 breaker    = true
 
 [cap]
-consistency  = "strong"    # el dinero no admite un saldo viejo
-on_partition = "reject"    # antes de servir algo viejo, no sirve nada
+consistency  = "strong"    # money does not tolerate a stale balance
+on_partition = "reject"    # rather than serve something stale, it serves nothing
 ```
 
-`axon build` emite el cliente con esa política ejecutándose: timeout, backoff
-exponencial **con jitter completo** (sin jitter todos los clientes reintentan a la vez
-y el otro lado nunca se levanta), y un circuito por destino que pasa a medio abierto
-tras el enfriamiento. Los reintentos solo se emiten para métodos idempotentes — `verify`
-bloquea el resto — y la llamada lleva `traceparent`, `x-correlation-id`,
-`x-causation-id` e `idempotency-key`.
+`axon build` emits the client with that policy running: timeout, exponential backoff
+**with full jitter** (without jitter every client retries at the same instant and the
+other side never comes back up), and one breaker per target that goes half-open after
+the cooldown. Retries are only emitted for idempotent methods — `verify` blocks the rest
+— and the call carries `traceparent`, `x-correlation-id`, `x-causation-id` and
+`idempotency-key`.
 
-## `axon cap`: reconciliar lo declarado con lo que usás
+## `axon cap`: reconciling what you declared with what you use
 
-`verify` bloquea las contradicciones. `axon cap` explica las **consecuencias**, que es
-distinto: hay combinaciones que no son un error y aun así cambian lo que el servicio
-puede prometer.
+`verify` blocks the contradictions. `axon cap` explains the **consequences**, which is a
+different thing: there are combinations that are not an error and still change what the
+service can promise.
 
 ```console
 $ axon cap manifests/ -s payments
@@ -45,27 +45,28 @@ payments  [CP]  consistency = strong, on_partition = reject
                                 that improves availability at no cost in the C
 ```
 
-**`x` lo bloquea `verify`, `!` es un costo que pagás, `i` es una consecuencia que
-conviene conocer antes de un incidente.** El filtro `-s` acota el informe, pero el
-análisis sigue mirando a todos los servicios: sin `orders` cargado no se podría saber
-que esa dependencia es AP.
+**`x` is what `verify` blocks, `!` is a cost you pay, `i` is a consequence worth knowing
+before an incident.** The `-s` filter narrows the report, but the analysis still looks at
+every service: without `orders` loaded there would be no way to know that dependency is
+AP.
 
-## El lado del teorema que sí se elige
+## The side of the theorem you do get to choose
 
-La tolerancia a particiones no es una opción: la red se parte. Lo que se elige es qué
-hacer mientras está partida, y esa decisión **cambia el código**:
+Partition tolerance is not an option: the network partitions. What you choose is what to
+do while it is partitioned, and that decision **changes the code**:
 
 | | `strong` / `reject` (CP) | `eventual` / `degrade` (AP) |
 | --- | --- | --- |
-| `nivelAislamiento` | `SERIALIZABLE` | `READ COMMITTED` |
-| Obsolescencia | — | `obsolescenciaMaximaMs`, obligatoria |
-| Firma del cliente | `(input, e)` | `(input, e, respaldo)` |
+| `isolationLevel` | `SERIALIZABLE` | `READ COMMITTED` |
+| Staleness | — | `maxStalenessMs`, mandatory |
+| The client's signature | `(input, e)` | `(input, e, fallback)` |
 
-La última fila es la que importa: si declarás `degrade`, el cliente generado **exige**
-un parámetro `respaldo`. No podés decir "elijo disponibilidad" y después no escribir
-qué se sirve cuando el otro lado no está. No es una convención — no compila.
+The last row is the one that matters: if you declare `degrade`, the generated client
+**requires** a `fallback` parameter. You cannot say "I choose availability" and then not
+write what gets served when the other side is not there. It is not a convention — it
+does not compile.
 
-`verify` bloquea `strong` + `degrade` (es la contradicción del teorema), exige
-`max_staleness_ms` en todo `eventual` (sin un número, "eventual" es una palabra), y
-avisa cuando un servicio `strong` llama sincrónicamente a uno `eventual`: **la garantía
-de la ruta es la del eslabón más débil, no la tuya.**
+`verify` blocks `strong` + `degrade` (it is the theorem's contradiction), requires
+`max_staleness_ms` on everything `eventual` (without a number, "eventual" is a word), and
+warns when a `strong` service synchronously calls an `eventual` one: **the path's
+guarantee is the weakest link's, not yours.**

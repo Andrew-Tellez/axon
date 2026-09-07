@@ -32,7 +32,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// manifiesto -> contratos y clase base
+    /// manifest -> contracts and base class
     Build {
         manifest: PathBuf,
         /// The other manifests: that is where the type of what this service consumes comes from.
@@ -62,7 +62,7 @@ enum Cmd {
     Classes { sources: Vec<String> },
     /// the domain's state machines -> mermaid: stateDiagram
     States { sources: Vec<String> },
-    /// migraciones -> mermaid: entidad-relacion
+    /// migrations -> mermaid: entity-relationship
     Er { sources: Vec<String> },
     /// an event's causal flow -> mermaid: sequence
     Seq {
@@ -74,9 +74,9 @@ enum Cmd {
     },
     /// registry of services and methods (directory, file or URL)
     Discover { sources: Vec<String> },
-    /// drift entre manifiestos, migraciones e infraestructura
+    /// drift between manifests, migrations and infrastructure
     Verify { sources: Vec<String> },
-    /// AsyncAPI (2.x o 3.x, JSON o YAML) -> manifiesto axon
+    /// AsyncAPI (2.x or 3.x, JSON or YAML) -> an axon manifest
     Import {
         /// source format
         #[arg(value_parser = ["asyncapi"])]

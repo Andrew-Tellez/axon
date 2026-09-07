@@ -40,7 +40,7 @@ jobs:
           mdbook build docs
           mkdir -p site
           cp -R docs/book/. site/
-          versiones=""
+          versions=""
           trabajo=$(mktemp -d)
           for tag in $(git tag -l 'v*' --sort=-v:refname); do
             # a version from before mdBook served a loose index.html: it gets
@@ -57,11 +57,11 @@ jobs:
             else
               continue
             fi
-            versiones="$versiones \"$tag\","
+            versions="$versions \"$tag\","
             echo "  $tag"
           done
-          printf '{"actual":"main","versiones":[%s]}\n' \
-            "\"main\",${versiones%,}" | sed 's/,]/]/' > site/versions.json
+          printf '{"current":"main","versions":[%s]}\n' \
+            "\"main\",${versions%,}" | sed 's/,]/]/' > site/versions.json
           cat site/versions.json
 
       - uses: actions/upload-pages-artifact@v3

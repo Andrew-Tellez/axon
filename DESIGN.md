@@ -121,7 +121,7 @@ sql/payments/
 | A field changed on an already published version | error |
 
 That table is the shape of it, not the whole of it: there are over a hundred rules, and
-[the documentation](https://andrew-tellez.github.io/axon/verificacion.html) lists them.
+[the documentation](https://andrew-tellez.github.io/axon/verification.html) lists them.
 
 In CI, run against the live manifests
 (`axon verify https://orders/... https://payments/...`), it compares what is declared
