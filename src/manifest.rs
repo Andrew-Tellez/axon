@@ -482,6 +482,15 @@ impl Saga {
     pub fn table(name: &str) -> String {
         format!("saga_{}", name.to_lowercase())
     }
+    /// The route the sweep comes in through. It lives HERE and not in each
+    /// generator because two of them concatenate it: the code that serves it
+    /// and the scheduler that hits it. When they drifted —the route in English
+    /// and the cron still in Spanish— the CronJob applied with no error and
+    /// hit a 404 forever: the sweep simply stopped running, and the only thing
+    /// that said so was a curl swallowing the failure.
+    pub fn sweep_route(name: &str) -> String {
+        format!("/internal/saga/{name}/sweep")
+    }
 }
 
 /// Event sourcing: the state IS the event stream, and what today lives in a
@@ -536,6 +545,11 @@ impl Aggregate {
     pub fn snapshots(name: &str) -> String {
         format!("{}_snapshot", name.to_lowercase())
     }
+    /// The prune route. Same reason as `Saga::sweep_route`: whoever serves it
+    /// and whoever schedules it read it from one place.
+    pub fn prune_route(name: &str) -> String {
+        format!("/internal/aggregate/{name}/prune")
+    }
 }
 
 /// CQRS: a read model built by applying already declared events.
@@ -567,6 +581,11 @@ impl View {
     /// give a wrong view with no error.
     pub fn checkpoint(name: &str) -> String {
         format!("view_{}_checkpoint", name.to_lowercase())
+    }
+    /// The rebuild route. It carries no cron —rebuilding is a decision, not a
+    /// cadence— but it lives here alongside the other two.
+    pub fn rebuild_route(name: &str) -> String {
+        format!("/internal/view/{name}/rebuild")
     }
 }
 
@@ -794,9 +813,9 @@ fn statements(text: &str, origin: &str) -> Vec<Statement> {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "axon: {origin}: no se pudo parsear el SQL: {e}\n      \
-                 axon lee las migraciones para el ER y para bloquear FK entre \
-                 servicios; preferir fallar a adivinar columns"
+                "axon: {origin}: could not parse the SQL: {e}\n      \
+                 axon reads the migrations for the ER diagram and to block FK \
+                 between services; better to fail than to guess columns"
             );
             std::process::exit(1);
         }
@@ -1232,7 +1251,7 @@ mod fechas {
         assert_eq!(civil(0), (1970, 1, 1));
         assert_eq!(civil(1), (1970, 1, 2));
         assert_eq!(civil(-1), (1969, 12, 31));
-        assert_eq!(civil(11_016), (2000, 2, 29)); // bisiesto de un siglo divisible por 400
+        assert_eq!(civil(11_016), (2000, 2, 29)); // the leap day of a century divisible by 400
         assert_eq!(civil(19_723), (2024, 1, 1));
         assert_eq!(civil(20_608), (2026, 6, 4));
     }
@@ -1240,7 +1259,7 @@ mod fechas {
     #[test]
     fn today_is_a_reasonable_date() {
         let (a, m, d) = today();
-        assert!((2025..2100).contains(&a), "ano fuera de rango: {a}");
+        assert!((2025..2100).contains(&a), "year out of range: {a}");
         assert!((1..=12).contains(&m));
         assert!((1..=31).contains(&d));
     }

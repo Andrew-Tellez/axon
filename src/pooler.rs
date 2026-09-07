@@ -71,7 +71,7 @@ fn host(m: &Manifest, target: &str, shard: u32) -> (String, String) {
         "local" => (
             format!(
                 "host = \"{}\"",
-                crate::infra::nodo(&m.service, Some(m.pooler.shards.max(1)), shard)
+                crate::infra::node(&m.service, Some(m.pooler.shards.max(1)), shard)
             ),
             "port = 5432".into(),
         ),

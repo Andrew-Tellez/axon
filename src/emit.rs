@@ -767,14 +767,15 @@ pub fn aggregates_ts(m: &Manifest) -> String {
             o.push(format!(
                 "/** The route the scheduler hits to prune the old snapshots.\n \
                  *  `axon infra` deploys it on all four targets. */\n\
-                 export const pruneRoute{p} = \"POST /internal/aggregate/{name}/prune\" as const;\n\
+                 export const pruneRoute{p} = \"POST {route}\" as const;\n\
                  \n\
                  /** One prune pass. Returns how many snapshots it deleted, so it can\n \
                  *  be measured: a prune that reports nothing is indistinguishable from\n \
                  *  one that does not run, and what shows up then is the table size. */\n\
                  export async function prune{p}(stream: SnapshottingStream): Promise<number> {{\n  \
                    return stream.pruneSnapshots({c}SnapshotRules);\n\
-                 }}\n"
+                 }}\n",
+                route = Aggregate::prune_route(name),
             ));
         }
     }
@@ -921,7 +922,7 @@ pub fn views_ts(m: &Manifest) -> String {
             o.push(format!(
                 "/** The route that rebuilds the view. It carries NO cron: rebuilding\n \
                  *  is not periodic, it is an operation somebody decides on. */\n\
-                 export const rebuildRoute{p} = \"POST /internal/view/{name}/rebuild\" as const;\n\
+                 export const rebuildRoute{p} = \"POST {route}\" as const;\n\
                  \n\
                  /** Throws the view away and builds it again from the stream. Returns\n \
                  *  how many events it applied.\n \
@@ -966,7 +967,8 @@ pub fn views_ts(m: &Manifest) -> String {
                    // The swap goes at the end: until here nobody saw any of this.\n  \
                    await shadow.swap();\n  \
                    return applied;\n\
-                 }}\n"
+                 }}\n",
+                route = View::rebuild_route(name),
             ));
         }
     }
@@ -1331,7 +1333,8 @@ pub fn sagas_ts(m: &Manifest) -> String {
              *\n \
              *  It is NOT a declared method, so it does not go out through the\n \
              *  gateway. It triggers compensations: it cannot be public. */\n\
-             export const sweepRoute{p} = \"POST /internal/saga/{name}/sweep\" as const;\n"
+             export const sweepRoute{p} = \"POST {route}\" as const;\n",
+            route = Saga::sweep_route(name),
         ));
         o.push(format!(
             "/** The steps declared in the manifest. Generated: do not edit. */\n\

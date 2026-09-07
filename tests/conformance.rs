@@ -250,7 +250,7 @@ CREATE INDEX ledger_entry_account_idx ON "ledger_entry" (account_id, posted_at D
     .unwrap();
     let (_, err, ok) = axon(&["er", dir.to_str().unwrap()]);
     assert!(!ok, "el SQL invalido se ignoro en silencio");
-    assert!(err.contains("no se pudo parsear"), "{err}");
+    assert!(err.contains("could not parse the SQL"), "{err}");
 }
 
 /// Una clave anadida en una migracion POSTERIOR tiene que contar. Era invisible,
@@ -322,6 +322,57 @@ fn un_rename_posterior_cuenta() {
     assert!(!er.contains("vista"), "la columna vieja sigue:\n{er}");
     // la PK sobrevive al rename, con el nombre nuevo
     assert!(er.contains("PK"), "la PK se perdio en el rename:\n{er}");
+}
+
+/// La ruta que sirve el codigo y la que golpea el programador tienen que ser
+/// LA MISMA. Estuvieron separadas —la ruta en ingles y el cron todavia en
+/// espanol— y el CronJob se aplico sin un error contra un 404: el barrido dejo
+/// de correr, y lo unico que lo decia era un curl que se comia el fallo.
+#[test]
+fn el_cron_golpea_la_ruta_que_el_codigo_sirve() {
+    let (ts, err, ok) = axon(&["build", "examples/checkout.toml", "examples"]);
+    assert!(ok, "{err}");
+    // las rutas internas, como las declara el codigo generado
+    let rutas: Vec<String> = ts
+        .lines()
+        .filter(|l| l.contains("Route") && l.contains("POST /internal/"))
+        .map(|l| {
+            l.split("POST ")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert!(
+        rutas.len() >= 3,
+        "el ejemplo deberia generar barrido, limpieza y reconstruccion: {rutas:?}"
+    );
+    // el plan neutral es la fuente de los cuatro targets: si la ruta coincide
+    // aqui, coincide en los cuatro
+    let (plan, err, ok) = axon(&["infra", "examples", "--target", "plan"]);
+    assert!(ok, "{err}");
+    for r in &rutas {
+        // la reconstruccion no lleva cron a proposito: no es periodica
+        if r.contains("/rebuild") {
+            assert!(!plan.contains(r), "la reconstruccion no deberia llevar cron");
+            continue;
+        }
+        assert!(
+            plan.contains(r),
+            "el codigo sirve `{r}` y ningun cron del plan la golpea:\n{plan}"
+        );
+    }
+    // y al reves: ningun cron apunta a una ruta que nadie sirve
+    for l in plan.lines().filter(|l| l.contains("/internal/")) {
+        let r = l.split('"').find(|s| s.starts_with("/internal/")).unwrap();
+        assert!(
+            rutas.iter().any(|x| x == r),
+            "el cron golpea `{r}` y el codigo generado no la sirve"
+        );
+    }
 }
 
 #[test]
