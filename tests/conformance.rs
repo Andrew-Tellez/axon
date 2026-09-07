@@ -1055,6 +1055,13 @@ fn the_generated_testkit_runs() {
     assert!(out.status.success(), "the generated tests fail:\n{printed}");
     assert!(printed.contains("propagates the causal chain"), "{printed}");
     assert!(printed.contains("does not repeat the effect"), "{printed}");
+    // the declared failures too: `fail`, the body on the wire and the manifest
+    // are generated separately, and this is what holds them to each other
+    assert!(printed.contains("declared failures"), "{printed}");
+    assert!(
+        printed.contains("the body on the wire carries that same code"),
+        "{printed}"
+    );
     assert!(printed.contains("fail 0"), "{printed}");
 }
 

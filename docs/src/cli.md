@@ -31,16 +31,17 @@ generator.
 
 ## `axon test <manifest> <sources> [--lang ts] [--contracts ./contracts.ts]`
 A testkit that **compiles on its own**: in-memory doubles of `Bus`, `Inbox` and `Outbox`,
-fixtures derived from the schema of each event's **emitter**, and two exported suites.
+fixtures derived from the schema of each event's **emitter**, and three exported suites.
 
 It does not guess where your code lives: `contractTests` takes a factory. Weaving it in
 is three hand-written lines:
 
 ```ts
-import { contractTests, machineTests } from "./axon.testkit.ts";
+import { contractTests, errorTests, machineTests } from "./axon.testkit.ts";
 import { Payments } from "./index.ts";
 contractTests((bus, inbox, outbox) => new Payments(bus, inbox, outbox, db));
 machineTests();
+errorTests();
 ```
 
 `contractTests` checks what the manifest promises: that the handler accepts the event
@@ -49,6 +50,13 @@ effect, that the causal chain (`causationId`, `correlationId`, `traceparent`) su
 handler, and that with `outbox` declared nothing is published straight to the bus.
 `machineTests` does not need your code: it walks the transition table and verifies that
 each transition is legal from its sources and illegal from any other state.
+
+`errorTests` needs none of it either, and it exists because the ends of a declared failure
+are generated separately: `fail()` and the table on the callee's side, the `problem+json`
+body on the wire, and the retriable list on the caller's client. It checks that they say
+the same thing — the declared status and code on both sides, a trace on the body, an
+undeclared error that does not come out looking declared, and nothing final offered as
+retriable. See [`errors` on a method](./manifest.md#errors-on-a-method).
 
 It runs with `node --test`, with no dependencies.
 

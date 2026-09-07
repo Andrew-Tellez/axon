@@ -6,6 +6,7 @@
 //   import { Payments } from "./index.ts";
 //   contractTests((bus, inbox, outbox) => new Payments(bus, inbox, outbox));
 //   machineTests();
+//   errorTests();
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -15,6 +16,10 @@ import {
   type Inbox,
   PaymentsService,
   type Outbox,
+  AxonProblem,
+  declaredErrors,
+  fail,
+  problem,
   type OrderPlacedV1,
   paymentTransitions,
   paymentNext,
@@ -118,6 +123,64 @@ export function machineTests() {
         for (const e of states.filter((s) => !t.from.includes(s))) {
           assert.throws(() => paymentNext(e, action as PaymentAction));
           assert.equal(paymentCan(e, action as PaymentAction), false);
+        }
+      }
+    });
+  });
+}
+
+/** Tests for the declared failures. They need none of your code. */
+export function errorTests() {
+  describe("payments · declared failures", () => {
+    it("`fail` throws the status and the code the manifest declares", () => {
+      for (const [method, failures] of Object.entries(declaredErrors)) {
+        for (const f of failures) {
+          assert.throws(
+            () => fail(method as keyof typeof declaredErrors, f.code as never),
+            (err: unknown) => {
+              assert.ok(err instanceof AxonProblem, `${method}.${f.code} is not an AxonProblem`);
+              assert.equal(err.code, f.code);
+              assert.equal(err.status, f.status);
+              return true;
+            },
+          );
+        }
+      }
+    });
+
+    it("the body on the wire carries that same code and status", () => {
+      for (const [method, failures] of Object.entries(declaredErrors)) {
+        for (const f of failures) {
+          try {
+            fail(method as keyof typeof declaredErrors, f.code as never);
+          } catch (err) {
+            const body = problem(err, newEnvelope("test", "test", {}));
+            assert.equal(body.status, f.status, `${f.code} goes out with another status`);
+            assert.equal(body.title, f.code, "the code does not travel in the body");
+            assert.match(body.type, /payments/, "the type does not name the service that failed");
+            assert.ok(body.traceId, "the failure goes out with no trace");
+          }
+        }
+      }
+    });
+
+    it("an undeclared failure does not come out looking declared", () => {
+      const body = problem(new Error("the disk filled up"));
+      assert.equal(body.status, 500, "a failure nobody declared came out as something else");
+      assert.equal(body.title, "internal");
+      assert.ok(!("code" in body), "it invented a code for a failure nobody declared");
+    });
+
+    it("nothing final is offered as retriable", () => {
+      // A 4xx says the request is what is wrong: sending it again ends the
+      // same way, and the caller's client would spend its budget for nothing.
+      const notYet = [408, 425, 429];
+      for (const failures of Object.values(declaredErrors)) {
+        for (const f of failures) {
+          assert.ok(f.status >= 400 && f.status < 600, `${f.code} is not a failure`);
+          if (f.retriable && f.status < 500) {
+            assert.ok(notYet.includes(f.status), `${f.code} is retriable on ${f.status}`);
+          }
         }
       }
     });

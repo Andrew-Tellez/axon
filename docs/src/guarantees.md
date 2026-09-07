@@ -8,7 +8,7 @@ their own — a compiler that only verifies itself produces invalid output:
 | The generated TypeScript | `tsc --strict --noEmit` |
 | The generated Terraform | `terraform validate` with the real providers (gcp and aws), with no warnings |
 | The generated workflow | a YAML parse, the scalar blocks, and that no target leaks another cloud |
-| The generated testkit | `node --test` against the real example service |
+| The generated testkit | `node --test` against the real example service, and its failure suite catches a hand-edit of the generated `problem()` |
 | The generated Go | `go vet` |
 | The DDL | `PARTITION BY`, table-level constraints, and a loud failure on invalid SQL |
 | The generated RLS | it is applied to a real Postgres and checked to see that it isolates |

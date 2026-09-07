@@ -138,6 +138,14 @@ pub fn build_tests(ms: &[Manifest], m: &Manifest, contracts: &str) -> Result<Str
     if m.patterns.outbox {
         tipos.push("type Outbox".into());
     }
+    // The declared failures are projected as three things, and the suite below
+    // checks that the three agree.
+    if m.methods.values().any(|me| !me.errors.is_empty()) {
+        tipos.push("AxonProblem".into());
+        tipos.push("declaredErrors".into());
+        tipos.push("fail".into());
+        tipos.push("problem".into());
+    }
 
     // the schema of a consumed event is declared by its emitter
     let mut consumidos: Vec<(&String, &Fields)> = Vec::new();
@@ -166,12 +174,17 @@ pub fn build_tests(ms: &[Manifest], m: &Manifest, contracts: &str) -> Result<Str
          //   import {{ contractTests, machineTests }} from \"./axon.testkit.ts\";\n\
          //   import {{ {p} }} from \"./index.ts\";\n\
          //   contractTests((bus, inbox{o}) => new {p}(bus, inbox{o}));\n\
-         //   machineTests();\n\
+         //   machineTests();{e}\n\
          import {{ describe, it }} from \"node:test\";\n\
          import assert from \"node:assert/strict\";\n\
          import {{\n{t},\n}} from \"{c}\";\n",
         p = pascal(svc),
         o = if m.patterns.outbox { ", outbox" } else { "" },
+        e = if m.methods.values().any(|me| !me.errors.is_empty()) {
+            "\n//   errorTests();"
+        } else {
+            ""
+        },
         t = tipos
             .iter()
             .map(|t| format!("  {t}"))
@@ -324,5 +337,84 @@ pub fn build_tests(ms: &[Manifest], m: &Manifest, contracts: &str) -> Result<Str
         ));
     }
     o.push("}\n".into());
+    o.push(error_tests(m));
     Ok(o.join("\n"))
+}
+
+/// Tests for the declared failures. Pure, like the machine ones: they need
+/// nothing from the person's code, because what they check is that the
+/// projections of the same declaration agree.
+///
+/// It is worth generating because the two ends are generated separately —the
+/// table and `fail` on one side, the `problem+json` body on the other— and a
+/// disagreement between them is exactly the drift that stops the caller from
+/// being able to trust `retriable`.
+fn error_tests(m: &Manifest) -> String {
+    let mut o = vec![
+        "/** Tests for the declared failures. They need none of your code. */\nexport function errorTests() {"
+            .to_string(),
+    ];
+    let declaring: Vec<(&String, &Method)> = m
+        .methods
+        .iter()
+        .filter(|(_, me)| !me.errors.is_empty())
+        .collect();
+    if declaring.is_empty() {
+        o.push("  // this service declares no `errors`".into());
+        o.push("}\n".into());
+        return o.join("\n");
+    }
+    o.push(format!(
+        "  describe(\"{svc} · declared failures\", () => {{\n    \
+           it(\"`fail` throws the status and the code the manifest declares\", () => {{\n      \
+             for (const [method, failures] of Object.entries(declaredErrors)) {{\n        \
+               for (const f of failures) {{\n          \
+                 assert.throws(\n            \
+                   () => fail(method as keyof typeof declaredErrors, f.code as never),\n            \
+                   (err: unknown) => {{\n              \
+                     assert.ok(err instanceof AxonProblem, `${{method}}.${{f.code}} is not an AxonProblem`);\n              \
+                     assert.equal(err.code, f.code);\n              \
+                     assert.equal(err.status, f.status);\n              \
+                     return true;\n            \
+                   }},\n          \
+                 );\n        \
+               }}\n      \
+             }}\n    }});\n\n    \
+           it(\"the body on the wire carries that same code and status\", () => {{\n      \
+             for (const [method, failures] of Object.entries(declaredErrors)) {{\n        \
+               for (const f of failures) {{\n          \
+                 try {{\n            \
+                   fail(method as keyof typeof declaredErrors, f.code as never);\n          \
+                 }} catch (err) {{\n            \
+                   const body = problem(err, newEnvelope(\"test\", \"test\", {{}}));\n            \
+                   assert.equal(body.status, f.status, `${{f.code}} goes out with another status`);\n            \
+                   assert.equal(body.title, f.code, \"the code does not travel in the body\");\n            \
+                   assert.match(body.type, /{svc}/, \"the type does not name the service that failed\");\n            \
+                   assert.ok(body.traceId, \"the failure goes out with no trace\");\n          \
+                 }}\n        \
+               }}\n      \
+             }}\n    }});\n\n    \
+           it(\"an undeclared failure does not come out looking declared\", () => {{\n      \
+             const body = problem(new Error(\"the disk filled up\"));\n      \
+             assert.equal(body.status, 500, \"a failure nobody declared came out as something else\");\n      \
+             assert.equal(body.title, \"internal\");\n      \
+             assert.ok(!(\"code\" in body), \"it invented a code for a failure nobody declared\");\n    \
+           }});\n\n    \
+           it(\"nothing final is offered as retriable\", () => {{\n      \
+             // A 4xx says the request is what is wrong: sending it again ends the\n      \
+             // same way, and the caller's client would spend its budget for nothing.\n      \
+             const notYet = [408, 425, 429];\n      \
+             for (const failures of Object.values(declaredErrors)) {{\n        \
+               for (const f of failures) {{\n          \
+                 assert.ok(f.status >= 400 && f.status < 600, `${{f.code}} is not a failure`);\n          \
+                 if (f.retriable && f.status < 500) {{\n            \
+                   assert.ok(notYet.includes(f.status), `${{f.code}} is retriable on ${{f.status}}`);\n          \
+                 }}\n        \
+               }}\n      \
+             }}\n    }});\n  \
+         }});",
+        svc = m.service
+    ));
+    o.push("}\n".into());
+    o.join("\n")
 }
