@@ -199,7 +199,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
             }
             crons.push(Cron {
                 service: svc.clone(),
-                name: format!("fotos.{name}"),
+                name: format!("snapshots.{name}"),
                 path: Aggregate::prune_route(name),
                 port: m.infra.port.unwrap_or(8080),
                 // Hourly, and this number does NOT come from the manifest because

@@ -390,7 +390,7 @@ jobs:
         run: |
           axon build {manifests}/{svc}.toml {manifests}/ --lang ts > {contracts}
           git diff --exit-code || {{
-            echo "::error::codigo generado desactualizado; corre axon build"
+            echo "::error::generated code is out of date; run axon build"
             exit 1
           }}
 {gates}

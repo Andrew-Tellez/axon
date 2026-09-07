@@ -80,7 +80,7 @@ enum Cmd {
     Import {
         /// source format
         #[arg(value_parser = ["asyncapi"])]
-        formato: String,
+        format: String,
         /// file, or `-` for stdin
         file: String,
         /// service name, unless it has to be inferred from info.title
@@ -310,38 +310,38 @@ fn run() -> Result<ExitCode, String> {
                                 }
                             }
                         }
-                        Err(e) => r.warnings.push(format!("[{bin}] salida invalida: {e}")),
+                        Err(e) => r.warnings.push(format!("[{bin}] invalid output: {e}")),
                     },
-                    Err(e) => r.warnings.push(format!("[{bin}] no corrio: {e}")),
+                    Err(e) => r.warnings.push(format!("[{bin}] did not run: {e}")),
                 }
             }
             // Errors first: they are what has to be fixed, and in a long list
             // what matters cannot end up at the bottom.
             for e in &r.errors {
-                eprintln!("{} {}", color::red("error"), realzar(e));
+                eprintln!("{} {}", color::red("error"), highlight(e));
             }
             for w in &r.warnings {
-                println!("{}  {}", color::yellow("warn"), realzar(w));
+                println!("{}  {}", color::yellow("warn"), highlight(w));
             }
-            let resumen = format!(
+            let summary = format!(
                 "{} services, {} errors, {} warnings",
                 ms.len(),
                 r.errors.len(),
                 r.warnings.len()
             );
             if r.errors.is_empty() && r.warnings.is_empty() {
-                println!("{} {}", color::green("ok"), color::grey(&resumen));
+                println!("{} {}", color::green("ok"), color::grey(&summary));
             } else if r.errors.is_empty() {
-                println!("{}  {}", color::yellow("near"), color::grey(&resumen));
+                println!("{}  {}", color::yellow("near"), color::grey(&summary));
             } else {
-                println!("{} {}", color::red("fail"), color::grey(&resumen));
+                println!("{} {}", color::red("fail"), color::grey(&summary));
             }
             if !r.errors.is_empty() {
                 return Ok(ExitCode::FAILURE);
             }
         }
         Cmd::Import {
-            formato: _,
+            format: _,
             file,
             service,
         } => {
@@ -527,7 +527,7 @@ fn run() -> Result<ExitCode, String> {
 /// Highlights whatever sits between backticks. The messages are already
 /// written with `` `this` `` to name fields and values; this takes advantage of
 /// that instead of asking for a new format.
-fn realzar(msg: &str) -> String {
+fn highlight(msg: &str) -> String {
     // With no colour the message comes out as-is: stripping the backticks would
     // change the content, and a highlight must not change what the text says. I
     // found that out by breaking nine tests that check the messages.
