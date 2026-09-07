@@ -161,7 +161,7 @@ while [ "$(sql -c "SELECT count(*) FROM outbox WHERE id = '$ORPHAN' AND publishe
   sleep 1
 done
 # and it really reached the bus, it was not just marked
-if grep -q "$ORPHAN" .axon/local.ndjson 2>/dev/null; then
+if grep -q "$ORPHAN" .axon/log/local.ndjson 2>/dev/null; then
   echo "  OK: the relay came back and published it; nobody had to retry by hand"
 else
   echo "  FAILED: it was marked as published and does not show up in the envelope log"
@@ -293,10 +293,15 @@ echo "  the reads while the view is being rebuilt"
 rows_before=$(sql -c "SELECT count(*) FROM view_conversion" | tr -d ' \r\n')
 [ "$rows_before" -ge 3 ] || { echo "  FAILED: rows are needed to be able to measure the window"; exit 1; }
 cp "$ENVQ" "$ENVQ.es"
-printf 'AXON_DEMO_REBUILD_SLOW_MS=150\n' >> "$ENVQ"
+# 400ms per applied event, so the window lasts long enough to be SAMPLED. With
+# 150ms it lasted under a second and on a CI runner —where each `psql` through
+# `compose exec` costs a few hundred ms— only one read landed inside it, and the
+# check failed for lack of samples and not for a half-built view.
+printf 'AXON_DEMO_REBUILD_SLOW_MS=400\n' >> "$ENVQ"
 $COMPOSE stop checkout > /dev/null 2>&1
 $COMPOSE up -d --wait checkout > /dev/null 2>&1
 
+started=$(date +%s)
 curl -sS -m 180 -X POST "$CHECKOUT/internal/view/conversion/rebuild" > /tmp/axon-rebuild.json &
 rebuild=$!
 minimum=$rows_before
@@ -309,10 +314,18 @@ while kill -0 "$rebuild" 2>/dev/null; do
   [ "$n" -lt "$minimum" ] && minimum=$n
 done
 wait "$rebuild" || true
+took=$(( $(date +%s) - started ))
 applied=$(sed 's/.*"applied":\([0-9]*\).*/\1/' /tmp/axon-rebuild.json)
 rows_after=$(sql -c "SELECT count(*) FROM view_conversion" | tr -d ' \r\n')
-echo "    $i reads during the rebuild; lowest seen: $minimum of $rows_before"
-if [ "$i" -ge 3 ] && [ "$minimum" -ge "$rows_before" ] && [ "$rows_after" -ge "$rows_before" ]; then
+echo "    $i reads in the ${took}s the rebuild took; lowest seen: $minimum of $rows_before"
+# What is asserted is the invariant —the reads never dropped— plus that there was a
+# window to read INSIDE: a rebuild that finishes instantly proves nothing, and how
+# many samples land in it depends on the machine.
+if [ "$took" -lt 1 ]; then
+  echo "  FAILED: the rebuild took under a second; there was no window to measure"
+  exit 1
+fi
+if [ "$i" -ge 1 ] && [ "$minimum" -ge "$rows_before" ] && [ "$rows_after" -ge "$rows_before" ]; then
   echo "  OK: nobody saw a half-built view; $applied events applied in the shadow"
   echo "  i rebuilding in place, the lowest would have been 0"
 else

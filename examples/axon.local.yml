@@ -271,7 +271,7 @@ services:
     env_file: [.env.local]
     environment:
       AXON_BROKER_URL: nats://broker:4222
-      AXON_TRACE_LOG: /out/local.ndjson
+      AXON_TRACE_LOG: /out/log/local.ndjson
       DATABASE_URL: postgres://postgres:local@db-checkout:5432/checkout
       AXON_FLAGS_URL: http://flags:8016
       OTEL_SERVICE_NAME: "checkout"
@@ -280,6 +280,15 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: "service.name=checkout,axon.owner=commerce-team,axon.tier=1,service.version=1.0.0"
       OTEL_TRACES_SAMPLER: "parentbased_always_on"
     volumes: ["./.axon:/out"]
+    # The k8s target already probes `/healthz`; here it is what makes `up --wait`
+    # actually wait. Without it compose returns as soon as the container STARTS, and
+    # the first request lands before the process is listening —a reset that reads as
+    # a bug in the service. On a cold start, which is the CI case, it always lost.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     labels:
       - traefik.enable=true
       - traefik.http.routers.checkout.rule=PathPrefix(`/v1/checkouts`)
@@ -293,7 +302,7 @@ services:
     env_file: [.env.local]
     environment:
       AXON_BROKER_URL: nats://broker:4222
-      AXON_TRACE_LOG: /out/local.ndjson
+      AXON_TRACE_LOG: /out/log/local.ndjson
       DATABASE_URL: postgres://postgres:local@pooler-orders:6432/orders
       AXON_FLAGS_URL: http://flags:8016
       OTEL_SERVICE_NAME: "orders"
@@ -302,6 +311,15 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: "service.name=orders,axon.owner=commerce-team,axon.tier=1,service.version=2.0.0"
       OTEL_TRACES_SAMPLER: "parentbased_always_on"
     volumes: ["./.axon:/out"]
+    # The k8s target already probes `/healthz`; here it is what makes `up --wait`
+    # actually wait. Without it compose returns as soon as the container STARTS, and
+    # the first request lands before the process is listening —a reset that reads as
+    # a bug in the service. On a cold start, which is the CI case, it always lost.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     labels:
       - traefik.enable=true
       - traefik.http.routers.orders.rule=PathPrefix(`/v1/tenants`)
@@ -315,7 +333,7 @@ services:
     env_file: [.env.local]
     environment:
       AXON_BROKER_URL: nats://broker:4222
-      AXON_TRACE_LOG: /out/local.ndjson
+      AXON_TRACE_LOG: /out/log/local.ndjson
       DATABASE_URL: postgres://postgres:local@db-payments:5432/payments
       # STRIPE_API_KEY: comes from .env.local
       AWS_ENDPOINT_URL: http://objetos:9000
@@ -328,6 +346,15 @@ services:
       OTEL_RESOURCE_ATTRIBUTES: "service.name=payments,axon.owner=payments-team,axon.tier=0,service.version=1.2.0"
       OTEL_TRACES_SAMPLER: "parentbased_always_on"
     volumes: ["./.axon:/out"]
+    # The k8s target already probes `/healthz`; here it is what makes `up --wait`
+    # actually wait. Without it compose returns as soon as the container STARTS, and
+    # the first request lands before the process is listening —a reset that reads as
+    # a bug in the service. On a cold start, which is the CI case, it always lost.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     labels:
       - traefik.enable=true
       - traefik.http.routers.payments.rule=PathPrefix(`/v1/payments`) || PathPrefix(`/v1/payouts`)
@@ -347,11 +374,14 @@ services:
   warehouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     environment: { CLICKHOUSE_DB: axon, CLICKHOUSE_USER: local, CLICKHOUSE_PASSWORD: local }
-    # The envelope log, where `file()` can read it. NOT read-only: the
-    # image's entrypoint `chown`s this directory and with `:ro` that fails
-    # and the container does not start.
-    volumes: ["./.axon:/var/lib/clickhouse/user_files"]
-    ports: ["${AXON_BODEGA_PORT:-8123}:8123"]
+    # ONLY the log's subdirectory, and not `.axon` itself. The image's
+    # entrypoint `chown`s user_files —with `:ro` it fails and the container
+    # does not start— so whatever is mounted there changes owner. With
+    # `./.axon` there, on Linux every file the demo writes afterwards failed
+    # with `Permission denied`; on Docker Desktop it did not, because the
+    # chown does not reach the host.
+    volumes: ["./.axon/log:/var/lib/clickhouse/user_files"]
+    ports: ["${AXON_WAREHOUSE_PORT:-8123}:8123"]
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping"]
       interval: 2s

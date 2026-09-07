@@ -52,7 +52,7 @@ diagnose() {
   done
   echo
   echo "--- recorded envelopes ---"
-  cat .axon/local.ndjson 2>/dev/null || echo "(none)"
+  cat .axon/log/local.ndjson 2>/dev/null || echo "(none)"
   return "$code"
 }
 trap diagnose EXIT
@@ -60,7 +60,10 @@ trap diagnose EXIT
 step "generating the local infrastructure from the manifests"
 "$AXON" infra . --target local > axon.local.yml
 
-mkdir -p .axon
+# The envelope log lives in its own subdirectory because ClickHouse `chown`s
+# whatever is mounted at its user_files: with `.axon` itself there, on Linux every
+# file written afterwards fails with `Permission denied`.
+mkdir -p .axon/log
 # flagd reads this JSON: the flags come out of the manifest too
 "$AXON" flags . > .axon/flags.json
 
@@ -77,7 +80,7 @@ step "bringing up the broker, the databases, the migrations and the services"
 # what it is.
 docker compose -f axon.local.yml up -d --build --wait --remove-orphans
 
-rm -f .axon/local.ndjson
+rm -f .axon/log/local.ndjson
 mkdir -p .axon
 
 TENANT="${AXON_TENANT:-11111111-1111-4111-8111-111111111111}"
@@ -95,7 +98,7 @@ echo "$response"
 
 step "waiting for the chain to propagate"
 i=0
-while [ "$(wc -l < .axon/local.ndjson 2>/dev/null || echo 0)" -lt 3 ]; do
+while [ "$(wc -l < .axon/log/local.ndjson 2>/dev/null || echo 0)" -lt 3 ]; do
   i=$((i + 1))
   [ "$i" -gt 45 ] && { echo "the chain did not complete"; exit 1; }
   sleep 1
@@ -103,7 +106,7 @@ done
 
 echo
 step "the real causal chain"
-"$AXON" trace .axon/local.ndjson
+"$AXON" trace .axon/log/local.ndjson
 echo
 step "the trace in OpenTelemetry"
 UI="localhost:${AXON_TRACE_UI_PORT:-16686}"
@@ -121,9 +124,9 @@ trap 'rm -rf "$tmp"' EXIT
 # It is narrowed to the flow this demo fired. Comparing one expected flow against
 # ALL the ones in the log only works if there is exactly one, and that stops being
 # true as soon as anything else touches the system —a load test, for instance.
-FLOW=$(python3 -c 'import json;print(json.loads(open(".axon/local.ndjson").readline())["correlationId"])')
+FLOW=$(python3 -c 'import json;print(json.loads(open(".axon/log/local.ndjson").readline())["correlationId"])')
 "$AXON" seq order.placed@v1 . --events > "$tmp/expected"
-"$AXON" trace .axon/local.ndjson --seq --correlation "$FLOW" > "$tmp/real"
+"$AXON" trace .axon/log/local.ndjson --seq --correlation "$FLOW" > "$tmp/real"
 if diff -u "$tmp/expected" "$tmp/real"; then
   echo "OK: the system does exactly what it declares"
 else

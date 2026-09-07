@@ -15,7 +15,7 @@ ui = sys.argv[1] if len(sys.argv) > 1 else "localhost:16686"
 
 # It looks for THE trace of this run, not the latest one there is: the collector
 # keeps the earlier ones and "the latest" is not a criterion.
-with open(".axon/local.ndjson") as f:
+with open(".axon/log/local.ndjson") as f:
     from_log = json.loads(f.readline())["correlationId"]
 tags = urllib.parse.quote(json.dumps({"axon.correlation_id": from_log}))
 url = f"http://{ui}/api/traces?service=orders&tags={tags}&lookback=1h&limit=5"

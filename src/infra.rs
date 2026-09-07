@@ -1624,8 +1624,17 @@ services:
     env_file: [.env.local]
     environment:
       AXON_BROKER_URL: nats://broker:4222
-      AXON_TRACE_LOG: /out/local.ndjson
+      AXON_TRACE_LOG: /out/log/local.ndjson
 {db_env}{secrets}    volumes: [\"./.axon:/out\"]
+    # The k8s target already probes `/healthz`; here it is what makes `up --wait`
+    # actually wait. Without it compose returns as soon as the container STARTS, and
+    # the first request lands before the process is listening —a reset that reads as
+    # a bug in the service. On a cold start, which is the CI case, it always lost.
+    healthcheck:
+      test: [\"CMD\", \"node\", \"-e\", \"fetch('http://127.0.0.1:{port}/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 {labels}",
             deps = deps.join(", "),
             host = apps[&w.service],
@@ -1664,11 +1673,14 @@ services:
             "  warehouse:\n    \
              image: clickhouse/clickhouse-server:24.8-alpine\n    \
              environment: { CLICKHOUSE_DB: axon, CLICKHOUSE_USER: local, CLICKHOUSE_PASSWORD: local }\n    \
-             # The envelope log, where `file()` can read it. NOT read-only: the\n    \
-             # image's entrypoint `chown`s this directory and with `:ro` that fails\n    \
-             # and the container does not start.\n    \
-             volumes: [\"./.axon:/var/lib/clickhouse/user_files\"]\n    \
-             ports: [\"${AXON_BODEGA_PORT:-8123}:8123\"]\n    \
+             # ONLY the log's subdirectory, and not `.axon` itself. The image's\n    \
+             # entrypoint `chown`s user_files —with `:ro` it fails and the container\n    \
+             # does not start— so whatever is mounted there changes owner. With\n    \
+             # `./.axon` there, on Linux every file the demo writes afterwards failed\n    \
+             # with `Permission denied`; on Docker Desktop it did not, because the\n    \
+             # chown does not reach the host.\n    \
+             volumes: [\"./.axon/log:/var/lib/clickhouse/user_files\"]\n    \
+             ports: [\"${AXON_WAREHOUSE_PORT:-8123}:8123\"]\n    \
              healthcheck:\n      \
              test: [\"CMD-SHELL\", \"wget -qO- http://127.0.0.1:8123/ping\"]\n      \
              interval: 2s\n      \
