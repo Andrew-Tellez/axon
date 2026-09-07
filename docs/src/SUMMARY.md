@@ -1,6 +1,7 @@
 # Summary
 
 [axon](./introduction.md)
+[Architecture](./architecture.md)
 
 # Getting started
 

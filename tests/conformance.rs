@@ -2601,6 +2601,117 @@ fn the_documentation_examples_validate() {
     eprintln!("{checked} manifest examples across {pages} pages");
 }
 
+/// The architecture page draws the compiler's own modules and claims, target by
+/// target, which resources each render emits. Neither is derivable from a
+/// manifest —it is a diagram of axon itself— so it is the one page that can go
+/// stale without anything noticing.
+///
+/// So it gets checked against the code it describes: every module in `src/` is in
+/// the map and every module the map names exists, and every provider resource the
+/// page names is really emitted by that target.
+#[test]
+fn the_architecture_page_matches_the_code_it_describes() {
+    let page = std::fs::read_to_string("docs/src/architecture.md").unwrap();
+
+    // --- the module map ---------------------------------------------------
+    let mut modules = Vec::new();
+    for entry in std::fs::read_dir("src").unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "rs") {
+            modules.push(path.file_name().unwrap().to_string_lossy().to_string());
+        }
+    }
+    assert!(modules.len() >= 12, "only {} modules found", modules.len());
+    for m in &modules {
+        assert!(
+            page.contains(m),
+            "`{m}` is not in the architecture page's map. A module that nobody \
+             drew is a module nobody knows exists"
+        );
+    }
+    // and the other way round: a module the page names has to exist, or the
+    // drawing describes a compiler that is not this one
+    let mut named = 0;
+    let bytes: Vec<char> = page.chars().collect();
+    for (i, w) in bytes.windows(3).enumerate() {
+        if w != ['.', 'r', 's'] {
+            continue;
+        }
+        let start = bytes[..i]
+            .iter()
+            .rposition(|c| !(c.is_ascii_lowercase() || *c == '_'))
+            .map_or(0, |p| p + 1);
+        let name: String = bytes[start..i + 3].iter().collect();
+        if name.len() > 3 {
+            assert!(
+                std::path::Path::new("src").join(&name).exists(),
+                "the page names `{name}` and `src/{name}` does not exist"
+            );
+            named += 1;
+        }
+    }
+    assert!(named >= 12, "only {named} modules named in the page");
+
+    // --- what each target really emits ------------------------------------
+    // The page's table says, for instance, that `[infra] state` becomes a
+    // `google_sql_database_instance` on gcp and an `aws_db_parameter_group` on
+    // aws. Those are claims about the renderer, and the renderer can answer.
+    for (target, prefix) in [("gcp", "google_"), ("aws", "aws_")] {
+        let (out, err, ok) = axon(&["infra", &source_for(target), "--target", target]);
+        assert!(ok, "{target}: {err}");
+        let mut checked = 0;
+        let chars: Vec<char> = page.chars().collect();
+        let pre: Vec<char> = prefix.chars().collect();
+        for i in 0..chars.len() {
+            if !chars[i..].starts_with(&pre[..]) {
+                continue;
+            }
+            // a resource name runs to the first character that cannot be in one
+            let end = chars[i..]
+                .iter()
+                .position(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_'))
+                .map_or(chars.len(), |p| i + p);
+            let name: String = chars[i..end].iter().collect();
+            if name.len() < prefix.len() + 4 || !name.contains('_') {
+                continue;
+            }
+            assert!(
+                out.contains(&name),
+                "the page says `{target}` emits `{name}` and it does not. Either \
+                 the renderer stopped emitting it or the page describes another tool"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 6,
+            "only {checked} `{prefix}*` resources checked for {target}"
+        );
+    }
+
+    // and the k8s objects, which are kinds and not resources
+    let (k8s, err, ok) = axon(&["infra", &source_for("k8s"), "--target", "k8s"]);
+    assert!(ok, "{err}");
+    for kind in [
+        "Broker",
+        "Trigger",
+        "HTTPRoute",
+        "Gateway",
+        "Deployment",
+        "NetworkPolicy",
+        "CronJob",
+        "ExternalSecret",
+    ] {
+        assert!(
+            page.contains(kind),
+            "the page does not name the `{kind}` that k8s emits"
+        );
+        assert!(
+            k8s.contains(&format!("kind: {kind}")),
+            "the page names `{kind}` and the k8s target does not emit it"
+        );
+    }
+}
+
 /// The book and the README also quote the DEMO's output, which is the strongest
 /// thing either of them says: those lines are measured against containers, not
 /// claimed. So they get the same treatment as the tool's messages — four

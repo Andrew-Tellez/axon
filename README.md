@@ -177,6 +177,7 @@ every release. It is written in Spanish for now.
 | --- | --- |
 | [Your first manifest](https://andrew-tellez.github.io/axon/getting-started.html) | Ten minutes, from zero to verified |
 | [The demo, measured](https://andrew-tellez.github.io/axon/demo.html) | The 35 checks against real containers, and what running it twice proves |
+| [Architecture](https://andrew-tellez.github.io/axon/architecture.html) | High and low level design, in diagrams: the modules, and one declaration rendered on four targets |
 | [Manifest reference](https://andrew-tellez.github.io/axon/manifest.html) | Every field and why it exists |
 | [Patterns](https://andrew-tellez.github.io/axon/patterns.html) | Declared, not remembered: outbox, idempotent inbox, **saga**, **event sourcing**, **CQRS** |
 | [CAP and resilience](https://andrew-tellez.github.io/axon/cap.html) | The side you do get to choose |

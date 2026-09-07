@@ -20,10 +20,11 @@ their own — a compiler that only verifies itself produces invalid output:
 | The book's manifest examples | every ```toml block goes through `axon verify` |
 | The output the book quotes | four consecutive words of it have to appear in `src/` |
 | The demo output the book quotes | four consecutive words of it have to appear in the script that prints it |
+| The architecture page | every module in `src/` is in its map, and every provider resource it names is really emitted by that target |
 | The diagrams and the registry | the emitter's edge, the consumer's edge and the synchronous call are in them, and an external service is told apart |
 
 ```sh
-cargo test --release      # 61 conformance checks
+cargo test --release      # 62 conformance checks
 cd examples && ./demo.sh  # 35 checks against real containers
 ```
 

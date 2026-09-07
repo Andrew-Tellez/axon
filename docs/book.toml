@@ -10,7 +10,7 @@ default-theme = "rust"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/Andrew-Tellez/axon"
 edit-url-template = "https://github.com/Andrew-Tellez/axon/edit/main/docs/{path}"
-additional-js = ["versions.js"]
+additional-js = ["versions.js", "mermaid.min.js", "mermaid-init.js"]
 additional-css = ["axon.css"]
 
 [output.html.fold]
@@ -21,3 +21,8 @@ level = 1
 enable = true
 limit-results = 20
 use-boolean-and = true
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

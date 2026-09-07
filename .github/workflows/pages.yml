@@ -28,7 +28,10 @@ jobs:
         with: { fetch-depth: 0 }   # the tags are the source of the versions
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
-        with: { tool: mdbook }
+        # mdbook-mermaid is the preprocessor that turns the ` ```mermaid ` blocks
+        # into diagrams. Without it `mdbook build` fails on the current book, and
+        # an older tag —whose book.toml does not declare it— builds the same.
+        with: { tool: "mdbook,mdbook-mermaid" }
       - uses: actions/configure-pages@v5
 
       # The site is rebuilt whole from git on every deploy: the root is `main`
