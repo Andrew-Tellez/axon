@@ -119,7 +119,9 @@ $ cd examples && ./demo.sh
   axon: 0 thresholds breached
 ```
 
-It runs in CI on every push.
+It runs in CI on every push. The whole run —15 sections, 35 checks— and what happens when
+you run it **twice in a row** are in
+[The demo, measured](https://andrew-tellez.github.io/axon/demo.html).
 
 ## What it is built with, and what verifies it
 
@@ -174,6 +176,7 @@ every release. It is written in Spanish for now.
 | | |
 | --- | --- |
 | [Your first manifest](https://andrew-tellez.github.io/axon/getting-started.html) | Ten minutes, from zero to verified |
+| [The demo, measured](https://andrew-tellez.github.io/axon/demo.html) | The 35 checks against real containers, and what running it twice proves |
 | [Manifest reference](https://andrew-tellez.github.io/axon/manifest.html) | Every field and why it exists |
 | [Patterns](https://andrew-tellez.github.io/axon/patterns.html) | Declared, not remembered: outbox, idempotent inbox, **saga**, **event sourcing**, **CQRS** |
 | [CAP and resilience](https://andrew-tellez.github.io/axon/cap.html) | The side you do get to choose |

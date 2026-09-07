@@ -7,6 +7,7 @@
 - [Install](./install.md)
 - [Your first manifest](./getting-started.md)
 - [Getting in without rewriting anything](./importing.md)
+- [The demo, measured](./demo.md)
 
 # The manifest
 

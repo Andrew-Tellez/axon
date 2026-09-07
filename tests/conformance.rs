@@ -2601,6 +2601,150 @@ fn the_documentation_examples_validate() {
     eprintln!("{checked} manifest examples across {pages} pages");
 }
 
+/// The book and the README also quote the DEMO's output, which is the strongest
+/// thing either of them says: those lines are measured against containers, not
+/// claimed. So they get the same treatment as the tool's messages — four
+/// consecutive words of each quoted line have to appear in a script that prints
+/// it.
+///
+/// It is the same failure mode from the other side: the pages showed a demo that
+/// had stopped existing —two example services, a pgdog that was not wired yet—
+/// and nothing said so, because prose is not executable.
+#[test]
+fn the_docs_quote_demo_output_a_script_really_prints() {
+    // interpolations get REMOVED, not turned into words: the script says
+    // `${elapsed}ms inside the ${budget}ms budget` and the book quotes
+    // `14000ms inside the 60000ms budget`. Deleting them leaves the same words
+    // on both sides, which is the part worth comparing.
+    let plain = |t: &str, code: bool| -> String {
+        let mut src = t.to_string();
+        if code {
+            // ${...}, $name and {name}
+            while let Some(i) = src.find("${") {
+                match src[i..].find('}') {
+                    Some(j) => src.replace_range(i..i + j + 1, " "),
+                    None => break,
+                }
+            }
+            while let Some(i) = src.find("{") {
+                match src[i..].find('}') {
+                    Some(j)
+                        if src[i + 1..i + j]
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c == '_') =>
+                    {
+                        src.replace_range(i..i + j + 1, " ")
+                    }
+                    _ => {
+                        src.replace_range(i..i + 1, " ");
+                    }
+                }
+            }
+            let mut out = String::new();
+            let mut chars = src.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '$' {
+                    while chars
+                        .peek()
+                        .is_some_and(|n| n.is_ascii_alphanumeric() || *n == '_')
+                    {
+                        chars.next();
+                    }
+                    out.push(' ');
+                } else {
+                    out.push(c);
+                }
+            }
+            src = out;
+        }
+        let mut o = String::from(" ");
+        let mut space = true;
+        for c in src.chars() {
+            if c.is_ascii_alphabetic() {
+                o.push(c.to_ascii_lowercase());
+                space = false;
+            } else if !space {
+                o.push(' ');
+                space = true;
+            }
+        }
+        o
+    };
+
+    // Whatever prints a line the pages quote: the demo's scripts, the example's
+    // own services, and `src/` for the lines that come from the CLI itself.
+    let mut corpus = String::new();
+    for pattern in [
+        "examples",
+        "examples/services/orders",
+        "examples/services/payments",
+        "examples/services/checkout",
+        "src",
+    ] {
+        for entry in std::fs::read_dir(pattern).unwrap().flatten() {
+            let path = entry.path();
+            let keep = path
+                .extension()
+                .is_some_and(|e| e == "sh" || e == "py" || e == "ts" || e == "rs");
+            if keep {
+                corpus.push_str(&plain(&std::fs::read_to_string(path).unwrap(), true));
+            }
+        }
+    }
+
+    let mut quoted = 0;
+    let mut pages = Vec::new();
+    for entry in std::fs::read_dir("docs/src").unwrap().flatten() {
+        pages.push(entry.path());
+    }
+    pages.push(std::path::PathBuf::from("README.md"));
+    for path in pages {
+        if path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut inside = false;
+        for (n, line) in text.lines().enumerate() {
+            if line.starts_with("```") {
+                inside = line.starts_with("```console");
+                continue;
+            }
+            if !inside {
+                continue;
+            }
+            let l = line.trim();
+            // the demo's own vocabulary: a check that passed, one that failed,
+            // and the `i` that explains a number
+            if !(l.starts_with("OK:") || l.starts_with("FAILED:") || l.starts_with("i ")) {
+                continue;
+            }
+            quoted += 1;
+            let flat = plain(l, false);
+            let words: Vec<&str> = flat.split_whitespace().collect();
+            let n_words = words.len().min(4);
+            assert!(
+                n_words >= 2,
+                "{name}:{}: nothing to compare in `{l}`",
+                n + 1
+            );
+            assert!(
+                words
+                    .windows(n_words)
+                    .any(|w| corpus.contains(&format!(" {} ", w.join(" ")))),
+                "{name}:{}: no script prints this line. Either the demo stopped \
+                 printing it or it was paraphrased:\n  {l}",
+                n + 1
+            );
+        }
+    }
+    assert!(
+        quoted >= 40,
+        "only {quoted} quoted demo lines were checked; the scan stopped seeing them"
+    );
+    eprintln!("{quoted} quoted demo lines checked against the scripts that print them");
+}
+
 /// The three projections nothing asserted: the event topology, the class diagram
 /// and the registry. They are the answer to "who consumes this event and what
 /// breaks if I change a field on it", so what is checked is that the RELATIONSHIP

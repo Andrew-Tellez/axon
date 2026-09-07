@@ -1,0 +1,190 @@
+# The demo, measured
+
+`examples/` ships three services that really run — `orders`, `payments` and `checkout`,
+in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
+brings the whole system up and makes **35 checks against reality**: not against a mock,
+and not against axon's own asserts.
+
+```sh
+cd examples && ./demo.sh    # needs Docker; ~4 minutes from cold
+```
+
+It brings up the broker, four Postgres nodes with [pgdog](https://pgdog.dev) in front,
+MinIO, Jaeger, flagd, ClickHouse, the edge and the three services — all of it emitted by
+`axon infra --target local`, nothing hand-written.
+
+Every line below is printed by a script in `examples/`, and a test checks that: four
+consecutive words of each quoted line have to appear in whatever prints it. A page that
+quotes a demo which stopped existing is the same drift this project hunts, from the other
+side.
+
+## The whole run
+
+```console
+$ cd examples && ./demo.sh
+==> generating the local infrastructure from the manifests
+==> bringing up the broker, the databases, the migrations and the services
+==> POST /v1/tenants/{tenantId}/orders
+{"orderId":"ea2a86e1-5525-488e-b8b0-10b55c163df4"}
+==> waiting for the chain to propagate
+
+==> the real causal chain
+└─ POST /v1/tenants/{tenantId}/orders <- http
+   └─ order.placed@v1 <- orders
+      └─ payment.captured@v1 <- payments
+
+==> the trace in OpenTelemetry
+  orders/POST /v1/tenants/{tenantId}/orders
+      orders/publish order.placed@v1
+          payments/process order.placed@v1
+              payments/stage payment.captured@v1
+                  payments/publish payment.captured@v1
+  OK: 5 spans, one root, no orphans, crossing ['orders', 'payments']
+  and the correlationId matches the log's: 5299db21-eaf8-409b-98e8-37809ca67576
+
+==> expected (manifest) vs real (envelope log)
+OK: the system does exactly what it declares
+
+==> the registry, from what is RUNNING
+  OK: 3 services discovered live, and they declare what the repo says
+
+==> tenant isolation through the pooler
+  a query with no tenant in the WHERE
+  OK: pgdog rejects it at the router, before touching a node
+  20 connections alternating tenant, each also asking for the other one's
+  OK: 20 of 20 saw 1 row of their own and 0 of the tenant they asked for
+  i pgdog cleans the connection when handing it back: 0 of 20 inherited the value.
+
+==> the saga: compensation and resume, measured
+  a checkout below the ceiling
+    {"state":"completed"}
+  a checkout ABOVE the ceiling: step 2 fails after the charge
+    {"state":"compensated"}
+  OK: the charge was undone and the merchant was not paid
+  a saga stranded in another process, resumed by the sweep
+    {"claimed":1,"completed":0,"compensated":1,"stuck":0,"pending":false}
+  OK: resumed from the journal, compensated, and the refund reached the charge
+  OK: a closed saga is not swept again
+
+==> event sourcing and CQRS, measured
+  two concurrent writes at the same version
+  OK: one got in and the other was rejected; 1 event left at version 3
+  i the rejection is the UNIQUE, not a check in the application
+  OK: the view agrees with the stream
+  OK: 1041ms of real lag; the unprojected event shows up
+  OK: 0ms, inside the declared budget of 3000ms
+  OK: the relay came back and published it; nobody had to retry by hand
+  OK: snapshot at version 2, a multiple of the declared cadence (2)
+  OK: the snapshot says 'compensated' and the projection, which did not use it, says the same
+  OK: the rules 0 snapshot lives alongside the current one, which says 900 cents
+  OK: it applied 11 events of the stream's 11, and no garbage was left
+  OK: every rebuilt row matches the last event of its stream
+  OK: the dates came from the stream, not from the hour of the rebuild
+    14 reads in the 2s the rebuild took; lowest seen: 4 of 4
+  OK: nobody saw a half-built view; 11 events applied in the shadow
+  i rebuilding in place, the lowest would have been 0
+  OK: the ones from another version are gone, and only the newest of each stream is left
+  OK: with no snapshot at all the system stays correct, it just rebuilds more
+  OK: 0 payments and 0 events; the event does not survive the rollback
+  i with `stage` on its own connection this gave 0 and 1: a charge
+
+==> declared vs occurred retries
+  declared in the generated code: payout 2 retries, refund 3
+  a payout slower than its timeout: how many times it arrives
+    {"state":"compensated"}  (13s)
+  OK: 3 calls = 1 + 2 retries, exactly what was declared
+  OK: 13000ms inside the 60000ms budget
+  OK: 3 calls to the refund (2 failures and the one that got through), and the charge was undone
+  i without the 3 declared retries, this saga ended up STUCK
+    HTTP 500
+  OK: 4 calls, the saga was left STUCK and the response did not hide it
+  payments restored with no switches
+
+==> declared vs applied rollout
+  declared 10%  measured 10.7%  (32 of 300)
+  OK: sticky per tenant, and the percentage applies
+
+==> the warehouse: schema, funnel and PII
+  OK: 1 events in the warehouse, with the generated schema untouched
+  OK: 1 flows, 1 reached the charge (100% conversion)
+  i the funnel's business latency: 37ms from the order to the charge
+  OK: 1 orders and 25000 cents, the same as counting the table by hand
+  OK: 1 bucket(s) and 1 currency; the metric groups by what it declares
+  OK: 1 hashed, 0 addresses in plaintext
+axon: the warehouse has 0 differences against the manifest
+  OK: the missing column is detected, and without it that field would be stored nowhere
+  OK: restored whole after breaking it: 1 rows, all with their amount
+  OK: 1 rows before and after; the loader is idempotent
+
+==> declared vs measured capacity
+info: orders: 20 requests measured at 2.0/s
+axon: 0 thresholds breached
+```
+
+Three things about the numbers, because they are not decoration:
+
+- **The 1041ms of view lag is deliberate.** It comes from the event the concurrency race
+  wrote *straight into the stream*, bypassing the projection. The next check —an
+  up-to-date checkout— reports 0ms inside the 3000ms budget. It is measured in both
+  directions so a pretty number cannot pass for a working one.
+- **The two `i` lines in the past tense** (`this gave 0 and 1`, `the lowest would have
+  been 0`) are real defects, already fixed. They stayed in the demo as regression guards.
+- **`1 events in the warehouse` on a cold start is right**: the envelope log holds only
+  the flow the demo fired, and the orders the other checks seed go through the pooler
+  straight into Postgres, not over the bus.
+
+## Run it twice
+
+This is the check with the best track record in the project: **three of the worst bugs it
+has had were found by running the demo a second time**, not by any test. The per-view
+checkpoint that held one number for the whole view, the saga journal's outputs read back
+as `undefined` after a resume, and —most recently— a drift check of my own that quietly
+deleted the warehouse's history.
+
+Two consecutive runs over the same volumes, both `exit 0`, 35 checks each:
+
+| | run 1 | run 2 |
+| --- | --- | --- |
+| warehouse | 13 events, 51100 cents | **14 events, 76100 cents** |
+| restored after breaking it | 13 rows, all with their amount | **14 rows, all with their amount** |
+| loader, run twice | 13 rows before and after | **14 rows before and after** |
+| view rebuild | 65 events applied | **83 events** |
+| the shadow's window | 101 reads in 12s, lowest 28 of 28 | **128 reads in 14s, lowest 36 of 36** |
+| snapshot prune | 8 snapshots, deleted 1, 7 left | 8 snapshots, deleted 1, 7 left |
+| real view lag | 1042ms | 1013ms |
+
+The numbers that **grow** are the point: the second run works on the first one's state, so
+every assertion holds over data that already existed. The ones that do **not** grow say
+something too — the snapshot prune always leaves 8→7, because a snapshot is a cache and
+not a history. And the lowest row count seen during a rebuild rises with the volume and
+never drops below what was there: nobody saw a half-built view with 83 events any more
+than with 11.
+
+## One capability at a time
+
+Each section is a script you can run on its own once the system is up, which is the
+shortest way to show one thing:
+
+| | |
+| --- | --- |
+| `./check-saga.sh` | compensation, resume from the journal, and a closed saga not swept again |
+| `./check-es.sh` | optimistic concurrency, view lag, the relay, snapshots, prune, rebuild with the shadow, and the transactional outbox |
+| `./check-retries.sh` | the declared retries, occurring, and what they buy |
+| `./check-pooler.sh` | tenant isolation through pgdog in transaction mode |
+| `./check-warehouse.sh` | schema, funnel, metrics, PII and drift detection |
+| `python3 check-flags.py localhost:8016 charge_v2 10` | the rollout, applied and sticky |
+| `python3 check-trace.py localhost:16686` | the span tree, with no orphans |
+| `python3 check-registry.py <disk.json> <running.json>` | the repo against what is deployed |
+
+And with nothing running at all, the projections take a second:
+
+```sh
+axon verify   examples          # the rules, over the example itself
+axon graph    examples          # the event topology, as Mermaid
+axon classes  examples          # the class diagram
+axon er       examples          # entity-relationship, from the migrations
+axon seq      order.placed@v1 examples
+axon cap      examples          # what the CAP side you picked implies
+axon analytics examples --target clickhouse
+axon infra    examples --target k8s
+```
