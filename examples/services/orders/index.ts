@@ -1,5 +1,5 @@
 // The business logic. The only thing a person writes.
-import { OrdersService, httpRoutes, type PlaceOrderIn, type PlaceOrderOut,
+import { OrdersService, httpRoutes, manifest, type PlaceOrderIn, type PlaceOrderOut,
          type GetOrderIn, type GetOrderOut, type Envelope } from "./contracts.ts";
 import { startTelemetry } from "../telemetry.ts";
 import { NotFound, bus, connectBroker, serve, waitForDb } from "../runtime.ts";
@@ -87,6 +87,11 @@ const svc = new Orders(bus(await connectBroker()), db);
 serve(
   Number(process.env.PORT ?? 8080),
   {
+    // Discovery: the service publishes its own manifest at the path the
+    // generated contract names. `axon discover <url>` merges that with what is
+    // on disk, so a registry can be built from what is RUNNING and not from what
+    // somebody remembered to commit.
+    "GET /.well-known/axon.json": async () => manifest,
     "POST /v1/tenants/{tenantId}/orders": (body, e, params) =>
       svc.placeOrder({ ...body, tenantId: params.tenantId }, e),
     "GET /v1/tenants/{tenantId}/orders/{orderId}": (_body, _e, params) =>

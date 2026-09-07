@@ -58,7 +58,21 @@ mutating methods and `application/problem+json` (RFC 7807) as the uniform error.
 
 ## `axon discover <sources>`
 A JSON registry: version, owner, methods with inputs and outputs, events emitted and
-consumed. It works against disk and against running services.
+consumed. It works against disk and against running services, and merges both.
+
+Each service serves its own manifest at `/.well-known/axon.json` —the path the generated
+contract publishes— so the registry can be built from what is **deployed** instead of
+from what somebody remembered to commit. A service running a manifest other than the
+one in the repo compiles fine, because its contracts were generated from the old one;
+comparing the two registries is the only place that shows, and the demo does it:
+
+```console
+==> the registry, from what is RUNNING
+  OK: 3 services discovered live, and they declare what the repo says
+```
+
+A service that is down is reported and does not break the rest, and an external contract
+is only on disk: it is frozen and serves nothing.
 
 ## `axon import asyncapi <file|-> [--service <name>]`
 AsyncAPI 2.x or 3.x, JSON or YAML, to a manifest on stdout. The service's name comes from

@@ -135,6 +135,20 @@ else
 fi
 
 
+step "the registry, from what is RUNNING"
+# Each service serves its own manifest at the path the generated contract names,
+# so a registry can be built from what is deployed instead of from what somebody
+# remembered to commit. What is checked is that both agree: if a service were
+# running a manifest other than the one in the repo, this is where it shows.
+"$AXON" discover . > "$tmp/on-disk.json"
+"$AXON" discover \
+  "http://localhost:$AXON_PORT_orders" \
+  "http://localhost:$AXON_PORT_payments" \
+  "http://localhost:$AXON_PORT_checkout" > "$tmp/running.json"
+# `source` differs on purpose —a file path against a URL— and `stripe` is only on
+# disk, because an external contract is frozen and serves nothing.
+python3 check-registry.py "$tmp/on-disk.json" "$tmp/running.json"
+
 step "tenant isolation through the pooler"
 ./check-pooler.sh
 

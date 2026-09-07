@@ -66,7 +66,7 @@ the diagram is stale: somebody broke the manifest, and CI says so before the mer
 
 `examples/` ships three services that really run —one over four Postgres nodes with
 [pgdog](https://pgdog.dev) in front, and another coordinating a saga. `./demo.sh` brings
-the whole system up and makes **34 checks against reality**:
+the whole system up and makes **35 checks against reality**:
 
 ```console
 $ cd examples && ./demo.sh
@@ -80,6 +80,9 @@ $ cd examples && ./demo.sh
 
 ==> expected (manifest) vs real (envelope log)
   OK: the system does exactly what it declares
+
+==> the registry, from what is RUNNING
+  OK: 3 services discovered live, and they declare what the repo says
 
 ==> tenant isolation through the pooler
   OK: pgdog rejects the query with no tenant at the router
@@ -131,7 +134,7 @@ verified against itself.
 
 | Tool | What for | How the generated output is verified |
 | --- | --- | --- |
-| **Docker** | `--target local`: broker, Postgres per service, MinIO, Jaeger, flagd, the edge and your services | `./demo.sh` brings the system up and makes 34 checks against reality |
+| **Docker** | `--target local`: broker, Postgres per service, MinIO, Jaeger, flagd, the edge and your services | `./demo.sh` brings the system up and makes 35 checks against reality |
 | **Terraform** | `--target gcp` and `--target aws` | `terraform validate` with the **real providers**, and with no warnings |
 | **`tsc`** | the TypeScript from `axon build` and `axon test` | `tsc --strict --noEmit`, plus the example service's typecheck |
 | **Node 24+** | runs the testkit with no build step, using type stripping | `node --test` against the real example service |

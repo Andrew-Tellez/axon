@@ -1,5 +1,5 @@
 // The business logic. The state machine is enforced by the generated code.
-import { PaymentsService, httpRoutes, paymentNext, paymentCan, flagChargeV2, flagStripeKill,
+import { PaymentsService, httpRoutes, manifest, paymentNext, paymentCan, flagChargeV2, flagStripeKill,
          type CapturePaymentIn, type CapturePaymentOut,
          type RefundPaymentIn, type RefundPaymentOut,
          type PayoutMerchantIn, type PayoutMerchantOut,
@@ -150,6 +150,11 @@ await subscribe(nc, ["order.placed@v1"], (e) => svc.dispatch(e));
 serve(
   Number(process.env.PORT ?? 8080),
   {
+    // Discovery: the service publishes its own manifest at the path the
+    // generated contract names. `axon discover <url>` merges that with what is
+    // on disk, so a registry can be built from what is RUNNING and not from what
+    // somebody remembered to commit.
+    "GET /.well-known/axon.json": async () => manifest,
     "POST /v1/payments": (body, e) => svc.capturePayment(body, e),
     "POST /v1/payments/{paymentId}/refunds": (_b, _e, params) =>
       svc.refundPayment({ paymentId: params.paymentId }),
