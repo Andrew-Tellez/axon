@@ -87,3 +87,21 @@ tenant_binding = "set_local"
 shards = 4
 max_client_conn = 500
 pool_size = 40
+
+# Business metrics. The funnel already answers conversion and business latency,
+# because both are derivable from the causal chain; these two are not: somebody
+# has to say which field, grouped by what, in which bucket. Declared here they
+# end up as views next to the funnels instead of a query pasted into a dashboard.
+[metrics.orders_placed]
+on     = ["order.placed@v1"]
+kind   = "count"
+window = "1d"
+
+# `total` is `money`, so what gets added up is its amount column: the manifest
+# keeps talking about the field the contract declares.
+[metrics.gmv]
+on     = ["order.placed@v1"]
+kind   = "sum"
+field  = "total"
+by     = ["total.currency"]
+window = "1d"

@@ -173,6 +173,28 @@ export const manifest = {
   "saga": {},
   "aggregate": {},
   "view": {},
+  "metrics": {
+    "orders_placed": {
+      "on": [
+        "order.placed@v1"
+      ],
+      "kind": "count",
+      "field": null,
+      "by": [],
+      "window": "1d"
+    },
+    "gmv": {
+      "on": [
+        "order.placed@v1"
+      ],
+      "kind": "sum",
+      "field": "total",
+      "by": [
+        "total.currency"
+      ],
+      "window": "1d"
+    }
+  },
   "infra": {
     "state": "postgres",
     "runtime": "container",

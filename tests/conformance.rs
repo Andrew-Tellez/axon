@@ -1573,6 +1573,14 @@ fn a_published_version_is_immutable() {
             "[emits.\"order.placed@v1\"]",
             "[emits.\"order.placed@v2\"]",
         ),
+        // The metrics read that event, so retiring it moves them too. That is
+        // the point of the rule, not a nuisance: a metric left reading a retired
+        // event answers zero forever, and zero reads like nothing was sold.
+        (
+            "orders.toml",
+            "on     = [\"order.placed@v1\"]",
+            "on     = [\"order.placed@v2\"]",
+        ),
         ("payments.toml", "order.placed@v1", "order.placed@v2"),
     ] {
         let p = dir.join(f);
@@ -2591,6 +2599,211 @@ fn the_documentation_examples_validate() {
     assert!(pages >= 10, "only {pages} pages of docs/src were read");
     assert!(checked >= 10, "only {checked} examples were checked");
     eprintln!("{checked} manifest examples across {pages} pages");
+}
+
+/// A declared metric is a view next to the funnels, in the dialect of each
+/// warehouse, and it has to be valid SQL in all three: a `sum` over a `money`
+/// field adds up its amount column, and the time bucket is a different function
+/// in every one of them.
+#[test]
+fn the_declared_metrics_are_valid_sql() {
+    for (target, bucket, quote) in [
+        ("bigquery", "TIMESTAMP_TRUNC(event_time, DAY)", '`'),
+        ("snowflake", "DATE_TRUNC('DAY', event_time)", '"'),
+        ("clickhouse", "toStartOfDay(event_time)", '"'),
+    ] {
+        let (ddl, err, ok) = axon(&["analytics", "examples", "--target", target]);
+        assert!(ok, "{target}: {err}");
+        assert!(
+            ddl.contains(&format!("VIEW {quote}@dataset.metric_gmv{quote}")),
+            "{target}: no metric view:\n{ddl}"
+        );
+        // the bucket is per dialect: the three truncate a timestamp differently
+        assert!(
+            ddl.contains(bucket),
+            "{target}: no bucket `{bucket}`:\n{ddl}"
+        );
+        // `total` is `money`, so what gets added up is its amount column
+        assert!(
+            ddl.contains("sum(total_amount) AS value"),
+            "{target}: the money field is not added up by its amount:\n{ddl}"
+        );
+        // and a `money` sub-field is a dimension, flat in the warehouse
+        assert!(
+            ddl.contains("GROUP BY bucket, total_currency"),
+            "{target}: the dimension did not arrive:\n{ddl}"
+        );
+        // a count counts rows, and reads the table directly
+        assert!(ddl.contains("count(*) AS value"), "{target}:\n{ddl}");
+        assert!(
+            !ddl.contains("FROM SELECT"),
+            "{target}: a single event should read its table, not a subquery:\n{ddl}"
+        );
+
+        // And that it parses with THAT warehouse's dialect. A view that does not
+        // parse fails at apply time, which is after somebody trusted the number.
+        let sql = ddl.replace("@dataset", "ds");
+        let parsed = match target {
+            "bigquery" => {
+                sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::BigQueryDialect {}, &sql)
+            }
+            "snowflake" => {
+                sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SnowflakeDialect {}, &sql)
+            }
+            _ => sqlparser::parser::Parser::parse_sql(
+                &sqlparser::dialect::ClickHouseDialect {},
+                &sql,
+            ),
+        };
+        assert!(
+            parsed.is_ok(),
+            "{target}: the metric's SQL does not parse: {}",
+            parsed.unwrap_err()
+        );
+    }
+
+    // the neutral plan carries the metrics too, for whoever renders it themselves
+    let (plan, _, _) = axon(&["analytics", "examples", "--target", "plan"]);
+    assert!(
+        plan.contains("\"gmv\"") && plan.contains("\"orders_placed\""),
+        "the plan does not carry the declared metrics:\n{plan}"
+    );
+}
+
+/// The metric rules: each one blocks a way of having a number that answers
+/// something other than what it claims. None of them fails at apply time —a sum
+/// over text answers zero in one warehouse— so the compiler is the only place
+/// they can be caught.
+#[test]
+fn the_metric_rules_block() {
+    let dir = std::env::temp_dir().join("axon-metrics");
+    let base = r#"service = "shop"
+version = "1.0.0"
+owner = "team"
+tier = "1"
+
+[emits."order.placed@v1"]
+orderId = "uuid"
+customerEmail = "string"
+total = "money"
+
+[analytics]
+warehouse = "clickhouse"
+"#;
+    let run = |extra: &str| -> String {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shop.toml"), format!("{base}{extra}")).unwrap();
+        let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        assert!(!ok, "it passed clean:\n{extra}");
+        err
+    };
+
+    // a metric over an event nobody emits counts zero forever
+    let err = run("[metrics.m]
+on = [\"other.thing@v1\"]
+kind = \"count\"
+");
+    assert!(err.contains("nobody emits it"), "{err}");
+    assert!(err.contains("counts zero forever"), "{err}");
+
+    // a sum over something that is not a number
+    let err = run("[metrics.m]
+on = [\"order.placed@v1\"]
+kind = \"sum\"
+field = \"orderId\"
+");
+    assert!(err.contains("is `uuid` in `order.placed@v1`"), "{err}");
+    assert!(err.contains("answers zero in another"), "{err}");
+
+    // a sum with no field has nothing to add up
+    let err = run("[metrics.m]
+on = [\"order.placed@v1\"]
+kind = \"sum\"
+");
+    assert!(err.contains("with no `field`"), "{err}");
+
+    // a dimension the event does not declare becomes a NULL group
+    let err = run("[metrics.m]
+on = [\"order.placed@v1\"]
+kind = \"count\"
+by = [\"region\"]
+");
+    assert!(err.contains("does not declare"), "{err}");
+    assert!(err.contains("NULL group"), "{err}");
+
+    // and the one that matters: grouping by a personal field is a lookup table.
+    // `pii` is a field of the service, so it goes BEFORE any table: appended at
+    // the end it would land inside `[analytics]`, where `pii` is a mode.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        format!(
+            "pii = [\"customer_email\"]\n{base}[metrics.m]\non = [\"order.placed@v1\"]\nkind = \"count\"\nby = [\"customerEmail\"]\n"
+        ),
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "grouping by a personal field passed clean:\n{err}");
+    assert!(err.contains("declares as `pii`"), "{err}");
+    assert!(err.contains("hashing it does not change that"), "{err}");
+
+    // an aggregation or a bucket that does not exist in the three warehouses
+    let err = run("[metrics.m]
+on = [\"order.placed@v1\"]
+kind = \"p95\"
+field = \"total\"
+");
+    assert!(err.contains("is not an aggregation"), "{err}");
+    let err = run("[metrics.m]
+on = [\"order.placed@v1\"]
+kind = \"count\"
+window = \"13min\"
+");
+    assert!(err.contains("is not a bucket"), "{err}");
+
+    // a metric while the service exports nothing reads tables that carry nothing.
+    // `[analytics]` is already in the base, so this variant edits it instead of
+    // declaring it twice.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        format!(
+            "{}\n[metrics.m]\non = [\"order.placed@v1\"]\nkind = \"count\"\n",
+            base.replace(
+                "warehouse = \"clickhouse\"",
+                "warehouse = \"clickhouse\"\nexport = false"
+            )
+        ),
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "a metric with no export passed clean:\n{err}");
+    assert!(err.contains("carry nothing"), "{err}");
+
+    // and a count with a field is a warning: the field is ignored, and nobody
+    // reading the declaration would guess so
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        format!(
+            "{base}[metrics.m]
+on = [\"order.placed@v1\"]
+kind = \"count\"
+field = \"total\"
+"
+        ),
+    )
+    .unwrap();
+    let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "a warning should not block:\n{err}");
+    assert!(
+        format!("{out}{err}").contains("A count counts rows"),
+        "{out}{err}"
+    );
 }
 
 /// The data warehouse: one table per event and the funnel views, which come

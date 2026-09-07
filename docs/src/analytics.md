@@ -315,15 +315,82 @@ come back up with nothing to read. Instead the manifest carries the exact comman
 create it, and the one for the secret with the credentials — which are not there either: a
 generated manifest is no place for them.
 
+## Declared metrics
+
+The funnel answers conversion and business latency because both are derivable from who
+causes whom. A sum by dimension is not: somebody has to say which field, grouped by what,
+in which bucket. Declared, it becomes a view next to the funnels instead of a query
+pasted into a dashboard.
+
+```toml
+[metrics.orders_placed]
+on     = ["order.placed@v1"]
+kind   = "count"
+window = "1d"
+
+[metrics.gmv]
+on     = ["order.placed@v1"]
+kind   = "sum"
+field  = "total"          # `money`, so what gets added up is its amount column
+by     = ["total.currency"]
+window = "1d"
+```
+
+`count`, `sum` and `avg`, and the buckets `1h`, `1d`, `1w`, `1mo` — the ones that mean the
+same thing in the three warehouses. A quantile does not: it changes name per dialect, and
+a metric that means something slightly different in each is worse than no metric.
+
+```sql
+CREATE OR REPLACE VIEW `@dataset.metric_gmv` AS
+SELECT
+  TIMESTAMP_TRUNC(event_time, DAY) AS bucket,
+  total_currency,
+  sum(total_amount) AS value
+FROM `@dataset.order_placed_v1`
+GROUP BY bucket, total_currency;
+```
+
+The field is named as the **contract** names it: `total` is `money`, so the view adds up
+`total_amount`, and `total.currency` is a dimension even though the contract declares one
+field. The manifest never talks about warehouse columns.
+
+### What `verify` refutes
+
+| | |
+| --- | --- |
+| A metric over an event nobody emits | the view gets applied and counts zero forever |
+| A `sum` over a field that is not a number | one warehouse refuses it at apply time and another answers zero, and zero reads like nothing was sold |
+| A `sum` with no `field` | there is nothing to add up |
+| A dimension the event does not declare | it turns into a NULL group, and a metric with a NULL group is one nobody can read |
+| **A dimension that is a `pii` field** | one row per person is not a metric, and hashing it does not change that: the hash identifies the same person across tables |
+| A `kind` or a `window` that is not in the closed list | a metric that means something else in each warehouse |
+| A metric while the service declares `export = false` | it reads tables that carry nothing |
+| Two services declaring the same metric name | both land on the same view, and whichever applies second overwrites the first with no error |
+
+A `count` with a `field` is a warning: the field is ignored, and nobody reading the
+declaration would guess so.
+
+### Measured against ClickHouse
+
+The demo compares each metric against counting the table by hand. If they differed, the
+view would be answering something other than what it claims — and a number in a dashboard
+has nobody to contradict it.
+
+```console
+  the declared metrics against a direct count
+  OK: 11 orders and 26000 cents, the same as counting the table by hand
+  OK: 1 bucket(s) and 1 currency; the metric groups by what it declares
+```
+
+That check found a real bug on its first run: the loader's `INSERT ... SELECT` matched
+columns **by position**, so after the drift check dropped and re-added `total_amount`
+—which brings the column back at the end of the table— the amount was loaded into the
+currency column and the metric answered NULL. Nothing failed. The loader now names its
+columns, so a column that moved is harmless and one that is missing is an error.
+
 ## What is missing
 
-Declarable retention for the warehouse's tables, and a way to declare business metrics
-beyond the funnels that come out of the causal chain.
-
-The funnel already gives conversion and business latency per flow, because both are
-derivable from the declared chain. A metric that is not —a rate, a sum by dimension, a
-threshold with a window— has nowhere to be declared today, so it ends up written by hand
-in the BI tool, which is exactly where it stops being verifiable.
+Declarable retention for the warehouse's tables.
 
 And `k8s`'s ingest is validated but not measured against containers: the local target is
 filled from the envelope log, so Vector's path does not go through the demo. Bringing it up

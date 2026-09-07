@@ -55,6 +55,38 @@ ms=$(ch -q "SELECT round(avg(ms_to_payment_captured_v1)) FROM axon.funnel_order_
 [ "$flows" = "$rows" ] || { echo "  FAILED: $flows flows in the funnel and $rows orders in the table"; exit 1; }
 echo "  i the funnel's business latency: ${ms}ms from the order to the charge"
 
+# --- the declared metrics answer what a direct query answers -------------
+# A metric is a view over the same tables, so what is checked is that it says the
+# same as counting by hand. If they differed, the view would be answering
+# something other than what it claims — and a number in a dashboard has nobody to
+# contradict it.
+echo "  the declared metrics against a direct count"
+placed=$(ch -q "SELECT count(*) FROM axon.order_placed_v1")
+metric_count=$(ch -q "SELECT sum(value) FROM axon.metric_orders_placed")
+gmv_direct=$(ch -q "SELECT sum(total_amount) FROM axon.order_placed_v1")
+gmv_metric=$(ch -q "SELECT sum(value) FROM axon.metric_gmv")
+# A sum over an all-NULL column returns NULL in ClickHouse, and `NULL = NULL`
+# would pass this check while the metric answered nothing: the amount has to be a
+# number, and a positive one.
+case "$gmv_metric" in ''|*[!0-9]*) echo "  FAILED: the metric answers '$gmv_metric', not a number"; exit 1 ;; esac
+if [ "$placed" = "$metric_count" ] && [ "$gmv_direct" = "$gmv_metric" ] && [ "$gmv_metric" -gt 0 ]; then
+  echo "  OK: $metric_count orders and $gmv_metric cents, the same as counting the table by hand"
+else
+  echo "  FAILED: count $placed vs $metric_count, gmv $gmv_direct vs $gmv_metric"
+  exit 1
+fi
+
+# And the bucket exists: without it a metric is one number for all of history,
+# which is a total and not a metric.
+buckets=$(ch -q "SELECT count(DISTINCT bucket) FROM axon.metric_gmv")
+dims=$(ch -q "SELECT count(DISTINCT total_currency) FROM axon.metric_gmv")
+if [ "$buckets" -ge 1 ] && [ "$dims" -ge 1 ]; then
+  echo "  OK: $buckets bucket(s) and $dims currency; the metric groups by what it declares"
+else
+  echo "  FAILED: buckets=$buckets dimensions=$dims"
+  exit 1
+fi
+
 # --- the personal data does not travel in plaintext ----------------------
 # `pii = "hash"` in the manifest. That the column is a hash and not the address
 # is the only way to know the policy was applied.
@@ -90,6 +122,16 @@ if "$AXON" analytics . --target clickhouse --check .axon/broken.tsv > /dev/null 
 fi
 echo "  OK: the missing column is detected, and without it that field would be stored nowhere"
 ch -q "ALTER TABLE axon.order_placed_v1 ADD COLUMN total_amount Nullable(Int64)"
+# Re-adding the column brings it back EMPTY, and the loader is idempotent by event
+# id, so every row loaded before would keep a NULL forever —and the metric over
+# it would answer nothing on the next run. The table gets rebuilt from the log,
+# which is the warehouse's source of truth: that the amounts come back is what
+# proves it.
+ch -q "TRUNCATE TABLE axon.order_placed_v1"
+ch --param_salt=demo-salt --multiquery < .axon/load.sql
+restored=$(ch -q "SELECT count(*) FROM axon.order_placed_v1 WHERE total_amount > 0")
+[ "$restored" -ge 1 ] || { echo "  FAILED: the table was not rebuilt from the log"; exit 1; }
+echo "  OK: rebuilt from the log after breaking it; $restored rows with their amount back"
 
 # --- loading twice does not duplicate ------------------------------------
 # A periodic loader runs many times over the same log. If it does not filter by

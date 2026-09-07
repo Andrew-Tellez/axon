@@ -15,13 +15,14 @@ their own — a compiler that only verifies itself produces invalid output:
 | The generated pgdog config | validated against pgdog's official JSON Schema |
 | The generated Vector config | `vector validate` in its own container |
 | The warehouse schemas | parsed with each dialect's own parser |
+| The declared metrics | their SQL parses in the three dialects, and the demo compares each one against counting the table by hand |
 | The four targets | they deploy the workload and deliver to somebody |
 | The book's manifest examples | every ```toml block goes through `axon verify` |
 | The output the book quotes | four consecutive words of it have to appear in `src/` |
 
 ```sh
-cargo test --release      # 57 conformance checks
-cd examples && ./demo.sh  # 31 checks against real containers
+cargo test --release      # 59 conformance checks
+cd examples && ./demo.sh  # 34 checks against real containers
 ```
 
 Preview. The command surface is stable; the manifest format can still change before

@@ -1439,6 +1439,147 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // Business metrics. What a funnel answers is derivable from the causal chain;
+    // this is not, so the whole value of declaring it is that these things become
+    // refutable instead of being a query somebody pasted into a dashboard.
+    let emitted: IndexMap<&str, &Manifest> = ms
+        .iter()
+        .filter(|m| !m.external)
+        .flat_map(|m| m.emits.keys().map(move |e| (e.as_str(), m)))
+        .collect();
+    let mut metric_owner: IndexMap<String, String> = IndexMap::new();
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        for (name, mt) in &m.metrics {
+            // A metric lives in the warehouse and reads the exported tables: with
+            // `export = false` there is nothing there, and the view gets applied
+            // over tables that carry no rows.
+            if !m.analytics.export {
+                errors.push(format!(
+                    "{svc}.{name}: a metric with `[analytics] export = false` reads tables that \
+                     carry nothing. It gets applied and answers zero forever, which is \
+                     indistinguishable from a business that sold nothing"
+                ));
+            }
+            // The view's name is global to the dataset: two services with the same
+            // metric name overwrite each other's view, and the second one wins in
+            // silence.
+            if let Some(prev) = metric_owner.insert(name.clone(), svc.clone()) {
+                errors.push(format!(
+                    "{svc}.{name}: `{}` is also declared by {prev}, and both land on the same \
+                     view in the warehouse. Whichever is applied second overwrites the first \
+                     without an error",
+                    Metric::view(name)
+                ));
+            }
+            if !AGGREGATIONS.contains(&mt.kind.as_str()) {
+                errors.push(format!(
+                    "{svc}.{name}: `kind = \"{}\"` is not an aggregation; use {}. Those are the \
+                     ones that mean the same thing in the three warehouses",
+                    mt.kind,
+                    AGGREGATIONS.join(", ")
+                ));
+            }
+            if !WINDOWS.contains(&mt.window.as_str()) {
+                errors.push(format!(
+                    "{svc}.{name}: `window = \"{}\"` is not a bucket; use {}",
+                    mt.window,
+                    WINDOWS.join(", ")
+                ));
+            }
+            match (mt.adds_up(), &mt.field) {
+                (true, None) => errors.push(format!(
+                    "{svc}.{name}: `{}` with no `field`; there is nothing to add up",
+                    mt.kind
+                )),
+                (false, Some(f)) => warnings.push(format!(
+                    "{svc}.{name}: `count` with `field = \"{f}\"`. A count counts rows: the field \
+                     is ignored, and nobody reading the declaration would guess so"
+                )),
+                _ => {}
+            }
+            if mt.on.is_empty() {
+                errors.push(format!(
+                    "{svc}.{name}: a metric with no `on` reads nothing and answers nothing"
+                ));
+            }
+            for ev in &mt.on {
+                let Some(owner) = emitted.get(ev.as_str()) else {
+                    errors.push(format!(
+                        "{svc}.{name}: reads `{ev}` and nobody emits it. The view gets applied \
+                         and counts zero forever"
+                    ));
+                    continue;
+                };
+                // The metric reads the exported table, so the event's owner has to
+                // export: with `export = false` on the emitter's side, that table
+                // does not exist at all.
+                if !owner.analytics.export {
+                    errors.push(format!(
+                        "{svc}.{name}: reads `{ev}`, and {} declares `[analytics] export = \
+                         false`: that event has no table in the warehouse",
+                        owner.service
+                    ));
+                    continue;
+                }
+                let fields = &owner.emits[ev];
+                // The field it adds up has to BE a number in the schema its emitter
+                // declares. A sum over a string is not an error in any warehouse:
+                // one refuses it at apply time and another answers zero, and zero
+                // reads exactly like "nothing was sold".
+                if let (true, Some(f)) = (mt.adds_up(), &mt.field) {
+                    match fields.iter().find(|(k, _)| normalize(k) == normalize(f)) {
+                        None => errors.push(format!(
+                            "{svc}.{name}: adds up `{f}`, which `{ev}` does not declare. That \
+                             column does not exist in that table"
+                        )),
+                        Some((_, kind)) if !NUMERIC.contains(&kind.as_str()) => {
+                            errors.push(format!(
+                                "{svc}.{name}: adds up `{f}`, which is `{kind}` in `{ev}`. A sum \
+                                 over something that is not a number is refused by one \
+                                 warehouse and answers zero in another, and zero reads like \
+                                 nothing happened"
+                            ))
+                        }
+                        _ => {}
+                    }
+                }
+                for dim in &mt.by {
+                    // A dimension missing in one of the events silently becomes a
+                    // NULL group: the metric keeps answering, with a row nobody can
+                    // attribute to anything.
+                    // A `money` field is two columns in the warehouse, so
+                    // `total.amount` and `total.currency` are dimensions even
+                    // though the contract declares one field called `total`.
+                    let money_part = dim.rsplit_once('.').is_some_and(|(head, part)| {
+                        matches!(part, "amount" | "currency")
+                            && fields
+                                .iter()
+                                .any(|(k, t)| t == "money" && normalize(k) == normalize(head))
+                    });
+                    if !money_part && !fields.iter().any(|(k, _)| normalize(k) == normalize(dim)) {
+                        errors.push(format!(
+                            "{svc}.{name}: groups by `{dim}`, which `{ev}` does not declare. \
+                             That turns into a NULL group, and a metric with a NULL group is \
+                             one nobody can read"
+                        ));
+                    }
+                    // And a personal field is not a dimension. Hashed or not, one
+                    // row per person with a `GROUP BY` is a lookup table, and the
+                    // warehouse is where it would live longest.
+                    if is_pii(&owner.pii, dim) {
+                        errors.push(format!(
+                            "{svc}.{name}: groups by `{dim}`, which {} declares as `pii`. One \
+                             row per person is not a metric, and hashing it does not change \
+                             that: the hash identifies the same person across tables",
+                            owner.service
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     // state machines: dead states, unreachable ones and phantom triggers
     for m in ms.iter().filter(|m| !m.external) {
         for (name, mac) in &m.machine {

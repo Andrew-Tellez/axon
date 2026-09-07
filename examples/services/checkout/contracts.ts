@@ -209,6 +209,7 @@ export const manifest = {
       "max_staleness_ms": 3000
     }
   },
+  "metrics": {},
   "infra": {
     "state": "postgres",
     "runtime": "container",

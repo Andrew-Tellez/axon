@@ -83,6 +83,20 @@ has to be fixed cannot end up underneath.
 | A `kill_switch` with a `rollout` | error |
 | `sticky_by` on a field that appears in no contract | error |
 
+## Metrics
+
+| | |
+| --- | --- |
+| A metric over an event nobody emits | error |
+| A `sum` or `avg` over a field that is not a number | error |
+| A `sum` or `avg` with no `field` | error |
+| A dimension the event does not declare | error |
+| A dimension that is a `pii` field | error |
+| A `kind` or `window` outside the closed list | error |
+| A metric while the service declares `export = false` | error |
+| Two services declaring the same metric name | error |
+| A `count` with a `field` | warning |
+
 ## A published version is immutable
 
 `verify` compares the manifests with each other, but that is not enough for the most

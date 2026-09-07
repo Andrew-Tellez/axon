@@ -38,6 +38,11 @@ pub struct Dialect {
     pub tail: fn() -> String,
     /// Diferencia en milisegundos entre dos expresiones.
     pub diff_ms: fn(&str, &str) -> String,
+    /// The time bucket of a metric: `("1d", "event_time")`. It is per dialect
+    /// because the three truncate a timestamp with three different functions,
+    /// and a bucket that means "day" in one warehouse and "day in UTC minus the
+    /// session's timezone" in another is a metric that does not match itself.
+    pub bucket: fn(&str, &str) -> String,
 }
 
 fn quote_backtick(s: &str) -> String {
@@ -110,6 +115,15 @@ pub fn dialect(name: &str) -> Option<Dialect> {
                     .into()
             },
             diff_ms: |a, b| format!("TIMESTAMP_DIFF(\n{a},\n{b},\n    MILLISECOND\n  )"),
+            // TIMESTAMP_TRUNC does not take WEEK or MONTH, and DATE_TRUNC over a
+            // DATE does: the bucket comes back as a DATE for those two, which is
+            // what a weekly or monthly metric wants anyway.
+            bucket: |w, c| match w {
+                "1h" => format!("TIMESTAMP_TRUNC({c}, HOUR)"),
+                "1w" => format!("DATE_TRUNC(DATE({c}), WEEK)"),
+                "1mo" => format!("DATE_TRUNC(DATE({c}), MONTH)"),
+                _ => format!("TIMESTAMP_TRUNC({c}, DAY)"),
+            },
         },
         "snowflake" => Dialect {
             name: "snowflake",
@@ -119,6 +133,15 @@ pub fn dialect(name: &str) -> Option<Dialect> {
             // PARTITION BY would be an error, not an optimisation.
             tail: || "CLUSTER BY (TO_DATE(event_time), correlation_id)".into(),
             diff_ms: |a, b| format!("TIMESTAMPDIFF(\n    MILLISECOND,\n{b},\n{a}\n  )"),
+            bucket: |w, c| {
+                let unit = match w {
+                    "1h" => "HOUR",
+                    "1w" => "WEEK",
+                    "1mo" => "MONTH",
+                    _ => "DAY",
+                };
+                format!("DATE_TRUNC('{unit}', {c})")
+            },
         },
         "clickhouse" => Dialect {
             name: "clickhouse",
@@ -134,6 +157,15 @@ pub fn dialect(name: &str) -> Option<Dialect> {
                     .into()
             },
             diff_ms: |a, b| format!("dateDiff(\n    'millisecond',\n{b},\n{a}\n  )"),
+            bucket: |w, c| {
+                let f = match w {
+                    "1h" => "toStartOfHour",
+                    "1w" => "toStartOfWeek",
+                    "1mo" => "toStartOfMonth",
+                    _ => "toStartOfDay",
+                };
+                format!("{f}({c})")
+            },
         },
         _ => return None,
     })
@@ -202,10 +234,23 @@ pub fn loader(ms: &[Manifest], base: &str, log: &str) -> String {
                 }
             }
         }
+        // The columns go NAMED. `INSERT ... SELECT` matches by POSITION, so a
+        // table whose columns were reordered —which is what a `DROP COLUMN`
+        // followed by an `ADD COLUMN` leaves, because the column comes back at
+        // the end— loads the amount into the currency and nobody sees an error.
+        // Measured: after the drift check dropped and re-added `total_amount`,
+        // the currency column held `100` and the metric over the amount answered
+        // NULL. Named, a column that moved is harmless and one that is missing is
+        // an error.
+        let names: Vec<String> = sel
+            .iter()
+            .map(|c| c.rsplit(" AS ").next().unwrap_or_default().to_string())
+            .collect();
         o.push(format!(
-            "-- {} · owner: {}\nINSERT INTO {base}.{t}\nSELECT\n{}\nFROM file('{log}', LineAsString, 'l String')\nWHERE JSONExtractString(l, 'type') = '{}'\n  -- what is already loaded is not loaded again\n  AND JSONExtractString(l, 'id') NOT IN (SELECT event_id FROM {base}.{t});\n",
+            "-- {} · owner: {}\nINSERT INTO {base}.{t} ({})\nSELECT\n{}\nFROM file('{log}', LineAsString, 'l String')\nWHERE JSONExtractString(l, 'type') = '{}'\n  -- what is already loaded is not loaded again\n  AND JSONExtractString(l, 'id') NOT IN (SELECT event_id FROM {base}.{t});\n",
             e.name,
             e.duenio,
+            names.join(", "),
             sel.join(",\n"),
             e.name
         ));
@@ -519,6 +564,11 @@ fn snake(s: &str) -> String {
                 o.push('_');
             }
             o.extend(c.to_lowercase());
+        } else if c == '.' {
+            // `total.currency` is how a `money` sub-field is named in the
+            // manifest, because that is the shape the contract declares; in the
+            // warehouse it is one flat column.
+            o.push('_');
         } else {
             o.push(c);
         }
@@ -652,8 +702,118 @@ pub fn build(ms: &[Manifest], d: &Dialect) -> String {
     }
 
     o.extend(funnels(ms, &evs, d));
+    o.extend(metrics(ms, &evs, d));
     o.push(String::new());
     o.join("\n")
+}
+
+/// The declared metrics, one view each.
+///
+/// A metric is not derivable the way a funnel is: the funnel comes out of who
+/// causes whom, and this comes out of somebody saying which field, grouped by
+/// what, in which bucket. What declaring it buys is that it lives next to the
+/// funnels —same dataset, same dialect, same partitioned tables— instead of
+/// being a query pasted into a dashboard, and that `axon verify` can refute it.
+fn metrics(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
+    let known: IndexMap<&str, &Event> = evs.iter().map(|e| (e.name, e)).collect();
+    let mut o = Vec::new();
+    for m in ms.iter().filter(|m| !m.external && m.analytics.export) {
+        for (name, mt) in &m.metrics {
+            // an event nobody exports has no table to read: `verify` blocks it,
+            // and emitting SQL over a table that does not exist would turn that
+            // error into a failure at apply time
+            if mt.on.iter().any(|e| !known.contains_key(e.as_str())) {
+                continue;
+            }
+            let bucket = (d.bucket)(&mt.window, "event_time");
+            let dims: Vec<String> = mt.by.iter().map(|f| snake(f)).collect();
+            // The value column carries the aggregation in its name: a dashboard
+            // that reads `value` without knowing whether it is a sum or an
+            // average is a dashboard that will average an average.
+            let field = mt.field.clone().unwrap_or_default();
+            // The type comes from the emitter's schema: `verify` already checked
+            // the field exists in every event of `on` and that it is a number.
+            let column = mt.on.first().and_then(|e| {
+                let ev = known.get(e.as_str())?;
+                let (_, kind) = ev.fields.iter().find(|(f, _)| snake(f) == snake(&field))?;
+                Some(numeric_column(&field, kind))
+            });
+            let value = match (mt.kind.as_str(), &column) {
+                ("count", _) => "count(*)".to_string(),
+                (other, Some(c)) => format!("{other}({c})"),
+                // with no column there is nothing to add up; `verify` blocks
+                // this, and emitting `sum()` over nothing would be SQL that does
+                // not parse
+                (_, None) => continue,
+            };
+            let mut select = vec![format!("  {bucket} AS bucket")];
+            select.extend(dims.iter().map(|dim| format!("  {dim}")));
+            select.push(format!("  {value} AS value"));
+
+            // One SELECT per event, unioned: the columns are the same in every
+            // table because they come from the same schema, and a metric over
+            // several events counts them together on purpose.
+            let cols: Vec<String> = std::iter::once("event_time".to_string())
+                .chain(dims.iter().cloned())
+                .chain(column.clone())
+                .collect();
+            let froms: Vec<String> = mt
+                .on
+                .iter()
+                .map(|e| {
+                    format!(
+                        "    SELECT {} FROM {}",
+                        cols.join(", "),
+                        (d.quote)(&format!("@dataset.{}", table(e)))
+                    )
+                })
+                .collect();
+            // One event reads its table directly; several read the union of
+            // them, with the same columns in every branch because they come from
+            // the same schema.
+            let source = match mt.on.as_slice() {
+                [one] => (d.quote)(&format!("@dataset.{}", table(one))),
+                _ => format!("(\n{}\n)", froms.join("\n    UNION ALL\n")),
+            };
+            let group: Vec<String> = std::iter::once("bucket".to_string())
+                .chain(dims.iter().cloned())
+                .collect();
+            o.push(format!(
+                "\n-- Metric `{name}` ({kind}) per {window}{by}, from {on}.\n\
+                 -- Declared in {svc}: the aggregation, the field and the dimensions come\n\
+                 -- from the manifest, so nobody rewrites this query in a dashboard.\n\
+                 CREATE OR REPLACE VIEW {view} AS\n\
+                 SELECT\n{select}\n\
+                 FROM {source}\n\
+                 GROUP BY {group};",
+                kind = mt.kind,
+                window = mt.window,
+                by = if dims.is_empty() {
+                    String::new()
+                } else {
+                    format!(" by {}", dims.join(", "))
+                },
+                on = mt.on.join(", "),
+                svc = m.service,
+                view = (d.quote)(&format!("@dataset.{}", Metric::view(name))),
+                select = select.join(",\n"),
+                group = group.join(", "),
+            ));
+        }
+    }
+    o
+}
+
+/// The column a `sum` or an `avg` adds up, resolved against the schema its
+/// EMITTER declares.
+///
+/// A `money` field is two columns in the warehouse —you cannot sum an object— so
+/// adding up `total` means adding up `total_amount`. Resolving it here, from the
+/// contract, is what lets the manifest keep talking about the field the event
+/// declares instead of the column the warehouse happens to have.
+fn numeric_column(field: &str, kind: &str) -> String {
+    let cols = columns(&dialect("clickhouse").expect("clickhouse"), field, kind);
+    cols.first().map(|(n, _)| n.clone()).unwrap_or_default()
 }
 
 /// Funnel views: one row per business flow, with the moment of each step and
@@ -767,6 +927,7 @@ pub fn build_plan(ms: &[Manifest]) -> serde_json::Value {
         kind: |t| t.to_string(),
         tail: String::new,
         diff_ms: |a, b| format!("{a} - {b}"),
+        bucket: |w, c| format!("bucket({w}, {c})"),
     };
     serde_json::json!({
         "envelope": ENVELOPE.iter().map(|(n, t)| serde_json::json!({"name": n, "type": t})).collect::<Vec<_>>(),
@@ -788,5 +949,20 @@ pub fn build_plan(ms: &[Manifest]) -> serde_json::Value {
                 }).collect::<Vec<_>>()
             }).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
+        // The metrics go in the plan with axon's vocabulary —the aggregation, the
+        // field as the contract names it, the bucket— and not as SQL: whoever
+        // renders the plan writes the query their warehouse speaks.
+        "metrics": ms.iter().filter(|m| !m.external && m.analytics.export).flat_map(|m| {
+            m.metrics.iter().map(move |(name, mt)| serde_json::json!({
+                "name": name,
+                "owner": m.service,
+                "view": Metric::view(name),
+                "on": mt.on,
+                "kind": mt.kind,
+                "field": mt.field,
+                "by": mt.by,
+                "window": mt.window,
+            }))
+        }).collect::<Vec<_>>(),
     })
 }

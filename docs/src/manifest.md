@@ -97,3 +97,19 @@ max_staleness_ms = 3000
 The state is the stream, and the view is built by applying it. The tables
 —`<name>_event`, the view's own and its checkpoint— are required by `verify` against the
 real migrations. See [Event sourcing](./patterns.md#event-sourcing).
+
+## `[metrics.<name>]`
+
+```toml
+[metrics.gmv]
+on     = ["order.placed@v1"]
+kind   = "sum"              # count · sum · avg
+field  = "total"            # the field as the CONTRACT names it
+by     = ["total.currency"] # dimensions, on top of the bucket
+window = "1d"               # 1h · 1d · 1w · 1mo
+```
+
+A view in the warehouse next to the funnels, in the dialect of each one. What makes it
+worth declaring is what `verify` refutes: a metric over an event nobody emits, a sum over
+something that is not a number, a dimension the event does not declare, and a dimension
+that is a personal field. See [Warehouse and metrics](./analytics.md#declared-metrics).

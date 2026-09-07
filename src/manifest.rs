@@ -552,6 +552,78 @@ impl Aggregate {
     }
 }
 
+/// A business metric over the declared events.
+///
+/// The funnel that comes out of the causal chain already answers conversion and
+/// business latency, because both are derivable from who causes whom. A rate, a
+/// sum by dimension or an average is not derivable from anything: somebody has
+/// to say which field and grouped by what. Declared here, the metric ends up in
+/// the warehouse next to the funnels instead of hand-written in the BI tool,
+/// which is where it stops being verifiable.
+///
+/// What can be REFUTED is what makes it worth declaring: a metric over an event
+/// nobody emits, a sum over a field that is not a number, a dimension that does
+/// not exist in every event it reads, and —the one that matters— a dimension
+/// that is a personal field, because a metric grouped by an email address is not
+/// a metric, it is a lookup table with a `GROUP BY`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Metric {
+    /// The events it is computed from. All of them have to be declared by
+    /// somebody: a metric over an event nobody emits counts nothing forever.
+    #[serde(default)]
+    pub on: Vec<String>,
+    /// `count`, `sum` or `avg`. The three exist with the same syntax in the
+    /// three warehouses; a quantile does not, and one that changes name per
+    /// dialect would be a metric that means something slightly different in each.
+    #[serde(default = "count")]
+    pub kind: String,
+    /// The field to add up. Mandatory for `sum` and `avg`, and it has to be a
+    /// number in the schema its emitter declares. A `money` field is added up by
+    /// its amount: `total` reads the `total_amount` column.
+    pub field: Option<String>,
+    /// The dimensions to group by, on top of the time bucket. They have to exist
+    /// in EVERY event of `on`: one missing in one of them silently turns into a
+    /// NULL group, and a metric with a NULL group is one nobody can read.
+    #[serde(default)]
+    pub by: Vec<String>,
+    /// The time bucket: `1h`, `1d`, `1w` or `1mo`. Without a bucket a metric is
+    /// one number for all of history, which is a total and not a metric.
+    #[serde(default = "one_day")]
+    pub window: String,
+}
+
+fn count() -> String {
+    "count".to_string()
+}
+
+fn one_day() -> String {
+    "1d".to_string()
+}
+
+/// The types a `sum` or an `avg` can add up. A string that looks like a number
+/// is still a string: the warehouse either refuses the sum or answers zero.
+pub const NUMERIC: [&str; 3] = ["int", "float", "money"];
+
+/// The aggregations that mean the same thing in the three dialects.
+pub const AGGREGATIONS: [&str; 3] = ["count", "sum", "avg"];
+
+/// The buckets each dialect can express without a per-warehouse expression that
+/// would silently mean something else.
+pub const WINDOWS: [&str; 4] = ["1h", "1d", "1w", "1mo"];
+
+impl Metric {
+    /// The view it lives in. `metric_<name>` so it sits next to `funnel_<event>`
+    /// in the same dataset, and so a name that collides between two services is
+    /// a collision `verify` can see.
+    pub fn view(name: &str) -> String {
+        format!("metric_{}", name.to_lowercase())
+    }
+    /// Whether it adds a field up, which is what makes `field` mandatory.
+    pub fn adds_up(&self) -> bool {
+        self.kind == "sum" || self.kind == "avg"
+    }
+}
+
 /// CQRS: a read model built by applying already declared events.
 ///
 /// What declaring it adds is not the code —a projection is a `switch`— but
@@ -638,6 +710,9 @@ pub struct Manifest {
     /// Read models. See `View`.
     #[serde(default)]
     pub view: IndexMap<String, View>,
+    /// Business metrics over the declared events. See `Metric`.
+    #[serde(default)]
+    pub metrics: IndexMap<String, Metric>,
     #[serde(default)]
     pub infra: Infra,
     /// Per-environment overrides: `[env.prod] min_instances = 3`.

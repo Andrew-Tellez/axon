@@ -71,6 +71,7 @@ not in the generated code, it does not exist.
 | **Saga** | `[saga.<name>]` | A coordinator that calls in order and, on a failure, undoes everything ATTEMPTED in reverse order; a journal, a resume sweep, and a time budget that has to cover the sum of the steps. |
 | **Event sourcing** | `[aggregate.<name>]` | An append-only stream with a mandatory `UNIQUE (stream_id, version)`, a `fold` with one case per declared event, and snapshots as a cache carrying the rules version they were computed with. |
 | **CQRS** | `[view.<name>]` | A projection with a per-stream checkpoint, a shadow-table rebuild, and a staleness budget that has to fit inside the service's. |
+| **Business metrics** | `[metrics.<name>]` | A view in the warehouse per metric, in the dialect of each one: the aggregation, the field as the contract names it, the dimensions and the time bucket. A dimension that is a personal field is an error. |
 
 The GoF patterns live one level down, in the code the team writes — that is what
 [`gof-patterns`](https://github.com/Andrew-Tellez/patterns) is for, in six languages.
