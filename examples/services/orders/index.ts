@@ -1,5 +1,5 @@
 // The business logic. The only thing a person writes.
-import { OrdersService, httpRoutes, manifest, type PlaceOrderIn, type PlaceOrderOut,
+import { OrdersService, fail, problem, httpRoutes, manifest, type PlaceOrderIn, type PlaceOrderOut,
          type GetOrderIn, type GetOrderOut, type Envelope } from "./contracts.ts";
 import { startTelemetry } from "../telemetry.ts";
 import { NotFound, bus, connectBroker, serve, waitForDb } from "../runtime.ts";
@@ -39,6 +39,11 @@ class Orders extends OrdersService {
   }
 
   async placeOrder(input: PlaceOrderIn, e: Envelope<unknown>): Promise<PlaceOrderOut> {
+    // The declared failure, thrown with `fail`: the code is checked against the
+    // manifest, so this cannot drift from what the OpenAPI promises.
+    if (input.total.amount <= 0) {
+      fail("placeOrder", "order_rejected", "the total has to be positive");
+    }
     const orderId = crypto.randomUUID();
     await this.#asTenant(input.tenantId, (c) =>
       c.query(
@@ -99,4 +104,6 @@ serve(
   },
   // startup fails if the manifest declares a route with no handler
   httpRoutes,
+  // the declared failures, projected as problem+json
+  problem,
 );

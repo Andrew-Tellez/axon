@@ -52,6 +52,25 @@ export interface Outbox<Tx = unknown> { stage(e: Envelope<unknown>, tx: Tx): Pro
  *  happens exactly once. `once` does not re-run an id it has already seen. */
 export interface Inbox { once(id: string, fn: () => Promise<void>): Promise<void>; }
 
+/** A failure the other side DECLARED, carried as RFC 7807.
+ *
+ *  It is the difference between "it failed" and "it failed for this reason":
+ *  the `code` is part of the callee's contract, like a field name, so a caller
+ *  can match on it instead of parsing prose out of a 500. Whoever implements
+ *  `Transport` throws this when the response is a `problem+json`; three lines,
+ *  and the framework still does not pick a transport. */
+export class AxonProblem extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly detail?: string;
+  constructor(status: number, code: string, detail?: string) {
+    super(`${code} (${status})`);
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
 export interface PaymentCapturedV1 {
   paymentId: string;
   orderId: string;
@@ -126,7 +145,21 @@ export const manifest = {
       "auth": "required",
       "rate_limit": null,
       "timeout_ms": 8000,
-      "paginated": false
+      "paginated": false,
+      "errors": [
+        {
+          "code": "card_declined",
+          "status": 402,
+          "retriable": false,
+          "detail": "the issuer declined the charge"
+        },
+        {
+          "code": "issuer_unavailable",
+          "status": 503,
+          "retriable": true,
+          "detail": "the issuer is not answering"
+        }
+      ]
     },
     "refundPayment": {
       "in": {
@@ -141,7 +174,15 @@ export const manifest = {
       "auth": "required",
       "rate_limit": null,
       "timeout_ms": 8000,
-      "paginated": false
+      "paginated": false,
+      "errors": [
+        {
+          "code": "refund_rejected",
+          "status": 503,
+          "retriable": true,
+          "detail": "the refund did not go through"
+        }
+      ]
     },
     "payoutMerchant": {
       "in": {
@@ -156,7 +197,21 @@ export const manifest = {
       "auth": "required",
       "rate_limit": null,
       "timeout_ms": 4000,
-      "paginated": false
+      "paginated": false,
+      "errors": [
+        {
+          "code": "merchant_ceiling",
+          "status": 409,
+          "retriable": false,
+          "detail": "the payout is over the merchant's ceiling"
+        },
+        {
+          "code": "rail_busy",
+          "status": 503,
+          "retriable": true,
+          "detail": "the payout rail is saturated"
+        }
+      ]
     }
   },
   "depends": [
@@ -423,6 +478,48 @@ export const httpRoutes = ["POST /v1/payments", "POST /v1/payments/{paymentId}/r
 export const isolationLevel = "SERIALIZABLE" as const;
 
 
+/** The failures declared in the manifest, by method. */
+export const declaredErrors = {
+  capturePayment: [
+    { code: "card_declined", status: 402, retriable: false, detail: "the issuer declined the charge" },
+    { code: "issuer_unavailable", status: 503, retriable: true, detail: "the issuer is not answering" },
+  ],
+  refundPayment: [
+    { code: "refund_rejected", status: 503, retriable: true, detail: "the refund did not go through" },
+  ],
+  payoutMerchant: [
+    { code: "merchant_ceiling", status: 409, retriable: false, detail: "the payout is over the merchant's ceiling" },
+    { code: "rail_busy", status: 503, retriable: true, detail: "the payout rail is saturated" },
+  ],
+} as const;
+
+type Declared = typeof declaredErrors;
+type Code<M extends keyof Declared> = Declared[M][number]["code"];
+
+/** Throws a DECLARED failure. The code is checked against the manifest,
+ *  so a handler cannot invent one: an undeclared code does not compile, and
+ *  that is what keeps the caller's `retriable` from lying. */
+export function fail<M extends keyof Declared>(method: M, code: Code<M>, detail?: string): never {
+  const f = (declaredErrors[method] as readonly { code: string; status: number; detail?: string }[])
+    .find((f) => f.code === code)!;
+  throw new AxonProblem(f.status, f.code, detail ?? f.detail);
+}
+
+/** The body that goes out on the wire: RFC 7807, with the code and the
+ *  trace. An undeclared error becomes a 500 with no code, because saying
+ *  `unknown` about a failure nobody declared is the honest answer. */
+export function problem(err: unknown, e?: Envelope<unknown>) {
+  const p = err instanceof AxonProblem ? err : null;
+  return {
+    type: p ? `about:axon/payments/${p.code}` : "about:blank",
+    title: p ? p.code : "internal",
+    status: p ? p.status : 500,
+    ...(p?.detail ? { detail: p.detail } : {}),
+    ...(e ? { traceId: e.traceparent.split("-")[1] } : {}),
+  };
+}
+
+
 /** Flag provider, with OpenFeature's shape: `evaluate` takes the name,
  *  the default value and the context it is pinned by. The standard's four
  *  types, so the real SDK fits with no translation. */
@@ -522,8 +619,21 @@ async function withTimeout<T>(p: Promise<T>, ms: number, who: string): Promise<T
 }
 
 /** Applies the declared policy. Retries are only emitted for idempotent
- *  methods: `axon verify` blocks the rest. */
-export async function withPolicy<T>(who: string, pol: Policy, attempt: () => Promise<T>): Promise<T> {
+ *  methods: `axon verify` blocks the rest.
+ *
+ *  `retriable` comes from the CALLEE's declared errors, and it is what makes
+ *  `[methods.*] errors` more than documentation: a failure the other side
+ *  declared as not retriable is not retried at all. Retrying a declined card
+ *  ends in the same answer and spends the caller's time budget on the way, and
+ *  that budget is what a saga counts on to compensate in time. An error nobody
+ *  declared keeps the old behaviour —retried— because an unknown failure could
+ *  be the network. */
+export async function withPolicy<T>(
+  who: string,
+  pol: Policy,
+  attempt: () => Promise<T>,
+  retriable: (code: string) => boolean = () => true,
+): Promise<T> {
   const breaker = pol.breaker
     ? (breakers.get(who) ?? breakers.set(who, new Breaker()).get(who)!)
     : null;
@@ -539,6 +649,9 @@ export async function withPolicy<T>(who: string, pol: Policy, attempt: () => Pro
     } catch (err) {
       last = err;
       breaker?.failed(Date.now());
+      // A declared failure that cannot end differently: retrying is spending
+      // the budget to get the same answer.
+      if (err instanceof AxonProblem && !retriable(err.code)) throw err;
       if (n === pol.retries) break;
       // exponential with full jitter: without jitter every client retries at
       // the same instant and the other side never comes back up

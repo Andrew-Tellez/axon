@@ -23,6 +23,13 @@ timeout_ms = 5000
 idempotent = true
 in = { tenantId = "uuid", customerId = "uuid", customerEmail = "string", total = "money" }
 out = { orderId = "uuid" }
+# The front door is where guessing costs the most: whoever integrates against
+# this reads the code, not our 500s. Nothing about it is retriable —the same
+# order gets rejected the same way— and the generated client of anyone who calls
+# it stops spending retries on it.
+errors = [
+  { code = "order_rejected", status = 422, detail = "the order does not pass the rules" },
+]
 
 [methods.getOrder]
 http = "GET /v1/tenants/{tenantId}/orders/{orderId}"

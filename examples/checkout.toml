@@ -13,6 +13,13 @@ timeout_ms = 30000
 idempotent = true
 in = { orderId = "uuid", amount = "money" }
 out = { state = "string" }
+# The saga's own failure. It is a 500 because it IS ours: a compensation that
+# did not get through leaves money charged with nothing behind it, and it is not
+# retriable because retrying the checkout would charge again —what unsticks it
+# is the sweep, not the caller.
+errors = [
+  { code = "saga_stuck", status = 500, detail = "the compensation did not get through; the sweep takes it from here" },
+]
 
 # Charging and then paying the merchant are two effects in two systems. There is
 # no transaction that covers both: if the second one fails, the first has to be

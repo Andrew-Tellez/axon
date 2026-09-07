@@ -5026,3 +5026,118 @@ fn the_vector_config_validates() {
         "a branch with no consumer:\n{printed}"
     );
 }
+
+/// The failure rules refute. A wrong declaration is worse than none: the
+/// generated client stops retrying what the manifest calls final, so a `409`
+/// marked retriable would silence a retry that would have worked.
+#[test]
+fn the_failure_rules_block() {
+    let dir = std::env::temp_dir().join("axon-errors");
+    let base = r#"service = "shop"
+version = "1.0.0"
+owner = "team"
+tier = "1"
+"#;
+    let run = |extra: &str| -> String {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shop.toml"), format!("{base}{extra}")).unwrap();
+        let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        assert!(!ok, "it passed clean:\n{extra}");
+        err
+    };
+    let method = |errors: &str| {
+        format!(
+            "[methods.pay]\nhttp = \"POST /v1/pays\"\nauth = \"required\"\nidempotent = true\n\
+             in = {{ id = \"uuid\" }}\nout = {{ id = \"uuid\" }}\nerrors = [{errors}]\n"
+        )
+    };
+
+    // a 2xx is not a failure
+    let err = run(&method("{ code = \"declined\", status = 200 }"));
+    assert!(err.contains("is not a failure"), "{err}");
+
+    // the code travels on the wire and gets compared as a literal
+    let err = run(&method("{ code = \"Card Declined\", status = 402 }"));
+    assert!(err.contains("is not snake_case"), "{err}");
+
+    // the same code twice: which status wins would depend on the order
+    let err = run(&method(
+        "{ code = \"declined\", status = 402 }, { code = \"declined\", status = 409 }",
+    ));
+    assert!(err.contains("declares `declined` twice"), "{err}");
+
+    // and the one that matters: a 4xx says the request is what is wrong, so
+    // retrying it ends the same way. 408, 425 and 429 are the exceptions.
+    let err = run(&method(
+        "{ code = \"declined\", status = 402, retriable = true }",
+    ));
+    assert!(err.contains("retriable = true` on 402"), "{err}");
+    assert!(err.contains("ends the same"), "{err}");
+
+    // the three that mean "not yet" DO pass, and so does a 5xx
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        format!(
+            "{base}{}",
+            method(
+                "{ code = \"too_many\", status = 429, retriable = true }, \
+                 { code = \"issuer_down\", status = 503, retriable = true }"
+            )
+        ),
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(
+        ok,
+        "a retriable 429 and a retriable 503 were rejected:\n{err}"
+    );
+}
+
+/// `retriable` is not documentation: it lands in the generated client and
+/// decides whether it tries again. This is the projection, checked on the
+/// example —where `payoutMerchant` declares one final failure and one that is
+/// not— and the demo measures the same thing against the running containers.
+#[test]
+fn the_generated_client_only_retries_what_is_declared_retriable() {
+    let (ts, err, ok) = axon(&["build", "examples/checkout.toml", "examples"]);
+    assert!(ok, "{err}");
+    // the retriable one travels, the final one does not
+    assert!(
+        ts.contains("(code) => [\"rail_busy\"].includes(code)"),
+        "the client does not carry the retriable codes:\n{ts}"
+    );
+    assert!(
+        !ts.contains("\"merchant_ceiling\"].includes(code)"),
+        "a failure declared as final came out as retriable"
+    );
+    // and the loop that uses it: without this line the list decides nothing
+    assert!(
+        ts.contains("if (err instanceof AxonProblem && !retriable(err.code)) throw err;"),
+        "withPolicy does not consult the declared codes"
+    );
+
+    // the server side: `fail` typed against the manifest, so a code that is not
+    // declared does not compile
+    let (ts, err, ok) = axon(&["build", "examples/payments.toml", "examples"]);
+    assert!(ok, "{err}");
+    assert!(
+        ts.contains("export function fail<M extends keyof Declared>"),
+        "{ts}"
+    );
+    assert!(
+        ts.contains("{ code: \"merchant_ceiling\", status: 409, retriable: false"),
+        "the declared table does not carry the manifest's failure"
+    );
+
+    // and the OpenAPI says the same thing: one response per declared code
+    let (api, err, ok) = axon(&["openapi", "examples"]);
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&api).unwrap();
+    let payout = &v["paths"]["/v1/payouts"]["post"]["responses"];
+    assert_eq!(payout["409"]["x-axon-code"], "merchant_ceiling", "{payout}");
+    assert_eq!(payout["409"]["x-axon-retriable"], false, "{payout}");
+    assert_eq!(payout["503"]["x-axon-retriable"], true, "{payout}");
+}

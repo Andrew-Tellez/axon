@@ -80,6 +80,48 @@ draws it. And `axon verify` **proves properties over it** before the merge:
 Stripe, deciding whether it fails, writing the row — is yours, in your language, in an
 `extends` of the generated class. axon keeps the part that can be verified.
 
+## `errors` on a method
+
+```toml
+[methods.payoutMerchant]
+http       = "POST /v1/payouts"
+auth       = "required"
+idempotent = true
+in  = { paymentId = "uuid", amount = "money" }
+out = { payoutId = "uuid" }
+errors = [
+  { code = "merchant_ceiling", status = 409, detail = "over the merchant's ceiling" },
+  { code = "rail_busy", status = 503, retriable = true, detail = "the rail is saturated" },
+]
+```
+
+Declared like `in` and `out`, and for the same reason: how a method fails is part of its
+contract. Today those failures live in the handler's body, where the caller cannot see
+them, so every caller invents its own reading of a 500.
+
+`retriable` is what makes this more than documentation — it **changes the generated
+client**. A failure the callee declared as final is not retried at all: retrying a
+declined card ends in the same answer and spends the caller's time budget on the way,
+and in a saga that budget is what is left to compensate with. The default is `false`,
+which is the honest one.
+
+Three projections come out of the same declaration:
+
+| Projection | What it gets |
+| --- | --- |
+| The callee's code | `declaredErrors` plus a `fail()` typed against the manifest: an undeclared code does not compile |
+| The caller's client | the retriable code list `withPolicy` consults before trying again |
+| `axon openapi` | one response per code, with `x-axon-code` and `x-axon-retriable` |
+
+What `verify` refutes: a status that is not 4xx or 5xx, a code that is not `snake_case`,
+the same code twice, `retriable = true` on a 4xx that is not 408, 425 or 429 — a 4xx says
+the request is what is wrong, so sending it again ends the same — a public mutation with
+no declared failure, and retries against a method whose every failure is final.
+
+The demo measures it: the same route and the same policy, and the final failure arrives
+**once** while the retriable one arrives `1 + retries` times. See
+[The demo, measured](./demo.md).
+
 ## `[aggregate.<name>]` and `[view.<name>]`
 
 ```toml

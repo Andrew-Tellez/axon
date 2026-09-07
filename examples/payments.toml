@@ -19,6 +19,13 @@ timeout_ms = 8000
 idempotent = true
 in = { orderId = "uuid", amount = "money" }
 out = { paymentId = "uuid" }
+# How it fails, declared like `in` and `out`. A declined card and an issuer that
+# is down are not the same failure —one will never work, the other one will— and
+# without saying so both arrive at the caller as a 500 it has to guess about.
+errors = [
+  { code = "card_declined", status = 402, detail = "the issuer declined the charge" },
+  { code = "issuer_unavailable", status = 503, retriable = true, detail = "the issuer is not answering" },
+]
 
 [methods.refundPayment]
 http = "POST /v1/payments/{paymentId}/refunds"
@@ -27,6 +34,11 @@ timeout_ms = 8000
 idempotent = true
 in = { paymentId = "uuid" }
 out = { paymentId = "uuid", status = "string" }
+# The compensation's failure is retriable on purpose: there is nothing behind
+# it, and the saga's three declared retries are what keep it from getting stuck.
+errors = [
+  { code = "refund_rejected", status = 503, retriable = true, detail = "the refund did not go through" },
+]
 
 # The payout to the merchant, which is the step that can fail after the charge
 # already went through: the reason a saga exists instead of a transaction.
@@ -37,6 +49,14 @@ timeout_ms = 4000
 idempotent = true
 in = { paymentId = "uuid", amount = "money" }
 out = { payoutId = "uuid" }
+# The ceiling is final: the amount will not fit next time either. `retriable =
+# false` is not documentation —it CHANGES the generated client, which stops
+# retrying it— and what it buys is the saga's budget: the retries it does not
+# spend here are the ones left to compensate with.
+errors = [
+  { code = "merchant_ceiling", status = 409, detail = "the payout is over the merchant's ceiling" },
+  { code = "rail_busy", status = 503, retriable = true, detail = "the payout rail is saturated" },
+]
 
 [[depends]]
 service = "orders"

@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **35 checks against reality**: not against a mock,
+brings the whole system up and makes **39 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -100,6 +100,19 @@ OK: the system does exactly what it declares
   OK: 4 calls, the saga was left STUCK and the response did not hide it
   payments restored with no switches
 
+==> the declared failures, measured
+  declared in the generated code: payout 2 retries, retriable "rail_busy"
+  a payout over the ceiling: a final failure, how many times it arrives
+    {"state":"compensated"}
+  OK: 1 call. The declared 2 retries were NOT spent on a failure that cannot end differently
+  a saturated rail: a retriable failure, how many times it arrives
+    {"state":"compensated"}
+  OK: 3 calls = 1 + 2 retries. Same policy, and the declaration is the only difference
+  i final 1 call vs retriable 3: that is what the declared errors buy, and it is not documentation
+  the code on the wire against the manifest
+    HTTP 422  {"type":"about:axon/orders/order_rejected","title":"order_rejected","status":422,...}
+  OK: order_rejected with 422, the status and the code the manifest declares
+
 ==> declared vs applied rollout
   declared 10%  measured 10.7%  (32 of 300)
   OK: sticky per tenant, and the percentage applies
@@ -170,6 +183,7 @@ shortest way to show one thing:
 | `./check-saga.sh` | compensation, resume from the journal, and a closed saga not swept again |
 | `./check-es.sh` | optimistic concurrency, view lag, the relay, snapshots, prune, rebuild with the shadow, and the transactional outbox |
 | `./check-retries.sh` | the declared retries, occurring, and what they buy |
+| `./check-errors.sh` | a declared failure: the final one arrives once, the retriable one uses the whole budget |
 | `./check-pooler.sh` | tenant isolation through pgdog in transaction mode |
 | `./check-warehouse.sh` | schema, funnel, metrics, PII and drift detection |
 | `python3 check-flags.py localhost:8016 charge_v2 10` | the rollout, applied and sticky |

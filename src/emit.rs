@@ -54,6 +54,25 @@ export interface Outbox<Tx = unknown> { stage(e: Envelope<unknown>, tx: Tx): Pro
 /** Idempotent inbox / consumer: the broker delivers at least once, the effect
  *  happens exactly once. `once` does not re-run an id it has already seen. */
 export interface Inbox { once(id: string, fn: () => Promise<void>): Promise<void>; }
+
+/** A failure the other side DECLARED, carried as RFC 7807.
+ *
+ *  It is the difference between "it failed" and "it failed for this reason":
+ *  the `code` is part of the callee's contract, like a field name, so a caller
+ *  can match on it instead of parsing prose out of a 500. Whoever implements
+ *  `Transport` throws this when the response is a `problem+json`; three lines,
+ *  and the framework still does not pick a transport. */
+export class AxonProblem extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly detail?: string;
+  constructor(status: number, code: string, detail?: string) {
+    super(`${code} (${status})`);
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+}
 "#;
 
 fn iface(name: &str, fields: &Fields) -> String {
@@ -258,6 +277,7 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
             ))
             .unwrap_or_default(),
     ));
+    out.push(errors_ts(m));
     out.push(flags_ts(m));
     out.push(clients_ts(m, all)?);
     if !m.pii.is_empty() {
@@ -1598,6 +1618,75 @@ pub fn build_states(ms: &[Manifest]) -> String {
     o.join("\n")
 }
 
+// ---------- declared failures ----------
+
+/// The failures every method declared, and the two things that follow from
+/// them: a `fail` the type checker holds to the manifest, and the RFC 7807
+/// body that goes on the wire.
+///
+/// The point is that neither end writes its own version. Today the handler
+/// invents a status and a message, the caller reads a 500 and guesses, and the
+/// two readings drift with nobody noticing. Here the code is declared once and
+/// both sides project it.
+fn errors_ts(m: &Manifest) -> String {
+    let declared: Vec<String> = m
+        .methods
+        .iter()
+        .filter(|(_, me)| !me.errors.is_empty())
+        .map(|(name, me)| {
+            let rows: Vec<String> = me
+                .errors
+                .iter()
+                .map(|f| {
+                    format!(
+                        "    {{ code: \"{}\", status: {}, retriable: {}{} }},",
+                        f.code,
+                        f.status,
+                        f.retriable,
+                        f.detail
+                            .as_deref()
+                            .map(|d| format!(", detail: {}", serde_json::json!(d)))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect();
+            format!("  {}: [\n{}\n  ],", camel(name), rows.join("\n"))
+        })
+        .collect();
+    if declared.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n/** The failures declared in the manifest, by method. */\n\
+         export const declaredErrors = {{\n{}\n}} as const;\n\n\
+         type Declared = typeof declaredErrors;\n\
+         type Code<M extends keyof Declared> = Declared[M][number][\"code\"];\n\n\
+         /** Throws a DECLARED failure. The code is checked against the manifest,\n \
+         *  so a handler cannot invent one: an undeclared code does not compile, and\n \
+         *  that is what keeps the caller's `retriable` from lying. */\n\
+         export function fail<M extends keyof Declared>(method: M, code: Code<M>, detail?: string): never {{\n  \
+           const f = (declaredErrors[method] as readonly {{ code: string; status: number; detail?: string }}[])\n    \
+             .find((f) => f.code === code)!;\n  \
+           throw new AxonProblem(f.status, f.code, detail ?? f.detail);\n\
+         }}\n\n\
+         /** The body that goes out on the wire: RFC 7807, with the code and the\n \
+         *  trace. An undeclared error becomes a 500 with no code, because saying\n \
+         *  `unknown` about a failure nobody declared is the honest answer. */\n\
+         export function problem(err: unknown, e?: Envelope<unknown>) {{\n  \
+           const p = err instanceof AxonProblem ? err : null;\n  \
+           return {{\n    \
+             type: p ? `about:axon/{svc}/${{p.code}}` : \"about:blank\",\n    \
+             title: p ? p.code : \"internal\",\n    \
+             status: p ? p.status : 500,\n    \
+             ...(p?.detail ? {{ detail: p.detail }} : {{}}),\n    \
+             ...(e ? {{ traceId: e.traceparent.split(\"-\")[1] }} : {{}}),\n  \
+           }};\n\
+         }}\n",
+        declared.join("\n"),
+        svc = m.service,
+    )
+}
+
 // ---------- resilient clients ----------
 
 const RESILIENCE_TS: &str = r#"
@@ -1661,8 +1750,21 @@ async function withTimeout<T>(p: Promise<T>, ms: number, who: string): Promise<T
 }
 
 /** Applies the declared policy. Retries are only emitted for idempotent
- *  methods: `axon verify` blocks the rest. */
-export async function withPolicy<T>(who: string, pol: Policy, attempt: () => Promise<T>): Promise<T> {
+ *  methods: `axon verify` blocks the rest.
+ *
+ *  `retriable` comes from the CALLEE's declared errors, and it is what makes
+ *  `[methods.*] errors` more than documentation: a failure the other side
+ *  declared as not retriable is not retried at all. Retrying a declined card
+ *  ends in the same answer and spends the caller's time budget on the way, and
+ *  that budget is what a saga counts on to compensate in time. An error nobody
+ *  declared keeps the old behaviour —retried— because an unknown failure could
+ *  be the network. */
+export async function withPolicy<T>(
+  who: string,
+  pol: Policy,
+  attempt: () => Promise<T>,
+  retriable: (code: string) => boolean = () => true,
+): Promise<T> {
   const breaker = pol.breaker
     ? (breakers.get(who) ?? breakers.set(who, new Breaker()).get(who)!)
     : null;
@@ -1678,6 +1780,9 @@ export async function withPolicy<T>(who: string, pol: Policy, attempt: () => Pro
     } catch (err) {
       last = err;
       breaker?.failed(Date.now());
+      // A declared failure that cannot end differently: retrying is spending
+      // the budget to get the same answer.
+      if (err instanceof AxonProblem && !retriable(err.code)) throw err;
       if (n === pol.retries) break;
       // exponential with full jitter: without jitter every client retries at
       // the same instant and the other side never comes back up
@@ -1753,11 +1858,45 @@ fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         } else {
             (String::new(), "    return attempt();".to_string())
         };
+        // The failures the CALLEE declared, and which of them are worth another
+        // try. It comes from the target's manifest for the same reason a
+        // consumed event's schema does: whoever fails owns the reason.
+        let retriable: Vec<String> = sig
+            .errors
+            .iter()
+            .filter(|f| f.retriable)
+            .map(|f| format!("\"{}\"", f.code))
+            .collect();
+        let decide = if sig.errors.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ",\n      (code) => [{}].includes(code)",
+                retriable.join(", ")
+            )
+        };
+        let declared = if sig.errors.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n   *  declares: {}",
+                sig.errors
+                    .iter()
+                    .map(|f| format!(
+                        "{} ({}{})",
+                        f.code,
+                        f.status,
+                        if f.retriable { ", retriable" } else { "" }
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            )
+        };
         methods.push(format!(
-            "  /** {tgt}.{met} · timeout {t}ms · {r} retries · breaker {b} */\n  \
+            "  /** {tgt}.{met} · timeout {t}ms · {r} retries · breaker {b}{declared} */\n  \
              async {name}(input: {base}In, e: Envelope<unknown>{param}): Promise<{base}Out> {{\n    \
                const attempt = () => withPolicy(\"{tgt}.{met}\", {pol}, async () =>\n      \
-                 (await this.transport.call(\"{tgt}\", \"{met}\", input, headers(e, {idem}))) as {base}Out);\n\
+                 (await this.transport.call(\"{tgt}\", \"{met}\", input, headers(e, {idem}))) as {base}Out{decide});\n\
 {body}\n  \
              }}",
             met = d.method,

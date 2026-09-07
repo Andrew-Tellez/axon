@@ -16,6 +16,7 @@ their own — a compiler that only verifies itself produces invalid output:
 | The generated Vector config | `vector validate` in its own container |
 | The warehouse schemas | parsed with each dialect's own parser |
 | The declared metrics | their SQL parses in the three dialects, and the demo compares each one against counting the table by hand |
+| The declared failures | the retriable codes land in the caller's client and the final ones do not, and the demo counts the calls each one really costs |
 | The four targets | they deploy the workload and deliver to somebody |
 | The book's manifest examples | every ```toml block goes through `axon verify` |
 | The output the book quotes | four consecutive words of it have to appear in `src/` |
@@ -25,7 +26,7 @@ their own — a compiler that only verifies itself produces invalid output:
 
 ```sh
 cargo test --release      # 62 conformance checks
-cd examples && ./demo.sh  # 35 checks against real containers
+cd examples && ./demo.sh  # 39 checks against real containers
 ```
 
 Preview. The command surface is stable; the manifest format can still change before

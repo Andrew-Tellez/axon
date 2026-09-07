@@ -42,6 +42,17 @@ has to be fixed cannot end up underneath.
 | A public route with no `rate_limit` or no `timeout_ms` | error |
 | A paginated method that does not return a `cursor` | error |
 
+## Declared failures
+
+| | |
+| --- | --- |
+| An `errors` entry with a status that is not 4xx or 5xx | error |
+| A code that is not `snake_case` | error |
+| The same code declared twice on one method | error |
+| `retriable = true` on a 4xx that is not 408, 425 or 429 | error |
+| A public mutation with no declared `errors` | warning |
+| `retries` against a method whose every declared failure is final | warning |
+
 ## Data
 
 | | |

@@ -1,5 +1,5 @@
 // The business logic. The state machine is enforced by the generated code.
-import { PaymentsService, httpRoutes, manifest, paymentNext, paymentCan, flagChargeV2, flagStripeKill,
+import { PaymentsService, fail, problem, httpRoutes, manifest, paymentNext, paymentCan, flagChargeV2, flagStripeKill,
          type CapturePaymentIn, type CapturePaymentOut,
          type RefundPaymentIn, type RefundPaymentOut,
          type PayoutMerchantIn, type PayoutMerchantOut,
@@ -93,8 +93,16 @@ export class Payments extends PaymentsService {
     // transient failure to count.
     const slow = Number(process.env.AXON_DEMO_PAYOUT_SLOW_MS ?? 0);
     if (slow > 0) await new Promise((r) => setTimeout(r, slow));
+    // A DECLARED failure, and `fail` is typed against the manifest: writing a
+    // code that is not declared does not compile. The rail is retriable and the
+    // ceiling is not, and the caller's client already knows which is which.
+    if (process.env.AXON_DEMO_RAIL_BUSY === "1") fail("payoutMerchant", "rail_busy");
     if (input.amount.amount > Payments.MERCHANT_CEILING) {
-      throw new Error(`amount ${input.amount.amount} is over the merchant's ceiling`);
+      fail(
+        "payoutMerchant",
+        "merchant_ceiling",
+        `${input.amount.amount} is over the ${Payments.MERCHANT_CEILING} ceiling`,
+      );
     }
     const payoutId = crypto.randomUUID();
     // `idempotent = true` in the manifest is not a label: retrying has to not
@@ -117,8 +125,8 @@ export class Payments extends PaymentsService {
     // The other demo switch: it fails the first N times and then gets through.
     // It is what makes it possible to measure that the COMPENSATION's retries
     // are what saves the saga from ending up stuck.
-    const fail = Number(process.env.AXON_DEMO_REFUND_FAIL_TIMES ?? 0);
-    if (n <= fail) throw new Error(`refund rejected (attempt ${n} of ${fail})`);
+    const failTimes = Number(process.env.AXON_DEMO_REFUND_FAIL_TIMES ?? 0);
+    if (n <= failTimes) fail("refundPayment", "refund_rejected", `attempt ${n} of ${failTimes}`);
     const { rows } = await this.#db.query(`SELECT status FROM payment WHERE id = $1`, [input.paymentId]);
     const current = rows[0]?.status as PaymentState | undefined;
     if (!current) return { paymentId: input.paymentId, status: "no_charge" };
@@ -161,5 +169,7 @@ serve(
     "POST /v1/payouts": (body) => svc.payoutMerchant(body),
   },
   httpRoutes,
+  // the declared failures, projected as problem+json
+  problem,
 );
 }

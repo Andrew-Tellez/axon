@@ -45,6 +45,24 @@ pub fn openapi(ms: &[Manifest]) -> Value {
                         {"schema": {"$ref": "#/components/schemas/Problem"}}}}
                 }
             });
+            // One response per declared failure. `default` still covers what
+            // nobody declared; these say which code arrives and whether trying
+            // again can end differently, which is the part a generated client
+            // acts on.
+            for f in &meth.errors {
+                let mut desc = f.code.clone();
+                if let Some(d) = &f.detail {
+                    desc.push_str(": ");
+                    desc.push_str(d);
+                }
+                op["responses"][f.status.to_string()] = json!({
+                    "description": desc,
+                    "x-axon-code": f.code,
+                    "x-axon-retriable": f.retriable,
+                    "content": {"application/problem+json":
+                        {"schema": {"$ref": "#/components/schemas/Problem"}}}
+                });
+            }
             if meth.mutating() {
                 op["requestBody"] = body;
                 op["parameters"] = json!([{
@@ -71,6 +89,7 @@ pub fn openapi(ms: &[Manifest]) -> Value {
             "Problem": {"type": "object", "required": ["type", "title", "status"], "properties": {
                 "type": {"type": "string"}, "title": {"type": "string"},
                 "status": {"type": "integer"}, "detail": {"type": "string"},
+                "code": {"type": "string", "description": "the code declared in the manifest"},
                 "traceId": {"type": "string", "description": "the trace-id from the traceparent"}
             }}
         }}

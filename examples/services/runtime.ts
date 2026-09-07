@@ -196,6 +196,10 @@ export function serve(
   port: number,
   routes: Record<string, Route>,
   declared: readonly string[] = [],
+  // The generated `problem`: the manifest's failures projected as RFC 7807.
+  // It is passed in and not imported because the runtime is shared and each
+  // service's codes are its own.
+  toProblem?: (err: unknown, e?: Envelope<unknown>) => { status: number },
 ) {
   const missing = declared.filter((d) => !(d in routes));
   if (missing.length) {
@@ -256,20 +260,24 @@ export function serve(
           // It is not rethrown: createServer's handler is async, so a throw here
           // comes out as an unhandled rejection and Node kills the process in the
           // middle of the response.
-          const status = err instanceof NotFound ? 404 : 500;
-          if (status === 500) {
+          // A DECLARED failure goes out with its code and its status: that is
+          // the whole point of declaring it. Anything else is still a 500,
+          // because a failure nobody declared is genuinely unexpected.
+          const body = err instanceof NotFound
+            ? { type: "about:blank", title: "not found", status: 404, traceId: traceparent.split("-")[1] }
+            : toProblem?.(err, root) ?? {
+                type: "about:blank",
+                title: String(err),
+                status: 500,
+                traceId: traceparent.split("-")[1],
+              };
+          const status = body.status;
+          if (status >= 500) {
             console.error(`[${process.env.AXON_SERVICE}] ${r.key} failed:`, err);
             annotate({ "error.type": String(err) });
           }
           res.writeHead(status, { "content-type": "application/problem+json" });
-          res.end(
-            JSON.stringify({
-              type: "about:blank",
-              title: String(err),
-              status,
-              traceId: traceparent.split("-")[1],
-            }),
-          );
+          res.end(JSON.stringify({ ...body, status }));
         }
       },
     );

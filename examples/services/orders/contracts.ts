@@ -52,6 +52,25 @@ export interface Outbox<Tx = unknown> { stage(e: Envelope<unknown>, tx: Tx): Pro
  *  happens exactly once. `once` does not re-run an id it has already seen. */
 export interface Inbox { once(id: string, fn: () => Promise<void>): Promise<void>; }
 
+/** A failure the other side DECLARED, carried as RFC 7807.
+ *
+ *  It is the difference between "it failed" and "it failed for this reason":
+ *  the `code` is part of the callee's contract, like a field name, so a caller
+ *  can match on it instead of parsing prose out of a 500. Whoever implements
+ *  `Transport` throws this when the response is a `problem+json`; three lines,
+ *  and the framework still does not pick a transport. */
+export class AxonProblem extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly detail?: string;
+  constructor(status: number, code: string, detail?: string) {
+    super(`${code} (${status})`);
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
 export interface OrderPlacedV1 {
   orderId: string;
   customerId: string;
@@ -115,7 +134,15 @@ export const manifest = {
       "auth": "public",
       "rate_limit": 60,
       "timeout_ms": 5000,
-      "paginated": false
+      "paginated": false,
+      "errors": [
+        {
+          "code": "order_rejected",
+          "status": 422,
+          "retriable": false,
+          "detail": "the order does not pass the rules"
+        }
+      ]
     },
     "getOrder": {
       "in": {
@@ -132,7 +159,8 @@ export const manifest = {
       "auth": "required",
       "rate_limit": null,
       "timeout_ms": 2000,
-      "paginated": false
+      "paginated": false,
+      "errors": []
     }
   },
   "depends": [
@@ -283,6 +311,40 @@ export const isolationLevel = "READ COMMITTED" as const;
 export const maxStalenessMs = 3000;
 
 
+/** The failures declared in the manifest, by method. */
+export const declaredErrors = {
+  placeOrder: [
+    { code: "order_rejected", status: 422, retriable: false, detail: "the order does not pass the rules" },
+  ],
+} as const;
+
+type Declared = typeof declaredErrors;
+type Code<M extends keyof Declared> = Declared[M][number]["code"];
+
+/** Throws a DECLARED failure. The code is checked against the manifest,
+ *  so a handler cannot invent one: an undeclared code does not compile, and
+ *  that is what keeps the caller's `retriable` from lying. */
+export function fail<M extends keyof Declared>(method: M, code: Code<M>, detail?: string): never {
+  const f = (declaredErrors[method] as readonly { code: string; status: number; detail?: string }[])
+    .find((f) => f.code === code)!;
+  throw new AxonProblem(f.status, f.code, detail ?? f.detail);
+}
+
+/** The body that goes out on the wire: RFC 7807, with the code and the
+ *  trace. An undeclared error becomes a 500 with no code, because saying
+ *  `unknown` about a failure nobody declared is the honest answer. */
+export function problem(err: unknown, e?: Envelope<unknown>) {
+  const p = err instanceof AxonProblem ? err : null;
+  return {
+    type: p ? `about:axon/orders/${p.code}` : "about:blank",
+    title: p ? p.code : "internal",
+    status: p ? p.status : 500,
+    ...(p?.detail ? { detail: p.detail } : {}),
+    ...(e ? { traceId: e.traceparent.split("-")[1] } : {}),
+  };
+}
+
+
 
 /** Everything needed to reach another service. Implemented by whoever
  *  deploys: HTTP, gRPC, an SDK. The framework does not pick a transport. */
@@ -344,8 +406,21 @@ async function withTimeout<T>(p: Promise<T>, ms: number, who: string): Promise<T
 }
 
 /** Applies the declared policy. Retries are only emitted for idempotent
- *  methods: `axon verify` blocks the rest. */
-export async function withPolicy<T>(who: string, pol: Policy, attempt: () => Promise<T>): Promise<T> {
+ *  methods: `axon verify` blocks the rest.
+ *
+ *  `retriable` comes from the CALLEE's declared errors, and it is what makes
+ *  `[methods.*] errors` more than documentation: a failure the other side
+ *  declared as not retriable is not retried at all. Retrying a declined card
+ *  ends in the same answer and spends the caller's time budget on the way, and
+ *  that budget is what a saga counts on to compensate in time. An error nobody
+ *  declared keeps the old behaviour —retried— because an unknown failure could
+ *  be the network. */
+export async function withPolicy<T>(
+  who: string,
+  pol: Policy,
+  attempt: () => Promise<T>,
+  retriable: (code: string) => boolean = () => true,
+): Promise<T> {
   const breaker = pol.breaker
     ? (breakers.get(who) ?? breakers.set(who, new Breaker()).get(who)!)
     : null;
@@ -361,6 +436,9 @@ export async function withPolicy<T>(who: string, pol: Policy, attempt: () => Pro
     } catch (err) {
       last = err;
       breaker?.failed(Date.now());
+      // A declared failure that cannot end differently: retrying is spending
+      // the budget to get the same answer.
+      if (err instanceof AxonProblem && !retriable(err.code)) throw err;
       if (n === pol.retries) break;
       // exponential with full jitter: without jitter every client retries at
       // the same instant and the other side never comes back up
@@ -399,10 +477,12 @@ export class Clients {
   constructor(transport: Transport) {
     this.transport = transport;
   }
-  /** payments.capturePayment · timeout 3000ms · 2 retries · breaker true */
+  /** payments.capturePayment · timeout 3000ms · 2 retries · breaker true
+   *  declares: card_declined (402) · issuer_unavailable (503, retriable) */
   async paymentsCapturePayment(input: PaymentsCapturePaymentIn, e: Envelope<unknown>, fallback: () => Promise<PaymentsCapturePaymentOut>): Promise<PaymentsCapturePaymentOut> {
     const attempt = () => withPolicy("payments.capturePayment", { timeoutMs: 3000, retries: 2, breaker: true }, async () =>
-      (await this.transport.call("payments", "capturePayment", input, headers(e, true))) as PaymentsCapturePaymentOut);
+      (await this.transport.call("payments", "capturePayment", input, headers(e, true))) as PaymentsCapturePaymentOut,
+      (code) => ["issuer_unavailable"].includes(code));
     try {
       return await attempt();
     } catch {

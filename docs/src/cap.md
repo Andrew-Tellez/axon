@@ -24,6 +24,10 @@ the cooldown. Retries are only emitted for idempotent methods — `verify` block
 — and the call carries `traceparent`, `x-correlation-id`, `x-causation-id` and
 `idempotency-key`.
 
+The retry budget is also spent according to the callee's declared failures: the client
+carries the codes that method declared as `retriable` and does not try again on the rest.
+See [`errors` on a method](./manifest.md#errors-on-a-method).
+
 ## `axon cap`: reconciling what you declared with what you use
 
 `verify` blocks the contradictions. `axon cap` explains the **consequences**, which is a

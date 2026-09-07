@@ -161,6 +161,9 @@ step "event sourcing and CQRS, measured"
 step "declared vs occurred retries"
 ./check-retries.sh
 
+step "the declared failures, measured"
+./check-errors.sh
+
 step "declared vs applied rollout"
 python3 check-flags.py "localhost:${AXON_FLAGS_PORT:-8016}" charge_v2 10
 

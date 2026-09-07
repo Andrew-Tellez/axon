@@ -31,6 +31,55 @@ pub struct Method {
     /// Returns a collection: forces cursor pagination.
     #[serde(default)]
     pub paginated: bool,
+    /// How it fails. Declared like `in` and `out`, and for the same reason: the
+    /// failures of a method are part of its contract, and today they live in the
+    /// handler's body —where the caller cannot see them— so every caller invents
+    /// its own reading of a 500.
+    ///
+    /// What this buys is not documentation: `retriable` CHANGES the generated
+    /// client. Retrying a declined card is nonsense that burns the caller's time
+    /// budget and ends in the same answer, so a declared non-retriable failure is
+    /// not retried at all.
+    #[serde(default)]
+    pub errors: Vec<Failure>,
+}
+
+/// A declared failure of a method.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Failure {
+    /// The code the caller matches on, in `snake_case`. It travels in the
+    /// `problem+json` body, so it is as much a contract as a field name: two
+    /// services reading `card_declined` differently is the same class of problem
+    /// as two reading `total` differently.
+    pub code: String,
+    /// The HTTP status it comes out as at the edge. A failure is not a 2xx, and
+    /// a caller that has to parse prose to tell "declined" from "provider down"
+    /// has no contract at all.
+    pub status: u16,
+    /// Whether trying again can end differently. `false` is the honest default:
+    /// most failures are decisions, not weather.
+    #[serde(default)]
+    pub retriable: bool,
+    /// One line for the OpenAPI, because a code with no sentence is a code
+    /// somebody will guess at.
+    pub detail: Option<String>,
+}
+
+/// The statuses where retrying can end differently, among the 4xx. The rest of
+/// the 4xx are decisions about the request: the same request gets the same
+/// answer, and a retry only burns the caller's budget.
+pub const RETRIABLE_4XX: [u16; 3] = [408, 425, 429];
+
+impl Failure {
+    /// Whether the code is in the shape that survives crossing a service
+    /// boundary: `snake_case`, no accents, no spaces.
+    pub fn well_formed(&self) -> bool {
+        !self.code.is_empty()
+            && self
+                .code
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    }
 }
 
 impl Method {

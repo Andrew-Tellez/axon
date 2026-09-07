@@ -876,6 +876,92 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // Declared failures. A method's failures are part of its contract, and the
+    // generated client acts on them: it does not retry what the callee declared
+    // as not retriable. Which means a wrong declaration is worse than none —
+    // it silences a retry that would have worked — so these rules are strict.
+    for m in ms.iter().filter(|m| !m.external) {
+        for (name, meth) in &m.methods {
+            let mut seen: IndexMap<String, ()> = IndexMap::new();
+            for f in &meth.errors {
+                if !f.well_formed() {
+                    errors.push(format!(
+                        "{}.{name}: error code `{}` is not snake_case; the code travels in \
+                         `problem+json` and gets compared as a literal",
+                        m.service, f.code
+                    ));
+                }
+                if seen.insert(f.code.clone(), ()).is_some() {
+                    errors.push(format!(
+                        "{}.{name}: declares `{}` twice; whichever status and `retriable` \
+                         won would depend on the order",
+                        m.service, f.code
+                    ));
+                }
+                if !(400..600).contains(&f.status) {
+                    errors.push(format!(
+                        "{}.{name}.{}: `status = {}` is not a failure; a declared error has \
+                         to be 4xx or 5xx",
+                        m.service, f.code, f.status
+                    ));
+                }
+                // A 4xx says the request is what is wrong: sending the same
+                // request again ends the same way. The exceptions are the three
+                // that mean "not yet": 408, 425 and 429.
+                if f.retriable
+                    && (400..500).contains(&f.status)
+                    && !RETRIABLE_4XX.contains(&f.status)
+                {
+                    errors.push(format!(
+                        "{}.{name}.{}: `retriable = true` on {}; a 4xx is the request's fault \
+                         and retrying it ends the same. Retriable 4xx: {}",
+                        m.service,
+                        f.code,
+                        f.status,
+                        RETRIABLE_4XX
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+            // A public mutation that declares no failure hands every caller the
+            // same 500 for a declined card and for a database that is down.
+            if meth.auth.as_deref() == Some("public") && meth.mutating() && meth.errors.is_empty() {
+                warnings.push(format!(
+                    "{}.{name}: public mutation with no declared `errors`; every caller \
+                     invents its own reading of a 500",
+                    m.service
+                ));
+            }
+        }
+    }
+    // Retries against a method whose every declared failure is final: the
+    // generated client will not retry them, so the budget only buys attempts
+    // against what nobody declared.
+    for m in ms.iter().filter(|m| !m.external) {
+        for d in &m.depends {
+            if d.retries == 0 {
+                continue;
+            }
+            let tgt = d.target();
+            if let Some(sig) = ms
+                .iter()
+                .find(|o| o.service == tgt)
+                .and_then(|o| o.methods.get(&d.method))
+            {
+                if !sig.errors.is_empty() && !sig.errors.iter().any(|f| f.retriable) {
+                    warnings.push(format!(
+                        "{} retries {tgt}.{} {} times and every failure it declares is final; \
+                         the retries only apply to what nobody declared",
+                        m.service, d.method, d.retries
+                    ));
+                }
+            }
+        }
+    }
+
     // One warehouse per platform. The events of one flow have to land in the
     // same place: split across two warehouses, the funnel —which is what makes
     // exporting worth anything— cannot be built with a single query, and nobody

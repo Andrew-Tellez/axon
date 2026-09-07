@@ -359,7 +359,7 @@ services:
       - traefik.enable=true
       - traefik.http.routers.payments.rule=PathPrefix(`/v1/payments`) || PathPrefix(`/v1/payouts`)
       - traefik.http.services.payments.loadbalancer.server.port=8080
-  cron-fotos_checkout:
+  cron-snapshots_checkout:
     image: curlimages/curl:8.11.1
     depends_on: { checkout: { condition: service_started } }
     # `while` and not a single `sleep`: a job that runs once and exits leaves
