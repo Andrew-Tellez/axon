@@ -234,7 +234,7 @@ como estaba: el campo se carga como nada y las consultas siguen devolviendo núm
 hay error en ninguna parte** — y por eso nadie lo mira.
 
 ```sh
-axon analytics manifests/ --consulta > esquema.sql   # la consulta al information_schema
+axon analytics manifests/ --introspect > esquema.sql   # la consulta al information_schema
 # ... correrla contra la bodega ...
 axon analytics manifests/ --check esquema.tsv        # el diff lo hace el compilador
 ```

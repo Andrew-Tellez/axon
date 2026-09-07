@@ -4021,7 +4021,7 @@ fn la_ingesta_no_se_promete_sin_camino() {
     // El cargador local sale del mismo sitio que el esquema: si las rutas del
     // JSON no coincidieran con las columnas, la carga fallaria en la bodega y
     // no aqui.
-    let (sql, err, ok) = axon(&["analytics", "examples", "--cargar", "local.ndjson"]);
+    let (sql, err, ok) = axon(&["analytics", "examples", "--load", "local.ndjson"]);
     assert!(ok, "{err}");
     assert!(sql.contains("INSERT INTO axon.order_placed_v1"), "{sql}");
     // el hash sale con salt por parametro, nunca el valor
@@ -4104,8 +4104,8 @@ pii = []
     let falta = real.replace("order_placed_v1\ttotal_amount\tNullable(Int64)\n", "");
     let (salida, ok) = check(&falta);
     assert!(!ok, "una columna que falta paso limpio");
-    assert!(salida.contains("falta `order_placed_v1.total_amount`"), "{salida}");
-    assert!(salida.contains("no se guarda en ningun lado"), "{salida}");
+    assert!(salida.contains("`order_placed_v1.total_amount` is missing"), "{salida}");
+    assert!(salida.contains("that field is stored nowhere"), "{salida}");
 
     // un tipo que no es el mismo: una fecha guardada como texto ordena mal
     let tipo = real.replace(
@@ -4114,29 +4114,29 @@ pii = []
     );
     let (salida, ok) = check(&tipo);
     assert!(!ok, "una fecha como texto paso limpio");
-    assert!(salida.contains("es texto en la bodega"), "{salida}");
+    assert!(salida.contains("is text in the warehouse"), "{salida}");
 
     // el correo en claro junto al hash: el manifiesto dice `hash` y el valor
     // viejo sigue ahi
     let claro = format!("{real}order_placed_v1\tcustomer_email\tNullable(String)\n");
     let (salida, ok) = check(&claro);
     assert!(!ok, "el correo en claro paso limpio");
-    assert!(salida.contains("existe en claro"), "{salida}");
-    assert!(salida.contains("se queda con los correos que ya tenia"), "{salida}");
+    assert!(salida.contains("exists in plaintext"), "{salida}");
+    assert!(salida.contains("keeps the addresses it already had"), "{salida}");
 
     // una columna de mas es un aviso, no un error: no rompe nada
     let sobra = format!("{real}order_placed_v1\tsobra\tString\n");
     let (salida, ok) = check(&sobra);
     assert!(ok, "una columna de mas bloqueo:\n{salida}");
-    assert!(salida.contains("Sobra de una version anterior"), "{salida}");
+    assert!(salida.contains("Left over from an earlier version"), "{salida}");
 
     // Y lo que mas importa: un volcado vacio NO puede dar 0 diferencias. Es el
     // resultado de correr la consulta contra la bodega equivocada, y leerlo
     // como "todo bien" es peor que no comprobar.
     let (salida, ok) = check("");
     assert!(!ok, "un volcado vacio dio 0 diferencias");
-    assert!(salida.contains("no tiene ninguna columna"), "{salida}");
-    assert!(salida.contains("se lee como que todo esta bien"), "{salida}");
+    assert!(salida.contains("has no columns at all"), "{salida}");
+    assert!(salida.contains("reads as everything being fine"), "{salida}");
 }
 
 /// La config de Vector se valida con `vector validate`: el parser que la va a

@@ -1,15 +1,15 @@
-//! Exportacion a la bodega de datos, y las metricas de negocio que salen de la
+//! Export to the data warehouse, and the business metrics that come out of the
 //! cadena causal declarada.
 //!
-//! Esto es derivable entero: axon ya conoce el esquema de cada evento, que
-//! campos son personales, y —lo mas importante— **quien causa a quien**. Esa
-//! ultima parte es la que ninguna bodega tiene: un embudo se arma normalmente
-//! adivinando como se relacionan los eventos, y aca esta declarado.
+//! This is derivable in full: axon already knows every event's schema, which
+//! fields are personal, and —most importantly— **who causes whom**. That last
+//! part is the one no warehouse has: a funnel is normally assembled by guessing
+//! how the events relate, and here it is declared.
 use crate::manifest::*;
 use indexmap::IndexMap;
 
-/// Columnas del envelope, iguales en toda tabla. Son las que permiten
-/// reconstruir un flujo: sin `correlation_id` no hay embudo posible.
+/// The envelope's columns, the same in every table. They are what makes
+/// reconstructing a flow possible: without `correlation_id` there is no funnel.
 const ENVELOPE: [(&str, &str); 7] = [
     ("event_id", "string"),
     ("event_type", "string"),
@@ -20,33 +20,34 @@ const ENVELOPE: [(&str, &str); 7] = [
     ("causation_id", "string"),
 ];
 
-/// Lo que cambia entre bodegas. Nada mas que esto: el esquema y los embudos
-/// son los mismos, porque salen del mismo manifiesto.
+/// What differs between warehouses. Nothing but this: the schema and the
+/// funnels are the same, because they come from the same manifest.
 ///
 /// Las diferencias no son cosmeticas. BigQuery necesita `PARTITION BY`
-/// explicito o cada consulta escanea el historico; Snowflake particiona solo y
-/// solo acepta `CLUSTER BY`; ClickHouse necesita un motor y una clave de orden,
-/// y sin `Nullable` una columna vacia guarda un cero en vez de nada.
-pub struct Dialecto {
-    pub nombre: &'static str,
-    /// Cita un identificador.
-    pub cita: fn(&str) -> String,
-    /// Tipo de columna para un tipo de axon.
-    pub tipo: fn(&str) -> String,
-    /// Lo que va despues del parentesis de columnas.
-    pub cola: fn() -> String,
+/// explicit partitioning or every query scans the whole history; Snowflake
+/// partitions on its own and only accepts `CLUSTER BY`; ClickHouse needs an
+/// engine and an ordering key, and without `Nullable` an empty column stores a
+/// zero instead of nothing.
+pub struct Dialect {
+    pub name: &'static str,
+    /// Quotes an identifier.
+    pub quote: fn(&str) -> String,
+    /// Column type for one of axon's types.
+    pub kind: fn(&str) -> String,
+    /// What goes after the column parenthesis.
+    pub tail: fn() -> String,
     /// Diferencia en milisegundos entre dos expresiones.
     pub diff_ms: fn(&str, &str) -> String,
 }
 
-fn cita_backtick(s: &str) -> String {
+fn quote_backtick(s: &str) -> String {
     format!("`{s}`")
 }
-fn cita_doble(s: &str) -> String {
+fn quote_double(s: &str) -> String {
     format!("\"{s}\"")
 }
 
-fn tipo_bigquery(t: &str) -> String {
+fn type_bigquery(t: &str) -> String {
     match t {
         "int" => "INT64",
         "float" => "FLOAT64",
@@ -58,7 +59,7 @@ fn tipo_bigquery(t: &str) -> String {
     .into()
 }
 
-fn tipo_snowflake(t: &str) -> String {
+fn type_snowflake(t: &str) -> String {
     match t {
         "int" => "NUMBER(38,0)",
         "float" => "FLOAT",
@@ -70,9 +71,9 @@ fn tipo_snowflake(t: &str) -> String {
     .into()
 }
 
-/// `Nullable(DateTime64(3))` -> `DateTime64(3)`. Quitar todos los parentesis
-/// del final rompe los tipos parametrizados: hay que sacar exactamente uno.
-fn sin_nullable(t: &str) -> String {
+/// `Nullable(DateTime64(3))` -> `DateTime64(3)`. Stripping every trailing
+/// parenthesis breaks parameterised types: exactly one has to come off.
+fn without_nullable(t: &str) -> String {
     match t
         .strip_prefix("Nullable(")
         .and_then(|r| r.strip_suffix(')'))
@@ -82,12 +83,12 @@ fn sin_nullable(t: &str) -> String {
     }
 }
 
-fn tipo_clickhouse(t: &str) -> String {
+fn type_clickhouse(t: &str) -> String {
     match t {
         "int" => "Nullable(Int64)",
         "float" => "Nullable(Float64)",
         "bool" => "Nullable(Bool)",
-        // milisegundos: un evento por segundo no ordena bien un embudo
+        // milliseconds: one event per second does not order a funnel properly
         "timestamp" => "Nullable(DateTime64(3))",
         "json" => "Nullable(String)",
         _ => "Nullable(String)",
@@ -95,39 +96,38 @@ fn tipo_clickhouse(t: &str) -> String {
     .into()
 }
 
-pub fn dialecto(nombre: &str) -> Option<Dialecto> {
-    Some(match nombre {
-        "bigquery" => Dialecto {
-            nombre: "bigquery",
-            cita: cita_backtick,
-            tipo: tipo_bigquery,
-            cola: || {
-                "-- particionar no es opcional: sin esto cada consulta escanea la\n\
-                 -- tabla entera y la factura crece con el historico\n\
+pub fn dialect(name: &str) -> Option<Dialect> {
+    Some(match name {
+        "bigquery" => Dialect {
+            name: "bigquery",
+            quote: quote_backtick,
+            kind: type_bigquery,
+            tail: || {
+                "-- partitioning is not optional: without it every query scans the\n\
+                 -- whole table and the bill grows with the history\n\
                  PARTITION BY DATE(event_time)\n\
                  CLUSTER BY correlation_id, source"
                     .into()
             },
             diff_ms: |a, b| format!("TIMESTAMP_DIFF(\n{a},\n{b},\n    MILLISECOND\n  )"),
         },
-        "snowflake" => Dialecto {
-            nombre: "snowflake",
-            cita: cita_doble,
-            tipo: tipo_snowflake,
-            // Snowflake particiona solo con sus micro-particiones: declarar
-            // PARTITION BY seria un error, no una optimizacion.
-            cola: || "CLUSTER BY (TO_DATE(event_time), correlation_id)".into(),
+        "snowflake" => Dialect {
+            name: "snowflake",
+            quote: quote_double,
+            kind: type_snowflake,
+            // Snowflake partitions on its own with micro-partitions: declaring
+            // PARTITION BY would be an error, not an optimisation.
+            tail: || "CLUSTER BY (TO_DATE(event_time), correlation_id)".into(),
             diff_ms: |a, b| format!("TIMESTAMPDIFF(\n    MILLISECOND,\n{b},\n{a}\n  )"),
         },
-        "clickhouse" => Dialecto {
-            nombre: "clickhouse",
-            cita: cita_doble,
-            tipo: tipo_clickhouse,
-            cola: || {
-                // El orden de las clausulas importa: ClickHouse espera ORDER BY
-                // justo despues del motor. Y la clave de orden decide que
-                // consultas son rapidas: primero el flujo, porque un embudo
-                // agrupa por el.
+        "clickhouse" => Dialect {
+            name: "clickhouse",
+            quote: quote_double,
+            kind: type_clickhouse,
+            tail: || {
+                // Clause order matters: ClickHouse expects ORDER BY right after
+                // the engine. And the ordering key decides which queries are
+                // fast: the flow first, because a funnel groups by it.
                 "ENGINE = MergeTree\n\
                  ORDER BY (correlation_id, event_time)\n\
                  PARTITION BY toYYYYMM(event_time)"
@@ -140,59 +140,60 @@ pub fn dialecto(nombre: &str) -> Option<Dialecto> {
 }
 
 
-/// El cargador del target local: lleva el log de envelopes a ClickHouse.
+/// The local target's loader: it carries the envelope log into ClickHouse.
 ///
-/// El log lo escribe el propio target —`AXON_TRACE_LOG` esta en el compose
-/// generado, no es un artefacto del demo— asi que la bodega local se llena de
-/// la misma fuente que la traza. Y las columnas y sus rutas dentro del JSON
-/// salen del mismo lugar que el esquema: si el esquema cambia, esto cambia con
-/// el, que es la unica forma de que no se desincronicen.
+/// The log is written by the target itself —`AXON_TRACE_LOG` is in the
+/// generated compose, it is not a demo artefact— so the local warehouse is
+/// filled from the same source as the trace. And the columns and their paths
+/// inside the JSON come from the same place as the schema: if the schema
+/// changes, this changes with it, which is the only way they do not drift.
 ///
-/// Existe porque generar el esquema sin un camino que lo llene deja tablas
-/// vacias sin un solo error, y eso es indistinguible de "no paso nada".
-pub fn cargador(ms: &[Manifest], base: &str, log: &str) -> String {
-    let d = dialecto("clickhouse").expect("clickhouse");
+/// It exists because generating the schema with no path to fill it leaves
+/// empty tables without a single error, and that is indistinguishable from
+/// "nothing happened".
+pub fn loader(ms: &[Manifest], base: &str, log: &str) -> String {
+    let d = dialect("clickhouse").expect("clickhouse");
     let mut o = vec![
         "-- generated by axon — do not edit.".to_string(),
-        format!("--   axon analytics manifests/ --cargar {log} > cargar.sql"),
+        format!("--   axon analytics manifests/ --load {log} > load.sql"),
         "--".to_string(),
-        "-- Idempotente por evento: se filtra por lo que ya se cargo, asi que".to_string(),
-        "-- correrlo dos veces no duplica filas. Sin eso, un cargador periodico".to_string(),
-        "-- multiplica cada evento por la cantidad de pasadas y el embudo miente.".to_string(),
+        "-- Idempotent per event: it filters by what has already been loaded, so".to_string(),
+        "-- running it twice does not duplicate rows. Without that, a periodic".to_string(),
+        "-- loader multiplies each event by the number of passes and the funnel lies.".to_string(),
         String::new(),
     ];
     for e in eventos(ms) {
-        let t = tabla(e.nombre);
+        let t = table(e.name);
         let mut sel = vec![
             "  JSONExtractString(l, 'id')            AS event_id".to_string(),
             "  JSONExtractString(l, 'type')          AS event_type".to_string(),
             "  JSONExtractString(l, 'source')        AS source".to_string(),
             "  parseDateTime64BestEffort(JSONExtractString(l, 'time'), 3) AS event_time".to_string(),
-            // el trace_id es el segundo campo del traceparent de W3C
+            // the trace_id is the second field of the W3C traceparent
             "  splitByChar('-', JSONExtractString(l, 'traceparent'))[2] AS trace_id".to_string(),
             "  JSONExtractString(l, 'correlationId') AS correlation_id".to_string(),
             "  nullIf(JSONExtractString(l, 'causationId'), '') AS causation_id".to_string(),
         ];
-        for (campo, tipo) in e.campos {
-            let sensible = is_pii(&e.pii, campo);
+        for (field, kind) in e.fields {
+            let sensible = is_pii(&e.pii, field);
             if sensible && e.modo_pii == "exclude" {
                 continue;
             }
-            for (n, _) in columnas(&d, campo, tipo) {
-                // la ruta dentro del JSON: `data.<campo>`, y `money` se aplana
-                // en las dos que declara el esquema
+            for (n, _) in columns(&d, field, kind) {
+                // the path inside the JSON: `data.<field>`, and `money` is
+                // flattened into the two the schema declares
                 let ruta = if n.ends_with("_currency") {
-                    format!("'data', '{campo}', 'currency'")
-                } else if tipo == "money" {
-                    format!("'data', '{campo}', 'amount'")
+                    format!("'data', '{field}', 'currency'")
+                } else if kind == "money" {
+                    format!("'data', '{field}', 'amount'")
                 } else {
-                    format!("'data', '{campo}'")
+                    format!("'data', '{field}'")
                 };
                 if sensible {
                     sel.push(format!(
                         "  lower(hex(SHA256(concat({{salt:String}}, JSONExtractString(l, {ruta}))))) AS {n}_hash"
                     ));
-                } else if tipo == "int" || (tipo == "money" && !n.ends_with("_currency")) {
+                } else if kind == "int" || (kind == "money" && !n.ends_with("_currency")) {
                     sel.push(format!("  JSONExtractInt(l, {ruta}) AS {n}"));
                 } else {
                     sel.push(format!("  nullIf(JSONExtractString(l, {ruta}), '') AS {n}"));
@@ -200,24 +201,24 @@ pub fn cargador(ms: &[Manifest], base: &str, log: &str) -> String {
             }
         }
         o.push(format!(
-            "-- {} · dueno: {}\nINSERT INTO {base}.{t}\nSELECT\n{}\nFROM file('{log}', LineAsString, 'l String')\nWHERE JSONExtractString(l, 'type') = '{}'\n  -- lo ya cargado no se vuelve a cargar\n  AND JSONExtractString(l, 'id') NOT IN (SELECT event_id FROM {base}.{t});\n",
-            e.nombre,
+            "-- {} · owner: {}\nINSERT INTO {base}.{t}\nSELECT\n{}\nFROM file('{log}', LineAsString, 'l String')\nWHERE JSONExtractString(l, 'type') = '{}'\n  -- what is already loaded is not loaded again\n  AND JSONExtractString(l, 'id') NOT IN (SELECT event_id FROM {base}.{t});\n",
+            e.name,
             e.duenio,
             sel.join(",\n"),
-            e.nombre
+            e.name
         ));
     }
     o.join("\n")
 }
 
 
-/// La consulta que vuelca el esquema REAL de la bodega.
+/// The query that dumps the warehouse's REAL schema.
 ///
-/// Se emite en vez de ejecutarse por la misma razon que `axon load --check`:
-/// axon no tiene —ni quiere— credenciales de la bodega. La salida vuelve por
-/// `--check`, y el diff lo hace el compilador.
-pub fn consulta(d: &Dialecto, base: &str) -> String {
-    let cuerpo = match d.nombre {
+/// It is emitted rather than run for the same reason as `axon load --check`:
+/// axon does not have —nor want— warehouse credentials. The output comes back
+/// through `--check`, and the compiler does the diff.
+pub fn introspect(d: &Dialect, base: &str) -> String {
+    let cuerpo = match d.name {
         "clickhouse" => format!(
             "SELECT table, name, type FROM system.columns\n \
              WHERE database = '{base}'\n \
@@ -238,144 +239,144 @@ pub fn consulta(d: &Dialecto, base: &str) -> String {
     };
     format!(
         "-- generated by axon — do not edit.\n\
-         --   axon analytics manifests/ --consulta > esquema.sql\n\
-         --   ... correrlo contra la bodega y guardar la salida ...\n\
+         --   axon analytics manifests/ --introspect > esquema.sql\n\
+         --   ... run it against the warehouse and save the output ...\n\
          --   axon analytics manifests/ --check esquema.tsv\n\
          --\n\
-         -- Tres columnas, en este orden: tabla, columna, tipo.\n\
+         -- Tres columns, en este orden: table, columna, kind.\n\
          {cuerpo};\n"
     )
 }
 
-/// La familia de un tipo, que es lo unico comparable entre bodegas.
+/// A type's family, which is the only comparable thing across warehouses.
 ///
-/// `Nullable(String)`, `STRING` y `text` son el mismo tipo con tres nombres. Lo
-/// que NO se puede confundir es una fecha con un texto o un entero con una
-/// cadena, y eso es justo lo que rompe una consulta sin dar error: un
-/// `event_time` guardado como texto ordena mal.
-fn familia(t: &str) -> &'static str {
+/// `Nullable(String)`, `STRING` and `text` are the same type with three names.
+/// What CANNOT be confused is a date with a text or an integer with a string,
+/// and that is exactly what breaks a query without raising an error: a
+/// `event_time` stored as text sorts wrong.
+fn family(t: &str) -> &'static str {
     let t = t.to_lowercase();
     let t = t
         .trim_start_matches("nullable(")
         .trim_end_matches(')')
         .trim();
     if t.contains("date") || t.contains("time") {
-        "fecha"
+        "a date"
     } else if t.contains("int") || t.contains("numeric") || t.contains("decimal") || t.contains("float") {
-        "numero"
+        "a number"
     } else if t.contains("bool") {
-        "booleano"
+        "a boolean"
     } else {
-        "texto"
+        "text"
     }
 }
 
-/// Lo declarado contra lo que hay en la bodega.
+/// The declared against what is actually in the warehouse.
 ///
-/// El drift aqui no da un error en ninguna parte: una columna nueva que la
-/// tabla no tiene se carga como nada, y una columna vieja que ya nadie escribe
-/// se queda con los datos que tenia. Las dos cosas dan consultas que devuelven
-/// numeros, y por eso nadie las mira.
-pub fn revisar(ms: &[Manifest], d: &Dialecto, real: &str) -> (Vec<String>, Vec<String>) {
-    let (mut errores, mut avisos) = (Vec::new(), Vec::new());
-    // lo que hay: tabla -> columna -> tipo
-    let mut hay: IndexMap<String, IndexMap<String, String>> = IndexMap::new();
+/// Drift here raises an error nowhere: a new column the table does not have
+/// loads as nothing, and an old column nobody writes any more keeps the data it
+/// had. Both give queries that return numbers, which is why nobody looks at
+/// them.
+pub fn review(ms: &[Manifest], d: &Dialect, real: &str) -> (Vec<String>, Vec<String>) {
+    let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+    // what is there: table -> column -> type
+    let mut present: IndexMap<String, IndexMap<String, String>> = IndexMap::new();
     for linea in real.lines() {
         let l = linea.trim();
         if l.is_empty() || l.starts_with('-') || l.starts_with('#') {
             continue;
         }
-        let campos: Vec<&str> = l.split(['\t', ',']).map(str::trim).collect();
-        if campos.len() < 3 {
+        let fields: Vec<&str> = l.split(['\t', ',']).map(str::trim).collect();
+        if fields.len() < 3 {
             continue;
         }
-        hay.entry(campos[0].to_lowercase())
+        present.entry(fields[0].to_lowercase())
             .or_default()
-            .insert(campos[1].to_lowercase(), campos[2].to_string());
+            .insert(fields[1].to_lowercase(), fields[2].to_string());
     }
-    if hay.is_empty() {
-        errores.push(
-            "el volcado no tiene ninguna columna. Corre `axon analytics --consulta` contra la \
-             bodega y pasa su salida: comparar contra un archivo vacio da 0 diferencias y eso \
-             se lee como que todo esta bien"
+    if present.is_empty() {
+        errors.push(
+            "the dump has no columns at all. Run `axon analytics --introspect` against the \
+             warehouse and pass its output: comparing against an empty file gives 0 \
+             differences and that reads as everything being fine"
                 .into(),
         );
-        return (errores, avisos);
+        return (errors, warnings);
     }
 
     for e in eventos(ms) {
-        let t = tabla(e.nombre);
-        let Some(real_cols) = hay.get(&t) else {
-            errores.push(format!(
-                "{}: falta la tabla `{t}` en la bodega. El evento se emite y no se guarda en \
+        let t = table(e.name);
+        let Some(real_cols) = present.get(&t) else {
+            errors.push(format!(
+                "{}: the `{t}` table is missing from the warehouse. The event is emitted and \
                  ninguna parte",
-                e.nombre
+                e.name
             ));
             continue;
         };
-        let mut declaradas: IndexMap<String, String> = IndexMap::new();
+        let mut declared: IndexMap<String, String> = IndexMap::new();
         for (n, t) in ENVELOPE {
-            declaradas.insert(n.to_string(), (d.tipo)(t));
+            declared.insert(n.to_string(), (d.kind)(t));
         }
-        for (campo, tipo) in e.campos {
-            let sensible = is_pii(&e.pii, campo);
+        for (field, kind) in e.fields {
+            let sensible = is_pii(&e.pii, field);
             if sensible && e.modo_pii == "exclude" {
-                // Declarado como excluido y presente en la bodega: el dato
-                // personal esta ahi de una version anterior, y seguira estando.
-                for (n, _) in columnas(d, campo, tipo) {
+                // Declared as excluded and present in the warehouse: the
+                // personal data is there from an earlier version, and stays.
+                for (n, _) in columns(d, field, kind) {
                     if real_cols.contains_key(&n) {
-                        errores.push(format!(
-                            "{}: `{t}.{n}` existe en la bodega y el manifiesto declara ese campo \
-                             como excluido. El dato personal quedo ahi de una version anterior y \
-                             no se va solo: hay que borrar la columna",
-                            e.nombre
+                        errors.push(format!(
+                            "{}: `{t}.{n}` exists in the warehouse and the manifest declares that field \
+                             as excluded. The personal data was left there by an earlier version \
+                             and does not leave on its own: the column has to be dropped",
+                            e.name
                         ));
                     }
                 }
                 continue;
             }
-            for (n, ty) in columnas(d, campo, tipo) {
-                let nombre = if sensible { format!("{n}_hash") } else { n.clone() };
-                declaradas.insert(nombre, if sensible { (d.tipo)("string") } else { ty });
-                // el valor en claro no puede seguir ahi despues de pasar a hash
+            for (n, ty) in columns(d, field, kind) {
+                let name = if sensible { format!("{n}_hash") } else { n.clone() };
+                declared.insert(name, if sensible { (d.kind)("string") } else { ty });
+                // the plaintext value cannot stay there after moving to a hash
                 if sensible && real_cols.contains_key(&n) {
-                    errores.push(format!(
-                        "{}: `{t}.{n}` existe en claro y el manifiesto declara `pii = \"hash\"`. \
-                         La columna nueva se llena y la vieja se queda con los correos que ya \
-                         tenia",
-                        e.nombre
+                    errors.push(format!(
+                        "{}: `{t}.{n}` exists in plaintext and the manifest declares `pii = \"hash\"`. \
+                         The new column gets filled and the old one keeps the addresses it \
+                         already had",
+                        e.name
                     ));
                 }
             }
         }
-        for (n, ty) in &declaradas {
+        for (n, ty) in &declared {
             match real_cols.get(n) {
-                None => errores.push(format!(
-                    "{}: falta `{t}.{n}` en la bodega. Lo que se declara se carga ahi, y sin la \
-                     columna ese campo no se guarda en ningun lado",
-                    e.nombre
+                None => errors.push(format!(
+                    "{}: `{t}.{n}` is missing from the warehouse. What is declared gets loaded \
+                     there, and without the column that field is stored nowhere",
+                    e.name
                 )),
-                Some(real_ty) if familia(real_ty) != familia(ty) => errores.push(format!(
-                    "{}: `{t}.{n}` es {} en la bodega y el manifiesto declara {}. Una fecha \
-                     guardada como texto ordena mal y no da error",
-                    e.nombre,
-                    familia(real_ty),
-                    familia(ty)
+                Some(real_ty) if family(real_ty) != family(ty) => errors.push(format!(
+                    "{}: `{t}.{n}` is {} in the warehouse and the manifest declares {}. A \
+                     date stored as text sorts wrong and raises no error",
+                    e.name,
+                    family(real_ty),
+                    family(ty)
                 )),
                 _ => {}
             }
         }
         for n in real_cols.keys() {
-            if !declaradas.contains_key(n) {
-                avisos.push(format!(
-                    "{}: `{t}.{n}` esta en la bodega y no en el manifiesto. Sobra de una version \
-                     anterior: no rompe nada y se sigue consultando",
-                    e.nombre
+            if !declared.contains_key(n) {
+                warnings.push(format!(
+                    "{}: `{t}.{n}` is in the warehouse and not in the manifest. Left over from an \
+                     earlier version: it breaks nothing and keeps being queried",
+                    e.name
                 ));
             }
         }
     }
-    (errores, avisos)
+    (errors, warnings)
 }
 
 
@@ -393,15 +394,15 @@ pub fn revisar(ms: &[Manifest], d: &Dialecto, real: &str) -> (Vec<String>, Vec<S
 /// silence: `vector validate` warns about it, and a warning today is a lost
 /// event tomorrow.
 pub fn vector(ms: &[Manifest], base: &str) -> String {
-    let d = dialecto("clickhouse").expect("clickhouse");
+    let d = dialect("clickhouse").expect("clickhouse");
     let evs = eventos(ms);
     let mut sources = Vec::new();
     let mut transforms = Vec::new();
     let mut sinks = Vec::new();
     for e in &evs {
-        let t = tabla(e.nombre);
+        let t = table(e.name);
         // NATS rejects `@` in a subject, the same substitution the runtime does
-        let subject = e.nombre.replace('@', ".");
+        let subject = e.name.replace('@', ".");
         sources.push(format!(
             "  in_{t}:\n    \
                type: nats\n    \
@@ -414,7 +415,7 @@ pub fn vector(ms: &[Manifest], base: &str) -> String {
                connection_name: axon-warehouse\n"
         ));
 
-        let mut campos = vec![
+        let mut fields = vec![
             "        \"event_id\": e.id,".to_string(),
             "        \"event_type\": e.type,".to_string(),
             "        \"source\": e.source,".to_string(),
@@ -424,26 +425,26 @@ pub fn vector(ms: &[Manifest], base: &str) -> String {
             "        \"correlation_id\": e.correlationId,".to_string(),
             "        \"causation_id\": e.causationId,".to_string(),
         ];
-        for (campo, tipo) in e.campos {
-            let sensible = is_pii(&e.pii, campo);
+        for (field, kind) in e.fields {
+            let sensible = is_pii(&e.pii, field);
             if sensible && e.modo_pii == "exclude" {
                 continue;
             }
-            for (n, _) in columnas(&d, campo, tipo) {
+            for (n, _) in columns(&d, field, kind) {
                 let ruta = if n.ends_with("_currency") {
-                    format!("e.data.{campo}.currency")
-                } else if tipo == "money" {
-                    format!("e.data.{campo}.amount")
+                    format!("e.data.{field}.currency")
+                } else if kind == "money" {
+                    format!("e.data.{field}.amount")
                 } else {
-                    format!("e.data.{campo}")
+                    format!("e.data.{field}")
                 };
                 if sensible {
-                    campos.push(format!(
+                    fields.push(format!(
                         "        \"{n}_hash\": sha2(join!([get_env_var!(\"AXON_PII_SALT\"), \
                          string!({ruta})]), variant: \"SHA-256\"),"
                     ));
                 } else {
-                    campos.push(format!("        \"{n}\": {ruta},"));
+                    fields.push(format!("        \"{n}\": {ruta},"));
                 }
             }
         }
@@ -455,7 +456,7 @@ pub fn vector(ms: &[Manifest], base: &str) -> String {
                  e = parse_json!(string!(.message))\n      \
                  trace = split(string!(e.traceparent), \"-\")\n      \
                  . = {{\n{}\n      }}\n",
-            campos.join("\n")
+            fields.join("\n")
         ));
 
         sinks.push(format!(
@@ -493,14 +494,14 @@ pub fn vector(ms: &[Manifest], base: &str) -> String {
     )
 }
 
-/// Nombre de tabla a partir del evento: `order.placed@v1` -> `order_placed_v1`.
-fn tabla(ev: &str) -> String {
+/// Table name from the event: `order.placed@v1` -> `order_placed_v1`.
+fn table(ev: &str) -> String {
     tfname(ev)
 }
 
-/// `customerId` -> `customer_id`. Una bodega se consulta a mano y con
-/// herramientas de BI: ahi la convencion es snake_case, igual que en la base.
-/// Los contratos usan la del lenguaje; la bodega, la suya.
+/// `customerId` -> `customer_id`. A warehouse is queried by hand and with BI
+/// tools: there the convention is snake_case, same as in the database. The
+/// contracts use the language's; the warehouse, its own.
 fn snake(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 4);
     for (i, c) in s.chars().enumerate() {
@@ -516,43 +517,43 @@ fn snake(s: &str) -> String {
     o
 }
 
-/// Un campo del evento a columnas. `money` se aplana en dos, que es lo que
-/// hace utilizable un importe en una bodega: sumar un objeto no se puede.
-fn columnas(d: &Dialecto, nombre: &str, tipo: &str) -> Vec<(String, String)> {
-    let n = snake(nombre);
-    if tipo == "money" {
-        // `amount` ya dice que es un importe: `amount_amount` no aporta nada
+/// One event field to columns. `money` is flattened into two, which is what
+/// makes an amount usable in a warehouse: you cannot sum an object.
+fn columns(d: &Dialect, name: &str, kind: &str) -> Vec<(String, String)> {
+    let n = snake(name);
+    if kind == "money" {
+        // `amount` already says it is an amount: `amount_amount` adds nothing
         let importe = if n.ends_with("amount") {
             n.clone()
         } else {
             format!("{n}_amount")
         };
         vec![
-            (importe, (d.tipo)("int")),
-            (format!("{n}_currency"), (d.tipo)("string")),
+            (importe, (d.kind)("int")),
+            (format!("{n}_currency"), (d.kind)("string")),
         ]
     } else {
-        vec![(n, (d.tipo)(tipo))]
+        vec![(n, (d.kind)(kind))]
     }
 }
 
-struct Evento<'a> {
-    nombre: &'a str,
+struct Event<'a> {
+    name: &'a str,
     duenio: &'a str,
-    campos: &'a Fields,
+    fields: &'a Fields,
     pii: Vec<String>,
     modo_pii: &'a str,
 }
 
-fn eventos<'a>(ms: &'a [Manifest]) -> Vec<Evento<'a>> {
+fn eventos<'a>(ms: &'a [Manifest]) -> Vec<Event<'a>> {
     let mut v = Vec::new();
     for m in ms.iter().filter(|m| !m.external && m.analytics.export) {
         let pii = m.pii.clone();
-        for (ev, campos) in &m.emits {
-            v.push(Evento {
-                nombre: ev,
+        for (ev, fields) in &m.emits {
+            v.push(Event {
+                name: ev,
                 duenio: &m.service,
-                campos,
+                fields,
                 pii: pii.clone(),
                 modo_pii: &m.analytics.pii,
             });
@@ -561,24 +562,24 @@ fn eventos<'a>(ms: &'a [Manifest]) -> Vec<Evento<'a>> {
     v
 }
 
-/// DDL de BigQuery: una tabla por evento, mas las vistas de embudo.
-pub fn build(ms: &[Manifest], d: &Dialecto) -> String {
+/// BigQuery DDL: one table per event, plus the funnel views.
+pub fn build(ms: &[Manifest], d: &Dialect) -> String {
     let evs = eventos(ms);
     let mut o = vec![
         "-- generated by axon — do not edit.".to_string(),
         format!(
             "--   axon analytics manifests/ --target {} > bodega.sql",
-            d.nombre
+            d.name
         ),
         "--".to_string(),
-        "-- Una tabla por evento, con las columnas del envelope que permiten".to_string(),
-        "-- reconstruir un flujo, y las vistas de embudo que salen de la cadena".to_string(),
-        "-- causal DECLARADA. Un embudo normalmente se arma adivinando como se".to_string(),
-        "-- relacionan los eventos; aca esta escrito en el manifiesto.".to_string(),
+        "-- One table per event, with the envelope columns that make reconstructing".to_string(),
+        "-- a flow possible, and the funnel views that come out of the DECLARED".to_string(),
+        "-- causal chain. A funnel is normally assembled by guessing how the".to_string(),
+        "-- events relate; here it is written in the manifest.".to_string(),
         String::new(),
-        "-- El dataset se pasa como parametro: `bq query --parameter=dataset::mi_dataset`"
+        "-- The dataset is passed as a parameter: `bq query --parameter=dataset::my_dataset`"
             .to_string(),
-        "-- o se sustituye antes de aplicar.".to_string(),
+        "-- or substituted before applying.".to_string(),
     ];
     if evs.is_empty() {
         o.push("\n-- Ningun servicio exporta eventos.".into());
@@ -590,50 +591,50 @@ pub fn build(ms: &[Manifest], d: &Dialecto) -> String {
         let mut cols: Vec<String> = ENVELOPE
             .iter()
             .map(|(n, t)| {
-                let nulo = matches!(*n, "trace_id" | "causation_id");
-                let tipo = (d.tipo)(t);
-                // en ClickHouse la nulabilidad va en el tipo, no en un sufijo
-                if d.nombre == "clickhouse" {
-                    let tipo = if nulo { tipo } else { sin_nullable(&tipo) };
-                    format!("  {n} {tipo}")
+                let nullable = matches!(*n, "trace_id" | "causation_id");
+                let kind = (d.kind)(t);
+                // in ClickHouse nullability goes in the type, not in a suffix
+                if d.name == "clickhouse" {
+                    let kind = if nullable { kind } else { without_nullable(&kind) };
+                    format!("  {n} {kind}")
                 } else {
-                    format!("  {n} {tipo}{}", if nulo { "" } else { " NOT NULL" })
+                    format!("  {n} {kind}{}", if nullable { "" } else { " NOT NULL" })
                 }
             })
             .collect();
         let mut excluidos = Vec::new();
-        for (campo, tipo) in e.campos {
-            let sensible = is_pii(&e.pii, campo);
+        for (field, kind) in e.fields {
+            let sensible = is_pii(&e.pii, field);
             if sensible && e.modo_pii == "exclude" {
-                excluidos.push(campo.clone());
+                excluidos.push(field.clone());
                 continue;
             }
-            for (n, t) in columnas(d, campo, tipo) {
+            for (n, t) in columns(d, field, kind) {
                 if sensible {
-                    // hash con salt, no el valor: una bodega es donde un dato
-                    // personal vive mas tiempo y lo lee mas gente
+                    // a salted hash, not the value: a warehouse is where
+                    // personal data lives longest and is read by the most people
                     cols.push(format!(
-                        "  -- SHA-256 de `{campo}` con salt: se puede contar sin guardar\n  {n}_hash {}",
-                        (d.tipo)("string")
+                        "  -- salted SHA-256 of `{field}`: countable without storing it\n  {n}_hash {}",
+                        (d.kind)("string")
                     ));
                 } else {
                     cols.push(format!("  {n} {t}"));
                 }
             }
         }
-        o.push(format!("\n-- {} · dueno: {}", e.nombre, e.duenio));
+        o.push(format!("\n-- {} · owner: {}", e.name, e.duenio));
         if !excluidos.is_empty() {
             o.push(format!(
-                "-- Campos personales excluidos: {}. Con `[analytics] pii = \"hash\"` se\n\
-                 -- exportarian como SHA-256 con salt en vez de no exportarse.",
+                "-- Personal fields excluded: {}. With `[analytics] pii = \"hash\"` they would\n\
+                 -- be exported as a salted SHA-256 instead of not at all.",
                 excluidos.join(", ")
             ));
         }
         o.push(format!(
             "CREATE TABLE IF NOT EXISTS {} (\n{}\n)\n{};",
-            (d.cita)(&format!("@dataset.{}", tabla(e.nombre))),
+            (d.quote)(&format!("@dataset.{}", table(e.name))),
             cols.join(",\n"),
-            (d.cola)()
+            (d.tail)()
         ));
     }
 
@@ -642,17 +643,17 @@ pub fn build(ms: &[Manifest], d: &Dialecto) -> String {
     o.join("\n")
 }
 
-/// Vistas de embudo: una fila por flujo de negocio, con el momento de cada
-/// paso y el tiempo entre ellos.
+/// Funnel views: one row per business flow, with the moment of each step and
+/// the time between them.
 ///
-/// Los pasos salen de la cadena causal declarada, la misma que dibuja
-/// `axon seq`. Eso es lo que hace que el embudo no sea una suposicion.
-fn embudos(ms: &[Manifest], evs: &[Evento], d: &Dialecto) -> Vec<String> {
-    let emisor: IndexMap<&str, &str> = evs.iter().map(|e| (e.nombre, e.duenio)).collect();
+/// The steps come from the declared causal chain, the same one `axon seq`
+/// draws. That is what makes the funnel not a guess.
+fn embudos(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
+    let emisor: IndexMap<&str, &str> = evs.iter().map(|e| (e.name, e.duenio)).collect();
     let mut o = Vec::new();
 
-    // un evento es raiz si nadie lo consume para producirlo, o sea si ningun
-    // servicio lo emite como consecuencia de otro
+    // an event is a root if nobody consumes it to produce it, that is, if no
+    // service emits it as a consequence of another
     let derivados: Vec<&str> = ms
         .iter()
         .flat_map(|m| {
@@ -668,8 +669,8 @@ fn embudos(ms: &[Manifest], evs: &[Evento], d: &Dialecto) -> Vec<String> {
         .filter(|e| !derivados.contains(e))
         .collect();
 
-    for raiz in raices {
-        let mut cadena = vec![raiz];
+    for root in raices {
+        let mut cadena = vec![root];
         let mut i = 0;
         while i < cadena.len() && cadena.len() < 12 {
             let actual = cadena[i];
@@ -693,7 +694,7 @@ fn embudos(ms: &[Manifest], evs: &[Evento], d: &Dialecto) -> Vec<String> {
             .map(|e| {
                 format!(
                     "    SELECT correlation_id, event_type, event_time FROM {}",
-                    (d.cita)(&format!("@dataset.{}", tabla(e)))
+                    (d.quote)(&format!("@dataset.{}", table(e)))
                 )
             })
             .collect();
@@ -701,17 +702,17 @@ fn embudos(ms: &[Manifest], evs: &[Evento], d: &Dialecto) -> Vec<String> {
             .iter()
             .enumerate()
             .map(|(n, e)| {
-                // CASE WHEN y no IF()/IFF(): es lo unico que las tres bodegas
+                // CASE WHEN and not IF()/IFF(): it is the only thing all three
                 // entienden igual
                 format!(
                     "  MIN(CASE WHEN event_type = '{e}' THEN event_time END) AS paso_{}_{}",
                     n + 1,
-                    tabla(e)
+                    table(e)
                 )
             })
             .collect();
-        // el tiempo entre el primer paso y cada uno de los siguientes: eso es
-        // la latencia del flujo de negocio, no la de una peticion
+        // the time between the first step and each of the following ones: that
+        // is the business flow's latency, not a request's
         let saltos: Vec<String> = cadena
             .iter()
             .skip(1)
@@ -721,19 +722,19 @@ fn embudos(ms: &[Manifest], evs: &[Evento], d: &Dialecto) -> Vec<String> {
                     "    MIN(CASE WHEN event_type = '{}' THEN event_time END)",
                     cadena[0]
                 );
-                format!("  {} AS ms_hasta_{}", (d.diff_ms)(&hasta, &desde), tabla(e))
+                format!("  {} AS ms_hasta_{}", (d.diff_ms)(&hasta, &desde), table(e))
             })
             .collect();
 
         o.push(format!(
-            "\n-- Embudo de `{raiz}`: un flujo por fila.\n\
-             -- Los pasos salen de la cadena causal declarada en los manifiestos, la\n\
-             -- misma que dibuja `axon seq`. Un paso en NULL es un flujo que no llego\n\
-             -- ahi: eso es la conversion, y el TIMESTAMP_DIFF es la latencia de\n\
-             -- negocio —no la de una peticion.\n\
+            "\n-- Funnel for `{root}`: one flow per row.\n\
+             -- The steps come from the causal chain declared in the manifests, the\n\
+             -- same one `axon seq` draws. A NULL step is a flow that did not get\n\
+             -- there: that is the conversion, and the TIMESTAMP_DIFF is the business\n\
+             -- latency, not a request\'s.\n\
              CREATE OR REPLACE VIEW {} AS\n\
              SELECT\n  correlation_id,\n{},\n{}\nFROM (\n{}\n)\nGROUP BY correlation_id;",
-            (d.cita)(&format!("@dataset.embudo_{}", tabla(raiz))),
+            (d.quote)(&format!("@dataset.embudo_{}", table(root))),
             pasos.join(",\n"),
             saltos.join(",\n"),
             union.join("\n    UNION ALL\n")
@@ -742,30 +743,30 @@ fn embudos(ms: &[Manifest], evs: &[Evento], d: &Dialecto) -> Vec<String> {
     o
 }
 
-/// El plan neutral de la exportacion, para quien no use BigQuery.
+/// The export's neutral plan, for whoever does not use BigQuery.
 pub fn build_plan(ms: &[Manifest]) -> serde_json::Value {
     let evs = eventos(ms);
-    // el plan lleva los tipos de axon, no los de una bodega: quien lo consuma
-    // los traduce a la suya
-    let neutral = Dialecto {
-        nombre: "plan",
-        cita: |s| s.to_string(),
-        tipo: |t| t.to_string(),
-        cola: String::new,
+    // the plan carries axon's types, not a warehouse's: whoever consumes it
+    // translates them into their own
+    let neutral = Dialect {
+        name: "plan",
+        quote: |s| s.to_string(),
+        kind: |t| t.to_string(),
+        tail: String::new,
         diff_ms: |a, b| format!("{a} - {b}"),
     };
     serde_json::json!({
         "envelope": ENVELOPE.iter().map(|(n, t)| serde_json::json!({"name": n, "type": t})).collect::<Vec<_>>(),
         "tables": evs.iter().map(|e| serde_json::json!({
-            "event": e.nombre,
+            "event": e.name,
             "owner": e.duenio,
-            "table": tabla(e.nombre),
+            "table": table(e.name),
             "partition_by": "DATE(event_time)",
             "cluster_by": ["correlation_id", "source"],
             "pii_mode": e.modo_pii,
-            "columns": e.campos.iter().flat_map(|(n, t)| {
+            "columns": e.fields.iter().flat_map(|(n, t)| {
                 let sensible = is_pii(&e.pii, n);
-                columnas(&neutral, n, t).into_iter().filter_map(move |(cn, ct)| {
+                columns(&neutral, n, t).into_iter().filter_map(move |(cn, ct)| {
                     match (sensible, e.modo_pii) {
                         (true, "exclude") => None,
                         (true, _) => Some(serde_json::json!({"name": format!("{cn}_hash"), "type": "STRING", "pii": true})),

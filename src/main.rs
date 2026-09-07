@@ -1,4 +1,4 @@
-//! axon — el manifiesto es la fuente de verdad; el resto son proyecciones.
+//! axon — the manifest is the source of truth; the rest are projections.
 mod api;
 mod baseline;
 mod bi;
@@ -23,7 +23,7 @@ use std::process::ExitCode;
 #[command(
     name = "axon",
     version,
-    about = "Compilador manifiesto-primero para microservicios event-driven"
+    about = "Manifest-first compiler for event-driven microservices"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -35,148 +35,148 @@ enum Cmd {
     /// manifiesto -> contratos y clase base
     Build {
         manifest: PathBuf,
-        /// Los demas manifiestos: de ahi sale el tipo de lo que este servicio consume.
+        /// The other manifests: that is where the type of what this service consumes comes from.
         sources: Vec<String>,
         #[arg(long, default_value = "ts")]
         lang: String,
     },
-    /// manifiesto -> pipeline de CI/CD
+    /// manifest -> CI/CD pipeline
     Ci {
         manifest: PathBuf,
-        /// plataforma de despliegue; sin esto solo genera los gates
+        /// deploy platform; without it only the gates get generated
         #[arg(long, default_value = "none")]
         target: String,
     },
-    /// manifiestos -> IaC. `--target plan` da el plan neutral en JSON.
+    /// manifests -> IaC. `--target plan` gives the neutral plan in JSON.
     Infra {
         sources: Vec<String>,
         #[arg(long, default_value = "plan")]
         target: String,
-        /// entorno: aplica los overrides de `[env.<nombre>]`
+        /// environment: applies the `[env.<name>]` overrides
         #[arg(long, default_value = "local")]
         env: String,
     },
-    /// manifiestos -> mermaid: topologia de eventos
+    /// manifests -> mermaid: event topology
     Graph { sources: Vec<String> },
-    /// manifiestos -> mermaid: diagrama de clases
+    /// manifests -> mermaid: class diagram
     Classes { sources: Vec<String> },
-    /// maquinas de estado del dominio -> mermaid: stateDiagram
+    /// the domain's state machines -> mermaid: stateDiagram
     States { sources: Vec<String> },
     /// migraciones -> mermaid: entidad-relacion
     Er { sources: Vec<String> },
-    /// flujo causal de un evento -> mermaid: secuencia
+    /// an event's causal flow -> mermaid: sequence
     Seq {
         event: String,
         sources: Vec<String>,
-        /// Solo la cadena de eventos, comparable con `axon trace --seq`.
+        /// Only the event chain, comparable with `axon trace --seq`.
         #[arg(long)]
         events: bool,
     },
-    /// registro de servicios y metodos (directorio, archivo o URL)
+    /// registry of services and methods (directory, file or URL)
     Discover { sources: Vec<String> },
     /// drift entre manifiestos, migraciones e infraestructura
     Verify { sources: Vec<String> },
     /// AsyncAPI (2.x o 3.x, JSON o YAML) -> manifiesto axon
     Import {
-        /// formato de origen
+        /// source format
         #[arg(value_parser = ["asyncapi"])]
         formato: String,
-        /// archivo, o `-` para stdin
+        /// file, or `-` for stdin
         file: String,
-        /// nombre del servicio, si no hay que deducirlo de info.title
+        /// service name, unless it has to be inferred from info.title
         #[arg(long)]
         service: Option<String>,
     },
-    /// esquemas de bodega y vistas de embudo, derivados de los eventos
+    /// warehouse schemas and funnel views, derived from the events
     Analytics {
         sources: Vec<String>,
         #[arg(long, default_value = "bigquery",
               value_parser = ["bigquery", "snowflake", "clickhouse", "plan"])]
         target: String,
-        /// emite el cargador del target local en vez del esquema: lleva el log
-        /// de envelopes a la bodega. Solo ClickHouse por ahora.
+        /// emits the local target's loader instead of the schema: it carries the
+        /// envelope log into the warehouse. ClickHouse only for now.
         #[arg(long)]
-        cargar: Option<String>,
-        /// la base de la bodega, para el cargador y para la consulta
+        load: Option<String>,
+        /// the warehouse database, for the loader and for the introspection query
         #[arg(long, default_value = "axon")]
         dataset: String,
-        /// emite la consulta que vuelca el esquema REAL de la bodega. Su salida
-        /// vuelve por `--check`.
+        /// emits the query that dumps the warehouse's REAL schema. Its output
+        /// comes back through `--check`.
         #[arg(long)]
-        consulta: bool,
-        /// compara lo declarado contra el volcado de la bodega. Un campo nuevo
-        /// que la tabla no tiene se carga como nada, y nadie ve un error.
+        introspect: bool,
+        /// compares the declared against the warehouse dump. A new field the
+        /// table does not have loads as nothing, and nobody sees an error.
         #[arg(long)]
         check: Option<PathBuf>,
-        /// emite la config de Vector: el camino de ingesta para un cluster,
-        /// donde no hay bodega gestionada a la que suscribirse.
+        /// emits the Vector config: the ingest path for a cluster, where there
+        /// is no managed warehouse to subscribe to.
         #[arg(long)]
         vector: bool,
     },
-    /// reconcilia el lado CAP declarado con los patrones en uso
+    /// reconciles the declared CAP side with the patterns in use
     Cap {
         sources: Vec<String>,
-        /// limita el informe a estos servicios; el analisis igual mira a todos
+        /// limits the report to these services; the analysis still looks at all of them
         #[arg(long = "service", short = 's')]
         services: Vec<String>,
     },
-    /// configuracion de flagd derivada de los `[flags.*]` declarados
+    /// flagd config derived from the declared `[flags.*]`
     Flags { sources: Vec<String> },
-    /// prueba de carga derivada del manifiesto, y su veredicto
+    /// load test derived from the manifest, and its verdict
     Load {
         manifest: PathBuf,
-        /// resumen de k6 (`--summary-export`) para comparar lo medido con lo
-        /// declarado; sin esto emite el script
+        /// k6 summary (`--summary-export`) to compare the measured against the
+        /// declared; without it the script is emitted
         #[arg(long)]
         check: Option<PathBuf>,
     },
-    /// snapshot de los contratos publicados, para detectar cambios incompatibles
+    /// snapshot of the published contracts, to detect incompatible changes
     Baseline { sources: Vec<String> },
-    /// configuracion del pooler o sharder, derivada del manifiesto
+    /// pooler or sharder config, derived from the manifest
     Pooler {
         sources: Vec<String>,
-        /// `local` nombra los contenedores que levanta `axon infra --target
-        /// local`; el resto deja los hosts como variables de entorno.
+        /// `local` names the containers `axon infra --target local` brings up;
+        /// the rest leave the hosts as environment variables.
         #[arg(long, default_value = "plan", value_parser = ["plan", "local"])]
         target: String,
-        /// emite el `users.toml` en vez del `pgdog.toml`: pgdog los lee como
+        /// emits the `users.toml` instead of the `pgdog.toml`: pgdog reads them as
         /// dos archivos separados
         #[arg(long)]
         users: bool,
-        /// de que servicio. Cada uno lleva su propio pgdog.toml, asi que solo
-        /// se puede omitir si hay uno solo con pooler.
+        /// which service. Each one carries its own pgdog.toml, so it can only
+        /// be omitted when a single one declares a pooler.
         #[arg(long = "service", short = 's')]
         service: Option<String>,
     },
-    /// politicas de acceso a datos: RLS por fila y vistas enmascaradas
+    /// data access policies: per-row RLS and masked views
     Rls {
         sources: Vec<String>,
-        /// `sql` protege la consulta viva; `pg_anon` genera el diccionario para
-        /// hacer una copia enmascarada.
+        /// `sql` protects the live query; `pg_anon` generates the dictionary for
+        /// making a masked copy.
         #[arg(long, default_value = "sql", value_parser = ["sql", "pg_anon"])]
         target: String,
     },
-    /// manifiestos -> OpenAPI 3.1 (un catalogo para toda la plataforma)
+    /// manifests -> OpenAPI 3.1 (one catalogue for the whole platform)
     Openapi { sources: Vec<String> },
-    /// manifiesto -> andamiaje de pruebas (unitarias, integracion, e2e)
+    /// manifest -> test scaffolding (unit, integration, e2e)
     Test {
         manifest: PathBuf,
         sources: Vec<String>,
         #[arg(long, default_value = "ts")]
         lang: String,
-        /// Ruta del modulo que genero `axon build`.
+        /// Path of the module `axon build` generated.
         #[arg(long, default_value = "./contracts.ts")]
         contracts: String,
     },
-    /// log NDJSON de envelopes -> cadena causal real (para debug local)
+    /// NDJSON envelope log -> the real causal chain (for local debugging)
     Trace {
-        /// archivo, o `-` para stdin
+        /// file, or `-` for stdin
         #[arg(default_value = "-")]
         log: String,
-        /// solo un flujo de negocio
+        /// one business flow only
         #[arg(long)]
         correlation: Option<String>,
-        /// mermaid en vez de arbol, para diffear contra `axon seq`
+        /// mermaid instead of a tree, to diff against `axon seq`
         #[arg(long)]
         seq: bool,
     },
@@ -209,17 +209,17 @@ fn run() -> Result<ExitCode, String> {
             if lang == "ts" {
                 println!("{}", emit::build_ts(&m, &all)?);
             } else {
-                // un target nativo; el resto por plugin
+                // a native target; the rest through a plugin
                 let bin = format!("axon-gen-{lang}");
                 if !plugin::exists(&bin) {
                     return Err(format!(
-                        "`{bin}` no esta en el PATH. Un generador es cualquier ejecutable \
-                         que lea {{manifest, peers}} por stdin y escriba codigo por stdout."
+                        "`{bin}` is not on the PATH. A generator is any executable that \
+                         reads {{manifest, peers}} on stdin and writes code on stdout."
                     ));
                 }
-                // El plugin recibe lo mismo que el generador nativo: su
-                // manifiesto y el de los demas, porque el esquema de un evento
-                // consumido lo posee su emisor.
+                // The plugin receives the same as the native generator: its own
+                // manifest and the others', because the schema of a consumed
+                // event is owned by its emitter.
                 let entrada = serde_json::json!({ "manifest": m, "peers": all });
                 print!("{}", plugin::run(&bin, &entrada.to_string())?);
             }
@@ -284,11 +284,11 @@ fn run() -> Result<ExitCode, String> {
                 dir.parent().unwrap_or(std::path::Path::new("."))
             };
             let mut r = verify::verify(&ms, &verify::load_policy(root));
-            // los contratos publicados, si el repo los registra
+            // the published contracts, if the repo registers them
             if let Some(b) = baseline::cargar(root) {
-                let (errores, avisos) = baseline::comparar(&ms, &b);
-                r.errors.extend(errores);
-                r.warnings.extend(avisos);
+                let (errors, warnings) = baseline::comparar(&ms, &b);
+                r.errors.extend(errors);
+                r.warnings.extend(warnings);
             } else {
                 r.warnings.push(format!(
                     "no {}: `verify` cannot detect a breaking change in an already \
@@ -355,48 +355,48 @@ fn run() -> Result<ExitCode, String> {
         Cmd::Analytics {
             sources,
             target,
-            cargar,
+            load,
             dataset,
-            consulta,
+            introspect,
             check,
             vector,
         } => {
             let ms = manifest::discover(&sources)?;
-            if let Some(log) = cargar {
-                print!("{}", bi::cargador(&ms, &dataset, &log));
+            if let Some(log) = load {
+                print!("{}", bi::loader(&ms, &dataset, &log));
                 return Ok(ExitCode::SUCCESS);
             }
             if vector {
                 print!("{}", bi::vector(&ms, &dataset));
                 return Ok(ExitCode::SUCCESS);
             }
-            if consulta || check.is_some() {
-                let d = bi::dialecto(&target)
-                    .ok_or_else(|| format!("bodega `{target}` desconocida"))?;
-                if consulta {
-                    print!("{}", bi::consulta(&d, &dataset));
+            if introspect || check.is_some() {
+                let d = bi::dialect(&target)
+                    .ok_or_else(|| format!("unknown warehouse `{target}`"))?;
+                if introspect {
+                    print!("{}", bi::introspect(&d, &dataset));
                     return Ok(ExitCode::SUCCESS);
                 }
                 let ruta = check.unwrap();
                 let real = std::fs::read_to_string(&ruta)
                     .map_err(|e| format!("{}: {e}", ruta.display()))?;
-                let (errores, avisos) = bi::revisar(&ms, &d, &real);
-                for a in &avisos {
+                let (errors, warnings) = bi::review(&ms, &d, &real);
+                for a in &warnings {
                     eprintln!("{}", color::yellow(&format!("warn: {a}")));
                 }
-                for e in &errores {
+                for e in &errors {
                     eprintln!("{}", color::red(&format!("error: {e}")));
                 }
                 println!(
-                    "axon: la bodega tiene {} {} con el manifiesto",
-                    errores.len(),
-                    if errores.len() == 1 {
+                    "axon: the warehouse has {} {} against the manifest",
+                    errors.len(),
+                    if errors.len() == 1 {
                         "diferencia"
                     } else {
                         "diferencias"
                     }
                 );
-                return Ok(if errores.is_empty() {
+                return Ok(if errors.is_empty() {
                     ExitCode::SUCCESS
                 } else {
                     ExitCode::FAILURE
@@ -407,9 +407,9 @@ fn run() -> Result<ExitCode, String> {
                     "{}",
                     serde_json::to_string_pretty(&bi::build_plan(&ms)).map_err(|e| e.to_string())?
                 ),
-                otro => {
+                other => {
                     let d =
-                        bi::dialecto(otro).ok_or_else(|| format!("bodega `{otro}` desconocida"))?;
+                        bi::dialect(other).ok_or_else(|| format!("unknown warehouse `{other}`"))?;
                     print!("{}", bi::build(&ms, &d));
                 }
             }
@@ -430,15 +430,15 @@ fn run() -> Result<ExitCode, String> {
                 Some(f) => {
                     let json =
                         std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
-                    let (errores, avisos) = carga::revisar(&m, &json)?;
-                    for a in &avisos {
+                    let (errors, warnings) = carga::revisar(&m, &json)?;
+                    for a in &warnings {
                         println!("info: {a}");
                     }
-                    for e in &errores {
+                    for e in &errors {
                         eprintln!("error: {e}");
                     }
-                    println!("axon: {} umbrales incumplidos", errores.len());
-                    if !errores.is_empty() {
+                    println!("axon: {} umbrales incumplidos", errors.len());
+                    if !errors.is_empty() {
                         return Ok(ExitCode::FAILURE);
                     }
                 }
@@ -489,7 +489,7 @@ fn run() -> Result<ExitCode, String> {
             contracts,
         } => {
             if lang != "ts" {
-                return Err(format!("lang `{lang}` sin generador nativo"));
+                return Err(format!("lang `{lang}` has no native generator"));
             }
             let target = manifest::load(&manifest)?;
             let all = if sources.is_empty() {
@@ -524,13 +524,13 @@ fn run() -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Resalta lo que va entre acentos graves. Los mensajes ya se escriben con
-/// `` `asi` `` para nombrar campos y valores; esto lo aprovecha en vez de
-/// pedir un formato nuevo.
+/// Highlights whatever sits between backticks. The messages are already
+/// written with `` `this` `` to name fields and values; this takes advantage of
+/// that instead of asking for a new format.
 fn realzar(msg: &str) -> String {
-    // Sin color, el mensaje sale tal cual: quitar los acentos graves cambiaria
-    // el contenido, y un realce no debe cambiar lo que dice el texto. Lo
-    // descubri rompiendo nueve pruebas que verifican los mensajes.
+    // With no colour the message comes out as-is: stripping the backticks would
+    // change the content, and a highlight must not change what the text says. I
+    // found that out by breaking nine tests that check the messages.
     if !color::enabled() {
         return msg.to_string();
     }

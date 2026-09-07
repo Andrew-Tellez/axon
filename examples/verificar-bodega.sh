@@ -19,7 +19,7 @@ ch --multiquery < .axon/bodega.sql
 
 echo "  cargando el log de envelopes"
 # El log lo escribe el propio target local. La ruta es la que ve ClickHouse.
-"$AXON" analytics . --cargar local.ndjson --dataset axon > .axon/cargar.sql
+"$AXON" analytics . --load local.ndjson --dataset axon > .axon/cargar.sql
 ch --param_salt=demo-salt --multiquery < .axon/cargar.sql
 
 filas=$(ch -q "SELECT count(*) FROM axon.order_placed_v1")
@@ -74,7 +74,7 @@ fi
 # existe se queda como estaba: el campo se carga como nada y las consultas
 # siguen devolviendo numeros. Nadie ve un error.
 echo "  el esquema de la bodega contra el manifiesto"
-"$AXON" analytics . --target clickhouse --consulta | grep -v '^--' > .axon/esquema.sql
+"$AXON" analytics . --target clickhouse --introspect | grep -v '^--' > .axon/esquema.sql
 ch --multiquery < .axon/esquema.sql > .axon/esquema.tsv
 "$AXON" analytics . --target clickhouse --check .axon/esquema.tsv
 
