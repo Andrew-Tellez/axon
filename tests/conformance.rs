@@ -1679,8 +1679,17 @@ fn the_declared_policy_is_executed() {
         "a `reject` service does not degrade"
     );
 
-    // and the policy behaves: it is executed against the generated code
-    let dir = std::path::Path::new("examples/services/payments");
+    // And the policy behaves: it is executed against the generated code.
+    //
+    // In its own directory and NOT inside the example: `tsc` there includes
+    // `**/*.ts`, and a file that appears and disappears while it runs makes it
+    // fail with a TS6053 about a file nobody wrote. The tests run in parallel,
+    // so it only failed sometimes and only on one runner.
+    let dir = std::env::temp_dir().join("axon-politica");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("contracts.ts"), &ts).unwrap();
+    let dir = dir.as_path();
     let prueba = dir.join("axon.politica.test.ts");
     std::fs::write(
         &prueba,
