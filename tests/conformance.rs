@@ -2362,6 +2362,122 @@ fn the_colours_respect_the_destination() {
     assert!(!coloured.contains('\x1b'), "NO_COLOR was not honoured");
 }
 
+/// The book quotes axon's output, and nothing checked that quote. That is how it went
+/// stale: for a while the pages showed messages in Spanish that the tool had stopped
+/// printing, right next to manifest examples that CI does check. Both halves of a page
+/// have to be checkable, or the uncheckable half is the one that lies.
+///
+/// So every quoted message is looked for IN THE SOURCE that prints it: four consecutive
+/// words of the quote have to appear in some message of `src/`, compared with
+/// punctuation and case removed, because a message is wrapped in the source and wrapped
+/// differently in the book. A paraphrased quote —or one in a language the tool no longer
+/// speaks— has no window that matches.
+#[test]
+fn the_docs_quote_output_the_tool_really_prints() {
+    // the labels `axon` prints, and the ones it printed BEFORE the migration: quoting
+    // those is quoting a tool that no longer exists
+    const LABELS: [&str; 6] = ["error", "warn", "near", "fail", "info", "ok"];
+    const GONE: [&str; 4] = ["aviso", "falla", "cerca", "correcto"];
+
+    // punctuation and case out: the same message is wrapped one way in the source and
+    // another in the book, and it carries interpolated values in between
+    let plain = |t: &str| -> String {
+        let mut o = String::from(" ");
+        let mut space = true;
+        for c in t.chars() {
+            if c.is_ascii_alphabetic() {
+                o.push(c.to_ascii_lowercase());
+                space = false;
+            } else if !space {
+                o.push(' ');
+                space = true;
+            }
+        }
+        o
+    };
+
+    let mut corpus = String::new();
+    for entry in std::fs::read_dir("src").unwrap().flatten() {
+        if entry.path().extension().is_some_and(|e| e == "rs") {
+            corpus.push_str(&plain(&std::fs::read_to_string(entry.path()).unwrap()));
+        }
+    }
+
+    let mut quoted = 0;
+    for entry in std::fs::read_dir("docs/src").unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut inside = false;
+        // the message being accumulated: its line, and its text so far
+        let mut current: Option<(usize, String)> = None;
+        let check = |line: usize, msg: &str| {
+            let flat = plain(msg);
+            let words: Vec<&str> = flat.split_whitespace().collect();
+            // four words, or the whole message when it is shorter: the summary line
+            // —`4 services, 3 errors, 1 warnings`— is three words once the numbers go
+            let n = words.len().min(4);
+            assert!(n >= 2, "{name}:{line}: nothing to compare in `{msg}`");
+            let found = words
+                .windows(n)
+                .any(|w| corpus.contains(&format!(" {} ", w.join(" "))));
+            assert!(
+                found,
+                "{name}:{line}: this quoted message is in no message of `src/`. \
+                 Either axon stopped printing it or it was paraphrased:\n  {msg}"
+            );
+        };
+        for (n, line) in text.lines().enumerate() {
+            let n = n + 1;
+            if line.starts_with("```") {
+                if let Some((l, m)) = current.take() {
+                    check(l, &m);
+                    quoted += 1;
+                }
+                inside = line.starts_with("```console");
+                continue;
+            }
+            if !inside {
+                continue;
+            }
+            for gone in GONE {
+                assert!(
+                    !line.starts_with(&format!("{gone} ")),
+                    "{name}:{n}: quotes `{gone}`, a label axon does not print any more:\n  {line}"
+                );
+            }
+            if LABELS.iter().any(|l| line.starts_with(&format!("{l} "))) {
+                if let Some((l, m)) = current.take() {
+                    check(l, &m);
+                    quoted += 1;
+                }
+                current = Some((n, line.split_once(' ').unwrap().1.to_string()));
+            } else if line.starts_with("       ") && current.is_some() {
+                // a continuation line of the same message
+                let (l, mut m) = current.take().unwrap();
+                m.push(' ');
+                m.push_str(line.trim());
+                current = Some((l, m));
+            } else if let Some((l, m)) = current.take() {
+                check(l, &m);
+                quoted += 1;
+            }
+        }
+        if let Some((l, m)) = current {
+            check(l, &m);
+            quoted += 1;
+        }
+    }
+    assert!(
+        quoted >= 15,
+        "only {quoted} quoted messages were checked; the scan stopped seeing them"
+    );
+    eprintln!("{quoted} quoted messages checked against `src/`");
+}
+
 /// The documentation examples are not text: every ```toml block in
 /// `docs/src/` is run through `axon verify`. An example that does not validate
 /// breaks CI, so the documentation cannot go stale in silence —which is
