@@ -554,7 +554,11 @@ pub struct Bucket {
 /// engine that is not here has to fail and say how to proceed.
 pub const ENGINES: [&str; 1] = ["postgres"];
 
+// A key nobody reads is the silent failure this project exists to catch, and
+// TOML makes it easy: a top-level key written after a table belongs to that
+// table. `include = [...]` under `[infra]` parsed fine and did nothing.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Infra {
     pub state: Option<String>,
     pub runtime: Option<String>,
@@ -912,6 +916,24 @@ pub struct Manifest {
     /// how to ask for a version.
     #[serde(default)]
     pub api: Api,
+    /// Files this manifest is split into, relative to its own directory.
+    ///
+    /// A service grows and its manifest with it. The blocks of a feature —its
+    /// methods, its events, its machine— can live in their own file, and each
+    /// entry here is a file or a DIRECTORY, in which case every `*.toml` inside
+    /// it counts, sorted, so adding a feature is adding a file.
+    ///
+    /// What does NOT get split is the service's own: `[infra]`, `[cap]`,
+    /// `[analytics]`, `[api]`, `[patterns]`, `[pooler]` and `[env.*]` belong to
+    /// the service and not to one of its features, and a fragment declaring one
+    /// is refused instead of merged.
+    ///
+    /// It is not serialized: what a service serves and what the baseline
+    /// records is the MERGED manifest, and the layout of the source is not part
+    /// of the contract. Splitting a file has to be invisible from the outside
+    /// or it is not a split, it is a change.
+    #[serde(default, skip_serializing)]
+    pub include: Vec<String>,
     /// Pooler or sharder in front of the database. See `Pooler`.
     #[serde(default)]
     pub pooler: Pooler,
@@ -997,12 +1019,148 @@ pub fn for_env(m: &Manifest, env: &str) -> Manifest {
     out
 }
 
+/// A piece of a service's manifest: the blocks of one feature.
+///
+/// Only what belongs to a feature. The rest is the service's, and mixing the
+/// two is how a `[cap]` ends up declared twice with different answers.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Fragment {
+    pub pii: Vec<String>,
+    pub emits: IndexMap<String, Fields>,
+    pub consumes: IndexMap<String, Consume>,
+    pub methods: IndexMap<String, Method>,
+    pub depends: Vec<Depend>,
+    pub flags: IndexMap<String, Flag>,
+    pub machine: IndexMap<String, Machine>,
+    pub saga: IndexMap<String, Saga>,
+    pub aggregate: IndexMap<String, Aggregate>,
+    pub view: IndexMap<String, View>,
+    pub metrics: IndexMap<String, Metric>,
+}
+
+/// The blocks a fragment may carry. Anything else is the service's, and saying
+/// so by name beats a generic "unknown field".
+const FRAGMENT_BLOCKS: [&str; 11] = [
+    "pii",
+    "emits",
+    "consumes",
+    "methods",
+    "depends",
+    "flags",
+    "machine",
+    "saga",
+    "aggregate",
+    "view",
+    "metrics",
+];
+
+/// Merges one fragment. Every collision is an error naming both files: last one
+/// wins is exactly the drift this whole project exists to catch, and split
+/// across files nobody would see it.
+fn merge(m: &mut Manifest, f: Fragment, from: &Path) -> Result<(), String> {
+    let who = from.display();
+    macro_rules! tables {
+        ($($field:ident),*) => {$(
+            for (k, v) in f.$field {
+                if m.$field.contains_key(&k) {
+                    return Err(format!(
+                        "{who}: `{}` is already declared in {} or in another fragment. \
+                         Two declarations of the same thing, and whichever won would \
+                         depend on the order the files got read in",
+                        k,
+                        m.origin.display()
+                    ));
+                }
+                m.$field.insert(k, v);
+            }
+        )*};
+    }
+    tables!(emits, consumes, methods, flags, machine, saga, aggregate, view, metrics);
+    for d in f.depends {
+        if m.depends
+            .iter()
+            .any(|o| o.target() == d.target() && o.method == d.method)
+        {
+            return Err(format!(
+                "{who}: it already depends on `{}.{}`. Declared twice, the generated client \
+                 would carry the same method with two policies",
+                d.target(),
+                d.method
+            ));
+        }
+        m.depends.push(d);
+    }
+    for p in f.pii {
+        if !m.pii.contains(&p) {
+            m.pii.push(p);
+        }
+    }
+    Ok(())
+}
+
+/// Resolves `include` into the files to read: an entry is a file or a
+/// directory, and a directory is every `*.toml` inside it, sorted.
+fn included(m: &Manifest) -> Result<Vec<PathBuf>, String> {
+    let base = m.origin.parent().unwrap_or(Path::new("."));
+    let mut out = Vec::new();
+    for entry in &m.include {
+        let path = base.join(entry);
+        if path.is_dir() {
+            let mut files: Vec<PathBuf> = std::fs::read_dir(&path)
+                .map_err(|e| format!("{}: {e}", path.display()))?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+                .collect();
+            files.sort();
+            if files.is_empty() {
+                return Err(format!(
+                    "{}: `include = \"{entry}\"` is a directory with no *.toml; an include \
+                     that brings nothing hides the file somebody thought they had split out",
+                    m.origin.display()
+                ));
+            }
+            out.extend(files);
+        } else if path.is_file() {
+            out.push(path);
+        } else {
+            return Err(format!(
+                "{}: `include = \"{entry}\"` does not exist",
+                m.origin.display()
+            ));
+        }
+    }
+    Ok(out)
+}
+
 pub fn load(path: &Path) -> Result<Manifest, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut m: Manifest = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     // serde cannot tell "absent" from "equal to the default"; the text can
     m.cap.declared = text.contains("[cap]");
     m.origin = path.to_path_buf();
+    for file in included(&m)? {
+        let piece =
+            std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        // The keys get checked before deserializing so the error can say WHY:
+        // `[infra]` in a fragment is not an unknown field, it is a block that
+        // belongs to the service.
+        let table: toml::Table =
+            toml::from_str(&piece).map_err(|e| format!("{}: {e}", file.display()))?;
+        for key in table.keys() {
+            if !FRAGMENT_BLOCKS.contains(&key.as_str()) {
+                return Err(format!(
+                    "{}: `{key}` belongs to the service, not to one of its features, so it \
+                     goes in {}. A fragment carries: {}",
+                    file.display(),
+                    path.display(),
+                    FRAGMENT_BLOCKS.join(", ")
+                ));
+            }
+        }
+        let f: Fragment = toml::from_str(&piece).map_err(|e| format!("{}: {e}", file.display()))?;
+        merge(&mut m, f, &file)?;
+    }
     Ok(m)
 }
 

@@ -1,0 +1,68 @@
+# La feature de cobro: lo que hace, lo que emite y su maquina.
+#
+# Es un fragmento, no un manifiesto: no lleva `service`, y tampoco `[infra]`,
+# `[cap]` ni `[analytics]`, que son del servicio y no de una de sus features.
+# `axon verify` rechaza el fragmento que los declare en vez de fusionarlos.
+[emits."payment.captured@v1"]
+paymentId = "uuid"
+orderId = "uuid"
+amount = "money"
+
+# Lo que este servicio LEE del evento, declarado. No es documentacion: el
+# handler generado recibe `Pick<OrderPlacedV1, ...>`, asi que leer un campo que
+# no se declaro no compila, y la declaracion no puede mentir. Es lo que Pact
+# consigue grabando el uso, sin grabar nada.
+[consumes."order.placed@v1"]
+handler = "onOrderPlaced"
+uses = ["orderId", "total"]
+
+[methods.capturePayment]
+http = "POST /v1/payments"
+auth = "required"
+timeout_ms = 8000
+idempotent = true
+in = { orderId = "uuid", amount = "money" }
+out = { paymentId = "uuid" }
+# How it fails, declared like `in` and `out`. A declined card and an issuer that
+# is down are not the same failure —one will never work, the other one will— and
+# without saying so both arrive at the caller as a 500 it has to guess about.
+errors = [
+  { code = "card_declined", status = 402, detail = "the issuer declined the charge" },
+  { code = "issuer_unavailable", status = 503, retriable = true, detail = "the issuer is not answering" },
+]
+
+[methods.refundPayment]
+http = "POST /v1/payments/{paymentId}/refunds"
+auth = "required"
+timeout_ms = 8000
+idempotent = true
+in = { paymentId = "uuid" }
+out = { paymentId = "uuid", status = "string" }
+# The compensation's failure is retriable on purpose: there is nothing behind
+# it, and the saga's three declared retries are what keep it from getting stuck.
+errors = [
+  { code = "refund_rejected", status = 503, retriable = true, detail = "the refund did not go through" },
+]
+
+# The only business logic worth declaring: the same in every language.
+[machine.payment]
+initial = "pending"
+final = ["refunded", "failed"]
+
+[machine.payment.transitions.capture]
+from = ["pending"]
+to = "captured"
+on = "capturePayment"
+emits = "payment.captured@v1"
+
+[machine.payment.transitions.fail]
+from = ["pending"]
+to = "failed"
+on = "capturePayment"
+
+[machine.payment.transitions.refund]
+from = ["captured"]
+to = "refunded"
+on = "refundPayment"
+compensates = "capture"
+

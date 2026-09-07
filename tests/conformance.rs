@@ -48,7 +48,9 @@ fn tuned(warehouse: &str) -> String {
     for e in std::fs::read_dir("examples").unwrap().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if e.path().is_dir() {
-            if name == "sql" || name == "sql-policies" {
+            // `payments/` holds the fragments payments.toml is split into: a
+            // copy without them is a manifest with half its methods
+            if name == "sql" || name == "sql-policies" || name == "payments" {
                 copy_tree(&e.path(), &dir.join(&name));
             }
             continue;
@@ -1489,6 +1491,12 @@ fn a_published_version_is_immutable() {
                 .join("\n");
             std::fs::write(dir.join(f), t).unwrap();
         }
+        // payments.toml is split by feature: without its fragments the copy is
+        // a manifest with half its methods
+        copy_tree(
+            std::path::Path::new("examples/payments"),
+            &dir.join("payments"),
+        );
         let (b, err, ok) = axon(&["baseline", dir.to_str().unwrap()]);
         assert!(ok, "{err}");
         std::fs::write(dir.join("axon.baseline.json"), b).unwrap();
@@ -1588,7 +1596,13 @@ fn a_published_version_is_immutable() {
             "on     = [\"order.placed@v1\"]",
             "on     = [\"order.placed@v2\"]",
         ),
-        ("payments.toml", "order.placed@v1", "order.placed@v2"),
+        // payments consumes it from its charging fragment, which is where the
+        // block lives now that the manifest is split by feature
+        (
+            "payments/charging.toml",
+            "order.placed@v1",
+            "order.placed@v2",
+        ),
     ] {
         let p = dir.join(f);
         let t = std::fs::read_to_string(&p).unwrap();
@@ -5793,4 +5807,105 @@ fn reading_an_undeclared_field_does_not_compile() {
     );
     // and the declared one is not what broke it
     assert!(!printed.contains("orderId"), "{printed}");
+}
+
+/// A manifest split by feature. What matters is the invariant: splitting the
+/// file changes nothing that comes out of it, and every collision is refused
+/// instead of merged — across files, last-one-wins is drift nobody would see.
+#[test]
+fn a_split_manifest_is_the_same_manifest() {
+    let dir = std::env::temp_dir().join("axon-include");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("shop")).unwrap();
+
+    // the header ends with a table on purpose: a top-level key written after
+    // one belongs to it, and `include` under `[infra]` used to parse fine and
+    // do nothing
+    let head = "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n";
+    let infra = "\n[infra]\nstate = \"postgres\"\n";
+    let charging = "[emits.\"order.placed@v1\"]\norderId = \"uuid\"\ntotal = \"money\"\n\n\
+                    [methods.placeOrder]\nhttp = \"POST /v1/orders\"\nauth = \"required\"\n\
+                    idempotent = true\nin = { total = \"money\" }\nout = { orderId = \"uuid\" }\n";
+    let reading = "[methods.getOrder]\nhttp = \"GET /v1/orders/{orderId}\"\nauth = \"required\"\n\
+                   in = { orderId = \"uuid\" }\nout = { orderId = \"uuid\" }\n";
+
+    // one file
+    std::fs::write(
+        dir.join("whole.toml"),
+        format!("{head}{infra}\n{charging}\n{reading}"),
+    )
+    .unwrap();
+    let (whole, err, ok) = axon(&[
+        "build",
+        dir.join("whole.toml").to_str().unwrap(),
+        dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "{err}");
+
+    // the same thing, split by feature
+    std::fs::remove_file(dir.join("whole.toml")).unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        format!("{head}include = [\"shop\"]\n{infra}"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("shop/1-charging.toml"), charging).unwrap();
+    std::fs::write(dir.join("shop/2-reading.toml"), reading).unwrap();
+    let (split, err, ok) = axon(&[
+        "build",
+        dir.join("shop.toml").to_str().unwrap(),
+        dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "{err}");
+    // `include` is not serialized: what gets served and what the baseline
+    // records is the merged manifest, so the split is invisible from outside
+    assert_eq!(
+        whole.replace("whole.toml", "shop.toml"),
+        split,
+        "splitting the manifest changed what comes out of it"
+    );
+
+    // the same thing declared twice, in two files
+    std::fs::write(dir.join("shop/3-again.toml"), reading).unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "two declarations of the same method passed clean");
+    assert!(err.contains("3-again.toml"), "{err}");
+    assert!(err.contains("`getOrder` is already declared"), "{err}");
+    assert!(
+        err.contains("depend on the order the files got read in"),
+        "{err}"
+    );
+    std::fs::remove_file(dir.join("shop/3-again.toml")).unwrap();
+
+    // a block that belongs to the service, in a fragment
+    std::fs::write(
+        dir.join("shop/3-infra.toml"),
+        "[cap]\nconsistency = \"strong\"\n",
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "a fragment with `[cap]` passed clean");
+    assert!(err.contains("`cap` belongs to the service"), "{err}");
+    assert!(err.contains("A fragment carries:"), "{err}");
+    std::fs::remove_file(dir.join("shop/3-infra.toml")).unwrap();
+
+    // an include that brings nothing, and one that does not exist
+    std::fs::write(
+        dir.join("shop.toml"),
+        format!("{head}include = [\"nowhere\"]\n{infra}"),
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("does not exist"), "{err}");
+    let empty = dir.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        format!("{head}include = [\"empty\"]\n"),
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("directory with no *.toml"), "{err}");
 }

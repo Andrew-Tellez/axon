@@ -122,6 +122,44 @@ The demo measures it: the same route and the same policy, and the final failure 
 **once** while the retriable one arrives `1 + retries` times. See
 [The demo, measured](./demo.md).
 
+## `include`: one service, split by feature
+
+A service grows and its manifest with it. The blocks of a feature can live in their own
+file:
+
+```toml
+service = "payments"
+owner   = "payments-team"
+tier    = "0"
+include = ["payments"]        # a file, or a directory: every *.toml inside, sorted
+
+[infra]
+state = "postgres"
+```
+
+```toml
+# payments/payouts.toml — a fragment, not a manifest: it carries no `service`
+[methods.payoutMerchant]
+http = "POST /v1/payouts"
+auth = "required"
+idempotent = true
+in  = { paymentId = "uuid", amount = "money" }
+out = { payoutId = "uuid" }
+```
+
+A fragment carries only what belongs to a **feature**: `emits`, `consumes`, `methods`,
+`depends`, `machine`, `saga`, `aggregate`, `view`, `metrics`, `flags`, `pii`. What belongs
+to the **service** — `[infra]`, `[cap]`, `[analytics]`, `[api]`, `[patterns]`, `[pooler]`,
+`[env.*]` — stays in the manifest, and a fragment that declares one is refused by name
+rather than merged: two `[cap]` blocks with different answers is not a split, it is a
+contradiction.
+
+Two rules hold the merge up. **Every collision is an error** naming both files — across
+files, last-one-wins is drift nobody would ever see. And **the split is invisible**:
+`include` is not serialized, so what the service serves at `/.well-known/axon.json` and
+what the baseline records is the merged manifest. A test splits a manifest in two and
+checks that what comes out of `axon build` is byte for byte the same.
+
 ## `uses`: what each consumer really reads
 
 ```toml

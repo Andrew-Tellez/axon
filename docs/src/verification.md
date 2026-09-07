@@ -42,6 +42,16 @@ has to be fixed cannot end up underneath.
 | A public route with no `rate_limit` or no `timeout_ms` | error |
 | A paginated method that does not return a `cursor` | error |
 
+## A split manifest
+
+| | |
+| --- | --- |
+| The same method, event, machine or flag declared in two files | error, naming both |
+| The same dependency declared in two files | error |
+| A fragment carrying `[infra]`, `[cap]`, `[api]`… | error, saying where it goes |
+| An `include` that does not exist, or a directory with no `*.toml` | error |
+| An unknown key under `[infra]` | error — a top-level key written after a table belongs to it |
+
 ## Declared consumption
 
 | | |
