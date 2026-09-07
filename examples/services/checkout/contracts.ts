@@ -156,7 +156,10 @@ export const manifest = {
       "via": null,
       "timeout_ms": 8000,
       "retries": 0,
-      "breaker": true
+      "breaker": true,
+      "uses": [
+        "paymentId"
+      ]
     },
     {
       "service": "payments",
@@ -165,7 +168,8 @@ export const manifest = {
       "via": null,
       "timeout_ms": 8000,
       "retries": 3,
-      "breaker": true
+      "breaker": true,
+      "uses": []
     },
     {
       "service": "payments",
@@ -174,7 +178,8 @@ export const manifest = {
       "via": null,
       "timeout_ms": 4000,
       "retries": 2,
-      "breaker": true
+      "breaker": true,
+      "uses": []
     }
   ],
   "patterns": {
@@ -1093,6 +1098,7 @@ export interface PaymentsCapturePaymentIn {
   amount: { amount: number; currency: string };
 }
 
+/** payments.capturePayment returns 1 fields; checkout declared it reads paymentId. */
 export interface PaymentsCapturePaymentOut {
   paymentId: string;
 }
@@ -1101,9 +1107,8 @@ export interface PaymentsRefundPaymentIn {
   paymentId: string;
 }
 
+/** payments.refundPayment returns 2 fields; checkout declared it reads none. */
 export interface PaymentsRefundPaymentOut {
-  paymentId: string;
-  status: string;
 }
 
 export interface PaymentsPayoutMerchantIn {
@@ -1111,8 +1116,8 @@ export interface PaymentsPayoutMerchantIn {
   amount: { amount: number; currency: string };
 }
 
+/** payments.payoutMerchant returns 1 fields; checkout declared it reads none. */
 export interface PaymentsPayoutMerchantOut {
-  payoutId: string;
 }
 
 

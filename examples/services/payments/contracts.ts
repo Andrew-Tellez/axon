@@ -77,11 +77,9 @@ export interface PaymentCapturedV1 {
   amount: { amount: number; currency: string };
 }
 
-// order.placed@v1: schema declared by orders, its owner
+// order.placed@v1: orders declares 4 fields; this service declared it reads orderId, total
 export interface OrderPlacedV1 {
   orderId: string;
-  customerId: string;
-  customerEmail: string;
   total: { amount: number; currency: string };
 }
 
@@ -128,7 +126,11 @@ export const manifest = {
   },
   "consumes": {
     "order.placed@v1": {
-      "handler": "onOrderPlaced"
+      "handler": "onOrderPlaced",
+      "uses": [
+        "orderId",
+        "total"
+      ]
     }
   },
   "methods": {
@@ -234,7 +236,8 @@ export const manifest = {
       "via": "onOrderPlaced",
       "timeout_ms": 1000,
       "retries": 3,
-      "breaker": true
+      "breaker": true,
+      "uses": null
     },
     {
       "service": null,
@@ -243,7 +246,8 @@ export const manifest = {
       "via": null,
       "timeout_ms": 8000,
       "retries": 0,
-      "breaker": true
+      "breaker": true,
+      "uses": null
     }
   ],
   "patterns": {
@@ -456,6 +460,7 @@ export abstract class PaymentsService {
     return this.outbox.stage(newEnvelope("payment.captured@v1", "payments", data, cause), tx);
   }
   /** consume order.placed@v1 */
+  /** Declared as read: orderId, total. The type above carries only that, so a field nobody declared does not compile. */
   abstract onOrderPlaced(e: Envelope<OrderPlacedV1>): Promise<void>;
   abstract capturePayment(input: CapturePaymentIn, e: Envelope<unknown>): Promise<CapturePaymentOut>;
   abstract refundPayment(input: RefundPaymentIn, e: Envelope<unknown>): Promise<RefundPaymentOut>;

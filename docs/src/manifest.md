@@ -122,6 +122,49 @@ The demo measures it: the same route and the same policy, and the final failure 
 **once** while the retriable one arrives `1 + retries` times. See
 [The demo, measured](./demo.md).
 
+## `uses`: what each consumer really reads
+
+```toml
+service = "payments"
+owner   = "payments-team"
+tier    = "1"
+
+[consumes."order.placed@v1"]
+handler = "onOrderPlaced"
+uses    = ["orderId", "total"]     # of the four fields the owner declares
+
+[[depends]]
+service = "orders"
+method  = "getOrder"
+uses    = ["orderId", "status"]
+
+[[depends]]
+service = "payments"
+method  = "refundPayment"
+uses    = []                       # a declaration too: it reads nothing
+```
+
+This is the question a producer cannot answer on its own, and the reason a contract ends
+up frozen: *somebody might be using it*. Declared, it has an answer.
+
+And it cannot drift, which is what separates it from a pact recorded once: **the fields
+nobody declared do not exist on this side**. The consumer's type of somebody else's event
+is what it declared it reads, and the client's answer type likewise — a pact goes stale
+the day somebody reads one more field, this does not compile. Absent means undeclared and
+nothing is concluded; an empty list is the honest answer of a handler that only reacts.
+
+What it buys:
+
+| | |
+| --- | --- |
+| `verify` | using a field the provider does not return is an error — either it was renamed and the caller reads `undefined`, or the declaration is wrong |
+| `verify` | a field **nobody** reads is a warning that says it can be removed. Only when every consumer declared: with one that declared nothing there is no answer, and saying "delete it" without one is how a field somebody was reading gets deleted. An exported event is exempt — the warehouse reads every field |
+| `axon baseline` | removing a published field names **who** reads it, and when nobody does it drops to a warning: it is not a breaking change |
+| The testkit | `FakeTransport` answers each dependency with a fixture of ITS contract, cut to what was declared. A hand-written mock can answer a field the other side does not return, and the test passes right up to production |
+
+Same value Pact gets from recording traffic, without recording anything, and it fails in
+the PR instead of after the deploy.
+
 ## `[api]`: how the API is versioned
 
 Two schemes, and `verify` requires the whole platform to declare the same one — with

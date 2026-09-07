@@ -16,6 +16,8 @@ import {
   type Inbox,
   PaymentsService,
   type Outbox,
+  Clients,
+  type Transport,
   AxonProblem,
   declaredErrors,
   fail,
@@ -53,12 +55,62 @@ export class FakeOutbox implements Outbox<unknown> {
   }
 }
 
+/** What each declared dependency answers by default: a fixture of ITS
+ *  contract, cut down to what this service declared it reads. */
+export const declaredAnswers: Record<string, unknown> = {
+  "orders.getOrder": { orderId: "00000000-0000-4000-8000-000000000000", status: "status", total: { amount: 100, currency: "MXN" } },
+  "stripe.charges.create": { id: "id", status: "status" },
+};
+
+/** A transport that answers the contract and records what was asked of it.
+ *
+ *  `on` replaces one answer and `failWith` makes it fail, which is how the
+ *  declared policy gets exercised without a network: a retriable failure has
+ *  to arrive 1 + retries times and a final one exactly once. */
+export class FakeTransport implements Transport {
+  readonly calls: { target: string; method: string; body: unknown }[] = [];
+  readonly #answers = new Map<string, (body: unknown) => unknown>();
+  readonly #failures = new Map<string, unknown>();
+
+  on(target: string, method: string, fn: (body: unknown) => unknown) {
+    this.#answers.set(`${target}.${method}`, fn);
+    return this;
+  }
+
+  failWith(target: string, method: string, err: unknown) {
+    this.#failures.set(`${target}.${method}`, err);
+    return this;
+  }
+
+  /** How many times one method was really called. */
+  timesCalled(target: string, method: string) {
+    return this.calls.filter((c) => c.target === target && c.method === method).length;
+  }
+
+  async call(target: string, method: string, body: unknown, _h: Record<string, string>) {
+    this.calls.push({ target, method, body });
+    const key = `${target}.${method}`;
+    const failure = this.#failures.get(key);
+    if (failure) throw failure;
+    const custom = this.#answers.get(key);
+    if (custom) return custom(body);
+    const declared = declaredAnswers[key];
+    if (declared === undefined) {
+      throw new Error(`${key} is not a declared dependency of payments`);
+    }
+    return declared;
+  }
+}
+
+/** The generated clients over the double: the declared timeout, retries and
+ *  breaker all running, with no network. */
+export const fakeClients = (t: FakeTransport = new FakeTransport()) =>
+  [new Clients(t), t] as const;
+
 // Fixtures derived from the schema declared by each event's OWNER, not
 // from what the consumer believes it receives: that is where drift shows up.
 export const fixtureOrderPlacedV1: OrderPlacedV1 = {
   orderId: "00000000-0000-4000-8000-000000000000",
-  customerId: "00000000-0000-4000-8000-000000000000",
-  customerEmail: "customerEmail",
   total: { amount: 100, currency: "MXN" },
 };
 

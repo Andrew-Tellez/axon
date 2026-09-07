@@ -5575,3 +5575,222 @@ fn the_version_cycle_rules_block() {
     assert!(err.contains("declare different `[api]`"), "{err}");
     assert!(err.contains("one decision for the whole platform"), "{err}");
 }
+
+/// Declared consumption: which fields each consumer really reads.
+#[test]
+fn the_declared_consumption_rules_block() {
+    let dir = std::env::temp_dir().join("axon-uses");
+    let write = |shop_extra: &str, front: &str| {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("shop.toml"),
+            format!(
+                "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+                 [analytics]\nexport = false\n\n\
+                 [emits.\"order.placed@v1\"]\norderId = \"uuid\"\ntotal = \"money\"\n\n\
+                 [methods.getOrder]\nhttp = \"GET /v1/orders/{{orderId}}\"\nauth = \"required\"\n\
+                 in = {{ orderId = \"uuid\" }}\nout = {{ orderId = \"uuid\", status = \"string\" }}\n\
+                 {shop_extra}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("front.toml"),
+            format!(
+                "service = \"front\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n{front}"
+            ),
+        )
+        .unwrap();
+    };
+
+    // a field the provider does not return: either it was renamed and the
+    // caller is reading `undefined`, or the declaration is wrong
+    write(
+        "",
+        "[[depends]]\nservice = \"shop\"\nmethod = \"getOrder\"\ntimeout_ms = 1000\n\
+         uses = [\"orderId\", \"customer\"]\n",
+    );
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "{err}");
+    assert!(err.contains("uses `shop.getOrder.customer`"), "{err}");
+    assert!(err.contains("which shop does not return"), "{err}");
+
+    // the same for an event
+    write(
+        "",
+        "[consumes.\"order.placed@v1\"]\nhandler = \"onPlaced\"\nuses = [\"orderId\", \"tax\"]\n",
+    );
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "{err}");
+    assert!(err.contains("uses `order.placed@v1.tax`"), "{err}");
+
+    // and the answer nobody has today: a field NOBODY reads. It only comes out
+    // when every consumer declared what it uses — with one that declared
+    // nothing there is no answer, and saying "delete it" without one is how a
+    // field somebody was reading gets deleted.
+    write(
+        "",
+        "[consumes.\"order.placed@v1\"]\nhandler = \"onPlaced\"\nuses = [\"orderId\"]\n\n\
+         [[depends]]\nservice = \"shop\"\nmethod = \"getOrder\"\ntimeout_ms = 1000\n\
+         uses = [\"orderId\"]\n",
+    );
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("order.placed@v1.total is read by nobody"),
+        "{out}"
+    );
+    assert!(
+        out.contains("shop.getOrder returns `status` and no caller reads it"),
+        "{out}"
+    );
+
+    // with one consumer that declared nothing, it stays quiet
+    write(
+        "",
+        "[consumes.\"order.placed@v1\"]\nhandler = \"onPlaced\"\n\n\
+         [[depends]]\nservice = \"shop\"\nmethod = \"getOrder\"\ntimeout_ms = 1000\n",
+    );
+    let (out, _, _) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(
+        !out.contains("read by nobody"),
+        "it claimed nobody reads it without an answer:\n{out}"
+    );
+}
+
+/// The double of the dependencies, and the declared policy exercised with no
+/// network. It is the same claim the demo measures against containers — a
+/// retriable failure arrives 1 + retries times and a final one exactly once —
+/// provable here in a unit test.
+#[test]
+fn the_generated_double_runs_the_declared_policy() {
+    if !has("node") {
+        eprintln!("salteado: node no esta instalado");
+        return;
+    }
+    let dir = std::env::temp_dir().join("axon-double");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (ts, err, ok) = axon(&["build", "examples/checkout.toml", "examples"]);
+    assert!(ok, "{err}");
+    std::fs::write(dir.join("contracts.ts"), ts).unwrap();
+    let (kit, err, ok) = axon(&["test", "examples/checkout.toml", "examples"]);
+    assert!(ok, "{err}");
+    std::fs::write(dir.join("axon.testkit.ts"), kit).unwrap();
+    std::fs::write(
+        dir.join("double.test.ts"),
+        r#"import { test } from "node:test";
+import assert from "node:assert/strict";
+import { fakeClients } from "./axon.testkit.ts";
+import { AxonProblem, newEnvelope } from "./contracts.ts";
+
+const e = newEnvelope("test", "test", {});
+const input = { paymentId: "p1", amount: { amount: 10, currency: "MXN" } };
+
+test("the double answers the contract, with no network", async () => {
+  const [clients, t] = fakeClients();
+  const out = await clients.paymentsCapturePayment({ orderId: "o1", amount: input.amount }, e);
+  assert.equal(typeof out.paymentId, "string");
+  assert.equal(t.timesCalled("payments", "capturePayment"), 1);
+});
+
+test("a retriable failure spends the whole declared budget", async () => {
+  const [clients, t] = fakeClients();
+  t.failWith("payments", "payoutMerchant", new AxonProblem(503, "rail_busy"));
+  await assert.rejects(() => clients.paymentsPayoutMerchant(input, e));
+  // 2 declared retries: 1 + 2
+  assert.equal(t.timesCalled("payments", "payoutMerchant"), 3);
+});
+
+test("a final failure arrives exactly once", async () => {
+  const [clients, t] = fakeClients();
+  t.failWith("payments", "payoutMerchant", new AxonProblem(409, "merchant_ceiling"));
+  await assert.rejects(() => clients.paymentsPayoutMerchant(input, e));
+  assert.equal(t.timesCalled("payments", "payoutMerchant"), 1);
+});
+
+test("what it was asked is what the caller sent", async () => {
+  const [clients, t] = fakeClients();
+  await clients.paymentsPayoutMerchant(input, e);
+  assert.deepEqual(t.calls[0], { target: "payments", method: "payoutMerchant", body: input });
+});
+"#,
+    )
+    .unwrap();
+    let out = Command::new("node")
+        .args(["--test", "double.test.ts"])
+        .current_dir(&dir)
+        .output()
+        .expect("node --test");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "the double does not run:\n{printed}");
+    assert!(
+        printed.contains("spends the whole declared budget"),
+        "{printed}"
+    );
+    assert!(printed.contains("fail 0"), "{printed}");
+}
+
+/// And the part that keeps `uses` from lying: the field nobody declared does
+/// not exist on this side, so reading it does not compile. A Pact recorded once
+/// goes stale the day somebody reads one more field; this cannot.
+#[test]
+fn reading_an_undeclared_field_does_not_compile() {
+    if !has("node") {
+        eprintln!("salteado: node no esta instalado");
+        return;
+    }
+    let dir = std::env::temp_dir().join("axon-undeclared");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (ts, err, ok) = axon(&["build", "examples/payments.toml", "examples"]);
+    assert!(ok, "{err}");
+    std::fs::write(dir.join("contracts.ts"), ts).unwrap();
+    // `orders` declares customerEmail on the event; payments declared it reads
+    // orderId and total
+    std::fs::write(
+        dir.join("read.ts"),
+        "import { type OrderPlacedV1 } from \"./contracts.ts\";\n\
+         export const declared = (d: OrderPlacedV1) => d.orderId;\n\
+         export const undeclared = (d: OrderPlacedV1) => d.customerEmail;\n",
+    )
+    .unwrap();
+    let out = Command::new("npx")
+        .args([
+            "-y",
+            "-p",
+            "typescript@5",
+            "tsc",
+            "--noEmit",
+            "--strict",
+            "--target",
+            "es2022",
+            "--lib",
+            "es2022,dom",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+            "--allowImportingTsExtensions",
+            "read.ts",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("npx");
+    let printed = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        !out.status.success(),
+        "reading a field nobody declared compiled:\n{printed}"
+    );
+    assert!(
+        printed.contains("customerEmail") && printed.contains("does not exist"),
+        "{printed}"
+    );
+    // and the declared one is not what broke it
+    assert!(!printed.contains("orderId"), "{printed}");
+}

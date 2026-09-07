@@ -214,7 +214,8 @@ export const manifest = {
       "via": null,
       "timeout_ms": 3000,
       "retries": 2,
-      "breaker": true
+      "breaker": true,
+      "uses": null
     }
   ],
   "patterns": {

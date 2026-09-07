@@ -9,8 +9,13 @@ paymentId = "uuid"
 orderId = "uuid"
 amount = "money"
 
+# Lo que este servicio LEE del evento, declarado. No es documentacion: el
+# handler generado recibe `Pick<OrderPlacedV1, ...>`, asi que leer un campo que
+# no se declaro no compila, y la declaracion no puede mentir. Es lo que Pact
+# consigue grabando el uso, sin grabar nada.
 [consumes."order.placed@v1"]
 handler = "onOrderPlaced"
+uses = ["orderId", "total"]
 
 [methods.capturePayment]
 http = "POST /v1/payments"

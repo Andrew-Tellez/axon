@@ -51,6 +51,19 @@ handler, and that with `outbox` declared nothing is published straight to the bu
 `machineTests` does not need your code: it walks the transition table and verifies that
 each transition is legal from its sources and illegal from any other state.
 
+`FakeTransport` doubles the declared dependencies: it answers each one with a fixture of
+**its** contract —cut down to what this service declared it `uses`— records what was
+asked of it, and lets a test make one fail. That is how the declared policy gets
+exercised with no network: a retriable failure has to arrive `1 + retries` times and a
+final one exactly once.
+
+```ts
+const [clients, t] = fakeClients();
+t.failWith("payments", "payoutMerchant", new AxonProblem(409, "merchant_ceiling"));
+await assert.rejects(() => clients.paymentsPayoutMerchant(input, e));
+assert.equal(t.timesCalled("payments", "payoutMerchant"), 1);   // final: it is not retried
+```
+
 `errorTests` needs none of it either, and it exists because the ends of a declared failure
 are generated separately: `fail()` and the table on the callee's side, the `problem+json`
 body on the wire, and the retriable list on the caller's client. It checks that they say

@@ -8,6 +8,18 @@ pub type Fields = IndexMap<String, String>;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Consume {
     pub handler: String,
+    /// The fields of the event this service actually READS.
+    ///
+    /// Absent means nobody declared it and nothing can be concluded. An EMPTY
+    /// list is a declaration too: it reads none of them, which is the honest
+    /// answer for a handler that only reacts.
+    ///
+    /// Declaring it is what turns "somebody might be using this" into a
+    /// question with an answer. It is not documentation either: the generated
+    /// handler receives `Pick<Event, ...>`, so reading a field that was not
+    /// declared does not compile, and the declaration cannot drift from the
+    /// code the way a Pact recorded once does.
+    pub uses: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -143,6 +155,12 @@ pub struct Depend {
     /// Cuts the cascade when the other side goes down.
     #[serde(default)]
     pub breaker: bool,
+    /// The fields of the answer this service actually READS. The generated
+    /// client returns `Pick<..., uses>`: what is not declared does not compile.
+    ///
+    /// Absent means undeclared; empty means it reads none of them, which is
+    /// what a compensation whose answer nobody looks at really does.
+    pub uses: Option<Vec<String>>,
 }
 
 impl Depend {

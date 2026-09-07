@@ -81,6 +81,8 @@ service = "payments"
 method = "capturePayment"
 timeout_ms = 8000
 breaker = true
+# La saga guarda el paymentId para compensar con el: es lo unico que lee.
+uses = ["paymentId"]
 
 [[depends]]
 service = "payments"
@@ -90,10 +92,15 @@ method = "refundPayment"
 timeout_ms = 8000
 retries = 3
 breaker = true
+# Una lista vacia tambien es una declaracion: de la respuesta no lee nada, que
+# es la verdad de una compensacion. Sin esto, `paymentId` y `status` figuran
+# como leidos por alguien y nadie puede tocarlos.
+uses = []
 
 [[depends]]
 service = "payments"
 method = "payoutMerchant"
+uses = []
 timeout_ms = 4000
 # Idempotent, so retrying is legal: `axon verify` blocks retries over what is
 # not. The demo measures that they are exactly these.

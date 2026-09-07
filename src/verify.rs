@@ -879,6 +879,117 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // Declared consumption: which fields each consumer really reads.
+    //
+    // This is what a producer cannot answer on its own, and the reason a
+    // contract ends up frozen: "somebody might be using it". Declared, the
+    // question has an answer — and it cannot drift, because the generated code
+    // hands the consumer `Pick<..., uses>` and reading anything else does not
+    // compile.
+    for m in ms.iter().filter(|m| !m.external) {
+        for d in &m.depends {
+            let Some(uses) = &d.uses else { continue };
+            let tgt = d.target();
+            let Some(sig) = ms
+                .iter()
+                .find(|o| o.service == tgt)
+                .and_then(|o| o.methods.get(&d.method))
+            else {
+                continue;
+            };
+            for f in uses {
+                if !sig.output.contains_key(f) {
+                    errors.push(format!(
+                        "{} declares it uses `{tgt}.{}.{f}`, which {tgt} does not return. \
+                         Either it is a field that was renamed and the caller is reading \
+                         `undefined`, or the declaration is wrong",
+                        m.service, d.method
+                    ));
+                }
+            }
+        }
+        for (ev, c) in &m.consumes {
+            let Some(fields) = ms.iter().find_map(|o| o.emits.get(ev)) else {
+                continue;
+            };
+            for f in c.uses.iter().flatten() {
+                if !fields.contains_key(f) {
+                    errors.push(format!(
+                        "{} declares it uses `{ev}.{f}`, which the event does not carry",
+                        m.service
+                    ));
+                }
+            }
+        }
+    }
+    // And the answer nobody has today: a field NOBODY reads.
+    //
+    // Only when every consumer declared what it uses. With one that declared
+    // nothing there is no answer, and a warning saying "delete it" without an
+    // answer is how a field somebody was reading gets deleted.
+    for m in ms.iter().filter(|m| !m.external) {
+        // The warehouse reads EVERY field of an exported event, so for an
+        // exported one nobody-reads-it is false. A rule with a false positive
+        // gets silenced wholesale, and this one has to survive to be worth
+        // anything. A method's answer does not go to the warehouse, so the
+        // exemption stops at the events.
+        for (ev, fields) in m.emits.iter().filter(|_| !m.analytics.export) {
+            let consumers: Vec<&Manifest> = ms
+                .iter()
+                .filter(|o| !o.external && o.consumes.contains_key(ev))
+                .collect();
+            if consumers.is_empty() || consumers.iter().any(|c| c.consumes[ev].uses.is_none()) {
+                continue;
+            }
+            for f in fields.keys() {
+                if !consumers
+                    .iter()
+                    .any(|c| c.consumes[ev].uses.iter().flatten().any(|u| u == f))
+                {
+                    warnings.push(format!(
+                        "{ev}.{f} is read by nobody: every consumer declared what it uses and \
+                         none of them names it. It can be removed in the next version",
+                    ));
+                }
+            }
+        }
+        for (name, meth) in &m.methods {
+            let callers: Vec<&Manifest> = ms
+                .iter()
+                .filter(|o| !o.external)
+                .filter(|o| {
+                    o.depends
+                        .iter()
+                        .any(|d| d.target() == m.service && &d.method == name)
+                })
+                .collect();
+            if callers.is_empty()
+                || callers.iter().any(|c| {
+                    c.depends
+                        .iter()
+                        .filter(|d| d.target() == m.service && &d.method == name)
+                        .any(|d| d.uses.is_none())
+                })
+            {
+                continue;
+            }
+            for f in meth.output.keys() {
+                if !callers.iter().any(|c| {
+                    c.depends
+                        .iter()
+                        .filter(|d| d.target() == m.service && &d.method == name)
+                        .any(|d| d.uses.iter().flatten().any(|u| u == f))
+                }) {
+                    warnings.push(format!(
+                        "{}.{name} returns `{f}` and no caller reads it: every one of them \
+                         declared what it uses. It can stop being returned",
+                        m.service
+                    ));
+                }
+            }
+        }
+    }
+
     // The API's versioning, and its maintenance cycle.
     //
     // A platform decision: `verify` requires every service to declare the same

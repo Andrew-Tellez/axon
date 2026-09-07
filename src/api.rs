@@ -181,6 +181,91 @@ fn fixture(name: &str, kind: &str, campos: &Fields) -> String {
     )
 }
 
+/// A double of the declared dependencies.
+///
+/// The answers are fixtures derived from the PEER's contract, narrowed to what
+/// this service declared it reads. That is what separates it from a mock
+/// written by hand: a hand-written one can answer a field the other side does
+/// not return, and the test passes right up to production. Here the shape is
+/// the contract\'s, and `tsc` holds it.
+fn transport_double(ms: &[Manifest], m: &Manifest) -> String {
+    if m.depends.is_empty() {
+        return String::new();
+    }
+    let mut answers = Vec::new();
+    for d in &m.depends {
+        let tgt = d.target();
+        let Some(sig) = ms
+            .iter()
+            .find(|o| o.service == tgt)
+            .and_then(|o| o.methods.get(&d.method))
+        else {
+            continue;
+        };
+        let mine: Fields = match &d.uses {
+            Some(uses) => sig
+                .output
+                .iter()
+                .filter(|(k, _)| uses.iter().any(|u| u == *k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            None => sig.output.clone(),
+        };
+        let body: Vec<String> = mine
+            .iter()
+            .map(|(k, t)| format!("{k}: {}", value(t, k)))
+            .collect();
+        answers.push(format!(
+            "  \"{tgt}.{}\": {{ {} }},",
+            d.method,
+            body.join(", ")
+        ));
+    }
+    format!(
+        "/** What each declared dependency answers by default: a fixture of ITS\n \
+         *  contract, cut down to what this service declared it reads. */\n\
+         export const declaredAnswers: Record<string, unknown> = {{\n{answers}\n}};\n\n\
+         /** A transport that answers the contract and records what was asked of it.\n \
+         *\n \
+         *  `on` replaces one answer and `failWith` makes it fail, which is how the\n \
+         *  declared policy gets exercised without a network: a retriable failure has\n \
+         *  to arrive 1 + retries times and a final one exactly once. */\n\
+         export class FakeTransport implements Transport {{\n  \
+           readonly calls: {{ target: string; method: string; body: unknown }}[] = [];\n  \
+           readonly #answers = new Map<string, (body: unknown) => unknown>();\n  \
+           readonly #failures = new Map<string, unknown>();\n\n  \
+           on(target: string, method: string, fn: (body: unknown) => unknown) {{\n    \
+             this.#answers.set(`${{target}}.${{method}}`, fn);\n    return this;\n  \
+           }}\n\n  \
+           failWith(target: string, method: string, err: unknown) {{\n    \
+             this.#failures.set(`${{target}}.${{method}}`, err);\n    return this;\n  \
+           }}\n\n  \
+           /** How many times one method was really called. */\n  \
+           timesCalled(target: string, method: string) {{\n    \
+             return this.calls.filter((c) => c.target === target && c.method === method).length;\n  \
+           }}\n\n  \
+           async call(target: string, method: string, body: unknown, _h: Record<string, string>) {{\n    \
+             this.calls.push({{ target, method, body }});\n    \
+             const key = `${{target}}.${{method}}`;\n    \
+             const failure = this.#failures.get(key);\n    \
+             if (failure) throw failure;\n    \
+             const custom = this.#answers.get(key);\n    \
+             if (custom) return custom(body);\n    \
+             const declared = declaredAnswers[key];\n    \
+             if (declared === undefined) {{\n      \
+               throw new Error(`${{key}} is not a declared dependency of {svc}`);\n    \
+             }}\n    return declared;\n  \
+           }}\n\
+         }}\n\n\
+         /** The generated clients over the double: the declared timeout, retries and\n \
+         *  breaker all running, with no network. */\n\
+         export const fakeClients = (t: FakeTransport = new FakeTransport()) =>\n  \
+           [new Clients(t), t] as const;\n",
+        answers = answers.join("\n"),
+        svc = m.service,
+    )
+}
+
 /// A testkit that compiles on its own: doubles, fixtures and exported suites.
 ///
 /// It does not guess where the person's code lives — it takes a factory. That
@@ -199,6 +284,10 @@ pub fn build_tests(ms: &[Manifest], m: &Manifest, contracts: &str) -> Result<Str
     if m.patterns.outbox {
         tipos.push("type Outbox".into());
     }
+    if !m.depends.is_empty() {
+        tipos.push("Clients".into());
+        tipos.push("type Transport".into());
+    }
     // The declared failures are projected as three things, and the suite below
     // checks that the three agree.
     if m.methods.values().any(|me| !me.errors.is_empty()) {
@@ -209,13 +298,24 @@ pub fn build_tests(ms: &[Manifest], m: &Manifest, contracts: &str) -> Result<Str
     }
 
     // the schema of a consumed event is declared by its emitter
-    let mut consumidos: Vec<(&String, &Fields)> = Vec::new();
-    for ev in m.consumes.keys() {
+    let mut consumidos: Vec<(&String, Fields)> = Vec::new();
+    for (ev, spec) in &m.consumes {
         let campos = m
             .emits
             .get(ev)
             .or_else(|| ms.iter().find_map(|o| o.emits.get(ev)))
             .ok_or_else(|| format!("{svc}: consumes `{ev}` and nobody was found emitting it"))?;
+        // The fixture feeds the HANDLER, and the handler receives what this
+        // service declared it reads: the owner's other fields do not exist on
+        // this side, so building them would not compile.
+        let campos = match spec.uses.as_deref() {
+            Some(uses) => campos
+                .iter()
+                .filter(|(k, _)| uses.iter().any(|u| u == *k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            None => campos.clone(),
+        };
         consumidos.push((ev, campos));
         tipos.push(format!("type {}", pascal(ev)));
     }
@@ -278,6 +378,7 @@ pub fn build_tests(ms: &[Manifest], m: &Manifest, contracts: &str) -> Result<Str
         );
     }
 
+    o.push(transport_double(ms, m));
     o.push(
         "// Fixtures derived from the schema declared by each event's OWNER, not\n\
             // from what the consumer believes it receives: that is where drift shows up."

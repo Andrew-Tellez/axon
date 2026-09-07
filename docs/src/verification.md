@@ -42,6 +42,16 @@ has to be fixed cannot end up underneath.
 | A public route with no `rate_limit` or no `timeout_ms` | error |
 | A paginated method that does not return a `cursor` | error |
 
+## Declared consumption
+
+| | |
+| --- | --- |
+| `uses` naming a field the provider does not return | error |
+| `uses` naming a field the event does not carry | error |
+| A field no consumer reads, with every consumer having declared | warning |
+| Removing a published field somebody declared reading | error, naming who |
+| Removing a published field nobody declared reading | warning: not a breaking change |
+
 ## Versioning and its cycle
 
 | | |

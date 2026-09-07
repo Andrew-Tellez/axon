@@ -86,6 +86,49 @@ pub fn cargar(dir: &Path) -> Option<Baseline> {
 
 /// Compares the declared against the published. It only looks backwards: a new
 /// event or method is not a problem, changing an old one is.
+/// Who declared they read a field of an event, and who of a method's answer.
+///
+/// It is what turns "the consumers read it" —which the baseline used to assert
+/// without being able to back it up— into a name. And when EVERY consumer
+/// declared what it uses and none names the field, removing it is not a
+/// breaking change: that is the difference between a contract that can evolve
+/// and one that is frozen by "somebody might be using it".
+fn readers<'a>(ms: &'a [Manifest], ev: &str, field: &str) -> Option<Vec<&'a str>> {
+    let consumers: Vec<&Manifest> = ms
+        .iter()
+        .filter(|m| !m.external && m.consumes.contains_key(ev))
+        .collect();
+    if consumers.is_empty() || consumers.iter().any(|c| c.consumes[ev].uses.is_none()) {
+        return None;
+    }
+    Some(
+        consumers
+            .iter()
+            .filter(|c| c.consumes[ev].uses.iter().flatten().any(|u| u == field))
+            .map(|c| c.service.as_str())
+            .collect(),
+    )
+}
+
+fn callers<'a>(ms: &'a [Manifest], key: &str, field: &str) -> Option<Vec<&'a str>> {
+    let (svc, met) = key.split_once('.')?;
+    let deps: Vec<(&Manifest, &Depend)> = ms
+        .iter()
+        .filter(|m| !m.external)
+        .flat_map(|m| m.depends.iter().map(move |d| (m, d)))
+        .filter(|(_, d)| d.target() == svc && d.method == met)
+        .collect();
+    if deps.is_empty() || deps.iter().any(|(_, d)| d.uses.is_none()) {
+        return None;
+    }
+    Some(
+        deps.iter()
+            .filter(|(_, d)| d.uses.iter().flatten().any(|u| u == field))
+            .map(|(m, _)| m.service.as_str())
+            .collect(),
+    )
+}
+
 pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -127,11 +170,28 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
             Some(now_) if now_.fields != before.fields => {
                 for (field, kind) in &before.fields {
                     match now_.fields.get(field) {
-                        None => errors.push(format!(
-                            "{ev}: field `{field}` disappeared from a published version; \
-                             publish {} instead",
-                            next_version(ev)
-                        )),
+                        // Removing a field is breaking BECAUSE somebody reads
+                        // it. With every consumer having declared what it uses,
+                        // that stops being an assumption: either it names who,
+                        // or it says nobody does and lets the field go.
+                        None => match readers(ms, ev, field) {
+                            Some(who) if who.is_empty() => warnings.push(format!(
+                                "{ev}: field `{field}` was removed and no consumer declared \
+                                 reading it. Every one of them declared what it uses, so this \
+                                 is not a breaking change"
+                            )),
+                            Some(who) => errors.push(format!(
+                                "{ev}: field `{field}` disappeared from a published version and \
+                                 {} reads it; publish {} instead",
+                                who.join(", "),
+                                next_version(ev)
+                            )),
+                            None => errors.push(format!(
+                                "{ev}: field `{field}` disappeared from a published version; \
+                                 publish {} instead",
+                                next_version(ev)
+                            )),
+                        },
                         Some(t) if t != kind => errors.push(format!(
                             "{ev}.{field}: changed from `{kind}` to `{t}` in a published version; \
                              publish {} instead",
@@ -172,9 +232,21 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
                 }
                 for (field, kind) in &before.output {
                     match now_.output.get(field) {
-                        None => errors.push(format!(
-                            "{key}: stopped returning `{field}`; the callers read it"
-                        )),
+                        None => match callers(ms, key, field) {
+                            Some(who) if who.is_empty() => warnings.push(format!(
+                                "{key}: stopped returning `{field}` and no caller declared \
+                                 reading it. Every one of them declared what it uses, so this \
+                                 is not a breaking change"
+                            )),
+                            Some(who) => errors.push(format!(
+                                "{key}: stopped returning `{field}`, which {} reads",
+                                who.join(", ")
+                            )),
+                            None => errors.push(format!(
+                                "{key}: stopped returning `{field}`; nobody declared what they \
+                                 read of it, so it has to be assumed somebody does"
+                            )),
+                        },
                         Some(t) if t != kind => errors.push(format!(
                             "{key}: output `{field}` changed from `{kind}` to `{t}`"
                         )),

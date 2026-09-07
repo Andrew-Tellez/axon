@@ -120,8 +120,34 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
             .find_map(|o| o.emits.get(ev).map(|f| (&o.service, f)))
         {
             Some((owner, fields)) => {
-                out.push(format!("// {ev}: schema declared by {owner}, its owner"));
-                out.push(iface(&pascal(ev), fields));
+                // The type this service sees of somebody else's event is what it
+                // DECLARED it reads. Narrowing the handler's parameter was not
+                // enough: an implementation can annotate the full type and TS
+                // accepts the wider parameter, so `uses` could lie. Here the wide
+                // type does not exist on this side.
+                match m.consumes.get(ev).and_then(|c| c.uses.as_deref()) {
+                    Some(uses) => {
+                        let mine: Fields = fields
+                            .iter()
+                            .filter(|(k, _)| uses.iter().any(|u| u == *k))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        out.push(format!(
+                            "// {ev}: {owner} declares {} fields; this service declared it reads {}",
+                            fields.len(),
+                            if mine.is_empty() {
+                                "none".to_string()
+                            } else {
+                                uses.join(", ")
+                            }
+                        ));
+                        out.push(iface(&pascal(ev), &mine));
+                    }
+                    None => {
+                        out.push(format!("// {ev}: schema declared by {owner}, its owner"));
+                        out.push(iface(&pascal(ev), fields));
+                    }
+                }
             }
             None => {
                 return Err(format!(
@@ -207,6 +233,17 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     }
     for (ev, spec) in &m.consumes {
         cls.push(format!("  /** consume {ev} */"));
+        if let Some(uses) = spec.uses.as_deref() {
+            cls.push(format!(
+                "  /** Declared as read: {}. The type above carries only that, so a field \
+                 nobody declared does not compile. */",
+                if uses.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    uses.join(", ")
+                }
+            ));
+        }
         cls.push(format!(
             "  abstract {}(e: Envelope<{}>): Promise<void>;",
             spec.handler,
@@ -2129,7 +2166,34 @@ fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         // with our own.
         let base = format!("{}{}", pascal(tgt), pascal(&d.method));
         types.push(iface(&format!("{base}In"), &sig.input));
-        types.push(iface(&format!("{base}Out"), &sig.output));
+        // The answer, as THIS caller sees it: only what it declared it reads.
+        // The rest does not exist on this side, so the declaration cannot drift
+        // from the code — which is what makes it usable to decide what the
+        // other side is free to change.
+        match &d.uses {
+            None => types.push(iface(&format!("{base}Out"), &sig.output)),
+            Some(uses) => {
+                let mine: Fields = sig
+                    .output
+                    .iter()
+                    .filter(|(k, _)| uses.iter().any(|u| u == *k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                types.push(format!(
+                    "/** {tgt}.{} returns {} fields; {} declared it reads {}. */",
+                    d.method,
+                    sig.output.len(),
+                    m.service,
+                    if uses.is_empty() {
+                        "none".to_string()
+                    } else {
+                        uses.join(", ")
+                    }
+                ));
+                types.push(iface(&format!("{base}Out"), &mine));
+            }
+        }
+        let seen = format!("{base}Out");
 
         let pol = format!(
             "{{ timeoutMs: {}, retries: {}, breaker: {} }}",
@@ -2142,7 +2206,7 @@ fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         // while the other side is unreachable.
         let (param, body) = if m.cap.degrades() {
             (
-                format!(", fallback: () => Promise<{base}Out>"),
+                format!(", fallback: () => Promise<{seen}>"),
                 concat!(
                     "    try {\n",
                     "      return await attempt();\n",
@@ -2212,9 +2276,9 @@ fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         };
         methods.push(format!(
             "  /** {tgt}.{met} · timeout {t}ms · {r} retries · breaker {b}{declared}{retiring} */\n  \
-             async {name}(input: {base}In, e: Envelope<unknown>{param}): Promise<{base}Out> {{\n    \
+             async {name}(input: {base}In, e: Envelope<unknown>{param}): Promise<{seen}> {{\n    \
                const attempt = () => withPolicy(\"{tgt}.{met}\", {pol}, async () =>\n      \
-                 (await this.transport.call(\"{tgt}\", \"{met}\", input, headers(e, {idem}))) as {base}Out{decide});\n\
+                 (await this.transport.call(\"{tgt}\", \"{met}\", input, headers(e, {idem}))) as {seen}{decide});\n\
 {body}\n  \
              }}",
             met = d.method,
