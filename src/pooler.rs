@@ -106,9 +106,9 @@ pub fn users(ms: &[Manifest], target: &str, only: Option<&str>) -> Result<String
          name = \"postgres\"\n\
          database = \"{base}\"\n\
          {key}\n\
-         # La misma regla que en pgdog.toml, otra vez aca: el ajuste por usuario\n\
-         # gana sobre el general, asi que declararlo de un only lado deja la\n\
-         # puerta abierta por el otro.\n\
+         # The same rule as in pgdog.toml, again here: the per-user setting wins\n\
+         # over the general one, so declaring it on one side only leaves the door\n\
+         # open on the other.\n\
          cross_shard_disabled = {cross}\n",
         base = base(svc),
         cross = m.pooler.cross_shard_disabled
@@ -125,9 +125,9 @@ pub fn build(ms: &[Manifest], target: &str, only: Option<&str>) -> Result<String
         format!("#   axon pooler manifests/ --service {svc} --target {target} > pgdog.toml"),
         "#".to_string(),
         match target {
-            "local" => "# Los hosts son los contenedores que levanta `axon infra --target local`.",
-            _ => "# Los nodos salen de variables: un archivo generado no es lugar\n\
-                  # para una contrasena ni para la topologia de un entorno.",
+            "local" => "# The hosts are the containers `axon infra --target local` brings up.",
+            _ => "# The nodes come from variables: a generated file is no place for a\n\
+                  # password or for an environment's topology.",
         }
         .to_string(),
         String::new(),
@@ -137,30 +137,30 @@ pub fn build(ms: &[Manifest], target: &str, only: Option<&str>) -> Result<String
     if let Some(n) = pl.pool_size {
         o.push(format!("default_pool_size = {n}"));
     }
-    // Rechazar antes que devolver un resultado incompleto: sin JOIN entre
-    // nodos ni unicidad global, una consulta que cruza se responde mal.
+    // Refuse rather than return an incomplete result: with no cross-node JOIN
+    // and no global uniqueness, a crossing query is answered wrong.
     o.push(format!(
-        "# rechaza la consulta que cruza nodos en vez de ejecutarla: sin JOIN entre\n\
-         # nodos, lo que el sharder no sabe resolver devolveria un resultado parcial\ncross_shard_disabled = {}",
+        "# rejects a query that crosses nodes instead of running it: with no cross-node\n\
+         # JOIN, what the sharder cannot resolve would return a partial result\ncross_shard_disabled = {}",
         pl.cross_shard_disabled
     ));
     if pl.shards > 1 {
-        // El parser tiene que estar SIEMPRE encendido: en `auto` no se activa
-        // con un only nodo primario, y ahi es justo donde una GUC de sesion se
-        // cuela sin ser interceptada.
+        // The parser has to be ALWAYS on: in `auto` it does not kick in with a
+        // single primary node, and that is exactly where a session GUC slips
+        // through without being intercepted.
         o.push(
-            "# `on` y no `auto`: en `auto` el parser no se activa con un only nodo\n\
-             # primario, que es exactamente el caso donde una GUC de sesion se cuela\nquery_parser = \"on\""
+            "# `on` and not `auto`: in `auto` the parser does not kick in with a single\n\
+             # primary node, which is exactly the case where a session GUC slips through\nquery_parser = \"on\""
                 .into(),
         );
         o.push(format!(
-            "# el reparto se declara en el manifiesto; aca only se refleja\n# shards = {}",
+            "# the sharding is declared in the manifest; here it is only reflected\n# shards = {}",
             pl.shards
         ));
     }
     o.push(String::new());
 
-    // Un bloque `databases` por nodo.
+    // One `databases` block per node.
     for shard in 0..pl.shards.max(1) {
         let (h, p) = host(m, target, shard);
         o.push("[[databases]]".into());
@@ -177,8 +177,8 @@ pub fn build(ms: &[Manifest], target: &str, only: Option<&str>) -> Result<String
         }
         o.push(String::new());
     }
-    // El compose local no levanta replicas: declararlas apuntando a un host
-    // que no existe deja al pooler reintentando contra la nada.
+    // The local compose brings up no replicas: declaring them pointing at a
+    // host that does not exist leaves the pooler retrying against nothing.
     let replicas = match target {
         "local" => 0,
         _ => m.infra.read_replicas.unwrap_or(0),
@@ -198,10 +198,10 @@ pub fn build(ms: &[Manifest], target: &str, only: Option<&str>) -> Result<String
             .infra
             .shard_key
             .as_ref()
-            .ok_or_else(|| format!("{svc}: `shards > 1` sin `shard_key`"))?;
+            .ok_or_else(|| format!("{svc}: `shards > 1` with no `shard_key`"))?;
         let tables = esquemas
             .get(svc)
-            .ok_or_else(|| format!("{svc}: sin migraciones, no se puede declarar el reparto"))?;
+            .ok_or_else(|| format!("{svc}: with no migrations, the sharding cannot be declared"))?;
         let mut declared = 0;
         for (t, tb) in tables {
             if ["outbox", "inbox_seen"].contains(&t.as_str()) || !tb.has(key) {
@@ -209,7 +209,7 @@ pub fn build(ms: &[Manifest], target: &str, only: Option<&str>) -> Result<String
             }
             let kind = key_type(tb, key).ok_or_else(|| {
                 format!(
-                    "{svc}.{t}.{key}: kind `{}` que el sharder no sabe hashear; admite \
+                    "{svc}.{t}.{key}: kind `{}` the sharder cannot hash; it accepts \
                      uuid, bigint y varchar",
                     tb.col(key).map(|c| c.ty.as_str()).unwrap_or("?")
                 )
@@ -219,20 +219,20 @@ pub fn build(ms: &[Manifest], target: &str, only: Option<&str>) -> Result<String
             o.push(format!("name = \"{t}\""));
             o.push(format!("column = \"{key}\""));
             o.push(format!("data_type = \"{kind}\""));
-            // el mismo hash que `PARTITION BY HASH` de Postgres, para que el
-            // reparto coincida si algun dia se mueve dentro del motor
+            // the same hash as Postgres's `PARTITION BY HASH`, so the sharding
+            // matches if it ever moves inside the engine
             o.push("hasher = \"postgres\"".into());
             o.push(String::new());
             declared += 1;
         }
         if declared == 0 {
             return Err(format!(
-                "{svc}: ninguna tabla lleva `{key}`, asi que no hay nada que repartir"
+                "{svc}: no table carries `{key}`, so there is nothing to shard"
             ));
         }
-        // pgdog rutea por la columna de inquilino cuando la reconoce en la
-        // consulta. Es la misma columna que sostiene la RLS generada, y
-        // declararla aca es lo que hace que un inquilino viva en un nodo.
+        // pgdog routes by the tenant column when it recognises it in the query.
+        // It is the same column the generated RLS rests on, and declaring it
+        // here is what makes a tenant live on one node.
         if let Some(col) = &m.infra.tenant_column {
             o.push("[multi_tenant]".into());
             o.push(format!("column = \"{col}\""));

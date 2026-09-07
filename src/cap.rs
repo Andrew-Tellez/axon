@@ -1,44 +1,44 @@
-//! Compatibilidad entre el lado CAP declarado y los patrones en uso.
+//! Compatibility between the declared CAP side and the patterns in use.
 //!
-//! `verify` bloquea las contradicciones. Esto explica las consecuencias, que
-//! es distinto: hay combinaciones que no son un error y aun asi cambian lo que
-//! el servicio puede prometer. Un outbox no rompe la consistencia del estado
-//! propio, pero si hace que los consumidores la vean tarde — eso no es un bug,
-//! es una propiedad, y conviene que este escrita en alguna parte antes de que
-//! alguien la descubra en un incidente.
+//! `verify` blocks the contradictions. This explains the consequences, which
+//! is a different thing: there are combinations that are not an error and still
+//! change what the service can promise. An outbox does not break the
+//! consistency of your own state, but it does make consumers see it late —that
+//! is not a bug, it is a property, and it is better written down somewhere
+//! before somebody discovers it during an incident.
 use crate::color::{blue, bold, green, grey, red, yellow};
 use crate::manifest::*;
 
-/// Nivel de un hallazgo, que decide el color y el orden.
-enum Nivel {
-    Contradice,
-    Cuesta,
-    Implica,
+/// A finding's level, which decides the colour and the order.
+enum Level {
+    Contradicts,
+    Costs,
+    Implies,
 }
 
 struct Hallazgo {
-    nivel: Nivel,
-    patron: String,
-    texto: String,
+    level: Level,
+    pattern: String,
+    text: String,
 }
 
-/// Rellena a lo ancho ANTES de colorear: `{:<18}` cuenta los bytes de la
-/// secuencia ANSI, asi que padear texto ya coloreado desalinea las columnas.
-fn columna(t: &str, ancho: usize) -> String {
+/// Pads to width BEFORE colouring: `{:<18}` counts the bytes of the ANSI
+/// sequence, so padding already coloured text misaligns the columns.
+fn column(t: &str, ancho: usize) -> String {
     bold(&format!("{t:<ancho$}"))
 }
 
-/// `solo` filtra por nombre de servicio. Se filtra al final y no al cargar,
-/// porque el analisis necesita a los demas: sin ellos no se puede saber que
-/// una dependencia es AP.
-pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
+/// `only` filters by service name. The filtering happens at the end and not at
+/// load time, because the analysis needs the others: without them there is no
+/// way to know that a dependency is AP.
+pub fn informe(ms: &[Manifest], only: &[String]) -> String {
     let lados: Vec<(&str, &Cap)> = ms.iter().map(|m| (m.service.as_str(), &m.cap)).collect();
     let mut o = Vec::new();
 
     for m in ms
         .iter()
         .filter(|m| !m.external)
-        .filter(|m| solo.is_empty() || solo.contains(&m.service))
+        .filter(|m| only.is_empty() || only.contains(&m.service))
     {
         let cap = &m.cap;
         let lado = if cap.eventual() { "AP" } else { "CP" };
@@ -55,9 +55,9 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
                     .unwrap_or_default()
             ))
         ));
-        if !cap.declarado {
+        if !cap.declared {
             o.push(format!(
-                "  {} el lado no esta declarado: se asumio CP, que falla cerrado",
+                "  {} the side is not declared: CP was assumed, which fails closed",
                 yellow("~")
             ));
         }
@@ -67,40 +67,41 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
         // --- outbox ---
         if m.patterns.outbox {
             hs.push(Hallazgo {
-                nivel: Nivel::Implica,
-                patron: "outbox".into(),
-                texto: "el estado propio queda consistente, pero los consumidores lo ven \
-                        tarde: el relay publica despues de confirmar. Eso no rompe tu \
-                        garantia, rompe la del flujo"
+                level: Level::Implies,
+                pattern: "outbox".into(),
+                text: "your own state stays consistent, but consumers see it late: the \
+                       relay publishes after the commit. That does not break your \
+                       guarantee, it breaks the flow's"
                     .into(),
             });
         } else if !m.emits.is_empty() && !cap.eventual() {
             hs.push(Hallazgo {
-                nivel: Nivel::Cuesta,
-                patron: "sin outbox".into(),
-                texto: "se declara CP y se publica directo al bus: si el commit sale y la \
-                        publicacion falla, el estado y el evento discrepan. Es el dual-write, \
+                level: Level::Costs,
+                pattern: "no outbox".into(),
+                text: "CP is declared and publishing goes straight to the bus: if the commit \
+                       lands and the publish fails, state and event disagree. That is the \
+                       dual-write, \
                         y contra eso existe `[patterns] outbox`"
                     .into(),
             });
         }
 
-        // --- replicas de lectura ---
+        // --- read replicas ---
         match m.infra.read_replicas.unwrap_or(0) {
             0 => {}
             n if cap.eventual() => hs.push(Hallazgo {
-                nivel: Nivel::Implica,
-                patron: "read replicas".into(),
-                texto: format!(
-                    "{n} replicas coherentes con AP: se lee con retraso, y el presupuesto \
-                     lo fija max_staleness_ms"
+                level: Level::Implies,
+                pattern: "read replicas".into(),
+                text: format!(
+                    "{n} replicas consistent with AP: reads lag, and the budget is set by \
+                     max_staleness_ms"
                 ),
             }),
             n => hs.push(Hallazgo {
-                nivel: Nivel::Contradice,
-                patron: "read replicas".into(),
-                texto: format!(
-                    "{n} replicas leidas bajo una promesa CP: una replica va con retraso"
+                level: Level::Contradicts,
+                pattern: "read replicas".into(),
+                text: format!(
+                    "{n} replicas read under a CP promise: a replica lags"
                 ),
             }),
         }
@@ -108,44 +109,46 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
         // --- alta disponibilidad ---
         if m.infra.ha == Some(true) {
             hs.push(Hallazgo {
-                nivel: Nivel::Implica,
-                patron: "standby HA".into(),
-                texto: "no rompe la consistencia: del standby no se lee, solo toma el relevo. \
-                        Es lo unico de esta lista que mejora la disponibilidad sin costo en la C"
+                level: Level::Implies,
+                pattern: "standby HA".into(),
+                text: "it breaks no consistency: nobody reads from the standby, it only takes \
+                       over. It is the only thing on this list that improves \
+                       availability at no cost in the C"
                     .into(),
             });
         } else if !cap.eventual() && m.infra.state.is_some() {
             hs.push(Hallazgo {
-                nivel: Nivel::Cuesta,
-                patron: "sin standby".into(),
-                texto: "CP sin failover: cuando el primario se cae, el servicio no sirve nada. \
+                level: Level::Costs,
+                pattern: "no standby".into(),
+                text: "CP with no failover: when the primary goes down, the service serves \
+                       nothing. \
                         Consistente, si, y tambien apagado"
                     .into(),
             });
         }
 
         // --- sagas declaradas ---
-        for (nombre, sg) in &m.saga {
-            // El error ya lo emite `verify`; aca se explica el costo, que es
-            // lo que este informe agrega.
-            let compensables = sg.steps.iter().filter(|p| p.undo.is_some()).count();
+        for (name, sg) in &m.saga {
+            // `verify` already emits the error; here the cost is explained,
+            // which is what this report adds.
+            let compensated = sg.steps.iter().filter(|p| p.undo.is_some()).count();
             hs.push(Hallazgo {
-                nivel: if cap.eventual() {
-                    Nivel::Implica
+                level: if cap.eventual() {
+                    Level::Implies
                 } else {
-                    Nivel::Contradice
+                    Level::Contradicts
                 },
-                patron: format!("saga.{nombre}"),
-                texto: format!(
-                    "{} pasos, {compensables} con compensacion. Entre el primer paso y el \
-                     ultimo hay estados intermedios visibles que ningun invariante describe: \
-                     el estado propio puede ser CP, el FLUJO es eventual",
+                pattern: format!("saga.{name}"),
+                text: format!(
+                    "{} steps, {compensated} with a compensation. Between the first step and \
+                     the last there are visible intermediate states no invariant describes: \
+                     your own state can be CP, the FLOW is eventual",
                     sg.steps.len()
                 ),
             });
         }
 
-        // --- sagas dentro de una maquina de estado ---
+        // --- sagas inside a state machine ---
         let compensa: Vec<&str> = m
             .machine
             .values()
@@ -155,11 +158,11 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
             .collect();
         if !compensa.is_empty() && !cap.eventual() {
             hs.push(Hallazgo {
-                nivel: Nivel::Cuesta,
-                patron: "saga".into(),
-                texto: format!(
-                    "`{}` compensa un paso anterior. Una compensacion es consistencia \
-                     eventual por construccion: el estado propio es CP, el FLUJO no",
+                level: Level::Costs,
+                pattern: "saga".into(),
+                text: format!(
+                    "`{}` compensates an earlier step. A compensation is eventual consistency \
+                     by construction: your own state is CP, the FLOW is not",
                     compensa.join("`, `")
                 ),
             });
@@ -169,18 +172,18 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
         for d in &m.depends {
             if d.retries > 0 && !cap.eventual() && !d.breaker {
                 hs.push(Hallazgo {
-                    nivel: Nivel::Cuesta,
-                    patron: "reintentos".into(),
-                    texto: format!(
-                        "se reintenta `{}` sin breaker bajo una promesa CP: los reintentos \
-                         alargan la indisponibilidad en vez de acortarla",
+                    level: Level::Costs,
+                    pattern: "retries".into(),
+                    text: format!(
+                        "`{}` is retried with no breaker under a CP promise: the retries \
+                         lengthen the outage instead of shortening it",
                         d.method
                     ),
                 });
             }
         }
 
-        // --- el eslabon mas debil ---
+        // --- the weakest link ---
         for d in &m.depends {
             let flojo = lados
                 .iter()
@@ -188,69 +191,69 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
                 .is_some_and(|(_, c)| c.eventual());
             if flojo && !cap.eventual() {
                 hs.push(Hallazgo {
-                    nivel: Nivel::Contradice,
-                    patron: "dependencia".into(),
-                    texto: format!(
-                        "se llama a `{}`, que es AP, en una ruta sincrona: la garantia de la \
-                         ruta es la del mas debil",
+                    level: Level::Contradicts,
+                    pattern: "dependency".into(),
+                    text: format!(
+                        "`{}`, which is AP, is called on a synchronous path: the path's \
+                         guarantee is the weaker one",
                         d.target()
                     ),
                 });
             }
         }
 
-        // --- escalar a cero con una promesa de rechazar ---
+        // --- scaling to zero with a promise to reject ---
         if !cap.eventual() && !cap.degrades() && m.infra.min_instances == Some(0) {
             hs.push(Hallazgo {
-                nivel: Nivel::Cuesta,
-                patron: "min_instances = 0".into(),
-                texto: "se promete rechazar antes que degradar, y se escala a cero: la primera \
-                        peticion despues del reposo espera un arranque en frio sin nada que \
+                level: Level::Costs,
+                pattern: "min_instances = 0".into(),
+                text: "rejecting rather than degrading is promised, and it scales to zero: the \
+                       first request after idling waits out a cold start with nothing to \
                         servir mientras tanto"
                     .into(),
             });
         }
 
-        // --- degradar sin respaldo declarado ---
+        // --- degrading with no declared fallback ---
         if cap.degrades() && m.depends.is_empty() {
             hs.push(Hallazgo {
-                nivel: Nivel::Implica,
-                patron: "degrade".into(),
-                texto: "no hay dependencias que degradar: la eleccion no cambia nada todavia"
+                level: Level::Implies,
+                pattern: "degrade".into(),
+                text: "there are no dependencies to degrade: the choice changes nothing yet"
                     .into(),
             });
         }
 
         if hs.is_empty() {
-            o.push(format!("  {} nada que reconciliar", green("ok")));
+            o.push(format!("  {} nothing to reconcile", green("ok")));
         }
-        hs.sort_by_key(|h| match h.nivel {
-            Nivel::Contradice => 0,
-            Nivel::Cuesta => 1,
-            Nivel::Implica => 2,
+        hs.sort_by_key(|h| match h.level {
+            Level::Contradicts => 0,
+            Level::Costs => 1,
+            Level::Implies => 2,
         });
         for h in hs {
-            let (marca, etiqueta) = match h.nivel {
-                Nivel::Contradice => (red("x"), red("contradice")),
-                Nivel::Cuesta => (yellow("!"), yellow("cuesta")),
-                Nivel::Implica => (blue("i"), blue("implica")),
+            let (mark, label) = match h.level {
+                Level::Contradicts => (red("x"), red("contradicts")),
+                Level::Costs => (yellow("!"), yellow("costs")),
+                Level::Implies => (blue("i"), blue("implies")),
             };
             o.push(format!(
-                "  {marca} {} {etiqueta}  {}",
-                columna(&h.patron, 18),
-                h.texto
+                "  {mark} {} {label}  {}",
+                column(&h.pattern, 18),
+                h.text
             ));
         }
     }
 
     if o.is_empty() {
-        return format!("{} ningun servicio con ese nombre", yellow("aviso"));
+        return format!("{} no service by that name", yellow("warn"));
     }
     o.push(format!(
         "\n{}",
         grey(
-            "x contradice lo declarado y `axon verify` lo bloquea · ! es un costo que se paga \
-             · i es una consecuencia que conviene conocer"
+            "x contradicts what is declared and `axon verify` blocks it · ! is a cost you \
+             pay · i is a consequence worth knowing"
         )
     ));
     o.join("\n")

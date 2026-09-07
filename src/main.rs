@@ -220,8 +220,8 @@ fn run() -> Result<ExitCode, String> {
                 // The plugin receives the same as the native generator: its own
                 // manifest and the others', because the schema of a consumed
                 // event is owned by its emitter.
-                let entrada = serde_json::json!({ "manifest": m, "peers": all });
-                print!("{}", plugin::run(&bin, &entrada.to_string())?);
+                let entry = serde_json::json!({ "manifest": m, "peers": all });
+                print!("{}", plugin::run(&bin, &entry.to_string())?);
             }
         }
         Cmd::Ci { manifest, target } => {
@@ -377,9 +377,9 @@ fn run() -> Result<ExitCode, String> {
                     print!("{}", bi::introspect(&d, &dataset));
                     return Ok(ExitCode::SUCCESS);
                 }
-                let ruta = check.unwrap();
-                let real = std::fs::read_to_string(&ruta)
-                    .map_err(|e| format!("{}: {e}", ruta.display()))?;
+                let route = check.unwrap();
+                let real = std::fs::read_to_string(&route)
+                    .map_err(|e| format!("{}: {e}", route.display()))?;
                 let (errors, warnings) = bi::review(&ms, &d, &real);
                 for a in &warnings {
                     eprintln!("{}", color::yellow(&format!("warn: {a}")));
@@ -391,9 +391,9 @@ fn run() -> Result<ExitCode, String> {
                     "axon: the warehouse has {} {} against the manifest",
                     errors.len(),
                     if errors.len() == 1 {
-                        "diferencia"
+                        "difference"
                     } else {
-                        "diferencias"
+                        "differences"
                     }
                 );
                 return Ok(if errors.is_empty() {
@@ -430,14 +430,14 @@ fn run() -> Result<ExitCode, String> {
                 Some(f) => {
                     let json =
                         std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
-                    let (errors, warnings) = carga::revisar(&m, &json)?;
+                    let (errors, warnings) = carga::review(&m, &json)?;
                     for a in &warnings {
                         println!("info: {a}");
                     }
                     for e in &errors {
                         eprintln!("error: {e}");
                     }
-                    println!("axon: {} umbrales incumplidos", errors.len());
+                    println!("axon: {} thresholds breached", errors.len());
                     if !errors.is_empty() {
                         return Ok(ExitCode::FAILURE);
                     }

@@ -2060,27 +2060,27 @@ fn la_carga_sale_del_manifiesto() {
     assert!(ok, "{err}");
     // la tasa es el rate_limit declarado, no un numero elegido a ojo
     assert!(
-        js.contains("rate: 60,              // declarado en rate_limit"),
+        js.contains("rate: 60,              // declared in rate_limit"),
         "{js}"
     );
     // el umbral es el timeout declarado
     assert!(
-        js.contains(r#""http_req_duration{escenario:placeOrder}": ["p(95)<5000"]"#),
+        js.contains(r#""http_req_duration{scenario:placeOrder}": ["p(95)<5000"]"#),
         "{js}"
     );
     assert!(
-        js.contains(r#""http_req_duration{escenario:getOrder}": ["p(95)<2000"]"#),
+        js.contains(r#""http_req_duration{scenario:getOrder}": ["p(95)<2000"]"#),
         "{js}"
     );
     // una ruta con parametro se prueba con un id inventado: un 404 ahi no es
     // un fallo del servicio, asi que el umbral va sobre el check
     assert!(
-        js.contains(r#""checks{escenario:getOrder}": ["rate>0.99"]"#),
+        js.contains(r#""checks{scenario:getOrder}": ["rate>0.99"]"#),
         "{js}"
     );
     assert!(js.contains("r.status === 404"), "{js}");
     // el techo que impone el pool declarado queda escrito
-    assert!(js.contains("4 conexiones x 10 instancias = 40"), "{js}");
+    assert!(js.contains("4 connections x 10 instances = 40"), "{js}");
 
     // y el veredicto: `true` en un umbral de k6 significa INCUMPLIDO
     let dir = std::env::temp_dir().join("axon-carga");
@@ -2089,7 +2089,7 @@ fn la_carga_sale_del_manifiesto() {
     let bien = dir.join("bien.json");
     std::fs::write(
         &bien,
-        r#"{"metrics":{"http_req_duration{escenario:placeOrder}":{"p(95)":23.8,"thresholds":{"p(95)<5000":false}},"http_reqs":{"count":41,"rate":2.05}}}"#,
+        r#"{"metrics":{"http_req_duration{scenario:placeOrder}":{"p(95)":23.8,"thresholds":{"p(95)<5000":false}},"http_reqs":{"count":41,"rate":2.05}}}"#,
     )
     .unwrap();
     let (out, err, ok) = axon(&[
@@ -2099,13 +2099,13 @@ fn la_carga_sale_del_manifiesto() {
         bien.to_str().unwrap(),
     ]);
     assert!(ok, "{err}");
-    assert!(out.contains("0 umbrales incumplidos"), "{out}");
-    assert!(out.contains("41 peticiones medidas"), "{out}");
+    assert!(out.contains("0 thresholds breached"), "{out}");
+    assert!(out.contains("41 requests measured"), "{out}");
 
     let mal = dir.join("mal.json");
     std::fs::write(
         &mal,
-        r#"{"metrics":{"http_req_duration{escenario:placeOrder}":{"p(95)":9000,"thresholds":{"p(95)<5000":true}}}}"#,
+        r#"{"metrics":{"http_req_duration{scenario:placeOrder}":{"p(95)":9000,"thresholds":{"p(95)<5000":true}}}}"#,
     )
     .unwrap();
     let (_, err, ok) = axon(&[
@@ -2115,7 +2115,7 @@ fn la_carga_sale_del_manifiesto() {
         mal.to_str().unwrap(),
     ]);
     assert!(!ok, "un umbral incumplido tiene que fallar");
-    assert!(err.contains("incumplio `p(95)<5000`"), "{err}");
+    assert!(err.contains("breached `p(95)<5000`"), "{err}");
 
     // un resumen sin umbrales no es un veredicto, y decirlo es mejor que
     // dar por bueno lo que no se midio
@@ -2128,7 +2128,7 @@ fn la_carga_sale_del_manifiesto() {
         vacio.to_str().unwrap(),
     ]);
     assert!(!ok);
-    assert!(err.contains("no trae umbrales"), "{err}");
+    assert!(err.contains("carries no thresholds"), "{err}");
 }
 
 /// Una ruta declarada que nadie sirve devuelve 404 en produccion y no aparece
@@ -2293,17 +2293,17 @@ fn el_informe_cap_reconcilia_los_patrones() {
     let (out, err, ok) = axon(&["cap", "examples"]);
     assert!(ok, "{err}");
     // contradice: verify ya lo bloquea, y aca se explica por que
-    assert!(out.contains("contradice"), "{out}");
+    assert!(out.contains("contradicts"), "{out}");
     assert!(
-        out.contains("la garantia de la ruta es la del mas debil"),
+        out.contains("the path's guarantee is the weaker one"),
         "{out}"
     );
     // cuesta: una compensacion es consistencia eventual por construccion
-    assert!(out.contains("el estado propio es CP, el FLUJO no"), "{out}");
+    assert!(out.contains("your own state is CP, the FLOW is not"), "{out}");
     // implica: el outbox no rompe tu garantia, rompe la del flujo
-    assert!(out.contains("los consumidores lo ven tarde"), "{out}");
+    assert!(out.contains("consumers see it late"), "{out}");
     // y el standby es lo unico que da disponibilidad sin costo en consistencia
-    assert!(out.contains("sin costo en la C"), "{out}");
+    assert!(out.contains("at no cost in the C"), "{out}");
     assert!(out.contains("[CP]") && out.contains("[AP]"), "{out}");
 
     // el filtro por servicio, con el analisis mirando igual a todos: sin
@@ -2311,10 +2311,10 @@ fn el_informe_cap_reconcilia_los_patrones() {
     let (solo, _, _) = axon(&["cap", "examples", "-s", "payments"]);
     assert!(solo.contains("payments"), "{solo}");
     assert!(!solo.contains("\norders "), "el filtro no acoto:\n{solo}");
-    assert!(solo.contains("se llama a `orders`, que es AP"), "{solo}");
+    assert!(solo.contains("`orders`, which is AP, is called"), "{solo}");
 
     let (nada, _, _) = axon(&["cap", "examples", "-s", "inexistente"]);
-    assert!(nada.contains("ningun servicio con ese nombre"), "{nada}");
+    assert!(nada.contains("no service by that name"), "{nada}");
 }
 
 /// Colores: azul informa, amarillo advierte, rojo bloquea. Y se apagan solos
@@ -4098,7 +4098,7 @@ pii = []
 
     let (salida, ok) = check(real);
     assert!(ok, "el volcado que coincide dio diferencias:\n{salida}");
-    assert!(salida.contains("0 diferencias"), "{salida}");
+    assert!(salida.contains("0 differences"), "{salida}");
 
     // una columna declarada que la tabla no tiene
     let falta = real.replace("order_placed_v1\ttotal_amount\tNullable(Int64)\n", "");

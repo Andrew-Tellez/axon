@@ -298,7 +298,7 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
 /// the infrastructure. No hardcoded cloud.
 pub fn build_ci(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String {
     let svc = &m.service;
-    let en = |field: &String| ci.para(field, svc);
+    let en = |field: &String| ci.path(field, svc);
     let (dir, test, contracts, image, manifests) = (
         en(&ci.service_dir),
         en(&ci.test_cmd),
@@ -309,13 +309,13 @@ pub fn build_ci(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String {
 
     let mut gates = String::new();
     if !migrations_of(m).is_empty() {
-        let ruta = m.infra.migrations.clone().unwrap_or_default();
+        let route = m.infra.migrations.clone().unwrap_or_default();
         gates.push_str(&format!(
             "      # gate: expand -> migrate -> contract. A `.contract.sql` in the same
       # deploy as the code that stops using the column breaks the rollback.
       - name: migraciones (dry-run)
         run: |
-          flyway -url=$DB_URL -locations=filesystem:./{ruta} \\
+          flyway -url=$DB_URL -locations=filesystem:./{route} \\
             -sqlMigrationPrefix= -sqlMigrationSeparator=_ \\
             -validateMigrationNaming=true validate
 "

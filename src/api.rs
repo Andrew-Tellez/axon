@@ -50,7 +50,7 @@ pub fn openapi(ms: &[Manifest]) -> Value {
                 op["parameters"] = json!([{
                     "name": "Idempotency-Key", "in": "header", "required": true,
                     "schema": {"type": "string", "format": "uuid"},
-                    "description": "Reintentar con la misma llave no duplica el efecto."
+                    "description": "Retrying with the same key does not duplicate the effect."
                 }]);
             }
             paths
@@ -64,14 +64,14 @@ pub fn openapi(ms: &[Manifest]) -> Value {
     json!({
         "openapi": "3.1.0",
         "info": {"title": "axon", "version": "1.0.0",
-                 "description": "Generado desde los manifiestos. No editar."},
+                 "description": "Generated from the manifests. Do not edit."},
         "paths": paths,
         "components": {"schemas": {
             // RFC 7807: one error format across the whole platform
             "Problem": {"type": "object", "required": ["type", "title", "status"], "properties": {
                 "type": {"type": "string"}, "title": {"type": "string"},
                 "status": {"type": "integer"}, "detail": {"type": "string"},
-                "traceId": {"type": "string", "description": "el trace-id del traceparent"}
+                "traceId": {"type": "string", "description": "the trace-id from the traceparent"}
             }}
         }}
     })
@@ -79,7 +79,7 @@ pub fn openapi(ms: &[Manifest]) -> Value {
 
 // ---------- tests ----------
 
-fn valor(t: &str, k: &str) -> String {
+fn value(t: &str, k: &str) -> String {
     match t {
         "uuid" => "\"00000000-0000-4000-8000-000000000000\"".into(),
         "timestamp" => "\"2026-01-01T00:00:00.000Z\"".into(),
@@ -90,13 +90,13 @@ fn valor(t: &str, k: &str) -> String {
     }
 }
 
-fn fixture(nombre: &str, tipo: &str, campos: &Fields) -> String {
+fn fixture(name: &str, kind: &str, campos: &Fields) -> String {
     let body: Vec<String> = campos
         .iter()
-        .map(|(k, t)| format!("  {k}: {},", valor(t, k)))
+        .map(|(k, t)| format!("  {k}: {},", value(t, k)))
         .collect();
     format!(
-        "export const {nombre}: {tipo} = {{\n{}\n}};\n",
+        "export const {name}: {kind} = {{\n{}\n}};\n",
         body.join("\n")
     )
 }

@@ -1,79 +1,81 @@
-//! Pruebas de carga derivadas del manifiesto, y el chequeo de lo medido.
+//! Load tests derived from the manifest, and the check of what was measured.
 //!
-//! El manifiesto ya declara la capacidad: `rate_limit` dice cuanto trafico se
-//! espera por ruta, `timeout_ms` cuanto puede tardar, `max_instances` hasta
-//! donde escala y `pool_size` cuantas conexiones abre cada instancia. Todo eso
-//! son numeros, y un numero declarado que nadie mide es una opinion.
+//! The manifest already declares the capacity: `rate_limit` says how much
+//! traffic is expected per route, `timeout_ms` how long it may take,
+//! `max_instances` how far it scales and `pool_size` how many connections each
+//! instance opens. Those are all numbers, and a declared number nobody measures
+//! is an opinion.
 //!
-//! Asi que el script sale del manifiesto y los umbrales tambien: la prueba
-//! falla cuando la realidad no alcanza lo declarado. Es el mismo diff que
-//! `axon seq` contra `axon trace`, aplicado al rendimiento.
+//! So the script comes out of the manifest and so do the thresholds: the test
+//! fails when reality does not reach what was declared. It is the same diff as
+//! `axon seq` against `axon trace`, applied to performance.
 use crate::manifest::*;
 use serde::Deserialize;
 
-/// Techo teorico de peticiones concurrentes que el pool permite.
+/// The theoretical ceiling of concurrent requests the pool allows.
 ///
-/// No es una medicion: es la cota que impone lo declarado. Si la prueba mide
-/// mas, alguien miente; si mide mucho menos, el cuello esta en otro lado.
-fn techo_conexiones(m: &Manifest) -> Option<u32> {
+/// It is not a measurement: it is the bound what was declared imposes. If the
+/// test measures more, somebody is lying; if it measures far less, the
+/// bottleneck is elsewhere.
+fn connection_ceiling(m: &Manifest) -> Option<u32> {
     Some(m.infra.pool_size? * m.infra.max_instances.unwrap_or(10))
 }
 
 pub fn build_k6(m: &Manifest) -> Result<String, String> {
-    let rutas: Vec<(&String, &Method)> = m
+    let routes: Vec<(&String, &Method)> = m
         .methods
         .iter()
         .filter(|(_, me)| me.http.is_some())
         .collect();
-    if rutas.is_empty() {
-        return Err(format!("{}: no expone rutas HTTP que cargar", m.service));
+    if routes.is_empty() {
+        return Err(format!("{}: exposes no HTTP routes to load", m.service));
     }
 
-    let mut escenarios = Vec::new();
+    let mut scenarios = Vec::new();
     let mut umbrales = Vec::new();
     let mut peticiones = Vec::new();
-    for (nombre, me) in &rutas {
+    for (name, me) in &routes {
         let verbo = me.verb().unwrap_or("GET");
-        let ruta = me.path().unwrap_or("/");
-        let tag = camel(nombre);
-        // La tasa declarada es el objetivo, no una sugerencia: si el servicio
-        // no la aguanta, el rate_limit del manifiesto es una ficcion.
+        let route = me.path().unwrap_or("/");
+        let tag = camel(name);
+        // The declared rate is the target, not a suggestion: if the service
+        // cannot take it, the manifest's rate_limit is a fiction.
         let rate = me.rate_limit.unwrap_or(60);
         let timeout = me.timeout_ms.unwrap_or(10_000);
-        // Una ruta con parametro se prueba con un id inventado, porque axon no
-        // conoce los datos. Un 404 ahi no es un fallo del servicio: es que el
-        // recurso no existe. Lo que la prueba mide es el camino —ruteo, auth,
-        // ida y vuelta a la base—, no una lectura exitosa.
-        let con_parametro = ruta.contains('{');
-        let aceptados = if con_parametro {
+        // A route with a parameter is tested with a made-up id, because axon
+        // does not know the data. A 404 there is not a service failure: the
+        // resource simply does not exist. What the test measures is the path
+        // —routing, auth, a round trip to the database— not a successful read.
+        let con_parametro = route.contains('{');
+        let accepted = if con_parametro {
             "r.status === 404 || (r.status >= 200 && r.status < 300)"
         } else {
             "r.status >= 200 && r.status < 300"
         };
-        escenarios.push(format!(
+        scenarios.push(format!(
             "    {tag}: {{\n      \
                executor: \"constant-arrival-rate\",\n      \
                exec: \"{tag}\",\n      \
-               rate: {rate},              // declarado en rate_limit\n      \
+               rate: {rate},              // declared in rate_limit\n      \
                timeUnit: \"1m\",\n      \
                duration: __ENV.AXON_CARGA_DURACION || \"30s\",\n      \
                preAllocatedVUs: {vus},\n      maxVUs: {max},\n    }},",
             vus = (rate / 6).max(2),
             max = (rate / 2).max(10),
         ));
-        // El umbral es el timeout declarado. No un numero redondo elegido a ojo.
+        // The threshold is the declared timeout. Not a round number picked by eye.
         umbrales.push(format!(
-            "    \"http_req_duration{{escenario:{tag}}}\": [\"p(95)<{timeout}\"],"
+            "    \"http_req_duration{{scenario:{tag}}}\": [\"p(95)<{timeout}\"],"
         ));
-        // k6 cuenta un 404 como fallo, asi que en una ruta con parametro el
-        // umbral se pone sobre el check y no sobre el codigo HTTP.
+        // k6 counts a 404 as a failure, so on a route with a parameter the
+        // threshold goes on the check and not on the HTTP status.
         if con_parametro {
             umbrales.push(format!(
-                "    \"checks{{escenario:{tag}}}\": [\"rate>0.99\"],"
+                "    \"checks{{scenario:{tag}}}\": [\"rate>0.99\"],"
             ));
         } else {
             umbrales.push(format!(
-                "    \"http_req_failed{{escenario:{tag}}}\": [\"rate<0.01\"],"
+                "    \"http_req_failed{{scenario:{tag}}}\": [\"rate<0.01\"],"
             ));
         }
         let cuerpo = if me.mutating() {
@@ -97,15 +99,15 @@ pub fn build_k6(m: &Manifest) -> Result<String, String> {
             "export function {tag}() {{\n  \
                const r = http.request(\"{verbo}\", `${{base}}{ruta_js}`, {cuerpo}, {{\n    \
                  headers: {cabeceras},\n    \
-                 tags: {{ escenario: \"{tag}\" }},\n    \
+                 tags: {{ scenario: \"{tag}\" }},\n    \
                  timeout: \"{timeout}ms\",\n  }});\n  \
-               check(r, {{ \"{etiqueta}\": (r) => {aceptados} }}, {{ escenario: \"{tag}\" }});\n}}",
-            etiqueta = if con_parametro {
-                "2xx o 404: el id es inventado"
+               check(r, {{ \"{label}\": (r) => {accepted} }}, {{ scenario: \"{tag}\" }});\n}}",
+            label = if con_parametro {
+                "2xx or 404: the id is made up"
             } else {
                 "2xx"
             },
-            ruta_js = ruta
+            ruta_js = route
                 .split('/')
                 .map(|seg| {
                     if seg.starts_with('{') {
@@ -119,11 +121,11 @@ pub fn build_k6(m: &Manifest) -> Result<String, String> {
         ));
     }
 
-    let techo = techo_conexiones(m)
+    let ceiling = connection_ceiling(m)
         .map(|c| {
             format!(
-                "// Techo que impone el pool declarado: {} conexiones x {} instancias = {c}\n\
-                 // peticiones concurrentes. Si la prueba se estanca antes, el cuello es otro.\n",
+                "// Ceiling the declared pool imposes: {} connections x {} instances = {c}\n\
+                 // concurrent requests. If the test plateaus before that, the bottleneck is elsewhere.\n",
                 m.infra.pool_size.unwrap_or(0),
                 m.infra.max_instances.unwrap_or(10)
             )
@@ -131,30 +133,30 @@ pub fn build_k6(m: &Manifest) -> Result<String, String> {
         .unwrap_or_default();
 
     Ok(format!(
-        "// generated by axon from {origen} — do not edit\n\
+        "// generated by axon from {origin} — do not edit\n\
          //\n\
-         // Los umbrales NO son numeros elegidos a ojo: salen del manifiesto. Cada\n\
-         // escenario corre a la tasa que declara su `rate_limit` y falla si el p95\n\
-         // pasa su `timeout_ms`. Un numero declarado que nadie mide es una opinion.\n\
+         // The thresholds are NOT numbers picked by eye: they come from the manifest.\n\
+         // Each scenario runs at the rate its `rate_limit` declares and fails if the p95\n\
+         // goes past its `timeout_ms`. A declared number nobody measures is an opinion.\n\
          //\n\
          //   k6 run --env AXON_BASE=http://localhost:8080 carga.js\n\
          //\n\
-         {techo}import http from \"k6/http\";\n\
+         {ceiling}import http from \"k6/http\";\n\
          import {{ check }} from \"k6\";\n\n\
          const base = __ENV.AXON_BASE || \"http://localhost:8080\";\n\
          const uuid = () =>\n  \
            \"xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx\".replace(/x/g, () =>\n    \
              Math.floor(Math.random() * 16).toString(16),\n  );\n\n\
          export const options = {{\n  \
-           scenarios: {{\n{escenarios}\n  }},\n  \
+           scenarios: {{\n{scenarios}\n  }},\n  \
            thresholds: {{\n{umbrales}\n  }},\n\
          }};\n\n{peticiones}\n",
-        origen = m
+        origin = m
             .origin
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default(),
-        escenarios = escenarios.join("\n"),
+        scenarios = scenarios.join("\n"),
         umbrales = umbrales.join("\n"),
         peticiones = peticiones.join("\n\n"),
     ))
@@ -171,96 +173,96 @@ fn ejemplo(t: &str, k: &str) -> String {
     }
 }
 
-// ---------- lo medido contra lo declarado ----------
+// ---------- the measured against the declared ----------
 
-/// Forma real de `k6 --summary-export`: los valores de la metrica van planos
-/// junto a `thresholds`, y en ese mapa **`true` significa incumplido**, no ok.
-/// Lo comprobe contra un resumen de verdad despues de asumir lo contrario.
+/// The real shape of `k6 --summary-export`: the metric's values are flat
+/// junto a `thresholds`, y en ese mapa **`true` significa breached**, no ok.
+/// I checked that against a real summary after assuming the opposite.
 #[derive(Deserialize)]
-struct Metrica {
+struct Metric {
     #[serde(default)]
     thresholds: std::collections::BTreeMap<String, bool>,
     #[serde(flatten)]
     valores: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
-impl Metrica {
-    fn valor(&self, k: &str) -> Option<f64> {
+impl Metric {
+    fn value(&self, k: &str) -> Option<f64> {
         self.valores.get(k)?.as_f64()
     }
 }
 
 #[derive(Deserialize)]
-struct Resumen {
+struct Summary {
     #[serde(default)]
-    metrics: std::collections::BTreeMap<String, Metrica>,
+    metrics: std::collections::BTreeMap<String, Metric>,
 }
 
-/// Lee el resumen de k6 (`--summary-export`) y lo compara con lo declarado.
+/// Reads k6's summary (`--summary-export`) and compares it with the declared.
 ///
-/// k6 ya evalua sus umbrales, pero su codigo de salida se pierde en un
-/// pipeline y su reporte es para leer, no para diffear. Esto devuelve el
-/// veredicto en la forma del resto de axon: errores con el numero declarado al
-/// lado del medido.
-pub fn revisar(m: &Manifest, json: &str) -> Result<(Vec<String>, Vec<String>), String> {
-    let r: Resumen = serde_json::from_str(json).map_err(|e| format!("resumen invalido: {e}"))?;
-    let (mut errores, mut avisos) = (Vec::new(), Vec::new());
+/// k6 already evaluates its thresholds, but its exit code gets lost in a
+/// pipeline and its report is for reading, not for diffing. This returns the
+/// verdict in the shape of the rest of axon: errors with the declared number
+/// next to the measured one.
+pub fn review(m: &Manifest, json: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    let r: Summary = serde_json::from_str(json).map_err(|e| format!("invalid summary: {e}"))?;
+    let (mut errors, mut warnings) = (Vec::new(), Vec::new());
 
-    for (metrica, met) in &r.metrics {
-        for (umbral, incumplido) in &met.thresholds {
-            if *incumplido {
-                errores.push(format!(
-                    "{}: `{metrica}` incumplio `{umbral}`. Lo declarado en el manifiesto no se \
-                     sostiene con el trafico que el propio manifiesto declara",
+    for (metric, met) in &r.metrics {
+        for (threshold, breached) in &met.thresholds {
+            if *breached {
+                errors.push(format!(
+                    "{}: `{metric}` breached `{threshold}`. What the manifest declares does not \
+                     hold up under the traffic the manifest itself declares",
                     m.service
                 ));
             }
         }
     }
 
-    // Sin umbrales en el resumen no hay veredicto: decirlo es mejor que dar
-    // por bueno lo que no se midio.
+    // With no thresholds in the summary there is no verdict: saying so beats
+    // taking what was not measured as fine.
     if r.metrics.values().all(|m| m.thresholds.is_empty()) {
         return Err(
-            "el resumen no trae umbrales: corre k6 con el script que genera `axon load`".into(),
+            "the summary carries no thresholds: run k6 with the script `axon load` generates".into(),
         );
     }
 
     if let Some(dur) = r.metrics.get("http_req_duration") {
-        if let Some(p95) = dur.valor("p(95)") {
-            let declarado = m
+        if let Some(p95) = dur.value("p(95)") {
+            let declared = m
                 .methods
                 .values()
                 .filter_map(|me| me.timeout_ms)
                 .max()
                 .unwrap_or(10_000) as f64;
-            if p95 > declarado * 0.5 && p95 <= declarado {
-                avisos.push(format!(
-                    "{}: p95 de {p95:.0}ms contra un timeout declarado de {declarado:.0}ms; \
-                     queda poco margen antes de que el timeout empiece a dispararse",
+            if p95 > declared * 0.5 && p95 <= declared {
+                warnings.push(format!(
+                    "{}: a p95 of {p95:.0}ms against a declared timeout of {declared:.0}ms; \
+                     little margin left before the timeout starts firing",
                     m.service
                 ));
             }
         }
     }
     if let Some(reqs) = r.metrics.get("http_reqs") {
-        if let (Some(total), Some(rate)) = (reqs.valor("count"), reqs.valor("rate")) {
-            avisos.push(format!(
-                "{}: {total:.0} peticiones medidas a {rate:.1}/s",
+        if let (Some(total), Some(rate)) = (reqs.value("count"), reqs.value("rate")) {
+            warnings.push(format!(
+                "{}: {total:.0} requests measured at {rate:.1}/s",
                 m.service
             ));
         }
-        // El techo del pool es una cota, no una medicion: si el trafico medido
-        // se acerca, el siguiente cuello de botella son las conexiones.
-        if let (Some(rate), Some(techo)) = (reqs.valor("rate"), techo_conexiones(m)) {
-            if rate > f64::from(techo) * 0.5 {
-                avisos.push(format!(
-                    "{}: {rate:.1} peticiones/s contra un techo de {techo} conexiones \
-                     concurrentes que impone el pool declarado",
+        // The pool ceiling is a bound, not a measurement: if the measured
+        // traffic gets close, the next bottleneck is the connections.
+        if let (Some(rate), Some(ceiling)) = (reqs.value("rate"), connection_ceiling(m)) {
+            if rate > f64::from(ceiling) * 0.5 {
+                warnings.push(format!(
+                    "{}: {rate:.1} requests/s against a ceiling of {ceiling} concurrent \
+                     connections that the declared pool imposes",
                     m.service
                 ));
             }
         }
     }
-    Ok((errores, avisos))
+    Ok((errors, warnings))
 }

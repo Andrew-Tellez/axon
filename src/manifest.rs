@@ -93,7 +93,7 @@ pub struct Cap {
     pub max_staleness_ms: Option<u32>,
     /// `true` when somebody made the choice; `false` when it is the default.
     #[serde(skip)]
-    pub declarado: bool,
+    pub declared: bool,
 }
 
 impl Default for Cap {
@@ -104,7 +104,7 @@ impl Default for Cap {
             consistency: "strong".into(),
             on_partition: "reject".into(),
             max_staleness_ms: None,
-            declarado: false,
+            declared: false,
         }
     }
 }
@@ -708,7 +708,7 @@ pub fn load(path: &Path) -> Result<Manifest, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut m: Manifest = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     // serde cannot tell "absent" from "equal to the default"; the text can
-    m.cap.declarado = text.contains("[cap]");
+    m.cap.declared = text.contains("[cap]");
     m.origin = path.to_path_buf();
     Ok(m)
 }

@@ -1,22 +1,22 @@
-//! `axon import asyncapi` — entrar sin reescribir nada.
+//! `axon import asyncapi` — getting in without rewriting anything.
 //!
-//! Si el equipo ya tiene un catalogo de eventos en AsyncAPI, el manifiesto no
-//! deberia escribirse a mano. Lo que el import no puede saber (dueno, tier,
-//! timeouts) sale como TODO, y `axon verify` los reclama: la herramienta te
-//! deja en un estado incompleto pero honesto, no en uno que finge estar listo.
+//! If the team already has an event catalogue in AsyncAPI, the manifest should
+//! not be written by hand. What the import cannot know (owner, tier, timeouts)
+//! comes out as a TODO, and `axon verify` demands them: the tool leaves you in
+//! an incomplete but honest state, not in one that pretends to be ready.
 use serde_json::Value;
 
-pub fn asyncapi(text: &str, servicio: Option<&str>) -> Result<String, String> {
+pub fn asyncapi(text: &str, service: Option<&str>) -> Result<String, String> {
     let doc: Value = parse(text)?;
     let version = doc
         .get("asyncapi")
         .and_then(Value::as_str)
-        .ok_or("no parece un documento AsyncAPI: falta el campo `asyncapi`")?;
+        .ok_or("this does not look like an AsyncAPI document: the `asyncapi` field is missing")?;
 
-    let nombre = servicio
+    let name = service
         .map(str::to_string)
         .or_else(|| doc.pointer("/info/title").and_then(Value::as_str).map(slug))
-        .ok_or("sin `info.title`: pasa el nombre con --service")?;
+        .ok_or("no `info.title`: pass the name with --service")?;
 
     let (emits, consumes) = match version.chars().next() {
         Some('3') => v3(&doc)?,
@@ -25,7 +25,7 @@ pub fn asyncapi(text: &str, servicio: Option<&str>) -> Result<String, String> {
     };
 
     Ok(toml(
-        &nombre,
+        &name,
         doc.pointer("/info/version").and_then(Value::as_str),
         &emits,
         &consumes,
@@ -36,10 +36,10 @@ fn parse(text: &str) -> Result<Value, String> {
     if let Ok(v) = serde_json::from_str(text) {
         return Ok(v);
     }
-    serde_yaml_ng::from_str(text).map_err(|e| format!("no es JSON ni YAML valido: {e}"))
+    serde_yaml_ng::from_str(text).map_err(|e| format!("this is neither valid JSON nor valid YAML: {e}"))
 }
 
-/// Un evento con campos y, si venia declarado, su nombre de handler.
+/// An event with fields and, if it came declared, its handler name.
 type Evento = (String, Vec<(String, String)>);
 
 // ---------- AsyncAPI 3.x ----------
@@ -58,9 +58,9 @@ fn v3(doc: &Value) -> Result<(Vec<Evento>, Vec<Evento>), String> {
             .get("address")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .unwrap_or_else(|| "sin-direccion".into());
+            .unwrap_or_else(|| "no-direction".into());
 
-        // los mensajes de la operacion, o los del canal si no los acota
+        // the operation's messages, or the channel's if it does not narrow them
         let msgs: Vec<&Value> = match op.get("messages").and_then(Value::as_array) {
             Some(a) => a.iter().collect(),
             None => canal
@@ -80,26 +80,27 @@ fn v3(doc: &Value) -> Result<(Vec<Evento>, Vec<Evento>), String> {
         }
     }
     if emits.is_empty() && consumes.is_empty() {
-        return Err("no se encontro ninguna operacion con `action: send|receive`".into());
+        return Err("no operation with `action: send|receive` was found".into());
     }
     Ok((emits, consumes))
 }
 
 // ---------- AsyncAPI 2.x ----------
 
-/// En 2.x la direccion es desde fuera de la app: `publish` es lo que otros
-/// publican hacia ella (o sea, lo que la app consume) y `subscribe` lo que la
-/// app expone para que otros lo lean (lo que emite). Es al reves de lo que
-/// sugiere la palabra, y es la causa numero uno de errores al leer 2.x.
+/// In 2.x the direction is from outside the app: `publish` is what others
+/// publish towards it (that is, what the app consumes) and `subscribe` is what
+/// the app exposes for others to read (what it emits). It is the reverse of
+/// what the word suggests, and it is the number one cause of mistakes when
+/// reading 2.x.
 fn v2(doc: &Value) -> Result<(Vec<Evento>, Vec<Evento>), String> {
     let (mut emits, mut consumes) = (vec![], vec![]);
     let canales = doc
         .get("channels")
         .and_then(Value::as_object)
-        .ok_or("sin `channels`")?;
+        .ok_or("no `channels`")?;
     for (direccion, canal) in canales {
-        for (clave, destino) in [("subscribe", &mut emits), ("publish", &mut consumes)] {
-            let Some(op) = canal.get(clave) else { continue };
+        for (key, destino) in [("subscribe", &mut emits), ("publish", &mut consumes)] {
+            let Some(op) = canal.get(key) else { continue };
             let msgs: Vec<&Value> = match op.pointer("/message/oneOf").and_then(Value::as_array) {
                 Some(a) => a.iter().collect(),
                 None => op.get("message").into_iter().collect(),
@@ -110,7 +111,7 @@ fn v2(doc: &Value) -> Result<(Vec<Evento>, Vec<Evento>), String> {
         }
     }
     if emits.is_empty() && consumes.is_empty() {
-        return Err("los canales no declaran `publish` ni `subscribe`".into());
+        return Err("the channels declare neither `publish` nor `subscribe`".into());
     }
     Ok((emits, consumes))
 }
@@ -141,13 +142,13 @@ fn campos_de(doc: &Value, msg: &Value) -> Vec<(String, String)> {
         .map(|props| {
             props
                 .iter()
-                .map(|(k, v)| (k.clone(), tipo(doc, v)))
+                .map(|(k, v)| (k.clone(), kind(doc, v)))
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn tipo(doc: &Value, esquema: &Value) -> String {
+fn kind(doc: &Value, esquema: &Value) -> String {
     let e = deref(doc, esquema);
     let t = e.get("type").and_then(Value::as_str).unwrap_or("string");
     let f = e.get("format").and_then(Value::as_str).unwrap_or("");
@@ -158,8 +159,8 @@ fn tipo(doc: &Value, esquema: &Value) -> String {
         ("number", _) => "float",
         ("boolean", _) => "bool",
         ("object", _) => {
-            // { amount, currency } es dinero: el tipo propio existe justamente
-            // para que no viaje como float
+            // { amount, currency } is money: the dedicated type exists exactly
+            // so it does not travel as a float
             let p = e.get("properties").and_then(Value::as_object);
             let tiene = |k: &str| p.is_some_and(|p| p.contains_key(k));
             if tiene("amount") && tiene("currency") {
@@ -173,7 +174,7 @@ fn tipo(doc: &Value, esquema: &Value) -> String {
     .into()
 }
 
-/// axon exige version en el nombre del evento; AsyncAPI no la lleva ahi.
+/// axon requires a version in the event's name; AsyncAPI does not carry one there.
 fn evento(direccion: &str) -> String {
     if direccion.contains('@') {
         direccion.to_string()
@@ -201,12 +202,12 @@ fn handler(ev: &str) -> String {
     )
 }
 
-fn toml(servicio: &str, version: Option<&str>, emits: &[Evento], consumes: &[Evento]) -> String {
+fn toml(service: &str, version: Option<&str>, emits: &[Evento], consumes: &[Evento]) -> String {
     let mut o = vec![
-        "# importado desde AsyncAPI por axon.".to_string(),
-        "# Los TODO son lo que el documento no dice y `axon verify` va a reclamar.".to_string(),
+        "# imported from AsyncAPI by axon.".to_string(),
+        "# The TODOs are what the document does not say and `axon verify` will demand.".to_string(),
         String::new(),
-        format!("service = \"{servicio}\""),
+        format!("service = \"{service}\""),
     ];
     if let Some(v) = version {
         o.push(format!("version = \"{v}\""));
@@ -234,7 +235,7 @@ fn toml(servicio: &str, version: Option<&str>, emits: &[Evento], consumes: &[Eve
     o.join("\n")
 }
 
-/// Un evento puede aparecer en varias operaciones; el manifiesto lo declara una vez.
+/// An event can appear in several operations; the manifest declares it once.
 fn dedup(evs: &[Evento]) -> Vec<Evento> {
     let mut vistos = std::collections::HashSet::new();
     evs.iter()

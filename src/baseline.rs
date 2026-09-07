@@ -1,10 +1,10 @@
-//! Baseline: los contratos ya publicados.
+//! Baseline: the contracts already published.
 //!
-//! Sin esto, `verify` solo detecta que DOS servicios declaren el mismo evento
-//! distinto. No detecta lo mas comun y lo mas caro: cambiarle un campo a una
-//! version que ya esta en produccion, con consumidores desplegados que la
-//! esperan como estaba. Una version publicada es inmutable, y eso solo se
-//! puede comprobar contra un registro de lo que se publico.
+//! Without this, `verify` only detects TWO services declaring the same event
+//! differently. It does not detect the most common and most expensive thing:
+//! changing a field on a version that is already in production, with deployed
+//! consumers expecting it as it was. A published version is immutable, and that
+//! can only be checked against a record of what was published.
 use crate::manifest::*;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -84,15 +84,15 @@ pub fn cargar(dir: &Path) -> Option<Baseline> {
     }
 }
 
-/// Compara lo declarado contra lo publicado. Solo mira hacia atras: un evento
-/// o metodo nuevo no es un problema, cambiar uno viejo si.
+/// Compares the declared against the published. It only looks backwards: a new
+/// event or method is not a problem, changing an old one is.
 pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
-    let mut errores = Vec::new();
-    let mut avisos = Vec::new();
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
     let ahora = tomar(ms);
 
-    // Un contrato que no esta registrado no esta protegido: manana se le puede
-    // cambiar un campo y nadie lo va a notar.
+    // A contract that is not registered is not protected: tomorrow a field can
+    // change on it and nobody will notice.
     let nuevos: Vec<&String> = ahora
         .events
         .keys()
@@ -100,7 +100,7 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
         .chain(ahora.methods.keys().filter(|k| !b.methods.contains_key(*k)))
         .collect();
     if !nuevos.is_empty() {
-        avisos.push(format!(
+        warnings.push(format!(
             "{} contracts not recorded in {ARCHIVO} ({}); run `axon baseline` when you publish them",
             nuevos.len(),
             nuevos
@@ -114,38 +114,38 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
 
     for (ev, antes) in &b.events {
         match ahora.events.get(ev) {
-            None => errores.push(format!(
+            None => errors.push(format!(
                 "{ev}: it was published by {} and nobody emits it any more; its consumers are \
                  still deployed. If it really is being retired, remove it from {ARCHIVO} in the \
                  same PR",
                 antes.owner
             )),
-            Some(hoy) if hoy.owner != antes.owner => errores.push(format!(
+            Some(hoy) if hoy.owner != antes.owner => errors.push(format!(
                 "{ev}: changed owner, from {} to {}; an event has exactly one owner",
                 antes.owner, hoy.owner
             )),
             Some(hoy) if hoy.fields != antes.fields => {
-                for (campo, tipo) in &antes.fields {
-                    match hoy.fields.get(campo) {
-                        None => errores.push(format!(
-                            "{ev}: field `{campo}` disappeared from a published version; \
+                for (field, kind) in &antes.fields {
+                    match hoy.fields.get(field) {
+                        None => errors.push(format!(
+                            "{ev}: field `{field}` disappeared from a published version; \
                              publish {} instead",
                             siguiente(ev)
                         )),
-                        Some(t) if t != tipo => errores.push(format!(
-                            "{ev}.{campo}: changed from `{tipo}` to `{t}` in a published version; \
+                        Some(t) if t != kind => errors.push(format!(
+                            "{ev}.{field}: changed from `{kind}` to `{t}` in a published version; \
                              publish {} instead",
                             siguiente(ev)
                         )),
                         _ => {}
                     }
                 }
-                for campo in hoy.fields.keys() {
-                    if !antes.fields.contains_key(campo) {
+                for field in hoy.fields.keys() {
+                    if !antes.fields.contains_key(field) {
                         // Every axon field is required: adding one breaks the old
                         // producers just as removing one breaks the consumers.
-                        errores.push(format!(
-                            "{ev}: new field `{campo}` in a published version; \
+                        errors.push(format!(
+                            "{ev}: new field `{field}` in a published version; \
                              publish {} instead",
                             siguiente(ev)
                         ));
@@ -156,38 +156,38 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
         }
     }
 
-    for (clave, antes) in &b.methods {
-        match ahora.methods.get(clave) {
-            None => errores.push(format!(
-                "{clave}: estaba publicado y ya no existe; sus llamadores siguen desplegados"
+    for (key, antes) in &b.methods {
+        match ahora.methods.get(key) {
+            None => errors.push(format!(
+                "{key}: estaba publicado y ya no existe; sus llamadores siguen desplegados"
             )),
             Some(hoy) => {
                 if hoy.http != antes.http {
                     let r = |o: &Option<String>| o.clone().unwrap_or_else(|| "(no route)".into());
-                    errores.push(format!(
-                        "{clave}: the route changed from `{}` to `{}`; the clients point at the old one",
+                    errors.push(format!(
+                        "{key}: the route changed from `{}` to `{}`; the clients point at the old one",
                         r(&antes.http),
                         r(&hoy.http)
                     ));
                 }
-                for (campo, tipo) in &antes.output {
-                    match hoy.output.get(campo) {
-                        None => errores.push(format!(
-                            "{clave}: stopped returning `{campo}`; the callers read it"
+                for (field, kind) in &antes.output {
+                    match hoy.output.get(field) {
+                        None => errors.push(format!(
+                            "{key}: stopped returning `{field}`; the callers read it"
                         )),
-                        Some(t) if t != tipo => errores.push(format!(
-                            "{clave}: output `{campo}` changed from `{tipo}` to `{t}`"
+                        Some(t) if t != kind => errors.push(format!(
+                            "{key}: output `{field}` changed from `{kind}` to `{t}`"
                         )),
                         _ => {}
                     }
                 }
-                for (campo, tipo) in &hoy.input {
-                    match antes.input.get(campo) {
-                        None => errores.push(format!(
-                            "{clave}: new input `{campo}`, required; the old callers do not send it"
+                for (field, kind) in &hoy.input {
+                    match antes.input.get(field) {
+                        None => errors.push(format!(
+                            "{key}: new input `{field}`, required; the old callers do not send it"
                         )),
-                        Some(antes_tipo) if antes_tipo != tipo => errores.push(format!(
-                            "{clave}: input `{campo}` changed from `{antes_tipo}` to `{tipo}`"
+                        Some(antes_tipo) if antes_tipo != kind => errors.push(format!(
+                            "{key}: input `{field}` changed from `{antes_tipo}` to `{kind}`"
                         )),
                         _ => {}
                     }
@@ -195,7 +195,7 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
             }
         }
     }
-    (errores, avisos)
+    (errors, warnings)
 }
 
 /// `order.placed@v1` -> `order.placed@v2`

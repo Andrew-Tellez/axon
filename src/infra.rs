@@ -193,14 +193,14 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 max_attempts: 5,
             });
         }
-        for (nombre, ag) in &m.aggregate {
+        for (name, ag) in &m.aggregate {
             if ag.snapshot_every == 0 {
                 continue;
             }
             crons.push(Cron {
                 service: svc.clone(),
-                name: format!("fotos.{nombre}"),
-                path: Aggregate::prune_route(nombre),
+                name: format!("fotos.{name}"),
+                path: Aggregate::prune_route(name),
                 port: m.infra.port.unwrap_or(8080),
                 // Hourly, and this number does NOT come from the manifest because
                 // there is nothing there to derive it from: the snapshot cadence is
@@ -209,11 +209,11 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 every_ms: 3_600_000,
             });
         }
-        for (nombre, sg) in &m.saga {
+        for (name, sg) in &m.saga {
             crons.push(Cron {
                 service: svc.clone(),
-                name: format!("saga.{nombre}"),
-                path: Saga::sweep_route(nombre),
+                name: format!("saga.{name}"),
+                path: Saga::sweep_route(name),
                 port: m.infra.port.unwrap_or(8080),
                 every_ms: sg.timeout_ms.unwrap_or(60_000),
             });
@@ -234,12 +234,12 @@ pub fn plan(ms: &[Manifest]) -> Plan {
             });
         }
         for (_, me) in m.methods.iter() {
-            let (Some(verbo), Some(ruta)) = (me.verb(), me.path()) else {
+            let (Some(verbo), Some(route)) = (me.verb(), me.path()) else {
                 continue;
             };
             routes.push(Route {
                 method: verbo.to_string(),
-                path: ruta.to_string(),
+                path: route.to_string(),
                 service: svc.clone(),
                 port: m.infra.port.unwrap_or(8080),
                 public: me.auth.as_deref() == Some("public"),
@@ -247,13 +247,13 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 timeout_ms: me.timeout_ms.unwrap_or(10_000),
             });
         }
-        for (nombre, b) in &m.infra.buckets {
+        for (name, b) in &m.infra.buckets {
             buckets.push(Store2 {
                 service: svc.clone(),
-                name: nombre.clone(),
+                name: name.clone(),
                 // Neutral template: `{project}` is substituted by each target with
                 // its own syntax. The plan carries nobody's interpolation.
-                bucket: format!("{{project}}-{svc}-{nombre}"),
+                bucket: format!("{{project}}-{svc}-{name}"),
                 public: b.public,
                 retention_days: b.retention_days,
                 cache_ttl: b.cache_ttl.unwrap_or(3600),
@@ -445,13 +445,13 @@ fn gcp(p: &Plan) -> String {
         ));
     }
     if !p.routes.is_empty() {
-        let mut reglas = String::new();
+        let mut rules = String::new();
         for r in &p.routes {
             let prefijo = match r.path.find('{') {
                 Some(i) => r.path[..i].trim_end_matches('/').to_string(),
                 None => r.path.clone(),
             };
-            reglas.push_str(&format!(
+            rules.push_str(&format!(
                 "    path_rule {{\n      paths   = [\"{prefijo}\", \"{prefijo}/*\"]\n      \
                  service = google_compute_backend_service.{}.id\n    }}\n",
                 tfname(&r.service)
@@ -476,7 +476,7 @@ fn gcp(p: &Plan) -> String {
             "resource \"google_compute_url_map\" \"edge\" {{\n  name            = \"axon-edge\"\n  \
              default_service = google_compute_backend_service.{}.id\n\n  \
              path_matcher {{\n    name            = \"axon\"\n    \
-             default_service = google_compute_backend_service.{}.id\n{reglas}  }}\n}}\n",
+             default_service = google_compute_backend_service.{}.id\n{rules}  }}\n}}\n",
             tfname(&p.routes[0].service), tfname(&p.routes[0].service)
         ));
     }
@@ -519,7 +519,7 @@ fn gcp(p: &Plan) -> String {
         // for anyone, and this one triggers compensations.
         o.push(format!(
             "resource \"google_cloud_scheduler_job\" \"{sv}_{n}\" {{\n  \
-             name     = \"{svc}-{nombre}\"\n  \
+             name     = \"{svc}-{name}\"\n  \
              schedule = \"*/{min} * * * *\"\n  \
              # if one pass takes longer than the interval, this one is cut off before\n  \
              # the next one starts\n  \
@@ -532,7 +532,7 @@ fn gcp(p: &Plan) -> String {
                  service_account_email = google_service_account.{sv}.email\n      \
                  audience              = google_cloud_run_v2_service.{sv}.uri\n    }}\n  }}\n}}\n",
             svc = c.service,
-            nombre = c.name.replace('.', "-"),
+            name = c.name.replace('.', "-"),
             min = c.minutes(),
             plazo = (c.every_ms / 1000).max(30),
             path = c.path,
@@ -811,7 +811,7 @@ fn aws(p: &Plan) -> String {
         // the service IS reachable from.
         o.push(format!(
             "resource \"aws_ecs_task_definition\" \"{sv}_{n}\" {{\n  \
-             family                   = \"{svc}-{nombre}\"\n  \
+             family                   = \"{svc}-{name}\"\n  \
              requires_compatibilities = [\"FARGATE\"]\n  \
              network_mode             = \"awsvpc\"\n  cpu = \"256\"\n  memory = \"512\"\n  \
              execution_role_arn       = var.task_execution_role_arn\n  \
@@ -821,14 +821,14 @@ fn aws(p: &Plan) -> String {
                command = [\"-fsS\", \"-m\", \"{plazo}\", \"-X\", \"POST\", \"http://{svc}.internal:{port}{path}\"]\n  \
              }}])\n}}\n",
             svc = c.service,
-            nombre = c.name.replace('.', "-"),
+            name = c.name.replace('.', "-"),
             plazo = (c.every_ms / 1000).max(30),
             port = c.port,
             path = c.path,
         ));
         o.push(format!(
             "resource \"aws_scheduler_schedule\" \"{sv}_{n}\" {{\n  \
-             name                         = \"{svc}-{nombre}\"\n  \
+             name                         = \"{svc}-{name}\"\n  \
              schedule_expression          = \"{rate}\"\n  \
              # without this, a missed window is recovered by firing several times in a\n  \
              # row: several sweeps at once over the same sagas\n  \
@@ -842,7 +842,7 @@ fn aws(p: &Plan) -> String {
                  network_configuration {{\n        subnets = var.subnets\n      }}\n    }}\n    \
                retry_policy {{\n      maximum_retry_attempts = 1\n    }}\n  }}\n}}\n",
             svc = c.service,
-            nombre = c.name.replace('.', "-"),
+            name = c.name.replace('.', "-"),
             rate = c.rate(),
         ));
     }
@@ -853,21 +853,21 @@ fn aws(p: &Plan) -> String {
         // splitting them later, in the warehouse, with a query nobody wrote.
         o.push(format!(
             "resource \"aws_kinesis_firehose_delivery_stream\" \"warehouse_{n}\" {{\n  \
-             name        = \"axon-warehouse-{tabla}\"\n  \
+             name        = \"axon-warehouse-{table}\"\n  \
              destination = \"extended_s3\"\n  \
              extended_s3_configuration {{\n    \
                role_arn   = var.firehose_role_arn\n    \
                bucket_arn = aws_s3_bucket.warehouse.arn\n    \
                # the same date partitioning as the generated schema's `PARTITION BY\n    \
                # DATE(event_time)`: if they do not match, the warehouse reads too much\n    \
-               prefix              = \"eventos/{tabla}/dt=!{{timestamp:yyyy-MM-dd}}/\"\n    \
-               error_output_prefix = \"errores/{tabla}/dt=!{{timestamp:yyyy-MM-dd}}/\"\n    \
-               # what does not fit is not discarded: it lands in `errores/` and can be\n    \
+               prefix              = \"eventos/{table}/dt=!{{timestamp:yyyy-MM-dd}}/\"\n    \
+               error_output_prefix = \"errores/{table}/dt=!{{timestamp:yyyy-MM-dd}}/\"\n    \
+               # what does not fit is not discarded: it lands in `errors/` and can be\n    \
                # loaded again. It is the warehouse's equivalent of the DLQ.\n    \
                compression_format  = \"GZIP\"\n    \
                buffering_interval  = 60\n    \
                buffering_size      = 5\n  }}\n}}\n",
-            tabla = t.table
+            table = t.table
         ));
         o.push(format!(
             "resource \"aws_sns_topic_subscription\" \"warehouse_{n}\" {{\n  \
@@ -1155,14 +1155,14 @@ spec:
                 "\n    # only the sweep pod\n    - from:\n        - podSelector:\n            matchLabels: { axon.dev/sweep: \"true\" }",
             );
         }
-        let reglas = if !froms.is_empty() {
+        let rules = if !froms.is_empty() {
             froms.as_str()
         } else {
             " []   # nadie: este servicio solo reacciona a eventos"
         };
         o.push(format!(
             "---\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: {svc}\nspec:\n  \
-             podSelector:\n    matchLabels: {{ app: {svc} }}\n  policyTypes: [Ingress]\n  ingress:{reglas}",
+             podSelector:\n    matchLabels: {{ app: {svc} }}\n  policyTypes: [Ingress]\n  ingress:{rules}",
             svc = w.service
         ));
     }
@@ -1277,13 +1277,13 @@ spec:
         );
     }
     for c in &p.crons {
-        let nombre = c.name.replace('.', "-");
+        let name = c.name.replace('.', "-");
         o.push(format!(
             "---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {svc}-{nombre}
+  name: {svc}-{name}
 spec:
   schedule: \"*/{min} * * * *\"
   # `Forbid`: if one pass takes longer than the interval, the next does NOT start.
@@ -1692,7 +1692,7 @@ fn edge_labels(p: &Plan, svc: &str) -> String {
     if mine.is_empty() {
         return String::new();
     }
-    let reglas: Vec<String> = mine
+    let rules: Vec<String> = mine
         .iter()
         .map(|r| {
             let prefijo = match r.path.find('{') {
@@ -1702,7 +1702,7 @@ fn edge_labels(p: &Plan, svc: &str) -> String {
             format!("PathPrefix(`{prefijo}`)")
         })
         .collect();
-    let mut u: Vec<String> = reglas;
+    let mut u: Vec<String> = rules;
     u.sort();
     u.dedup();
     format!(

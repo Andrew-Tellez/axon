@@ -182,7 +182,7 @@ pub fn loader(ms: &[Manifest], base: &str, log: &str) -> String {
             for (n, _) in columns(&d, field, kind) {
                 // the path inside the JSON: `data.<field>`, and `money` is
                 // flattened into the two the schema declares
-                let ruta = if n.ends_with("_currency") {
+                let route = if n.ends_with("_currency") {
                     format!("'data', '{field}', 'currency'")
                 } else if kind == "money" {
                     format!("'data', '{field}', 'amount'")
@@ -191,12 +191,12 @@ pub fn loader(ms: &[Manifest], base: &str, log: &str) -> String {
                 };
                 if sensible {
                     sel.push(format!(
-                        "  lower(hex(SHA256(concat({{salt:String}}, JSONExtractString(l, {ruta}))))) AS {n}_hash"
+                        "  lower(hex(SHA256(concat({{salt:String}}, JSONExtractString(l, {route}))))) AS {n}_hash"
                     ));
                 } else if kind == "int" || (kind == "money" && !n.ends_with("_currency")) {
-                    sel.push(format!("  JSONExtractInt(l, {ruta}) AS {n}"));
+                    sel.push(format!("  JSONExtractInt(l, {route}) AS {n}"));
                 } else {
-                    sel.push(format!("  nullIf(JSONExtractString(l, {ruta}), '') AS {n}"));
+                    sel.push(format!("  nullIf(JSONExtractString(l, {route}), '') AS {n}"));
                 }
             }
         }
@@ -281,8 +281,8 @@ pub fn review(ms: &[Manifest], d: &Dialect, real: &str) -> (Vec<String>, Vec<Str
     let (mut errors, mut warnings) = (Vec::new(), Vec::new());
     // what is there: table -> column -> type
     let mut present: IndexMap<String, IndexMap<String, String>> = IndexMap::new();
-    for linea in real.lines() {
-        let l = linea.trim();
+    for line in real.lines() {
+        let l = line.trim();
         if l.is_empty() || l.starts_with('-') || l.starts_with('#') {
             continue;
         }
@@ -431,7 +431,7 @@ pub fn vector(ms: &[Manifest], base: &str) -> String {
                 continue;
             }
             for (n, _) in columns(&d, field, kind) {
-                let ruta = if n.ends_with("_currency") {
+                let route = if n.ends_with("_currency") {
                     format!("e.data.{field}.currency")
                 } else if kind == "money" {
                     format!("e.data.{field}.amount")
@@ -441,10 +441,10 @@ pub fn vector(ms: &[Manifest], base: &str) -> String {
                 if sensible {
                     fields.push(format!(
                         "        \"{n}_hash\": sha2(join!([get_env_var!(\"AXON_PII_SALT\"), \
-                         string!({ruta})]), variant: \"SHA-256\"),"
+                         string!({route})]), variant: \"SHA-256\"),"
                     ));
                 } else {
-                    fields.push(format!("        \"{n}\": {ruta},"));
+                    fields.push(format!("        \"{n}\": {route},"));
                 }
             }
         }
