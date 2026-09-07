@@ -932,8 +932,8 @@ fn el_testkit_generado_corre() {
         out.status.success(),
         "las pruebas generadas fallan:\n{salida}"
     );
-    assert!(salida.contains("propaga la cadena causal"), "{salida}");
-    assert!(salida.contains("no repite el efecto"), "{salida}");
+    assert!(salida.contains("propagates the causal chain"), "{salida}");
+    assert!(salida.contains("does not repeat the effect"), "{salida}");
     assert!(salida.contains("fail 0"), "{salida}");
 }
 

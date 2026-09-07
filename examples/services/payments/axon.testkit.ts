@@ -1,11 +1,11 @@
 // generado por axon — no editar.
 //
-// Enchufalo desde tu propio archivo de pruebas:
+// Wire it up from your own test file:
 //
-//   import { pruebasDeContrato, pruebasDeMaquinas } from "./axon.testkit.ts";
+//   import { contractTests, machineTests } from "./axon.testkit.ts";
 //   import { Payments } from "./index.ts";
-//   pruebasDeContrato((bus, inbox, outbox) => new Payments(bus, inbox, outbox));
-//   pruebasDeMaquinas();
+//   contractTests((bus, inbox, outbox) => new Payments(bus, inbox, outbox));
+//   machineTests();
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -23,33 +23,33 @@ import {
   type PaymentAction,
 } from "./contracts.ts";
 
-// Dobles en memoria. Deterministas y sin dependencias: las pruebas de
-// contrato no necesitan infraestructura, las de integracion si.
-export class BusFalso implements Bus {
-  readonly publicados: Envelope<unknown>[] = [];
+// In-memory doubles. Deterministic and dependency-free: contract tests
+// need no infrastructure, integration tests do.
+export class FakeBus implements Bus {
+  readonly published: Envelope<unknown>[] = [];
   async publish(e: Envelope<unknown>) {
-    this.publicados.push(e);
+    this.published.push(e);
   }
 }
 
-export class InboxEnMemoria implements Inbox {
-  readonly vistos = new Set<string>();
+export class MemoryInbox implements Inbox {
+  readonly seen = new Set<string>();
   async once(id: string, fn: () => Promise<void>) {
-    if (this.vistos.has(id)) return;
-    this.vistos.add(id);
+    if (this.seen.has(id)) return;
+    this.seen.add(id);
     await fn();
   }
 }
 
-export class OutboxFalso implements Outbox {
-  readonly guardados: Envelope<unknown>[] = [];
-  async stage(e: Envelope<unknown>) {
-    this.guardados.push(e);
+export class FakeOutbox implements Outbox<unknown> {
+  readonly staged: Envelope<unknown>[] = [];
+  async stage(e: Envelope<unknown>, _tx: unknown) {
+    this.staged.push(e);
   }
 }
 
-// Fixtures derivadas del esquema que declara el DUENO de cada evento,
-// no de lo que el consumidor cree recibir: ahi es donde aparece el drift.
+// Fixtures derived from the schema declared by each event's OWNER, not
+// from what the consumer believes it receives: that is where drift shows up.
 export const fixtureOrderPlacedV1: OrderPlacedV1 = {
   orderId: "00000000-0000-4000-8000-000000000000",
   customerId: "00000000-0000-4000-8000-000000000000",
@@ -57,67 +57,67 @@ export const fixtureOrderPlacedV1: OrderPlacedV1 = {
   total: { amount: 100, currency: "MXN" },
 };
 
-/** Pruebas de contrato. `crear` devuelve tu implementacion del servicio. */
-export function pruebasDeContrato(crear: (bus: BusFalso, inbox: InboxEnMemoria, outbox: OutboxFalso) => PaymentsService) {
-  const montar = () => {
-    const bus = new BusFalso();
-    const inbox = new InboxEnMemoria();
-    const outbox = new OutboxFalso();
-    const svc = crear(bus, inbox, outbox);
+/** Contract tests. `make` returns your implementation of the service. */
+export function contractTests(make: (bus: FakeBus, inbox: MemoryInbox, outbox: FakeOutbox) => PaymentsService) {
+  const setUp = () => {
+    const bus = new FakeBus();
+    const inbox = new MemoryInbox();
+    const outbox = new FakeOutbox();
+    const svc = make(bus, inbox, outbox);
     return { svc, bus, inbox, outbox };
   };
 
-  describe("payments · contrato", () => {
-    it("acepta order.placed@v1 tal como lo emite su dueno", async () => {
-      const { svc } = montar();
-      await svc.dispatch(newEnvelope("order.placed@v1", "prueba", fixtureOrderPlacedV1));
+  describe("payments · contract", () => {
+    it("accepts order.placed@v1 exactly as its owner emits it", async () => {
+      const { svc } = setUp();
+      await svc.dispatch(newEnvelope("order.placed@v1", "test", fixtureOrderPlacedV1));
     });
 
-    it("la segunda entrega de order.placed@v1 no repite el efecto", async () => {
-      const { svc, outbox } = montar();
-      const e = newEnvelope("order.placed@v1", "prueba", fixtureOrderPlacedV1);
+    it("a second delivery of order.placed@v1 does not repeat the effect", async () => {
+      const { svc, outbox } = setUp();
+      const e = newEnvelope("order.placed@v1", "test", fixtureOrderPlacedV1);
       await svc.dispatch(e);
-      const despues = outbox.guardados.length;
+      const after = outbox.staged.length;
       await svc.dispatch(e);
-      assert.equal(outbox.guardados.length, despues, "el mismo envelope tuvo efecto dos veces");
+      assert.equal(outbox.staged.length, after, "the same envelope took effect twice");
     });
-    it("propaga la cadena causal al reaccionar a order.placed@v1", async () => {
-      const { svc, outbox } = montar();
-      const causa = newEnvelope("order.placed@v1", "prueba", fixtureOrderPlacedV1);
-      await svc.dispatch(causa);
-      const salida = outbox.guardados;
-      assert.ok(salida.length > 0, "no emitio nada");
-      for (const e of salida) {
-        assert.equal(e.causationId, causa.id, "causationId no apunta a la causa");
-        assert.equal(e.correlationId, causa.correlationId, "se perdio el flujo");
-        assert.equal(e.traceparent.split("-")[1], causa.traceparent.split("-")[1], "se perdio la traza");
+    it("propagates the causal chain when reacting to order.placed@v1", async () => {
+      const { svc, outbox } = setUp();
+      const cause = newEnvelope("order.placed@v1", "test", fixtureOrderPlacedV1);
+      await svc.dispatch(cause);
+      const out = outbox.staged;
+      assert.ok(out.length > 0, "it emitted nothing");
+      for (const e of out) {
+        assert.equal(e.causationId, cause.id, "causationId does not point at the cause");
+        assert.equal(e.correlationId, cause.correlationId, "the flow was lost");
+        assert.equal(e.traceparent.split("-")[1], cause.traceparent.split("-")[1], "the trace was lost");
       }
     });
-    it("nada se publica fuera del outbox", async () => {
-      const { bus } = montar();
-      assert.equal(bus.publicados.length, 0, "dual-write: el handler toco el bus");
+    it("nothing gets published outside the outbox", async () => {
+      const { bus } = setUp();
+      assert.equal(bus.published.length, 0, "dual-write: the handler touched the bus");
     });
   });
 }
 
-/** Pruebas de las maquinas de estado. No necesitan tu codigo. */
-export function pruebasDeMaquinas() {
-  describe("payments · maquina payment", () => {
-    it("cada transicion declarada es legal desde sus estados de origen", () => {
-      for (const [accion, t] of Object.entries(paymentTransitions)) {
-        for (const desde of t.from) {
-          assert.equal(paymentNext(desde, accion as PaymentAction), t.to);
-          assert.ok(paymentCan(desde, accion as PaymentAction));
+/** State machine tests. They need none of your code. */
+export function machineTests() {
+  describe("payments · machine payment", () => {
+    it("every declared transition is legal from its source states", () => {
+      for (const [action, t] of Object.entries(paymentTransitions)) {
+        for (const from of t.from) {
+          assert.equal(paymentNext(from, action as PaymentAction), t.to);
+          assert.ok(paymentCan(from, action as PaymentAction));
         }
       }
     });
 
-    it("una transicion no declarada revienta", () => {
-      const estados: PaymentState[] = ["pending", "captured", "failed", "refunded"];
-      for (const [accion, t] of Object.entries(paymentTransitions)) {
-        for (const e of estados.filter((s) => !t.from.includes(s))) {
-          assert.throws(() => paymentNext(e, accion as PaymentAction));
-          assert.equal(paymentCan(e, accion as PaymentAction), false);
+    it("an undeclared transition blows up", () => {
+      const states: PaymentState[] = ["pending", "captured", "failed", "refunded"];
+      for (const [action, t] of Object.entries(paymentTransitions)) {
+        for (const e of states.filter((s) => !t.from.includes(s))) {
+          assert.throws(() => paymentNext(e, action as PaymentAction));
+          assert.equal(paymentCan(e, action as PaymentAction), false);
         }
       }
     });

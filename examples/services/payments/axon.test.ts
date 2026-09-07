@@ -1,9 +1,9 @@
 // Las tres lineas que tejen el testkit generado con la implementacion real.
-import { pruebasDeContrato, pruebasDeMaquinas } from "./axon.testkit.ts";
+import { contractTests, machineTests } from "./axon.testkit.ts";
 import { Payments } from "./index.ts";
 
-pruebasDeContrato((bus, inbox, outbox) => new Payments(bus, inbox, outbox, fakeDb()));
-pruebasDeMaquinas();
+contractTests((bus, inbox, outbox) => new Payments(bus, inbox, outbox, fakeDb()));
+machineTests();
 
 // La persistencia es de la persona, asi que el doble tambien.
 function fakeDb() {
