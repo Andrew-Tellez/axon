@@ -1,4 +1,4 @@
-//! Un solo archivo de checks: si algo de esto se rompe, la herramienta miente.
+//! One single file of checks: if any of this breaks, the tool lies.
 use std::process::Command;
 
 fn has(bin: &str) -> bool {
@@ -20,25 +20,26 @@ fn axon(args: &[&str]) -> (String, String, bool) {
     )
 }
 
-/// El ejemplo, pero sin el `[pooler]`.
+/// The example, but with no `[pooler]`.
 ///
-/// `orders` declara 4 nodos de reparto y hoy eso solo se levanta en el target
-/// local: el resto RECHAZA el plan en vez de emitir una instancia sola, que
-/// aplicaria sin error y dejaria el reparto sin existir. Asi que todo lo que se
-/// afirma sobre gcp, aws y k8s se afirma sobre esta copia — y `el_reparto_no_se_
-/// renderiza_donde_no_existe` cubre el rechazo.
-/// El ejemplo sin `[pooler]` y con la bodega que el target sepa alimentar.
+/// `orders` declares 4 shard nodes and today that is only brought up on the
+/// local target: the rest REFUSE the plan instead of emitting a single
+/// instance, which would apply with no error and leave the sharding
+/// non-existent. So everything asserted about gcp, aws and k8s is asserted
+/// over this copy —and `sharding_is_not_rendered_where_it_does_not_exist`
+/// covers the refusal.
+/// The example with no `[pooler]` and with the warehouse the target can feed.
 ///
-/// `axon infra` rechaza una bodega sin camino de ingesta, y con razon: el
-/// esquema se aplicaria y las tablas se quedarian vacias sin un solo error. El
-/// ejemplo declara ClickHouse, que es el que has camino en local; para gcp
-/// hay que decir BigQuery, y k8s todavia no has ninguno.
+/// `axon infra` refuses a warehouse with no ingest path, and rightly so: the
+/// schema would apply and the tables would stay empty without a single error.
+/// The example declares ClickHouse, which is the one with a path on local; for
+/// gcp it has to say BigQuery, and k8s has none yet.
 fn tuned(warehouse: &str) -> String {
-    // un directorio por llamada: los tests corren en paralelo y compartir la
-    // ruta hace que uno borre el arbol que otro esta leyendo
+    // one directory per call: the tests run in parallel and sharing the path
+    // makes one delete the tree another is reading
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "axon-sin-pooler-{}-{}",
+        "axon-no-pooler-{}-{}",
         std::process::id(),
         N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
@@ -57,9 +58,9 @@ fn tuned(warehouse: &str) -> String {
         }
         let mut text = std::fs::read_to_string(e.path()).unwrap();
         text = match warehouse {
-            // k8s no has camino de ingesta: lo que corresponde es justo lo
-            // que dice el mensaje de error, `export = false`
-            "ninguna" => text.replace(
+            // k8s has no ingest path: what fits is exactly what the error
+            // message says, `export = false`
+            "none" => text.replace(
                 "[analytics]",
                 "[analytics]\nexport = false",
             ),
@@ -68,51 +69,52 @@ fn tuned(warehouse: &str) -> String {
                 &format!("warehouse = \"{other}\""),
             ),
         };
-        // el bloque va al final del manifiesto, asi que cortar desde ahi
-        // alcanza y no hay que parsear TOML en un test
-        let sin = match text.find("\n[pooler]") {
+        // the block goes at the end of the manifest, so cutting from there is
+        // enough and no test has to parse TOML
+        let stripped = match text.find("\n[pooler]") {
             Some(i) => text[..i].to_string(),
             None => text,
         };
-        std::fs::write(dir.join(&name), sin).unwrap();
+        std::fs::write(dir.join(&name), stripped).unwrap();
     }
     dir.to_string_lossy().to_string()
 }
 
-/// De donde sale el plan para este target: el ejemplo tal cual donde el
-/// reparto se renderiza, y la copia sin pooler donde todavia no.
+/// Where the plan for this target comes from: the example as-is where the
+/// sharding renders, and the pooler-less copy where it does not yet.
 fn source_for(target: &str) -> String {
     match target {
         "local" | "plan" => "examples".to_string(),
         "gcp" => tuned("bigquery"),
-        "k8s" => tuned("ninguna"),
+        "k8s" => tuned("none"),
         _ => tuned("clickhouse"),
     }
 }
 
-fn copy_tree(de: &std::path::Path, a: &std::path::Path) {
-    std::fs::create_dir_all(a).unwrap();
-    for e in std::fs::read_dir(de).unwrap().flatten() {
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
         if e.path().is_dir() {
-            copy_tree(&e.path(), &a.join(e.file_name()));
+            copy_tree(&e.path(), &to.join(e.file_name()));
         } else {
-            std::fs::copy(e.path(), a.join(e.file_name())).unwrap();
+            std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
         }
     }
 }
 
-/// Lo que este rechazo evita: `terraform apply` sin un error y un solo Postgres
-/// donde el manifiesto declara cuatro. El reparto no existiria y nada lo diria.
+/// What this refusal prevents: a `terraform apply` with no error and a single
+/// Postgres where the manifest declares four. The sharding would not exist and
+/// nothing would say so.
 #[test]
 fn sharding_is_not_rendered_where_it_does_not_exist() {
     for t in ["gcp", "aws", "k8s"] {
         let (_, err, ok) = axon(&["infra", "examples", "--target", t]);
-        assert!(!ok, "{t} renderizo un plan con reparto que no sabe repartir");
+        assert!(!ok, "{t} rendered a plan with sharding it cannot shard");
         assert!(err.contains("shards = 4"), "{t}: {err}");
         assert!(err.contains("--target local"), "{t}: {err}");
     }
-    // y sin el pooler —y con una bodega que el target sepa alimentar— los tres
-    // siguen rindiendo
+    // and with no pooler —and a warehouse the target can feed— all three
+    // still render
     for t in ["gcp", "aws", "k8s"] {
         let (_, err, ok) = axon(&["infra", &source_for(t), "--target", t]);
         assert!(ok, "{t}: {err}");
@@ -132,26 +134,26 @@ fn traceability_is_not_optional() {
     for f in ["traceparent", "correlationId", "causationId"] {
         assert!(ts.contains(f), "falta {f}");
     }
-    // outbox declarado -> el emisor no toca el bus (sin dual-write)
+    // outbox declared -> the emitter does not touch the bus (no dual-write)
     assert!(ts.contains("this.outbox.stage(newEnvelope"));
     assert!(!ts.contains("this.bus.publish(newEnvelope"));
-    // Y la transaccion de quien llama es OBLIGATORIA: con una conexion propia,
-    // el `stage` se confirma solo, asi que una transaccion revertida deja el
-    // evento sin su fila y el relay publica algo que nunca paso. Medido contra
-    // los contenedores antes de arreglarlo: 0 pagos y 1 evento.
+    // And the caller's transaction is MANDATORY: on a connection of its own,
+    // the `stage` commits by itself, so a rolled-back transaction leaves the
+    // event with no row and the relay publishes something that never happened.
+    // Measured against the containers before fixing it: 0 payments and 1 event.
     assert!(
         ts.contains("tx: unknown, cause?: Envelope<unknown>"),
-        "el emisor con outbox no exige la transaccion:\n{ts}"
+        "the emitter with an outbox does not require the transaction:\n{ts}"
     );
     assert!(ts.contains("stage(newEnvelope(\"payment.captured@v1\", \"payments\", data, cause), tx)"));
-    // sin outbox no hay transaccion que compartir, y pedirla seria ruido
-    let (sin, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
-    assert!(sin.contains("this.bus.publish(newEnvelope"));
+    // with no outbox there is no transaction to share, and asking for one would be noise
+    let (without, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
+    assert!(without.contains("this.bus.publish(newEnvelope"));
     assert!(
-        !sin.contains("tx: unknown"),
-        "un servicio sin outbox no has transaccion que pasar"
+        !without.contains("tx: unknown"),
+        "a service with no outbox has no transaction to pass"
     );
-    // consumidor idempotente por defecto, no por disciplina
+    // an idempotent consumer by default, not by discipline
     assert!(ts.contains("this.inbox.once(e.id"));
     assert!(ts.contains(r#"case "order.placed@v1""#));
 }
@@ -160,13 +162,13 @@ fn traceability_is_not_optional() {
 fn migrations_folded_into_the_er_diagram() {
     let (er, _, _) = axon(&["er", "examples"]);
     assert!(er.contains("ORDER ||--o{ ORDER_ITEM : order_id"));
-    assert!(er.contains("text provider_ref"), "ADD COLUMN no se plego");
-    assert!(!er.contains("currency"), "DROP COLUMN no se plego");
+    assert!(er.contains("text provider_ref"), "ADD COLUMN was not folded");
+    assert!(!er.contains("currency"), "DROP COLUMN was not folded");
 }
 
-/// El esquema se lee con un parser SQL, no con una regex. Lo que sigue es
-/// exactamente lo que la regex no podia, y su peor propiedad era romperse en
-/// silencio: devolver columnas mal sin que nadie se enterara.
+/// The schema is read with a SQL parser, not with a regex. What follows is
+/// exactly what the regex could not do, and its worst property was breaking in
+/// silence: returning the wrong columns with nobody finding out.
 #[test]
 fn the_ddl_is_really_parsed() {
     let dir = std::env::temp_dir().join("axon-ddl");
@@ -202,36 +204,36 @@ CREATE INDEX ledger_entry_account_idx ON "ledger_entry" (account_id, posted_at D
 
     let (er, err, ok) = axon(&["er", dir.to_str().unwrap()]);
     assert!(ok, "{err}");
-    // PRIMARY KEY y FOREIGN KEY declaradas a nivel de tabla, no en la columna
-    assert!(er.contains("uuid id PK"), "PK de tabla no resuelta:\n{er}");
+    // PRIMARY KEY and FOREIGN KEY declared at table level, not on the column
+    assert!(er.contains("uuid id PK"), "table-level PK not resolved:\n{er}");
     assert!(
         er.contains("uuid account_id FK"),
-        "FK de tabla no resuelta:\n{er}"
+        "table-level FK not resolved:\n{er}"
     );
     assert!(
         er.contains("ACCOUNT ||--o{ LEDGER_ENTRY : account_id"),
         "{er}"
     );
-    // un tipo has que caber en un token o rompe el ER de mermaid
+    // a type has to fit in one token or it breaks mermaid's ER diagram
     assert!(
         er.contains("numeric(20,4) amount_cents") || er.contains("numeric(20,_4) amount_cents"),
         "{er}"
     );
     assert!(er.contains("varchar(64) handle"), "{er}");
-    // CREATE INDEX no es una tabla
+    // CREATE INDEX is not a table
     assert!(
         !er.to_uppercase().contains("LEDGER_ENTRY_ACCOUNT_IDX"),
         "{er}"
     );
 
-    // un DROP dentro de un comentario no es destructivo; uno de verdad si
+    // a DROP inside a comment is not destructive; a real one is
     std::fs::write(
         dir.join("sql/002_no_es_drop.expand.sql"),
         "-- ojo: no hacer DROP TABLE account aqui\nALTER TABLE account ADD COLUMN nota text;\n",
     )
     .unwrap();
     let (_, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
-    assert!(ok, "un DROP en un comentario se conto como destructivo");
+    assert!(ok, "a DROP inside a comment counted as destructive");
 
     std::fs::write(
         dir.join("sql/003_si_es_drop.expand.sql"),
@@ -242,20 +244,20 @@ CREATE INDEX ledger_entry_account_idx ON "ledger_entry" (account_id, posted_at D
     assert!(!ok);
     assert!(err.contains("destructive migration not marked"), "{err}");
 
-    // y el SQL que no se puede parsear falla ruidosamente, nunca en silencio
+    // and SQL that cannot be parsed fails loudly, never in silence
     std::fs::write(
         dir.join("sql/004_roto.expand.sql"),
         "CREATE TABL account (;\n",
     )
     .unwrap();
     let (_, err, ok) = axon(&["er", dir.to_str().unwrap()]);
-    assert!(!ok, "el SQL invalido se ignoro en silencio");
+    assert!(!ok, "the invalid SQL was ignored in silence");
     assert!(err.contains("could not parse the SQL"), "{err}");
 }
 
-/// Una clave anadida en una migracion POSTERIOR has que contar. Era invisible,
-/// y con eso toda regla sobre unicidad —la del flujo de eventos, las de reparto,
-/// el punto de una vista— la daba por ausente y pasaba en silencio.
+/// A key added in a LATER migration has to count. It was invisible, and with
+/// that every uniqueness rule —the event stream's, the sharding ones, a view's
+/// checkpoint— took it as absent and passed in silence.
 #[test]
 fn a_key_added_later_counts() {
     let dir = std::env::temp_dir().join("axon-alter-pk");
@@ -279,12 +281,12 @@ fn a_key_added_later_counts() {
          [analytics]\nexport = false\n\n[infra]\nstate = \"postgres\"\nmigrations = \"sql/\"\n",
     )
     .unwrap();
-    // el ER es la proyeccion mas simple del esquema plegado
+    // the ER diagram is the simplest projection of the folded schema
     let (er, err, ok) = axon(&["er", dir.to_str().unwrap()]);
     assert!(ok, "{err}");
-    // la columna anadida esta, y la PK marcada
+    // the added column is there, and the PK is marked
     assert!(er.contains("stream_id"), "{er}");
-    assert!(er.contains("PK"), "la PK anadida despues no se marco:\n{er}");
+    assert!(er.contains("PK"), "the PK added later was not marked:\n{er}");
 }
 
 /// A rename in a LATER migration has to count. It was invisible, and with that
@@ -316,23 +318,24 @@ fn a_later_rename_counts() {
     .unwrap();
     let (er, err, ok) = axon(&["er", dir.to_str().unwrap()]);
     assert!(ok, "{err}");
-    assert!(er.contains("POINT {"), "la tabla renombrada no aparece:\n{er}");
-    assert!(!er.to_lowercase().contains("punto"), "la tabla vieja sigue en el esquema:\n{er}");
-    assert!(er.contains("view_name"), "la columna renombrada no aparece:\n{er}");
-    assert!(!er.contains("vista"), "la columna vieja sigue:\n{er}");
-    // la PK sobrevive al rename, con el nombre nuevo
-    assert!(er.contains("PK"), "la PK se perdio en el rename:\n{er}");
+    assert!(er.contains("POINT {"), "the renamed table does not show up:\n{er}");
+    assert!(!er.to_lowercase().contains("punto"), "the old table is still in the schema:\n{er}");
+    assert!(er.contains("view_name"), "the renamed column does not show up:\n{er}");
+    assert!(!er.contains("vista"), "the old column is still there:\n{er}");
+    // the PK survives the rename, under the new name
+    assert!(er.contains("PK"), "the PK was lost in the rename:\n{er}");
 }
 
-/// La ruta que sirve el codigo y la que golpea el programador tienen que ser
-/// LA MISMA. Estuvieron separadas —la ruta en ingles y el cron todavia en
-/// espanol— y el CronJob se aplico sin un error contra un 404: el barrido dejo
-/// de correr, y lo unico que lo decia era un curl que se comia el fallo.
+/// The route the code serves and the one the scheduler hits have to be THE
+/// SAME. They were apart —the route in English and the cron still in Spanish—
+/// and the CronJob applied with no error against a 404: the sweep simply
+/// stopped running, and the only thing that said so was a curl swallowing the
+/// failure.
 #[test]
 fn the_cron_hits_the_route_the_code_serves() {
     let (ts, err, ok) = axon(&["build", "examples/checkout.toml", "examples"]);
     assert!(ok, "{err}");
-    // las rutas internas, como las declara el codigo generado
+    // the internal routes, as the generated code declares them
     let routes: Vec<String> = ts
         .lines()
         .filter(|l| l.contains("Route") && l.contains("POST /internal/"))
@@ -348,29 +351,29 @@ fn the_cron_hits_the_route_the_code_serves() {
         .collect();
     assert!(
         routes.len() >= 3,
-        "el ejemplo deberia generar barrido, limpieza y reconstruccion: {routes:?}"
+        "the example should generate a sweep, a prune and a rebuild: {routes:?}"
     );
-    // el plan neutral es la source_for de los cuatro targets: si la ruta coincide
-    // aqui, coincide en los cuatro
+    // the neutral plan is the source of all four targets: if the route matches
+    // here, it matches on all four
     let (plan, err, ok) = axon(&["infra", "examples", "--target", "plan"]);
     assert!(ok, "{err}");
     for r in &routes {
-        // la reconstruccion no lleva cron a proposito: no es periodica
+        // the rebuild carries no cron on purpose: it is not periodic
         if r.contains("/rebuild") {
-            assert!(!plan.contains(r), "la reconstruccion no deberia llevar cron");
+            assert!(!plan.contains(r), "the rebuild should not carry a cron");
             continue;
         }
         assert!(
             plan.contains(r),
-            "el codigo sirve `{r}` y ningun cron del plan la golpea:\n{plan}"
+            "the code serves `{r}` and no cron in the plan hits it:\n{plan}"
         );
     }
-    // y al reves: ningun cron apunta a una ruta que nadie sirve
+    // and the other way round: no cron points at a route nobody serves
     for l in plan.lines().filter(|l| l.contains("/internal/")) {
         let r = l.split('"').find(|s| s.starts_with("/internal/")).unwrap();
         assert!(
             routes.iter().any(|x| x == r),
-            "el cron golpea `{r}` y el codigo generado no la sirve"
+            "the cron hits `{r}` and the generated code does not serve it"
         );
     }
 }
@@ -387,16 +390,16 @@ fn the_same_plan_on_four_targets() {
         assert!(ok, "{target}: {err}");
         assert!(out.contains(marker), "{target} no genero {marker}");
     }
-    // DLQ siempre, en todos los targets
+    // DLQ always, on every target
     for t in ["gcp", "aws", "k8s"] {
         let (out, _, _) = axon(&["infra", &source_for(t), "--target", t]);
-        assert!(out.to_lowercase().contains("dead"), "{t} sin DLQ");
+        assert!(out.to_lowercase().contains("dead"), "{t} with no DLQ");
     }
 }
 
 #[test]
 fn every_target_deploys_the_workload() {
-    // sin esto la IaC deja topics y bases sin nada que corra el codigo
+    // without this the IaC leaves topics and databases with nothing running the code
     for (target, marker) in [
         ("local", "dockerfile: services/payments/Dockerfile"),
         (
@@ -407,17 +410,17 @@ fn every_target_deploys_the_workload() {
         ("k8s", "kind: Deployment"),
     ] {
         let (out, _, _) = axon(&["infra", &source_for(target), "--target", target]);
-        assert!(out.contains(marker), "{target} no despliega el workload");
+        assert!(out.contains(marker), "{target} does not deploy the workload");
     }
-    // y la entrega llega a alguien: nada de suscripciones al vacio
+    // and delivery reaches somebody: no subscriptions into the void
     let (gcp, _, _) = axon(&["infra", &source_for("gcp"), "--target", "gcp"]);
     assert!(gcp.contains("push_endpoint = google_cloud_run_v2_service.payments.uri"));
     let (k, _, _) = axon(&["infra", &source_for("k8s"), "--target", "k8s"]);
     assert!(
         k.contains("kind: Service\nmetadata:\n  name: payments"),
-        "el Trigger apunta a un Service inexistente"
+        "the Trigger points at a Service that does not exist"
     );
-    // el secreto llega al contenedor, no solo al vault
+    // the secret reaches the container, not just the vault
     assert!(gcp.contains("STRIPE_API_KEY"));
     let (loc, _, _) = axon(&["infra", "examples", "--target", "local"]);
     assert!(loc.contains("DATABASE_URL: postgres://postgres:local@db-payments"));
@@ -444,7 +447,7 @@ fn environments_are_deltas() {
     let (stg, _, _) = axon(&["infra", "examples", "--target", "plan", "--env", "staging"]);
     assert!(
         prod.contains("\"min_instances\": 3"),
-        "prod no aplico el override"
+        "prod did not apply the override"
     );
     assert!(!stg.contains("\"min_instances\": 3"));
 }
@@ -494,13 +497,13 @@ method = "charge"
     ] {
         assert!(
             err.contains(expected),
-            "falto el check `{expected}`:\n{err}"
+            "the `{expected}` check is missing:\n{err}"
         );
     }
 }
 
-/// Lo que el README promete y solo una herramienta externa puede confirmar.
-/// Sin la herramienta, el test se salta en vez de mentir.
+/// What the README promises and only an external tool can confirm.
+/// Without the tool, the test skips instead of lying.
 #[test]
 fn the_generated_typescript_typechecks() {
     if !has("node") {
@@ -537,9 +540,9 @@ fn the_generated_typescript_typechecks() {
     );
 }
 
-/// El tipo de un evento consumido lo declara su emisor. Sin los demas
-/// manifiestos, `build` has que fallar con un mensaje util, no generar
-/// codigo que no compila.
+/// The type of a consumed event is declared by its emitter. Without the other
+/// manifests, `build` has to fail with a useful message, not generate code
+/// that does not compile.
 #[test]
 fn build_without_sources_fails_clearly() {
     let (_, err, ok) = axon(&["build", "examples/payments.toml"]);
@@ -548,9 +551,9 @@ fn build_without_sources_fails_clearly() {
     assert!(err.contains("Pass the other manifests"), "{err}");
 }
 
-/// `terraform fmt` solo dice que el HCL parsea. `validate` con los providers
-/// reales dice que los atributos existen — es lo que caza una interpolacion
-/// de una variable inexistente o un bloque al que le falta un campo.
+/// `terraform fmt` only says the HCL parses. `validate` with the real
+/// providers says the attributes exist —which is what catches an
+/// interpolation of a non-existent variable or a block missing a field.
 #[test]
 fn the_generated_hcl_validates() {
     if !has("terraform") {
@@ -570,13 +573,13 @@ fn the_generated_hcl_validates() {
              variable \"ecs_execution_role_arn\" {}\nvariable \"subnets\" { type = list(string) }\n",
         ),
     ];
-    // Y los mismos dos targets sobre un manifiesto CON saga: el barrido emite
-    // un programador y una tarea que el ejemplo no has, y un atributo
-    // inventado ahi no lo ve nadie hasta el `apply`.
+    // And the same two targets over a manifest WITH a saga: the sweep emits a
+    // scheduler and a task the example does not have, and an invented
+    // attribute there goes unseen until the `apply`.
     //
-    // Las variables propias del barrido las declara axon, asi que aca NO van:
-    // declararlas de los dos lados es un `Duplicate variable declaration`, y el
-    // fallback a `fmt` no lo ve.
+    // The sweep's own variables are declared by axon, so they do NOT go here:
+    // declaring them on both sides is a `Duplicate variable declaration`, and
+    // the fallback to `fmt` does not see it.
     let saga = fixture_saga("tf").to_string_lossy().to_string();
     let mut casos: Vec<(String, &str, String, String)> = casos
         .iter()
@@ -591,7 +594,7 @@ fn the_generated_hcl_validates() {
     casos.push((
         "aws-saga".into(),
         casos[1].1,
-        // las variables del barrido las declara axon: aca no va ninguna
+        // the sweep's variables are declared by axon: none goes here
         casos[1].2.clone(),
         saga,
     ));
@@ -610,15 +613,15 @@ fn the_generated_hcl_validates() {
         )
         .unwrap();
 
-        // sin red no se pueden bajar los providers: se cae a `fmt`, que al
-        // menos confirma que el HCL parsea
+        // with no network the providers cannot be downloaded: it falls back to
+        // `fmt`, which at least confirms the HCL parses
         let init = Command::new("terraform")
             .args(["init", "-backend=false", "-input=false"])
             .current_dir(&dir)
             .output()
             .expect("terraform init");
         if !init.status.success() {
-            eprintln!("{target}: sin providers, se valida solo el parseo");
+            eprintln!("{target}: with no providers, only the parse is validated");
             let fmt = Command::new("terraform")
                 .args(["fmt", "-check", dir.to_str().unwrap()])
                 .output()
@@ -638,21 +641,22 @@ fn the_generated_hcl_validates() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(out.status.success(), "{target} no valida:\n{printed}");
-        // una advertencia hoy es un error del provider manana
+        // a warning today is a provider error tomorrow
         assert!(
             !printed.contains("Warning:"),
-            "{target} valida con advertencias:\n{printed}"
+            "{target} validates with warnings:\n{printed}"
         );
     }
 }
 
-/// El suite validaba el YAML que axon genera y nunca el del propio repo. Un
-/// workflow que no parsea no falla: GitHub lo reporta con su ruta como nombre
-/// y sin un solo job, o sea que un release roto se ve como que no corrio.
+/// The suite validated the YAML axon generates and never the repo's own. A
+/// workflow that does not parse does not fail: GitHub reports it with its path
+/// as the name and no jobs at all, which is to say a broken release looks
+/// like it never ran.
 #[test]
 fn the_repo_workflows_parse() {
     let dir = std::path::Path::new(".github/workflows");
-    let mut vistos = 0;
+    let mut seen = 0;
     for e in std::fs::read_dir(dir).expect("workflows") {
         let p = e.unwrap().path();
         if p.extension().is_none_or(|x| x != "yml" && x != "yaml") {
@@ -662,47 +666,47 @@ fn the_repo_workflows_parse() {
         let doc: Result<serde_yaml_ng::Value, _> = serde_yaml_ng::from_str(&text);
         assert!(doc.is_ok(), "{}: {}", p.display(), doc.unwrap_err());
         let doc = doc.unwrap();
-        assert!(doc.get("jobs").is_some(), "{}: sin `jobs`", p.display());
-        // `${{ }}` sin comillas dentro de un mapa en linea rompe el parseo,
-        // porque la `{` abre un mapa anidado
+        assert!(doc.get("jobs").is_some(), "{}: no `jobs`", p.display());
+        // `${{ }}` unquoted inside an inline map breaks the parse, because the
+        // `{` opens a nested map
         for (n, l) in text.lines().enumerate() {
             let t = l.trim();
             if let (Some(mapa), Some(expr)) = (t.find(": {"), t.find("${{")) {
-                // dentro de un escalar citado hay un numero impar de comillas
-                // antes de la expresion
+                // inside a quoted scalar there is an odd number of quotes
+                // before the expression
                 let citado = t[..expr].matches('"').count() % 2 == 1;
                 assert!(
                     mapa > expr || citado,
-                    "{}:{}: `${{{{ }}}}` sin comillas en un mapa en linea:\n  {t}",
+                    "{}:{}: `${{{{ }}}}` unquoted in an inline map:\n  {t}",
                     p.display(),
                     n + 1
                 );
             }
         }
-        vistos += 1;
+        seen += 1;
     }
-    assert!(vistos >= 3, "solo se validaron {vistos} workflows");
+    assert!(seen >= 3, "only {seen} workflows were validated");
 }
 
 #[test]
 fn the_generated_ci_is_valid_yaml() {
     let (yml, _, _) = axon(&["ci", "examples/payments.toml"]);
-    // el fallo real que tuvo: un `: ` dentro de un escalar plano multilinea
+    // the real failure it had: a `: ` inside a plain multiline scalar
     for line in yml.lines() {
         let t = line.trim_start();
         if t.starts_with("- run:") || t.starts_with("run:") {
-            assert!(!t.ends_with('\\'), "run multilinea sin bloque escalar: {t}");
+            assert!(!t.ends_with('\\'), "multiline run with no scalar block: {t}");
         }
     }
     assert!(
         yml.contains("run: |"),
-        "los comandos multilinea necesitan bloque escalar"
+        "multiline commands need a scalar block"
     );
-    assert!(yml.contains("id-token: write"), "sin OIDC");
+    assert!(yml.contains("id-token: write"), "no OIDC");
 }
 
-/// El unico generador que hardcodeaba un cloud. Ahora el despliegue sale del
-/// target, igual que la infraestructura.
+/// The only generator that hardcoded a cloud. Now the deploy comes from the
+/// target, same as the infrastructure.
 #[test]
 fn the_ci_hardcodes_no_cloud() {
     let marcas = [
@@ -717,23 +721,23 @@ fn the_ci_hardcodes_no_cloud() {
         for ajena in ajenas {
             assert!(!yml.contains(ajena), "{target} filtro `{ajena}`");
         }
-        // la infra va antes que el codigo, con el mismo target
+        // infra goes before code, with the same target
         assert!(
             yml.contains(&format!("axon infra ./ --target {target}")),
-            "{target} no aplica la infra antes de desplegar"
+            "{target} does not apply the infra before deploying"
         );
     }
-    // sin target no se inventa una plataforma
-    let (sin, _, _) = axon(&["ci", "examples/payments.toml"]);
-    for nube in ["gcloud", "aws ecs", "kubectl"] {
-        assert!(!sin.contains(nube), "sin --target aparecio `{nube}`");
+    // with no target no platform is invented
+    let (without, _, _) = axon(&["ci", "examples/payments.toml"]);
+    for cloud in ["gcloud", "aws ecs", "kubectl"] {
+        assert!(!without.contains(cloud), "with no --target `{cloud}` showed up");
     }
     assert!(
-        sin.contains("axon verify"),
-        "sin --target se perdieron los gates"
+        without.contains("axon verify"),
+        "with no --target the gates were lost"
     );
 
-    // el layout del repo lo dice la policy, no axon
+    // the repo layout is stated by the policy, not by axon
     let (yml, _, _) = axon(&["ci", "examples/payments.toml", "--target", "k8s"]);
     assert!(
         yml.contains("run: node --test services/payments"),
@@ -756,7 +760,7 @@ fn state_machines() {
     let (d, _, _) = axon(&["states", "examples"]);
     assert!(d.contains("pending --> captured: capture"));
 
-    // deadlock y disparador fantasma tienen que bloquear
+    // a deadlock and a phantom trigger both have to block
     let dir = std::env::temp_dir().join("axon-machine");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -803,10 +807,10 @@ fn import_asyncapi_3_and_2() {
     );
     assert!(
         t3.contains(r#"cost = "money""#),
-        "{{amount,currency}} no se reconocio como money"
+        "{{amount,currency}} was not recognised as money"
     );
-    // el consumidor no declara campos: el esquema lo posee el emisor, asi que
-    // el bloque de un evento consumido solo lleva su handler
+    // the consumer declares no fields: the schema is owned by the emitter, so
+    // a consumed event's block only carries its handler
     let consumido: Vec<&str> = t3
         .lines()
         .skip_while(|l| !l.starts_with("[consumes."))
@@ -816,10 +820,10 @@ fn import_asyncapi_3_and_2() {
     assert_eq!(
         consumido,
         vec![r#"handler = "onOrderPlaced""#],
-        "el import copio el esquema de un evento ajeno"
+        "the import copied a foreign event's schema"
     );
 
-    // 2.x: publish es lo que la app RECIBE, subscribe lo que EMITE. Invertido.
+    // 2.x: publish is what the app RECEIVES, subscribe what it EMITS. Inverted.
     let (t2, err, ok) = axon(&[
         "import",
         "asyncapi",
@@ -835,24 +839,24 @@ fn import_asyncapi_3_and_2() {
         "subscribe 2.x mal mapeado:\n{t2}"
     );
 
-    // lo importado has que ser inmediatamente verificable, y decir que falta
+    // what is imported has to be immediately verifiable, and say what is missing
     let dir = std::env::temp_dir().join("axon-import");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("s.toml"), &t3).unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    // un placeholder no es un valor: si esto pasa, el import produce mentiras
+    // a placeholder is not a value: if this passes, the import produces lies
     assert!(
         err.contains("no `owner`"),
-        "TODO se acepto como owner:\n{err}"
+        "TODO was accepted as an owner:\n{err}"
     );
     assert!(err.contains("no `tier`"), "{err}");
 }
 
-/// El protocolo de plugins has que aguantar un generador de verdad, no solo
-/// un check de tres lineas. Este esta escrito en Go, no sabe nada de axon, y
-/// su salida has que compilar.
+/// The plugin protocol has to hold up a real generator, not just a
+/// three-line check. This one is written in Go, knows nothing about axon, and
+/// its output has to compile.
 #[test]
 fn plugin_gen_go() {
     if !has("go") {
@@ -863,7 +867,7 @@ fn plugin_gen_go() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    // se compila el plugin y se pone en el PATH, como haria cualquier usuario
+    // the plugin is compiled and put on the PATH, as any user would
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let build = Command::new("go")
@@ -905,24 +909,24 @@ fn plugin_gen_go() {
     );
     let code = String::from_utf8_lossy(&out.stdout);
 
-    // el esquema de un evento consumido lo posee su emisor: sin `peers` en el
-    // protocolo, el plugin no podria declarar este tipo
+    // a consumed event's schema is owned by its emitter: without `peers` in
+    // the protocol, the plugin could not declare this type
     assert!(code.contains("type OrderPlacedV1 struct"), "{code}");
     assert!(
         code.contains("OrderID string `json:\"orderId\"`"),
-        "no usa la convencion de Go"
+        "it does not use Go's convention"
     );
     assert!(
         code.contains("func PaymentNext(state PaymentState"),
-        "sin maquina de estados"
+        "no state machine"
     );
     assert!(
         code.contains("return s.outbox.Stage(ctx, e)"),
         "outbox declarado y no respetado"
     );
-    assert!(code.contains("s.inbox.Once(ctx, e.ID"), "sin deduplicacion");
+    assert!(code.contains("s.inbox.Once(ctx, e.ID"), "no deduplication");
 
-    // y compila
+    // and it compiles
     let pkg = dir.join("payments");
     std::fs::create_dir_all(&pkg).unwrap();
     std::fs::write(pkg.join("go.mod"), "module tmp/payments\n\ngo 1.22\n").unwrap();
@@ -934,24 +938,24 @@ fn plugin_gen_go() {
         .expect("go vet");
     assert!(
         vet.status.success(),
-        "el Go generado no pasa vet:\n{}",
+        "the generated Go does not pass vet:\n{}",
         String::from_utf8_lossy(&vet.stderr)
     );
 }
 
-/// El codigo del servicio de ejemplo tambien has que typechequear, no solo
-/// lo generado. Sin esto quedaba un hueco: cambiar la interfaz que emite axon
-/// rompia la implementacion del ejemplo y el suite no lo veia, porque el
-/// type-stripping de Node borra los tipos y en tiempo de ejecucion no falla.
+/// The example service's code has to typecheck too, not only what is
+/// generated. Without this there was a gap: changing the interface axon emits
+/// broke the example's implementation and the suite did not see it, because
+/// Node's type stripping erases the types and nothing fails at runtime.
 #[test]
 fn the_example_typechecks() {
     if !has("node") || !std::path::Path::new("examples/services/node_modules").exists() {
         eprintln!("salteado: falta node o `npm i` en examples/services");
         return;
     }
-    // el testkit y los contratos se regeneran para que no se compruebe una
-    // version vieja en disco
-    for (manifest, destino) in [
+    // the testkit and the contracts are regenerated so an old version on disk
+    // is not what gets checked
+    for (manifest, target_dir) in [
         (
             "examples/orders.toml",
             "examples/services/orders/contracts.ts",
@@ -965,8 +969,8 @@ fn the_example_typechecks() {
         assert!(ok, "{err}");
         assert_eq!(
             ts.trim(),
-            std::fs::read_to_string(destino).unwrap().trim(),
-            "{destino} quedo desactualizado: corre axon build"
+            std::fs::read_to_string(target_dir).unwrap().trim(),
+            "{target_dir} quedo desactualizado: corre axon build"
         );
     }
     let out = Command::new("npm")
@@ -976,14 +980,14 @@ fn the_example_typechecks() {
         .expect("npm run typecheck");
     assert!(
         out.status.success(),
-        "el ejemplo no typechequea:\n{}{}",
+        "the example does not typecheck:\n{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
 }
 
-/// `axon test` genera un testkit que has que compilar y correr contra la
-/// implementacion real, no un esqueleto con huecos.
+/// `axon test` generates a testkit that has to compile and run against the
+/// real implementation, not a skeleton with holes.
 #[test]
 fn the_generated_testkit_runs() {
     if !has("node") {
@@ -996,14 +1000,14 @@ fn the_generated_testkit_runs() {
         return;
     }
 
-    // el testkit commiteado has que estar al dia con el manifiesto
+    // the committed testkit has to be up to date with the manifest
     let (kit, err, ok) = axon(&["test", "examples/payments.toml", "examples"]);
     assert!(ok, "{err}");
     let commiteado = std::fs::read_to_string(pkg.join("axon.testkit.ts")).unwrap();
     assert_eq!(
         kit.trim(),
         commiteado.trim(),
-        "el testkit commiteado quedo desactualizado: corre axon test"
+        "the committed testkit is out of date: run axon test"
     );
 
     let out = Command::new("node")
@@ -1018,18 +1022,18 @@ fn the_generated_testkit_runs() {
     );
     assert!(
         out.status.success(),
-        "las pruebas generadas fallan:\n{printed}"
+        "the generated tests fail:\n{printed}"
     );
     assert!(printed.contains("propagates the causal chain"), "{printed}");
     assert!(printed.contains("does not repeat the effect"), "{printed}");
     assert!(printed.contains("fail 0"), "{printed}");
 }
 
-/// El gateway y el almacenamiento no son fuentes de verdad nuevas: salen de
-/// los metodos con `http` y del bloque `[infra.buckets]`.
+/// The gateway and the storage are not new sources of truth: they come from
+/// the methods with `http` and from the `[infra.buckets]` block.
 #[test]
 fn the_edge_and_the_buckets_come_from_the_plan() {
-    // el edge, en los cuatro targets
+    // the edge, on all four targets
     for (target, marker) in [
         ("local", "image: traefik:v3"),
         ("gcp", "google_compute_url_map"),
@@ -1037,67 +1041,67 @@ fn the_edge_and_the_buckets_come_from_the_plan() {
         ("k8s", "kind: HTTPRoute"),
     ] {
         let (out, _, _) = axon(&["infra", &source_for(target), "--target", target]);
-        assert!(out.contains(marker), "{target} no genero el edge ({marker})");
+        assert!(out.contains(marker), "{target} did not generate the edge ({marker})");
     }
-    // auth y rate limit llegan a la configuracion, no se quedan en el manifiesto
+    // auth and rate limit reach the configuration, they do not stay in the manifest
     let (k, _, _) = axon(&["infra", &source_for("k8s"), "--target", "k8s"]);
     assert!(k.contains("axon.dev/auth: public"), "{k}");
     assert!(k.contains("axon.dev/rate-limit: \"60\""), "{k}");
     assert!(
         k.contains("timeouts: { request: 5s }"),
-        "el timeout del edge no llego"
+        "the edge timeout did not arrive"
     );
     let (a, _, _) = axon(&["infra", &source_for("aws"), "--target", "aws"]);
     assert!(
         a.contains("authorization_type = \"JWT\""),
-        "ruta privada sin authorizer"
+        "a private route with no authorizer"
     );
     assert!(
         a.contains("authorization_type = \"NONE\""),
         "ruta publica mal marcada"
     );
 
-    // publico implica CDN; privado implica que no la lleva
+    // public implies a CDN; private implies it carries none
     let (g, _, _) = axon(&["infra", &source_for("gcp"), "--target", "gcp"]);
-    assert!(g.contains("enable_cdn  = true"), "bucket publico sin CDN");
+    assert!(g.contains("enable_cdn  = true"), "a public bucket with no CDN");
     assert!(
         g.contains("default_ttl = 86400"),
-        "el cache_ttl no llego al CDN"
+        "the cache_ttl did not reach the CDN"
     );
     assert!(
         g.contains("public_access_prevention    = \"enforced\""),
-        "bucket privado sin candado"
+        "a private bucket with no lock"
     );
-    assert!(g.contains("age = 2555"), "la retencion no llego");
+    assert!(g.contains("age = 2555"), "the retention did not arrive");
     assert!(
         !a.contains("cloudfront_distribution\" \"payments_recibos"),
-        "CDN sobre un bucket privado"
+        "a CDN over a private bucket"
     );
 
-    // el nombre del bucket es una plantilla neutral en el plan
+    // the bucket's name is a neutral template in the plan
     let (plan, _, _) = axon(&["infra", "examples", "--target", "plan"]);
     assert!(plan.contains("{project}-payments-recibos"), "{plan}");
     assert!(
         !plan.contains("var.project"),
-        "el plan neutral filtro sintaxis de terraform"
+        "the neutral plan leaked terraform syntax"
     );
-    // y cada target la sustituye con la suya
+    // and each target substitutes it with its own
     assert!(g.contains("${var.project}-payments-recibos"));
     assert!(
         a.contains(r#"{ name = "BUCKET_RECIBOS", value = "${var.project}-payments-recibos" }"#),
-        "el nombre del bucket no llego al contenedor en aws"
+        "the bucket name did not reach the container on aws"
     );
     assert!(k.contains("${PROJECT}-payments-recibos"));
     let (l, _, _) = axon(&["infra", "examples", "--target", "local"]);
     assert!(l.contains("BUCKET_RECIBOS: local-payments-recibos"));
     assert!(
         l.contains("image: minio/minio:latest"),
-        "local sin almacenamiento de objetos"
+        "local with no object storage"
     );
 }
 
-/// Una ruta expuesta sin decidir quien puede llamarla es un incidente, no un
-/// default. El edge falla cerrado.
+/// An exposed route with nobody deciding who may call it is an incident, not
+/// a default. The edge fails closed.
 #[test]
 fn the_edge_fails_closed() {
     let dir = std::env::temp_dir().join("axon-edge");
@@ -1116,7 +1120,7 @@ auth = "public"
 in = { a = "int" }
 out = { b = "int" }
 [methods.sinAuth]
-http = "GET /v1/sin-auth"
+http = "GET /v1/no-auth"
 in = { a = "int" }
 out = { b = "int" }
 "#,
@@ -1128,8 +1132,8 @@ out = { b = "int" }
     assert!(err.contains("is public and has no `rate_limit`"), "{err}");
 }
 
-/// Las reglas de seguridad citan su categoria del OWASP Top 10, porque un
-/// error que no dice por que importa se silencia con un allow.
+/// The security rules cite their OWASP Top 10 category, because an error that
+/// does not say why it matters gets silenced with an allow.
 #[test]
 fn the_owasp_rules_fire() {
     let dir = std::env::temp_dir().join("axon-owasp");
@@ -1165,7 +1169,7 @@ public = true
     .unwrap();
     let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    let todo = format!("{out}{err}");
+    let coloured = format!("{out}{err}");
     for regla in [
         "[A01] mal.pagar: public mutating route on a tier 0 service",
         "[A04] mal.pagar: public route with no `timeout_ms`",
@@ -1173,10 +1177,10 @@ public = true
         "[A02] mal: `sk_ESTO_NO_ES_UNA_LLAVE`",
         "[A05] mal: bucket `abierto` is public and has no `retention_days`",
     ] {
-        assert!(todo.contains(regla), "falto `{regla}`:\n{todo}");
+        assert!(coloured.contains(regla), "falto `{regla}`:\n{coloured}");
     }
 
-    // A05: el endurecimiento va generado, no recordado
+    // A05: the hardening is generated, not remembered
     let (k, _, _) = axon(&["infra", &source_for("k8s"), "--target", "k8s"]);
     for marker in [
         "runAsNonRoot: true",
@@ -1185,50 +1189,50 @@ public = true
         "automountServiceAccountToken: false",
         "kind: NetworkPolicy",
     ] {
-        assert!(k.contains(marker), "k8s sin `{marker}`");
+        assert!(k.contains(marker), "k8s with no `{marker}`");
     }
-    // A01: sin ruta publica no hay puerta a internet
+    // A01: with no public route there is no door to the internet
     let (g, _, _) = axon(&["infra", &source_for("gcp"), "--target", "gcp"]);
     assert!(
         g.contains("ingress  = \"INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER\""),
-        "un servicio sin ruta publica quedo expuesto"
+        "a service with no public route was left exposed"
     );
-    // A08: se despliega por digest, no por etiqueta
+    // A08: deployed by digest, not by tag
     let (ci, _, _) = axon(&["ci", "examples/payments.toml", "--target", "gcp"]);
     assert!(
         ci.contains("@${{ steps.imagen.outputs.digest }}"),
-        "deploy por etiqueta mutable"
+        "deployed by a mutable tag"
     );
-    // A09: la lista de PII y su redactor llegan al codigo
+    // A09: the PII list and its redactor reach the code
     let (ts, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
     assert!(
         ts.contains("export const piiFields = [\"customer_email\"]"),
         "{ts}"
     );
     assert!(ts.contains("export function redact"), "{ts}");
-    // El mismo concepto se declara UNA vez: `customer_email` en el manifiesto
-    // cubre `customerEmail` en el contrato y `customer-email` en una cabecera.
-    // Antes hacia falta declararlo dos veces, que es absurdo.
+    // The same concept is declared ONCE: `customer_email` in the manifest
+    // covers `customerEmail` in the contract and `customer-email` in a header.
+    // It used to need declaring twice, which is absurd.
     assert!(
         ts.contains("const normalizePii"),
-        "el redactor compara claves exactas:\n{ts}"
+        "the redactor compares exact keys:\n{ts}"
     );
     assert!(ts.contains("pii.has(normalizePii(k))"), "{ts}");
-    // y la normalizacion llega a las tres capas desde una sola declaracion
+    // and the normalisation reaches all three layers from a single declaration
     let (warehouse, _, _) = axon(&["analytics", "examples"]);
     assert!(
         warehouse.contains("customer_email_hash"),
-        "la bodega no reconocio el campo del evento:\n{warehouse}"
+        "the warehouse did not recognise the event's field:\n{warehouse}"
     );
     let (rls, _, _) = axon(&["rls", "examples"]);
     assert!(
         rls.contains(r#"'[redacted]'::text AS "customer_email""#),
-        "la vista no enmascaro la columna:\n{rls}"
+        "the view did not mask the column:\n{rls}"
     );
 }
 
-/// RLS y enmascarado no se comprueban leyendo el SQL: se aplican a un Postgres
-/// de verdad y se mira si aislan.
+/// RLS and masking are not checked by reading the SQL: they are applied to a
+/// real Postgres and then looked at to see whether they isolate.
 #[test]
 fn the_generated_rls_really_isolates() {
     if !has("docker") {
@@ -1241,23 +1245,23 @@ fn the_generated_rls_really_isolates() {
         sql.contains(r#"ALTER TABLE "order" FORCE ROW LEVEL SECURITY"#),
         "{sql}"
     );
-    // `order` es palabra reservada: sin comillas el SQL no corre
+    // `order` is a reserved word: unquoted, the SQL does not run
     assert!(
         !sql.contains("ALTER TABLE order "),
-        "identificador sin citar"
+        "an unquoted identifier"
     );
-    // el rol se crea una vez, no una por servicio
+    // the role is created once, not once per service
     assert_eq!(sql.matches("CREATE ROLE axon_reader").count(), 1);
 
     let dir = std::env::temp_dir().join("axon-rls-sql");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let mut todo = String::new();
+    let mut coloured = String::new();
     for f in ["001_order.expand.sql", "003_tenant.expand.sql"] {
-        todo.push_str(&std::fs::read_to_string(format!("examples/sql/orders/{f}")).unwrap());
+        coloured.push_str(&std::fs::read_to_string(format!("examples/sql/orders/{f}")).unwrap());
     }
-    todo.push_str(&sql);
-    todo.push_str(
+    coloured.push_str(&sql);
+    coloured.push_str(
         r#"
 CREATE ROLE app LOGIN PASSWORD 'x';
 GRANT ALL ON ALL TABLES IN SCHEMA public TO app;
@@ -1274,7 +1278,7 @@ SELECT 'INQUILINO_B=' || count(*) || ':' || min(customer_email) FROM "order";
 SELECT 'MASKED=' || min(customer_email) FROM "order_masked";
 "#,
     );
-    std::fs::write(dir.join("todo.sql"), &todo).unwrap();
+    std::fs::write(dir.join("coloured.sql"), &coloured).unwrap();
 
     let name = "axon-test-rls";
     let _ = Command::new("docker").args(["rm", "-f", name]).output();
@@ -1295,12 +1299,12 @@ SELECT 'MASKED=' || min(customer_email) FROM "order_masked";
         .expect("docker run");
     if !arranque.status.success() {
         eprintln!(
-            "salteado: no se pudo arrancar postgres: {}",
+            "skipped: postgres could not be started: {}",
             String::from_utf8_lossy(&arranque.stderr)
         );
         return;
     }
-    // se limpia pase lo que pase, incluso si un assert revienta
+    // it cleans up whatever happens, even if an assert blows up
     struct Limpieza(&'static str);
     impl Drop for Limpieza {
         fn drop(&mut self) {
@@ -1311,8 +1315,8 @@ SELECT 'MASKED=' || min(customer_email) FROM "order_masked";
 
     let mut listo = false;
     for _ in 0..60 {
-        // pg_isready responde antes de que el init cree la base: postgres
-        // reinicia a mitad de su inicializacion. Se espera la base real.
+        // pg_isready answers before the init creates the database: postgres
+        // restarts halfway through its initialisation. Wait for the real database.
         let r = Command::new("docker")
             .args([
                 "exec", name, "psql", "-U", "postgres", "-d", "t", "-c", "select 1",
@@ -1336,7 +1340,7 @@ SELECT 'MASKED=' || min(customer_email) FROM "order_masked";
         .spawn()
         .and_then(|mut c| {
             use std::io::Write;
-            c.stdin.take().unwrap().write_all(todo.as_bytes())?;
+            c.stdin.take().unwrap().write_all(coloured.as_bytes())?;
             c.wait_with_output()
         })
         .expect("docker exec psql");
@@ -1347,15 +1351,15 @@ SELECT 'MASKED=' || min(customer_email) FROM "order_masked";
     );
     assert!(
         printed.contains("SIN_INQUILINO=0"),
-        "RLS no aplica sin inquilino:\n{printed}"
+        "RLS does not apply with no tenant:\n{printed}"
     );
     assert!(
         printed.contains("INQUILINO_A=1:ana@ejemplo.mx"),
-        "el inquilino A no ve su fila:\n{printed}"
+        "tenant A does not see its row:\n{printed}"
     );
     assert!(
         printed.contains("INQUILINO_B=1:beto@ejemplo.mx"),
-        "el inquilino B no ve su fila:\n{printed}"
+        "tenant B does not see its row:\n{printed}"
     );
     assert!(
         !printed.contains("INQUILINO_A=2") && !printed.contains("INQUILINO_B=2"),
@@ -1363,13 +1367,14 @@ SELECT 'MASKED=' || min(customer_email) FROM "order_masked";
     );
     assert!(
         printed.contains("MASKED=[redacted]"),
-        "la vista no enmascara:\n{printed}"
+        "the view does not mask:\n{printed}"
     );
 
-    // Como se fija el inquilino importa tanto como la politica, y esto lo mide
-    // en vez de inferirlo. El resultado es mas fuerte que "usá SET LOCAL":
-    // un solo `SET` de sesion envenena la conexion para todo SET LOCAL
-    // posterior, porque SET LOCAL revierte al valor de la SESION y no a nada.
+    // How the tenant is pinned matters as much as the policy, and this
+    // measures it instead of inferring it. The result is stronger than "use
+    // SET LOCAL": a single session `SET` poisons the connection for every
+    // later SET LOCAL, because SET LOCAL reverts to the SESSION's value and
+    // not to nothing.
     let prueba = r#"
 BEGIN; SET LOCAL axon.tenant = 'aaaaaaaa-0000-4000-8000-000000000001'; COMMIT;
 SELECT 'LIMPIA=' || coalesce(NULLIF(current_setting('axon.tenant', true), ''), 'SIN_FIJAR');
@@ -1398,22 +1403,22 @@ SELECT 'TRAS_RESET=' || coalesce(NULLIF(current_setting('axon.tenant', true), ''
         String::from_utf8_lossy(&out2.stdout),
         String::from_utf8_lossy(&out2.stderr)
     );
-    // en una conexion limpia, SET LOCAL no sobrevive al commit
+    // on a clean connection, SET LOCAL does not survive the commit
     assert!(
         s2.contains("LIMPIA=SIN_FIJAR"),
-        "SET LOCAL sobrevivio al commit:\n{s2}"
+        "SET LOCAL survived the commit:\n{s2}"
     );
-    // pero tras un `SET` de sesion, revierte a ESE valor: la fuga persiste
+    // but after a session `SET`, it reverts to THAT value: the leak persists
     assert!(
         s2.contains("ENVENENADA=bbbbbbbb-0000-4000-8000-000000000002"),
-        "el comportamiento medido cambio; revisar la prescripcion de la RLS:\n{s2}"
+        "the measured behaviour changed; review the RLS prescription:\n{s2}"
     );
     assert!(s2.contains("TRAS_RESET=SIN_FIJAR"), "{s2}");
 
-    // y la prescripcion generada dice exactamente eso
+    // and the generated prescription says exactly that
     assert!(
         sql.contains("NEVER a session `SET`"),
-        "la migracion no prescribe como fijar el inquilino"
+        "the migration does not prescribe how to pin the tenant"
     );
     assert!(
         sql.contains("NULLIF(current_setting('axon.tenant', true), '')::uuid"),
@@ -1421,14 +1426,14 @@ SELECT 'TRAS_RESET=' || coalesce(NULLIF(current_setting('axon.tenant', true), ''
     );
 }
 
-/// El hueco mas grave que tuvo la herramienta: se le podia cambiar un campo a
-/// una version ya publicada y `verify` salia limpio.
+/// The gravest gap the tool had: a field could be changed on an already
+/// published version and `verify` came out clean.
 #[test]
 fn a_published_version_is_immutable() {
     let base = std::env::temp_dir().join("axon-baseline");
 
-    // prepara una copia de los ejemplos con su baseline, sin migraciones
-    // (aqui solo se prueban contratos)
+    // prepares a copy of the examples with their baseline, with no migrations
+    // (only contracts are tested here)
     let preparar = |suffix: &str| -> std::path::PathBuf {
         let dir = base.join(suffix);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1448,29 +1453,29 @@ fn a_published_version_is_immutable() {
         dir
     };
 
-    // el punto de partida esta limpio
+    // the starting point is clean
     let dir = preparar("limpio");
     let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(ok, "{err}");
     assert!(out.contains("0 errors"), "{out}");
     assert!(
         !out.contains("not recorded"),
-        "el baseline recien tomado ya has huecos"
+        "the freshly taken baseline already has gaps"
     );
 
-    let cambiar = |suffix: &str, file: &str, de: &str, a: &str| -> String {
+    let change = |suffix: &str, file: &str, from: &str, to: &str| -> String {
         let dir = preparar(suffix);
         let p = dir.join(file);
         let t = std::fs::read_to_string(&p).unwrap();
-        assert!(t.contains(de), "el fixture no contiene `{de}`");
-        std::fs::write(&p, t.replace(de, a)).unwrap();
+        assert!(t.contains(from), "the fixture does not contain `{from}`");
+        std::fs::write(&p, t.replace(from, to)).unwrap();
         let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
-        assert!(!ok, "el cambio `{de}` -> `{a}` paso limpio");
+        assert!(!ok, "the change `{from}` -> `{to}` passed clean");
         err
     };
 
-    // tipo cambiado
-    let err = cambiar(
+    // a changed type
+    let err = change(
         "tipo",
         "orders.toml",
         "total = \"money\"",
@@ -1482,11 +1487,11 @@ fn a_published_version_is_immutable() {
     );
     assert!(
         err.contains("publish `order.placed@v2`"),
-        "no dice que hacer:\n{err}"
+        "it does not say what to do:\n{err}"
     );
 
-    // campo agregado: en axon todo campo es obligatorio, asi que rompe igual
-    let err = cambiar(
+    // an added field: in axon every field is mandatory, so it breaks all the same
+    let err = change(
         "agregado",
         "orders.toml",
         "\ntotal = \"money\"\n",
@@ -1497,8 +1502,8 @@ fn a_published_version_is_immutable() {
         "{err}"
     );
 
-    // ruta movida
-    let err = cambiar(
+    // a moved route
+    let err = change(
         "ruta",
         "orders.toml",
         "http = \"POST /v1/tenants/{tenantId}/orders\"",
@@ -1510,11 +1515,11 @@ fn a_published_version_is_immutable() {
     );
     assert!(
         !err.contains("Some("),
-        "el mensaje filtra el Debug de Option:\n{err}"
+        "the message leaks Option's Debug:\n{err}"
     );
 
-    // retirar una version publicada
-    let err = cambiar(
+    // retiring a published version
+    let err = change(
         "retiro",
         "orders.toml",
         "[emits.\"order.placed@v1\"]",
@@ -1525,9 +1530,9 @@ fn a_published_version_is_immutable() {
         "{err}"
     );
 
-    // la via de escape: retirarlo tambien del baseline, visible en el PR
+    // the escape hatch: retiring it from the baseline too, visible in the PR
     let dir = preparar("retiro_deliberado");
-    for (f, de, a) in [
+    for (f, from, to) in [
         (
             "orders.toml",
             "[emits.\"order.placed@v1\"]",
@@ -1537,7 +1542,7 @@ fn a_published_version_is_immutable() {
     ] {
         let p = dir.join(f);
         let t = std::fs::read_to_string(&p).unwrap();
-        std::fs::write(&p, t.replace(de, a)).unwrap();
+        std::fs::write(&p, t.replace(from, to)).unwrap();
     }
     let bl = dir.join("axon.baseline.json");
     let mut v: serde_json::Value =
@@ -1548,9 +1553,9 @@ fn a_published_version_is_immutable() {
         .remove("order.placed@v1");
     std::fs::write(&bl, serde_json::to_string_pretty(&v).unwrap()).unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
-    assert!(ok, "un retiro deliberado no deberia bloquear:\n{err}");
+    assert!(ok, "a deliberate retirement should not block:\n{err}");
 
-    // un contrato nuevo sin registrar no esta protegido, y hay que avisarlo
+    // a new unregistered contract is not protected, and that has to be said
     let dir = preparar("nuevo");
     let p = dir.join("orders.toml");
     let t = std::fs::read_to_string(&p).unwrap();
@@ -1560,18 +1565,18 @@ fn a_published_version_is_immutable() {
     )
     .unwrap();
     let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
-    assert!(ok, "un contrato nuevo no es un error");
+    assert!(ok, "a new contract is not an error");
     assert!(out.contains("not recorded"), "{out}");
 
-    // y sin baseline, `verify` has que decir que no puede ver esto
+    // and with no baseline, `verify` has to say it cannot see this
     let dir = preparar("sin_baseline");
     std::fs::remove_file(dir.join("axon.baseline.json")).unwrap();
     let (out, _, _) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(out.contains("no axon.baseline.json"), "{out}");
 }
 
-/// La resiliencia declarada has que ejecutarse, no solo validarse: era la
-/// unica promesa del manifiesto que no llegaba al codigo.
+/// The declared resilience has to be executed, not just validated: it was the
+/// only promise in the manifest that did not reach the code.
 #[test]
 fn the_declared_policy_is_executed() {
     if !has("node") || !std::path::Path::new("examples/services/node_modules").exists() {
@@ -1580,16 +1585,16 @@ fn the_declared_policy_is_executed() {
     }
     let (ts, err, ok) = axon(&["build", "examples/payments.toml", "examples"]);
     assert!(ok, "{err}");
-    // los numeros del manifiesto llegan literales al codigo
+    // the manifest's numbers reach the code literally
     assert!(
         ts.contains(
             r#"withPolicy("orders.getOrder", { timeoutMs: 1000, retries: 3, breaker: true }"#
         ),
-        "la politica no salio del manifiesto:\n{ts}"
+        "the policy did not come from the manifest:\n{ts}"
     );
-    // reintentar sin llave de idempotencia duplica el efecto del otro lado
+    // retrying with no idempotency key duplicates the effect on the other side
     assert!(ts.contains(r#"headers(e, true)"#));
-    // CAP: el lado declarado decide el aislamiento
+    // CAP: the declared side decides the isolation
     assert!(
         ts.contains(r#"export const isolationLevel = "SERIALIZABLE""#),
         "{ts}"
@@ -1603,17 +1608,17 @@ fn the_declared_policy_is_executed() {
         o.contains("export const maxStalenessMs = 3000"),
         "{o}"
     );
-    // `degrade` obliga a pasar el camino degradado; `reject` no lo admite
+    // `degrade` forces passing the degraded path; `reject` does not accept it
     assert!(
         o.contains("fallback: () => Promise<PaymentsCapturePaymentOut>"),
-        "declarar degrade no obligo a un fallback:\n{o}"
+        "declaring degrade did not force a fallback:\n{o}"
     );
     assert!(
         !ts.contains("fallback: () =>"),
-        "un servicio `reject` no degrada"
+        "a `reject` service does not degrade"
     );
 
-    // y la politica se comporta: se ejecuta contra el codigo generado
+    // and the policy behaves: it is executed against the generated code
     let dir = std::path::Path::new("examples/services/payments");
     let prueba = dir.join("axon.politica.test.ts");
     std::fs::write(
@@ -1676,12 +1681,12 @@ test("the trace and the idempotency key travel with the call", () => {
     );
     assert!(
         out.status.success(),
-        "la politica generada no se comporta:\n{printed}"
+        "the generated policy does not behave:\n{printed}"
     );
     assert!(printed.contains("pass 4"), "{printed}");
 }
 
-/// CAP: la particion no se elige, que hacer mientras dura si.
+/// CAP: the partition is not a choice, what to do while it lasts is.
 #[test]
 fn the_cap_side_is_verified() {
     let dir = std::env::temp_dir().join("axon-cap");
@@ -1703,7 +1708,7 @@ on_partition = "reject"
     assert!(!ok);
     assert!(err.contains("with no `max_staleness_ms`"), "{err}");
 
-    // la contradiccion del teorema: CP que sirve algo viejo
+    // the theorem's contradiction: CP serving something stale
     std::fs::write(
         dir.join("c.toml"),
         "service = \"c\"\nowner = \"x\"\ntier = \"1\"\n[cap]\nconsistency = \"strong\"\non_partition = \"degrade\"\n",
@@ -1713,7 +1718,7 @@ on_partition = "reject"
     assert!(!ok);
     assert!(err.contains("contradicts itself"), "{err}");
 
-    // sin declararlo, se asume el par que falla cerrado, y se avisa
+    // undeclared, the pair that fails closed is assumed, and it says so
     std::fs::write(
         dir.join("c.toml"),
         "service = \"c\"\nowner = \"x\"\ntier = \"1\"\n",
@@ -1723,7 +1728,7 @@ on_partition = "reject"
     assert!(ok);
     assert!(out.contains("no `[cap]`; assumed CP"), "{out}");
 
-    // la garantia de una ruta sincrona es la del eslabon mas debil
+    // a synchronous path's guarantee is the weakest link's
     let (out, _, _) = axon(&["verify", "examples"]);
     assert!(
         out.contains("is `strong` and calls orders, which is `eventual`"),
@@ -1731,10 +1736,10 @@ on_partition = "reject"
     );
 }
 
-/// OpenTelemetry: axon no trae un SDK ni inventa un formato. El envelope ya
-/// propaga `traceparent`, que es el contexto W3C que usa OTel, asi que solo
-/// levanta el backend en local y pone las variables estandar en los cuatro
-/// targets — el destino cambia, los atributos no.
+/// OpenTelemetry: axon ships no SDK and invents no format. The envelope
+/// already propagates `traceparent`, which is the W3C context OTel uses, so it
+/// only brings up the backend locally and puts the standard variables on all
+/// four targets —the destination changes, the attributes do not.
 #[test]
 fn otel_on_all_four_targets() {
     let expected = [
@@ -1750,19 +1755,19 @@ fn otel_on_all_four_targets() {
         for v in expected {
             assert!(out.contains(v), "{target} no inyecta {v}");
         }
-        // los atributos de recurso salen del manifiesto, no de una convencion
+        // the resource attributes come from the manifest, not from a convention
         assert!(
             out.contains("axon.owner=equipo-pagos") && out.contains("axon.tier=0"),
-            "{target}: los atributos no salen del manifiesto"
+            "{target}: the attributes do not come from the manifest"
         );
     }
 
-    // el destino es lo unico que cambia entre targets
+    // the destination is the only thing that changes between targets
     let (l, _, _) = axon(&["infra", "examples", "--target", "local"]);
     assert!(l.contains("http://traza:4318"));
     assert!(
         l.contains("image: jaegertracing/all-in-one"),
-        "local sin backend de trazas"
+        "local with no trace backend"
     );
     for (target, endpoint) in [
         ("gcp", "${var.otlp_endpoint}"),
@@ -1772,37 +1777,37 @@ fn otel_on_all_four_targets() {
         let (o, _, _) = axon(&["infra", &source_for(target), "--target", target]);
         assert!(
             o.contains(endpoint),
-            "{target} sin destino OTLP configurable"
+            "{target} with no configurable OTLP destination"
         );
     }
 
-    // el muestreo sale del tier: un tier 0 se traza entero, porque cuando se
-    // cae la traza que falta es justo la que hacia falta
+    // the sampling comes from the tier: a tier 0 is traced whole, because when
+    // it goes down the missing trace is exactly the one that was needed
     let (g, _, _) = axon(&["infra", &source_for("gcp"), "--target", "gcp"]);
     assert!(
         g.contains("parentbased_always_on"),
-        "tier 0 sin muestreo completo"
+        "tier 0 with no full sampling"
     );
     assert!(
         g.contains("parentbased_traceidratio"),
-        "tier 1 sin muestreo parcial"
+        "tier 1 with no partial sampling"
     );
-    // pero en local se traza todo: descartar el 90% mientras depuras no sirve
+    // but locally everything is traced: dropping 90% while you debug is no use
     assert!(
         !l.contains("parentbased_traceidratio"),
         "local muestrea parcialmente"
     );
 
-    // los flags del traceparent se heredan, no se inventan: declarar
-    // "muestreado" sobre una traza que no lo esta parte el arbol en fragmentos
+    // the traceparent's flags are inherited, not invented: declaring
+    // "sampled" over a trace that is not breaks the tree into fragments
     let (ts, _, _) = axon(&["build", "examples/payments.toml", "examples"]);
     assert!(ts.contains(r#"const flags = parts?.[3] ?? "01""#), "{ts}");
-    assert!(!ts.contains("${hex(8)}-01`"), "el envelope fija los flags");
+    assert!(!ts.contains("${hex(8)}-01`"), "the envelope pins the flags");
 }
 
-/// El diccionario de pg_anon: cada campo `pii` recibe una regla, y cada regla
-/// se aplica de verdad a una columna de su tipo. Una funcion que no existe
-/// —o un cast que falta— hace fallar el dump a mitad de camino.
+/// pg_anon's dictionary: every `pii` field gets a rule, and every rule really
+/// applies to a column of its type. A function that does not exist —or a
+/// missing cast— makes the dump fail halfway through.
 #[test]
 fn the_pg_anon_dictionary_works() {
     let dir = std::env::temp_dir().join("axon-pganon");
@@ -1821,9 +1826,9 @@ fn the_pg_anon_dictionary_works() {
     )
     .unwrap();
 
-    let (dic, err, ok) = axon(&["rls", dir.to_str().unwrap(), "--target", "pg_anon"]);
+    let (dict, err, ok) = axon(&["rls", dir.to_str().unwrap(), "--target", "pg_anon"]);
     assert!(ok, "{err}");
-    // cobertura: ningun campo declarado se queda sin regla
+    // coverage: no declared field is left without a rule
     for field in [
         "id",
         "correo",
@@ -1833,16 +1838,16 @@ fn the_pg_anon_dictionary_works() {
         "verificado",
     ] {
         assert!(
-            dic.contains(&format!("\"{field}\":")),
-            "sin regla para {field}:\n{dic}"
+            dict.contains(&format!("\"{field}\":")),
+            "no rule for {field}:\n{dict}"
         );
     }
-    // md5(uuid) no existe: el cast interno es obligatorio
-    assert!(dic.contains(r#"md5(\"id\"::text)::uuid"#), "{dic}");
-    // la regla sale del tipo, no del nombre: `correo` no lleva "mail" y aun asi
-    // recibe la regla de texto
-    assert!(dic.contains("anon_funcs.digest(\\\"correo\\\""), "{dic}");
-    // las tablas del propio framework se excluyen: el outbox lleva payloads
+    // md5(uuid) does not exist: the inner cast is mandatory
+    assert!(dict.contains(r#"md5(\"id\"::text)::uuid"#), "{dict}");
+    // the rule comes from the type, not from the name: `correo` carries no
+    // "mail" and still gets the text rule
+    assert!(dict.contains("anon_funcs.digest(\\\"correo\\\""), "{dict}");
+    // the framework's own tables are excluded: the outbox carries payloads
     let (dic2, _, _) = axon(&["rls", "examples", "--target", "pg_anon"]);
     assert!(
         dic2.contains("\"table\": \"outbox\"") && dic2.contains("dictionary_exclude"),
@@ -1850,11 +1855,11 @@ fn the_pg_anon_dictionary_works() {
     );
 
     if !has("docker") {
-        eprintln!("salteado el resto: docker no esta instalado");
+        eprintln!("skipping the rest: docker is not installed");
         return;
     }
 
-    // cada regla, aplicada a una columna de su tipo
+    // every rule, applied to a column of its type
     let name = "axon-test-pganon";
     let _ = Command::new("docker").args(["rm", "-f", name]).output();
     let arranque = Command::new("docker")
@@ -1904,14 +1909,14 @@ fn the_pg_anon_dictionary_works() {
         "INSERT INTO persona VALUES ('11111111-1111-4111-8111-111111111111',\n  \
          '22222222-2222-4222-8222-222222222222','ana@gmail.com','2026-03-14 10:30:00+00',\n  \
          25000,'{\"a\":1}'::jsonb,true);\n\
-         -- doble de anon_funcs.digest, only para comprobar la FORMA de la llamada:\n\
-         -- la funcion real la instala pg_anon en el destino.\n\
+         -- a double of anon_funcs.digest, only to check the SHAPE of the call:\n\
+         -- pg_anon installs the real function at the destination.\n\
          CREATE SCHEMA anon_funcs;\n\
          CREATE FUNCTION anon_funcs.digest(t text, salt text, algo text) RETURNS text\n  \
            AS $$ SELECT encode(sha256((t || salt)::bytea), 'hex') $$ LANGUAGE sql IMMUTABLE;\n",
     );
-    // cada regla del diccionario, tal cual, contra su columna
-    for line in dic.lines() {
+    // every dictionary rule, as-is, against its column
+    for line in dict.lines() {
         let l = line.trim();
         if !l.starts_with('"') || !l.contains("\": \"") {
             continue;
@@ -1923,7 +1928,7 @@ fn the_pg_anon_dictionary_works() {
         if ["schema", "table"].contains(&field) {
             continue;
         }
-        // el valor viene escapado para Python: aca se desescapa para SQL
+        // the value comes escaped for Python: here it is unescaped for SQL
         let regla = resto
             .trim_end_matches(&[',', '"'][..])
             .replace("\\\"", "\"");
@@ -1962,21 +1967,21 @@ fn the_pg_anon_dictionary_works() {
     );
     assert!(
         out.status.success(),
-        "una regla generada no corre en Postgres:\n{printed}"
+        "a generated rule does not run on Postgres:\n{printed}"
     );
-    // el dato original no sobrevive a ninguna regla
+    // the original data survives no rule
     assert!(
         !printed.contains("ana@gmail.com"),
-        "el correo no se enmascaro:\n{printed}"
+        "the address was not masked:\n{printed}"
     );
     assert!(
         printed.contains("2026-01-01"),
-        "la fecha no se trunco:\n{printed}"
+        "the date was not truncated:\n{printed}"
     );
 }
 
-/// Escalado de la base: aritmetica sobre lo declarado. El agotamiento de
-/// conexiones no aparece con una instancia; aparece el dia que escala.
+/// Database scaling: arithmetic over what is declared. Connection exhaustion
+/// does not show up with one instance; it shows up the day it scales.
 #[test]
 fn the_database_scaling_is_verified() {
     let dir = std::env::temp_dir().join("axon-escala");
@@ -1988,7 +1993,7 @@ fn the_database_scaling_is_verified() {
         (format!("{out}{err}"), ok)
     };
 
-    // 20 x 10 instancias = 200 conexiones contra un tope de 100
+    // 20 x 10 instances = 200 connections against a ceiling of 100
     let (msg, ok) = escribir(
         "service = \"s\"\nowner = \"x\"\ntier = \"2\"\n[infra]\nstate = \"postgres\"\n\
          pool_size = 20\nmax_connections = 100\nmax_instances = 10\n",
@@ -1997,8 +2002,8 @@ fn the_database_scaling_is_verified() {
     assert!(msg.contains("20 connections x 10 instances = 200"), "{msg}");
     assert!(msg.contains("exceeds the limit of 100"), "{msg}");
 
-    // una replica va con retraso: leer de ella y prometer consistencia fuerte
-    // es la contradiccion del teorema escrita en dos lugares
+    // a replica lags: reading from it and promising strong consistency is the
+    // theorem's contradiction written in two places
     let (msg, ok) = escribir(
         "service = \"s\"\nowner = \"x\"\ntier = \"2\"\n[cap]\nconsistency = \"strong\"\n\
          [infra]\nstate = \"postgres\"\nread_replicas = 2\n",
@@ -2006,7 +2011,7 @@ fn the_database_scaling_is_verified() {
     assert!(!ok);
     assert!(msg.contains("reads from 2 replicas and declares"), "{msg}");
 
-    // alta disponibilidad no es fallback: el standby replica el DROP TABLE
+    // high availability is not a fallback: the standby replicates the DROP TABLE
     let (msg, ok) = escribir(
         "service = \"s\"\nowner = \"x\"\ntier = \"0\"\n[infra]\nstate = \"postgres\"\nha = true\n",
     );
@@ -2014,7 +2019,7 @@ fn the_database_scaling_is_verified() {
     assert!(msg.contains("with no `backup_retention_days`"), "{msg}");
     assert!(msg.contains("is not a backup"), "{msg}");
 
-    // un tier 0 sin failover no es un tier 0
+    // a tier 0 with no failover is not a tier 0
     let (msg, ok) = escribir(
         "service = \"s\"\nowner = \"x\"\ntier = \"0\"\n[infra]\nstate = \"postgres\"\n\
          backup_retention_days = 30\n",
@@ -2022,26 +2027,26 @@ fn the_database_scaling_is_verified() {
     assert!(!ok);
     assert!(msg.contains("with no `ha = true`"), "{msg}");
 
-    // y los recursos: standby, respaldos y replicas salen del manifiesto
+    // and the resources: standby, backups and replicas come from the manifest
     let (g, _, _) = axon(&["infra", &source_for("gcp"), "--target", "gcp"]);
     assert!(
         g.contains("availability_type = \"REGIONAL\""),
-        "payments es tier 0: falta el standby"
+        "payments is tier 0: the standby is missing"
     );
     assert!(g.contains("retained_backups = 30"), "{g}");
     assert!(g.contains("point_in_time_recovery_enabled = true"), "{g}");
     assert!(
         g.contains("master_instance_name = google_sql_database_instance.orders.name"),
-        "sin replicas"
+        "no replicas"
     );
-    // una base por servicio es una INSTANCIA por servicio
+    // database-per-service is one INSTANCE per service
     assert!(
         g.contains("resource \"google_sql_database_instance\" \"payments\""),
         "{g}"
     );
     assert!(
         !g.contains("var.sql_instance"),
-        "las bases siguen compartiendo instancia"
+        "the databases still share an instance"
     );
     let (a, _, _) = axon(&["infra", &source_for("aws"), "--target", "aws"]);
     assert!(a.contains("multi_az                = true"), "{a}");
@@ -2052,18 +2057,18 @@ fn the_database_scaling_is_verified() {
     );
 }
 
-/// La prueba de carga sale del manifiesto, y su veredicto compara lo medido
-/// con lo declarado. Un numero declarado que nadie mide es una opinion.
+/// The load test comes from the manifest, and its verdict compares the
+/// measured against the declared. A declared number nobody measures is an opinion.
 #[test]
 fn the_load_test_comes_from_the_manifest() {
     let (js, err, ok) = axon(&["load", "examples/orders.toml"]);
     assert!(ok, "{err}");
-    // la tasa es el rate_limit declarado, no un numero elegido a ojo
+    // the rate is the declared rate_limit, not a number picked by eye
     assert!(
         js.contains("rate: 60,              // declared in rate_limit"),
         "{js}"
     );
-    // el umbral es el timeout declarado
+    // the threshold is the declared timeout
     assert!(
         js.contains(r#""http_req_duration{scenario:placeOrder}": ["p(95)<5000"]"#),
         "{js}"
@@ -2072,17 +2077,17 @@ fn the_load_test_comes_from_the_manifest() {
         js.contains(r#""http_req_duration{scenario:getOrder}": ["p(95)<2000"]"#),
         "{js}"
     );
-    // una ruta con parametro se prueba con un id inventado: un 404 ahi no es
-    // un fallo del servicio, asi que el umbral va sobre el check
+    // a route with a parameter is tested with a made-up id: a 404 there is not
+    // a service failure, so the threshold goes on the check
     assert!(
         js.contains(r#""checks{scenario:getOrder}": ["rate>0.99"]"#),
         "{js}"
     );
     assert!(js.contains("r.status === 404"), "{js}");
-    // el techo que impone el pool declarado queda escrito
+    // the ceiling the declared pool imposes is written down
     assert!(js.contains("4 connections x 10 instances = 40"), "{js}");
 
-    // y el veredicto: `true` en un umbral de k6 significa INCUMPLIDO
+    // and the verdict: `true` on a k6 threshold means BREACHED
     let dir = std::env::temp_dir().join("axon-carga");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -2114,11 +2119,11 @@ fn the_load_test_comes_from_the_manifest() {
         "--check",
         bad.to_str().unwrap(),
     ]);
-    assert!(!ok, "un umbral incumplido has que fallar");
+    assert!(!ok, "a breached threshold has to fail");
     assert!(err.contains("breached `p(95)<5000`"), "{err}");
 
-    // un resumen sin umbrales no es un veredicto, y decirlo es mejor que
-    // dar por bueno lo que no se midio
+    // a summary with no thresholds is not a verdict, and saying so beats
+    // taking what was not measured as fine
     let empty = dir.join("vacio.json");
     std::fs::write(&empty, r#"{"metrics":{"http_reqs":{"count":1,"rate":1}}}"#).unwrap();
     let (_, err, ok) = axon(&[
@@ -2131,9 +2136,8 @@ fn the_load_test_comes_from_the_manifest() {
     assert!(err.contains("carries no thresholds"), "{err}");
 }
 
-/// Una ruta declarada que nadie sirve devuelve 404 en produccion y no aparece
-/// en ninguna prueba. El codigo generado publica la lista para que el arranque
-/// pueda negarse.
+/// A declared route nobody serves returns a 404 in production and shows up in
+/// no test. The generated code publishes the list so startup can refuse.
 #[test]
 fn the_declared_routes_reach_the_code() {
     let (ts, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
@@ -2145,8 +2149,8 @@ fn the_declared_routes_reach_the_code() {
     );
 }
 
-/// Feature flags: lo que aporta declararlos no es el SDK, sino que el
-/// compilador imponga lo que nadie impone.
+/// Feature flags: what declaring them adds is not the SDK, but that the
+/// compiler enforces what nobody enforces.
 #[test]
 fn the_flags_are_verified() {
     let dir = std::env::temp_dir().join("axon-flags");
@@ -2159,40 +2163,40 @@ fn the_flags_are_verified() {
     };
     let base = "service = \"f\"\nowner = \"e\"\ntier = \"2\"\n";
 
-    // un flag sin fecha de muerte no muere
+    // a flag with no death date does not die
     let (msg, ok) = probar(&format!("{base}[flags.eterno]\nowner = \"e\"\n"));
     assert!(!ok);
     assert!(msg.contains("no `expires`"), "{msg}");
 
-    // uno vencido no se ignora: se limpia o se renueva
+    // an expired one is not ignored: it gets cleaned up or renewed
     let (msg, ok) = probar(&format!(
         "{base}[flags.viejo]\nowner = \"e\"\nexpires = \"2024-01-15\"\n"
     ));
     assert!(!ok);
     assert!(msg.contains("expired on 2024-01-15"), "{msg}");
 
-    // sin dueno, nadie lo apaga
+    // with no owner, nobody turns it off
     let (msg, ok) = probar(&format!(
         "{base}[flags.huerfano]\nexpires = \"2099-01-01\"\n"
     ));
     assert!(!ok);
     assert!(msg.contains("flag with no `owner`"), "{msg}");
 
-    // un rollout por peticion deja la misma entidad a medio migrar
+    // a per-request rollout leaves the same entity half migrated
     let (msg, ok) = probar(&format!(
         "{base}[flags.parcial]\nowner = \"e\"\nexpires = \"2099-01-01\"\nrollout = 25\n"
     ));
     assert!(!ok);
     assert!(msg.contains("rollout at 25% with no `sticky_by`"), "{msg}");
 
-    // un kill switch se apaga entero: el error es propio, no el del sticky
+    // a kill switch goes off whole: the error is its own, not the sticky one's
     let (msg, ok) = probar(&format!(
         "{base}[flags.cortar]\nowner = \"e\"\nkill_switch = true\nrollout = 50\n"
     ));
     assert!(!ok);
     assert!(msg.contains("`kill_switch` with `rollout`"), "{msg}");
 
-    // fijarse por un campo que el servicio no recibe no fija nada
+    // pinning by a field the service does not receive pins nothing
     let (msg, ok) = probar(&format!(
         "{base}[flags.malo]\nowner = \"e\"\nexpires = \"2099-01-01\"\nrollout = 50\n\
          sticky_by = \"no_existe\"\n"
@@ -2200,13 +2204,13 @@ fn the_flags_are_verified() {
     assert!(!ok);
     assert!(msg.contains("appears in no contract"), "{msg}");
 
-    // un kill switch sin expires es lo correcto, y no molesta
+    // a kill switch with no expires is the right thing, and it does not complain
     let (_, ok) = probar(&format!(
         "{base}[flags.corte]\nowner = \"e\"\nkill_switch = true\n"
     ));
-    assert!(ok, "un kill switch legitimo no deberia fallar");
+    assert!(ok, "a legitimate kill switch should not fail");
 
-    // el codigo: el accesor exige el campo por el que se fija
+    // the code: the accessor requires the field it is pinned by
     let (ts, _, _) = axon(&["build", "examples/payments.toml", "examples"]);
     assert!(
         ts.contains(
@@ -2223,13 +2227,13 @@ fn the_flags_are_verified() {
         "{ts}"
     );
 
-    // los cuatro tipos de OpenFeature: un flag no es solo un booleano, y un
-    // rollout de configuracion —un limite, un proveedor— necesita los otros
+    // OpenFeature's four types: a flag is not just a boolean, and a config
+    // rollout —a limit, a provider— needs the others
     assert!(
         ts.contains(
             "export const flagProveedorDeCobro = (flags: Flags, tenant_id: string): Promise<string> =>"
         ),
-        "sin accesor tipado para un flag de tipo string:\n{ts}"
+        "no typed accessor for a string flag:\n{ts}"
     );
     assert!(
         ts.contains(r#"flags.evaluate("proveedor_de_cobro", "stripe", "#),
@@ -2237,15 +2241,15 @@ fn the_flags_are_verified() {
     );
     assert!(
         ts.contains("export const flagLimiteDeReintentos = (flags: Flags): Promise<number> =>"),
-        "sin accesor tipado para un flag numerico:\n{ts}"
+        "no typed accessor for a numeric flag:\n{ts}"
     );
-    // la interfaz cubre los cuatro tipos del estandar
+    // the interface covers the standard's four types
     assert!(
         ts.contains("evaluate<T extends boolean | string | number | object>"),
         "{ts}"
     );
 
-    // y la config de flagd: el rollout se expresa con su `fractional`
+    // and flagd's config: the rollout is expressed with its `fractional`
     let (cfg, _, _) = axon(&["flags", "examples"]);
     let v: serde_json::Value = serde_json::from_str(&cfg).expect("flagd json");
     let f = &v["flags"]["cobro_v2"];
@@ -2253,22 +2257,22 @@ fn the_flags_are_verified() {
     assert_eq!(f["targeting"]["fractional"][0]["var"], "tenant_id");
     assert_eq!(f["targeting"]["fractional"][1][1], 10);
     assert_eq!(f["targeting"]["fractional"][2][1], 90);
-    // un kill switch no lleva targeting
+    // a kill switch carries no targeting
     assert!(v["flags"]["cortar_stripe"]["targeting"].is_null());
 
-    // y las variantes declaradas llegan a flagd tal cual, no un on/off fijo
+    // and the declared variants reach flagd as-is, not a fixed on/off
     let p = &v["flags"]["proveedor_de_cobro"];
     assert_eq!(p["variants"]["stripe"], "stripe");
     assert_eq!(p["variants"]["adyen"], "adyen");
     assert_eq!(p["defaultVariant"], "stripe");
-    // el rollout reparte entre la variante por defecto y la otra
+    // the rollout splits between the default variant and the other one
     assert_eq!(p["targeting"]["fractional"][1][0], "adyen");
     assert_eq!(p["targeting"]["fractional"][1][1], 20);
     assert_eq!(p["targeting"]["fractional"][2][0], "stripe");
     assert_eq!(v["flags"]["limite_de_reintentos"]["variants"]["normal"], 3);
 
-    // una variante por defecto inexistente hace que la evaluacion caiga
-    // siempre al valor del codigo, y el flag deja de servir en silencio
+    // a non-existent default variant makes evaluation always fall back to the
+    // code's value, and the flag stops working in silence
     let (msg, ok) = probar(&format!(
         "{base}[flags.raro]\nowner = \"e\"\nkill_switch = true\n\
          default_variant = \"no_existe\"\nvariants = {{ a = \"x\" }}\n"
@@ -2276,7 +2280,7 @@ fn the_flags_are_verified() {
     assert!(!ok);
     assert!(msg.contains("is not in `variants`"), "{msg}");
 
-    // OpenFeature resuelve un tipo por flag, no uno por variante
+    // OpenFeature resolves one type per flag, not one per variant
     let (msg, ok) = probar(&format!(
         "{base}[flags.mezcla]\nowner = \"e\"\nkill_switch = true\n\
          default_variant = \"a\"\nvariants = {{ a = \"x\", b = 2 }}\n"
@@ -2285,99 +2289,99 @@ fn the_flags_are_verified() {
     assert!(msg.contains("mix types"), "{msg}");
 }
 
-/// `axon cap` no repite lo que bloquea `verify`: explica las consecuencias.
-/// Hay combinaciones que no son un error y aun asi cambian lo que el servicio
-/// puede prometer, y eso conviene tenerlo escrito antes de un incidente.
+/// `axon cap` does not repeat what `verify` blocks: it explains the
+/// consequences. There are combinations that are not an error and still change
+/// what the service can promise, and that is worth writing down before an incident.
 #[test]
 fn the_cap_report_reconciles_the_patterns() {
     let (out, err, ok) = axon(&["cap", "examples"]);
     assert!(ok, "{err}");
-    // contradice: verify ya lo bloquea, y aca se explica por que
+    // contradicts: verify already blocks it, and here the why is explained
     assert!(out.contains("contradicts"), "{out}");
     assert!(
         out.contains("the path's guarantee is the weaker one"),
         "{out}"
     );
-    // cuesta: una compensacion es consistencia eventual por construccion
+    // costs: a compensation is eventual consistency by construction
     assert!(out.contains("your own state is CP, the FLOW is not"), "{out}");
-    // implica: el outbox no rompe tu garantia, rompe la del flujo
+    // implies: the outbox does not break your guarantee, it breaks the flow's
     assert!(out.contains("consumers see it late"), "{out}");
-    // y el standby es lo unico que da disponibilidad sin costo en consistencia
+    // and the standby is the only thing giving availability at no cost in consistency
     assert!(out.contains("at no cost in the C"), "{out}");
     assert!(out.contains("[CP]") && out.contains("[AP]"), "{out}");
 
-    // el filtro por servicio, con el analisis mirando igual a todos: sin
-    // `orders` cargado no se podria saber que la dependencia es AP
+    // the per-service filter, with the analysis still looking at all of them:
+    // without `orders` loaded there would be no way to know the dependency is AP
     let (only, _, _) = axon(&["cap", "examples", "-s", "payments"]);
     assert!(only.contains("payments"), "{only}");
-    assert!(!only.contains("\norders "), "el filtro no acoto:\n{only}");
+    assert!(!only.contains("\norders "), "the filter did not narrow:\n{only}");
     assert!(only.contains("`orders`, which is AP, is called"), "{only}");
 
     let (nothing, _, _) = axon(&["cap", "examples", "-s", "inexistente"]);
     assert!(nothing.contains("no service by that name"), "{nothing}");
 }
 
-/// Colores: azul informa, amarillo advierte, rojo bloquea. Y se apagan solos
-/// cuando la salida no es una terminal, porque ahi las secuencias son basura
-/// que ensucia un diff o un log de CI.
+/// Colours: blue informs, yellow warns, red blocks. And they turn themselves
+/// off when the output is not a terminal, because there the sequences are junk
+/// that dirties a diff or a CI log.
 #[test]
 fn the_colours_respect_the_destination() {
-    // el suite captura la salida, asi que nunca es una terminal
+    // the suite captures the output, so it is never a terminal
     let (out, err, _) = axon(&["verify", "examples"]);
-    let todo = format!("{out}{err}");
+    let coloured = format!("{out}{err}");
     assert!(
-        !todo.contains('\x1b'),
-        "coloreo una salida que no es terminal"
+        !coloured.contains('\x1b'),
+        "it coloured an output that is not a terminal"
     );
 
-    // y con CLICOLOR_FORCE si colorea
+    // and with CLICOLOR_FORCE it does colour
     let forzado = Command::new(env!("CARGO_BIN_EXE_axon"))
         .args(["verify", "examples"])
         .env("CLICOLOR_FORCE", "1")
         .output()
         .expect("axon");
-    let todo = format!(
+    let coloured = format!(
         "{}{}",
         String::from_utf8_lossy(&forzado.stdout),
         String::from_utf8_lossy(&forzado.stderr)
     );
-    assert!(todo.contains("\x1b[1;33m"), "no coloreo con CLICOLOR_FORCE");
+    assert!(coloured.contains("\x1b[1;33m"), "it did not colour with CLICOLOR_FORCE");
 
-    // NO_COLOR gana sobre el forzado, que es la convencion
-    let sin = Command::new(env!("CARGO_BIN_EXE_axon"))
+    // NO_COLOR wins over the forcing, which is the convention
+    let plain = Command::new(env!("CARGO_BIN_EXE_axon"))
         .args(["verify", "examples"])
         .env("CLICOLOR_FORCE", "1")
         .env("NO_COLOR", "1")
         .output()
         .expect("axon");
-    let todo = format!(
+    let coloured = format!(
         "{}{}",
-        String::from_utf8_lossy(&sin.stdout),
-        String::from_utf8_lossy(&sin.stderr)
+        String::from_utf8_lossy(&plain.stdout),
+        String::from_utf8_lossy(&plain.stderr)
     );
-    assert!(!todo.contains('\x1b'), "NO_COLOR no se respeto");
+    assert!(!coloured.contains('\x1b'), "NO_COLOR was not honoured");
 }
 
-/// Los ejemplos de la documentacion no son texto: cada bloque ```toml de
-/// `docs/src/` se pasa por `axon verify`. Un ejemplo que no valida rompe CI,
-/// asi que la documentacion no puede quedar vieja en silencio — que es
-/// exactamente como queda toda documentacion.
+/// The documentation examples are not text: every ```toml block in
+/// `docs/src/` is run through `axon verify`. An example that does not validate
+/// breaks CI, so the documentation cannot go stale in silence —which is
+/// exactly how all documentation goes.
 #[test]
 fn the_documentation_examples_validate() {
     let dir = std::env::temp_dir().join("axon-docs");
-    let mut revisados = 0;
-    let mut paginas = 0;
+    let mut checked = 0;
+    let mut pages = 0;
 
     for e in std::fs::read_dir("docs/src").expect("docs/src") {
         let pagina = e.unwrap().path();
         if pagina.extension().is_none_or(|x| x != "md") {
             continue;
         }
-        paginas += 1;
+        pages += 1;
         let text = std::fs::read_to_string(&pagina).unwrap();
         let name = pagina.file_name().unwrap().to_string_lossy().to_string();
 
-        // los bloques ```toml, en orden, con su numero de linea para el mensaje
+        // the ```toml blocks, in order, with their line number for the message
         let mut dentro = false;
         let mut inicio = 0usize;
         let mut bloque = String::new();
@@ -2398,9 +2402,9 @@ fn the_documentation_examples_validate() {
         }
 
         for (line, cuerpo) in bloques {
-            // Un bloque sin `service` es un fragmento —una policy, un trozo de
-            // `[infra]`— y no un manifiesto: se le pone una cabecera minima
-            // para poder parsearlo igual.
+            // A block with no `service` is a fragment —a policy, a piece of
+            // `[infra]`— and not a manifest: it gets a minimal header so it
+            // can be parsed all the same.
             let manifest = if cuerpo.contains("service = ") {
                 cuerpo.clone()
             } else if cuerpo.trim_start().starts_with('[') || cuerpo.contains(" = ") {
@@ -2415,67 +2419,67 @@ fn the_documentation_examples_validate() {
             let (out, err, _) = axon(&["verify", dir.to_str().unwrap()]);
             let printed = format!("{out}{err}");
 
-            // Lo que se comprueba es que el TOML sea valido y que el
-            // manifiesto se pueda cargar: un ejemplo puede fallar reglas a
-            // proposito, porque muchos ilustran justamente un error.
+            // What is checked is that the TOML is valid and that the manifest
+            // can be loaded: an example may fail rules on purpose, because
+            // many of them illustrate exactly an error.
             assert!(
                 !printed.contains("TOML parse error") && !printed.contains("falta `service`"),
-                "{name}:{line}: el ejemplo no es un manifiesto valido:\n{printed}\n---\n{manifest}"
+                "{name}:{line}: the example is not a valid manifest:\n{printed}\n---\n{manifest}"
             );
-            revisados += 1;
+            checked += 1;
         }
     }
     assert!(
-        paginas >= 10,
-        "solo se leyeron {paginas} paginas de docs/src"
+        pages >= 10,
+        "only {pages} pages of docs/src were read"
     );
-    assert!(revisados >= 10, "solo se revisaron {revisados} ejemplos");
-    eprintln!("{revisados} ejemplos de manifiesto en {paginas} paginas");
+    assert!(checked >= 10, "only {checked} examples were checked");
+    eprintln!("{checked} manifest examples across {pages} pages");
 }
 
-/// Bodega de datos: una tabla por evento y las vistas de embudo, que salen de
-/// la cadena causal DECLARADA. Eso ultimo es lo que ninguna bodega has: un
-/// embudo se arma normalmente adivinando como se relacionan los eventos.
+/// The data warehouse: one table per event and the funnel views, which come
+/// out of the DECLARED causal chain. That last part is the one no warehouse
+/// has: a funnel is normally assembled by guessing how the events relate.
 #[test]
 fn the_warehouse_schemas_are_valid_sql() {
     let (ddl, err, ok) = axon(&["analytics", "examples", "--target", "bigquery"]);
     assert!(ok, "{err}");
 
-    // el envelope: sin correlation_id no hay embudo posible
+    // the envelope: without correlation_id there is no funnel
     for col in [
         "event_id",
         "event_time TIMESTAMP",
         "correlation_id",
         "causation_id",
     ] {
-        assert!(ddl.contains(col), "falta la columna {col}:\n{ddl}");
+        assert!(ddl.contains(col), "the {col} column is missing:\n{ddl}");
     }
-    // particionar no es opcional: sin esto cada consulta escanea el historico
+    // partitioning is not optional: without it every query scans the history
     assert!(ddl.contains("PARTITION BY DATE(event_time)"), "{ddl}");
     assert!(ddl.contains("CLUSTER BY correlation_id, source"), "{ddl}");
-    // convencion de bodega: snake_case, no el camelCase del contrato
+    // warehouse convention: snake_case, not the contract's camelCase
     assert!(
         ddl.contains("customer_id STRING") && !ddl.contains("customerId STRING"),
         "{ddl}"
     );
-    // `money` se aplana, porque sumar un objeto no se puede; y `amount_amount`
-    // no aporta nada
+    // `money` is flattened, because you cannot sum an object; and
+    // `amount_amount` adds nothing
     assert!(
         ddl.contains("total_amount INT64") && ddl.contains("total_currency STRING"),
         "{ddl}"
     );
     assert!(
         ddl.contains("\n  amount INT64"),
-        "amount_amount no se colapso:\n{ddl}"
+        "amount_amount was not collapsed:\n{ddl}"
     );
-    // el modo hash del ejemplo: se exporta el hash, no el valor
+    // the example's hash mode: the hash is exported, not the value
     assert!(ddl.contains("customer_email_hash STRING"), "{ddl}");
     assert!(
         !ddl.contains("customer_email STRING"),
-        "se exporto el correo en claro:\n{ddl}"
+        "the address was exported in plaintext:\n{ddl}"
     );
 
-    // el embudo sale de la cadena declarada, con la latencia de negocio
+    // the funnel comes from the declared chain, with the business latency
     assert!(
         ddl.contains("CREATE OR REPLACE VIEW `@dataset.embudo_order_placed_v1`"),
         "{ddl}"
@@ -2484,23 +2488,23 @@ fn the_warehouse_schemas_are_valid_sql() {
     assert!(ddl.contains("AS paso_2_payment_captured_v1"), "{ddl}");
     assert!(
         ddl.contains("AS ms_hasta_payment_captured_v1"),
-        "sin latencia de negocio:\n{ddl}"
+        "no business latency:\n{ddl}"
     );
 
-    // Y lo que importa: que sea SQL valido. El comentario al final de una
-    // columna se come la coma que la separa de la siguiente, y el DDL queda
-    // roto — ya me habia pasado en una migracion, y aca volvio a pasar.
+    // And what matters: that it is valid SQL. A comment at the end of a column
+    // swallows the comma separating it from the next one, and the DDL ends up
+    // broken —it had already happened to me in a migration, and it happened again here.
     let sql = ddl.replace("@dataset", "ds");
     let sentencias =
         sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::BigQueryDialect {}, &sql);
     assert!(
         sentencias.is_ok(),
-        "el DDL de bodega no es SQL valido: {}",
+        "the warehouse DDL is not valid SQL: {}",
         sentencias.unwrap_err()
     );
     assert!(sentencias.unwrap().len() >= 3, "faltan sentencias");
 
-    // el plan neutral, para quien no use BigQuery
+    // the neutral plan, for whoever does not use BigQuery
     let (plan, _, _) = axon(&["analytics", "examples", "--target", "plan"]);
     let v: serde_json::Value = serde_json::from_str(&plan).expect("plan json");
     assert_eq!(v["tables"][0]["partition_by"], "DATE(event_time)");
@@ -2513,25 +2517,24 @@ fn the_warehouse_schemas_are_valid_sql() {
         "{plan}"
     );
 
-    // y el sink nativo: Pub/Sub escribe directo, sin un proceso intermedio
+    // and the native sink: Pub/Sub writes straight in, with no intermediate process
     let (g, _, _) = axon(&["infra", &source_for("gcp"), "--target", "gcp"]);
     assert!(g.contains("bigquery_config"), "{g}");
     assert!(g.contains("use_table_schema = true"), "{g}");
-    // la bodega tambien necesita DLQ: un mensaje que no encaja no desaparece
+    // the warehouse needs a DLQ too: a message that does not fit does not vanish
     let warehouse = g
         .split("_warehouse\" {")
         .nth(1)
-        .expect("suscripcion de bodega");
+        .expect("the warehouse subscription");
     assert!(
         warehouse.contains("dead_letter_policy"),
-        "el sink de bodega sin DLQ:\n{warehouse}"
+        "the warehouse sink with no DLQ:\n{warehouse}"
     );
 }
 
-/// Reglas de reparto que ninguna otra herramienta impone: el validador de
-/// esquema de PgDog esta en su roadmap sin empezar y Citus solo falla en
-/// tiempo de ejecucion al distribuir. Cada una describe una colision o una
-/// fuga que NO da error, solo datos mal.
+/// Sharding rules no other tool enforces: PgDog's schema validator is on its
+/// roadmap unstarted and Citus only fails at runtime when distributing. Each
+/// one describes a collision or a leak that raises NO error, only wrong data.
 #[test]
 fn the_sharding_rules_block() {
     let dir = std::env::temp_dir().join("axon-reparto");
@@ -2546,7 +2549,7 @@ fn the_sharding_rules_block() {
     let base = "service = \"s\"\nowner = \"e\"\ntier = \"2\"\n[infra]\nstate = \"postgres\"\n\
                 migrations = \"sql/\"\nshard_key = \"tenant_id\"\ntenant_column = \"tenant_id\"\n";
 
-    // una UNIQUE que no incluye la clave: cada nodo la cumple, el conjunto no
+    // a UNIQUE that does not include the key: each node honours it, the set does not
     let (msg, ok) = probar(
         "CREATE TABLE cuenta (id uuid PRIMARY KEY, tenant_id uuid NOT NULL,\n  \
          handle varchar(64) NOT NULL UNIQUE);\n",
@@ -2558,9 +2561,9 @@ fn the_sharding_rules_block() {
         "{msg}"
     );
 
-    // una compuesta que SI la incluye es segura, y una PK uuid es unica por
-    // construccion: sin esas dos excepciones la regla seria ruido, y una regla
-    // con falsos positivos se silencia
+    // a composite one that DOES include it is safe, and a uuid PK is unique by
+    // construction: without those two exceptions the rule would be noise, and
+    // a rule with false positives gets silenced
     let (msg, ok) = probar(
         "CREATE TABLE cuenta (id uuid PRIMARY KEY, tenant_id uuid NOT NULL,\n  \
          handle varchar(64) NOT NULL,\n  CONSTRAINT u UNIQUE (tenant_id, handle));\n",
@@ -2568,10 +2571,10 @@ fn the_sharding_rules_block() {
     );
     assert!(
         ok,
-        "una UNIQUE compuesta con la clave no deberia fallar:\n{msg}"
+        "a composite UNIQUE including the key should not fail:\n{msg}"
     );
 
-    // una secuencia por nodo arranca en 1 en cada uno
+    // one sequence per node starts at 1 on each of them
     let (msg, ok) = probar(
         "CREATE TABLE cuenta (id uuid PRIMARY KEY, tenant_id uuid NOT NULL, numero bigserial);\n",
         base,
@@ -2582,8 +2585,8 @@ fn the_sharding_rules_block() {
         "{msg}"
     );
 
-    // aislar por una columna y repartir por otra hace que toda consulta de un
-    // inquilino toque todos los nodos
+    // isolating by one column and sharding by another makes every query of one
+    // tenant touch every node
     let (msg, ok) = probar(
         "CREATE TABLE cuenta (id uuid PRIMARY KEY, tenant_id uuid, cliente_id uuid);\n",
         &base.replace(
@@ -2597,7 +2600,7 @@ fn the_sharding_rules_block() {
         "{msg}"
     );
 
-    // N nodos son N lineas de tiempo: no hay punto de recuperacion global
+    // N nodes are N timelines: there is no global recovery point
     let (msg, ok) = probar(
         "CREATE TABLE cuenta (id uuid PRIMARY KEY, tenant_id uuid NOT NULL);\n",
         &format!("{base}pitr = true\nbackup_retention_days = 7\n"),
@@ -2609,25 +2612,25 @@ fn the_sharding_rules_block() {
     );
 }
 
-/// El motor has que existir. Antes `state = "neo4j"` pasaba `verify` sin un
-/// error y generaba una instancia de Cloud SQL Postgres: salida incorrecta,
-/// en silencio, que es el peor modo de fallo que hay.
-/// `verify` hace la aritmetica de conexiones contra `max_connections`, asi que
-/// ese numero has que APLICARSE. Una regla que compara contra un tope que
-/// nadie fija esta comparando contra el default del motor, que es mas bajo.
+/// The engine has to exist. `state = "neo4j"` used to pass `verify` with no
+/// error and generate a Cloud SQL Postgres instance: wrong output, silently,
+/// which is the worst failure mode there is.
+/// `verify` does the connection arithmetic against `max_connections`, so that
+/// number has to be APPLIED. A rule comparing against a ceiling nobody sets is
+/// comparing against the engine's default, which is lower.
 #[test]
 fn the_connection_ceiling_is_applied() {
     let (g, _, _) = axon(&["infra", &source_for("gcp"), "--target", "gcp"]);
     assert!(
         g.contains("name  = \"max_connections\""),
-        "gcp no aplica el tope:\n{g}"
+        "gcp does not apply the ceiling:\n{g}"
     );
     assert!(
         g.contains("value = \"200\""),
-        "el valor de payments no llego:\n{g}"
+        "payments' value did not arrive:\n{g}"
     );
     let (a, _, _) = axon(&["infra", &source_for("aws"), "--target", "aws"]);
-    // en RDS el tope va en un parameter group, no en la instancia
+    // on RDS the ceiling goes in a parameter group, not on the instance
     assert!(a.contains("resource \"aws_db_parameter_group\""), "{a}");
     assert!(
         a.contains("parameter_group_name    = aws_db_parameter_group.payments.name"),
@@ -2636,49 +2639,49 @@ fn the_connection_ceiling_is_applied() {
     let (l, _, _) = axon(&["infra", "examples", "--target", "local"]);
     assert!(
         l.contains("\"max_connections=200\""),
-        "local no aplica el tope: agotar conexiones ahi es la unica forma de \
-         descubrirlo before de que escale:\n{l}"
+        "local does not apply the ceiling: exhausting connections there is the only \
+         way to find out before it scales:\n{l}"
     );
 }
 
-/// El `pgdog.toml` generado se valida contra el JSON Schema OFICIAL de pgdog,
-/// no contra un texto esperado. Ellos lo generan desde sus propios tipos de
-/// Rust y su CI falla si se desincroniza, asi que validar contra ese archivo
-/// es validar contra el parser real que va a leer la configuracion.
+/// The generated `pgdog.toml` is validated against pgdog's OFFICIAL JSON
+/// Schema, not against expected text. They generate it from their own Rust
+/// types and their CI fails if it drifts, so validating against that file is
+/// validating against the real parser that will read the configuration.
 #[test]
 fn the_pgdog_toml_validates_against_its_schema() {
     let (cfg, err, ok) = axon(&["pooler", "examples"]);
     assert!(ok, "{err}");
 
-    // el reparto sale del esquema real, no de una lista escrita a mano
+    // the sharding comes from the real schema, not from a hand-written list
     assert!(cfg.contains("[[sharded_tables]]"), "{cfg}");
     assert!(cfg.contains("column = \"tenant_id\""), "{cfg}");
     assert!(
         cfg.contains("data_type = \"uuid\""),
-        "el tipo de la clave no salio del DDL:\n{cfg}"
+        "the key's type did not come from the DDL:\n{cfg}"
     );
-    // el mismo hash que `PARTITION BY HASH` de Postgres
+    // the same hash as Postgres's `PARTITION BY HASH`
     assert!(cfg.contains("hasher = \"postgres\""), "{cfg}");
-    // rechazar antes que devolver un resultado incompleto
+    // refuse rather than return an incomplete result
     assert!(cfg.contains("cross_shard_disabled = true"), "{cfg}");
-    // `on` y no `auto`: en `auto` el parser no se activa con un solo nodo
-    // primario, que es justo donde una GUC de sesion se cuela sin interceptar
+    // `on` and not `auto`: in `auto` the parser does not kick in with a single
+    // primary node, which is exactly where a session GUC slips through uncaught
     assert!(cfg.contains("query_parser = \"on\""), "{cfg}");
-    // un archivo generado no es lugar para un host ni una contrasena
+    // a generated file is no place for a host or a password
     assert!(cfg.contains("${AXON_DB_HOST_0}"), "{cfg}");
     assert!(
         !cfg.to_lowercase().contains("password ="),
-        "el generado trae una contrasena:\n{cfg}"
+        "the generated file carries a password:\n{cfg}"
     );
-    // un nodo por shard, mas las replicas de lectura declaradas
+    // one node per shard, plus the declared read replicas
     assert_eq!(cfg.matches("[[databases]]").count(), 6, "{cfg}");
     assert!(
         cfg.contains("role = \"replica\""),
-        "las replicas declaradas no llegaron:\n{cfg}"
+        "the declared replicas did not arrive:\n{cfg}"
     );
 
     if !has("python3") {
-        eprintln!("salteado el resto: python3 no esta instalado");
+        eprintln!("skipping the rest: python3 is not installed");
         return;
     }
     let dir = std::env::temp_dir().join("axon-pgdog");
@@ -2702,9 +2705,9 @@ fn the_pgdog_toml_validates_against_its_schema() {
     );
     assert!(
         out.status.success(),
-        "el pgdog.toml generado no valida:\n{printed}"
+        "the generated pgdog.toml does not validate:\n{printed}"
     );
-    // si falta el modulo se saltea, nunca miente diciendo que paso
+    // if the module is missing it skips, it never lies by saying it passed
     assert!(
         printed.contains("OK: valida") || printed.contains("SALTEADO"),
         "{printed}"
@@ -2712,8 +2715,8 @@ fn the_pgdog_toml_validates_against_its_schema() {
     eprintln!("{}", printed.trim());
 }
 
-/// El pooler cambia el sujeto de la aritmetica de conexiones, y en modo
-/// transaccion puede romper el aislamiento por inquilino sin dar un error.
+/// The pooler changes the subject of the connection arithmetic, and in
+/// transaction mode it can break tenant isolation without raising an error.
 #[test]
 fn the_pooler_rules_block() {
     let dir = std::env::temp_dir().join("axon-pooler");
@@ -2740,8 +2743,8 @@ fn the_pooler_rules_block() {
         (format!("{out}{err}"), ok)
     };
 
-    // LA regla: en modo transaccion la conexion vuelve al pool en cada COMMIT
-    // y se le entrega a otro inquilino
+    // THE rule: in transaction mode the connection goes back to the pool on
+    // every COMMIT and is handed to another tenant
     let (msg, ok) = probar("[pooler]\nengine = \"pgdog\"\nmode = \"transaction\"\nshards = 2\n");
     assert!(!ok);
     assert!(
@@ -2750,27 +2753,27 @@ fn the_pooler_rules_block() {
     );
     assert!(msg.contains("reads the previous tenant's rows"), "{msg}");
 
-    // declararlo la deja pasar
+    // declaring it lets it through
     let (msg, ok) = probar(
         "[pooler]\nengine = \"pgdog\"\nmode = \"transaction\"\n\
          tenant_binding = \"set_local\"\nshards = 2\n",
     );
-    assert!(ok, "declarar el binding deberia alcanzar:\n{msg}");
+    assert!(ok, "declaring the binding should be enough:\n{msg}");
 
-    // repartir sin decir por que columna
+    // sharding without saying by which column
     let (msg, ok) = probar("[pooler]\nengine = \"pgdog\"\nmode = \"session\"\nshards = 4\n");
     let sin_clave = msg.clone();
     assert!(ok || sin_clave.contains("shards"), "{sin_clave}");
 
-    // el 2PC da consistencia eventual: prometer CP encima se contradice
+    // 2PC gives eventual consistency: promising CP on top contradicts itself
     let (msg, ok) =
         probar("[cap2]\n[pooler]\nengine = \"pgdog\"\nmode = \"session\"\nshards = 4\n");
     let _ = (msg, ok);
 
-    // El 2PC de un sharder da consistencia eventual con estados parciales
-    // visibles: prometer CP encima es la misma contradiccion que leer de una
-    // replica y prometer CP. Aca el manifiesto se reescribe entero para poder
-    // declarar `strong`.
+    // A sharder's 2PC gives eventual consistency with visible partial states:
+    // promising CP on top is the same contradiction as reading from a replica
+    // and promising CP. Here the manifest is rewritten whole so it can
+    // declare `strong`.
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("sql")).unwrap();
     std::fs::write(
@@ -2795,7 +2798,7 @@ fn the_pooler_rules_block() {
     );
     assert!(msg.contains("the real guarantee is eventual"), "{msg}");
 
-    // en modo sesion una conexion de cliente ata una de servidor
+    // in session mode one client connection ties up one server connection
     let (msg, ok) = probar(
         "pool_size = 20\nmax_connections = 500\n[pooler]\nengine = \"pgdog\"\n\
          mode = \"session\"\npool_size = 30\n",
@@ -2803,7 +2806,7 @@ fn the_pooler_rules_block() {
     assert!(!ok);
     assert!(msg.contains("does not multiplex"), "{msg}");
 
-    // campos de pooler sin pooler no se aplican en ninguna parte
+    // pooler fields with no pooler apply nowhere
     let (msg, ok) = probar("[pooler]\nshards = 4\n");
     assert!(!ok);
     assert!(msg.contains("with `engine = \"none\"`"), "{msg}");
@@ -2820,11 +2823,11 @@ fn an_unknown_engine_does_not_generate_postgres() {
     )
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
-    assert!(!ok, "un motor no soportado has que fallar");
+    assert!(!ok, "an unsupported engine has to fail");
     assert!(err.contains("no esta soportado"), "{err}");
-    // y el mensaje dice como seguir, no solo que no se puede
+    // and the message says how to proceed, not just that it cannot be done
     assert!(err.contains("axon-infra-neo4j"), "{err}");
-    // postgres sigue siendo valido
+    // postgres is still valid
     std::fs::write(
         dir.join("g.toml"),
         "service = \"g\"\nowner = \"e\"\ntier = \"2\"\n[infra]\nstate = \"postgres\"\n",
@@ -2845,9 +2848,9 @@ fn openapi_requires_an_idempotency_key() {
     assert!(json.contains("/v1/payments"));
 }
 
-/// Un par de manifiestos con una saga de dos pasos, uno con compensacion y el
-/// ultimo sin. Lo usan el test del coordinador y el de Terraform: la saga es lo
-/// unico que hace aparecer los recursos del barrido en la IaC.
+/// A pair of manifests with a two-step saga, one with a compensation and the
+/// last one without. The coordinator test and the Terraform one both use it:
+/// the saga is the only thing that makes the sweep's resources appear in the IaC.
 fn fixture_saga(suffix: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("axon-saga-{suffix}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -2948,9 +2951,9 @@ idempotent = true
     dir
 }
 
-/// El barrido has que EXISTIR en los cuatro targets. Un coordinador que sabe
-/// retomar y un programador que no se despliega es lo mismo que no tenerlo, y
-/// la IaC se aplica sin decir nada.
+/// The sweep has to EXIST on all four targets. A coordinator that knows how
+/// to resume plus a scheduler that does not get deployed is the same as not
+/// having it, and the IaC applies without saying a thing.
 #[test]
 fn the_sweep_is_deployed_on_all_four_targets() {
     let dir = fixture_saga("targets");
@@ -2963,32 +2966,32 @@ fn the_sweep_is_deployed_on_all_four_targets() {
     ] {
         let (out, err, ok) = axon(&["infra", f, "--target", target]);
         assert!(ok, "{target}: {err}");
-        assert!(out.contains(marker), "{target} no despliega el barrido");
-        // y siempre contra la ruta interna, no contra el edge
+        assert!(out.contains(marker), "{target} does not deploy the sweep");
+        // and always against the internal route, not against the edge
         assert!(
             out.contains("/internal/saga/checkout/sweep"),
-            "{target} no apunta a la ruta del barrido"
+            "{target} does not point at the sweep route"
         );
     }
-    // La ruta del barrido NO es una ruta declarada del servicio, asi que no
-    // sale por el gateway: dispara compensaciones y no puede ser publica.
+    // The sweep route is NOT a declared route of the service, so it does not
+    // go out through the gateway: it triggers compensations and cannot be public.
     let (g, _, _) = axon(&["infra", f, "--target", "gcp"]);
     assert!(
         !g.contains("google_compute_url_map"),
-        "el barrido se colo en el edge"
+        "the sweep slipped into the edge"
     );
-    // En k8s la politica de red has que dejar entrar al pod del barrido: si
-    // no, el CronJob se aplica, el curl no llega y solo lo dice el historial.
+    // On k8s the network policy has to let the sweep's pod in: otherwise the
+    // CronJob applies, the curl never arrives and only the history says so.
     let (k, _, _) = axon(&["infra", f, "--target", "k8s"]);
-    assert!(k.contains("axon.dev/sweep"), "el pod del barrido no entra");
+    assert!(k.contains("axon.dev/sweep"), "the sweep's pod does not get in");
     assert_eq!(
         k.matches("axon.dev/sweep").count(),
         2,
-        "la etiqueta va en el pod y en la politica, no en uno solo"
+        "the label goes on the pod and on the policy, not on just one"
     );
-    // La limpieza de fotos tambien se despliega, y por la misma razon: un
-    // `snapshot_version` que invalida fotos y nada que las borre hace crecer la
-    // tabla con cada version de reglas.
+    // The snapshot prune is deployed too, and for the same reason: a
+    // `snapshot_version` that invalidates snapshots with nothing to delete them
+    // makes the table grow with every rules version.
     let es = fixture_es("cron");
     for (target, marker) in [
         ("local", "/internal/aggregate/cuenta/prune"),
@@ -2998,23 +3001,22 @@ fn the_sweep_is_deployed_on_all_four_targets() {
     ] {
         let (out, err, ok) = axon(&["infra", es.to_str().unwrap(), "--target", target]);
         assert!(ok, "{target}: {err}");
-        assert!(out.contains(marker), "{target} no despliega la limpieza de fotos");
+        assert!(out.contains(marker), "{target} does not deploy the snapshot prune");
         assert!(
             out.contains("/internal/aggregate/cuenta/prune"),
-            "{target} no apunta a la ruta de limpieza"
+            "{target} does not point at the prune route"
         );
     }
 
-    // El intervalo sale del presupuesto declarado, y con 1 minuto la unidad de
-    // EventBridge va en singular: `rate(1 minutes)` no valida.
+    // The interval comes from the declared budget, and at 1 minute
+    // EventBridge's unit goes in the singular: `rate(1 minutes)` does not validate.
     let (a, _, _) = axon(&["infra", f, "--target", "aws"]);
     assert!(a.contains("rate(1 minute)"), "{a}");
 }
 
-/// Una saga no se valida leyendo el codigo generado: se corre. Lo que has que
-/// pasar cuando el paso 2 falla es que el paso 1 quede DESHECHO, y que el
-/// diario diga que la saga se compenso. Eso no se puede afirmar con un assert
-/// sobre el texto.
+/// A saga is not validated by reading the generated code: it is run. What has
+/// to happen when step 2 fails is that step 1 ends up UNDONE, and that the
+/// journal says the saga compensated. That cannot be asserted over text.
 #[test]
 fn the_generated_saga_compensates_in_reverse() {
     if !has("node") {
@@ -3023,25 +3025,25 @@ fn the_generated_saga_compensates_in_reverse() {
     }
     let dir = fixture_saga("compensa");
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
-    assert!(ok, "el fixture de la saga no esta limpio:\n{err}");
+    assert!(ok, "the saga fixture is not clean:\n{err}");
 
-    // el coordinador se genera y se corre con el testkit de Node, en el mismo
-    // directorio del ejemplo para reusar su node_modules
+    // the coordinator is generated and run with Node's testkit, in the
+    // example's own directory so its node_modules can be reused
     let (ts, err, ok) = axon(&[
         "build",
         dir.join("almacen.toml").to_str().unwrap(),
         dir.to_str().unwrap(),
     ]);
     assert!(ok, "{err}");
-    // su propio directorio: el testkit generado no importa ninguna dependencia
-    // —solo `node:test` y el modulo generado— y escribir en el del ejemplo hace
-    // que este test y el typecheck se pisen cuando corren en paralelo
-    let destino = dir.join("prueba");
-    std::fs::create_dir_all(&destino).unwrap();
-    let destino = destino.as_path();
-    std::fs::write(destino.join("axon.saga.contratos.ts"), &ts).unwrap();
+    // its own directory: the generated testkit imports no dependency —only
+    // `node:test` and the generated module— and writing into the example's
+    // makes this test and the typecheck collide when they run in parallel
+    let target_dir = dir.join("prueba");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    let target_dir = target_dir.as_path();
+    std::fs::write(target_dir.join("axon.saga.contratos.ts"), &ts).unwrap();
     std::fs::write(
-        destino.join("axon.saga.test.ts"),
+        target_dir.join("axon.saga.test.ts"),
         r#"import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runCheckout, sweepCheckout, newEnvelope, checkoutSteps, SagaStuck,
@@ -3088,60 +3090,60 @@ class Journal implements SagaJournal {
   }
 }
 
-/** Acciones de mentira: registran el orden y fallan cuando se les dice. */
+/** Fake actions: they record the order and fail when told to. */
 function acciones(rompe: string[]) {
-  const hechas: string[] = [];
+  const done: string[] = [];
   const a: CheckoutActions = {
     async step1Cobrar() {
       if (rompe.includes("cobrar")) throw new Error("cobrar");
-      hechas.push("cobrar");
+      done.push("cobrar");
       return { ok: "cobrado" };
     },
     async undo1Reembolsar(_e: Envelope<unknown>, prior: CheckoutOutputs) {
       if (rompe.includes("reembolsar")) throw new Error("reembolsar");
-      // el suffix es lo que prueba que la compensacion recibio la salida del
-      // paso 1 —y tras un retome, que salio del diario y no de una variable
-      hechas.push(`reembolsar:${prior.step1?.ok ?? "sin-cobro"}`);
+      // the suffix is what proves the compensation received step 1's output
+      // —and, after a resume, that it came from the journal and not a variable
+      done.push(`reembolsar:${prior.step1?.ok ?? "sin-cobro"}`);
     },
     async step2PagarProveedor() {
       if (rompe.includes("pagar")) throw new Error("pagar");
-      hechas.push("pagar");
+      done.push("pagar");
       return { ok: "pagado" };
     },
   };
-  return { a, hechas };
+  return { a, done };
 }
 
-test("el camino feliz no compensa nada", async () => {
-  const { a, hechas } = acciones([]);
+test("the happy path compensates nothing", async () => {
+  const { a, done } = acciones([]);
   const d = new Journal();
   const r = await runCheckout("s1", a, d, newEnvelope("x@v1", "prueba", {}));
   assert.equal(r.status, "completed");
-  assert.deepEqual(hechas, ["cobrar", "pagar"]);
+  assert.deepEqual(done, ["cobrar", "pagar"]);
   assert.equal(d.final, "completed");
 });
 
-test("si el paso 2 falla, el paso 1 se deshace", async () => {
-  const { a, hechas } = acciones(["pagar"]);
+test("if step 2 fails, step 1 is undone", async () => {
+  const { a, done } = acciones(["pagar"]);
   const d = new Journal();
   const r = await runCheckout("s2", a, d, newEnvelope("x@v1", "prueba", {}));
   assert.equal(r.status, "compensated");
-  // el orden importa: primero se hizo cobrar, y lo ultimo que corrio fue su inversa
-  // el suffix prueba que la compensacion RECIBIO lo que devolvio el paso 1
-  assert.deepEqual(hechas, ["cobrar", "reembolsar:cobrado"]);
+  // order matters: charging happened first, and the last thing that ran was its inverse
+  // the suffix proves the compensation RECEIVED what step 1 returned
+  assert.deepEqual(done, ["cobrar", "reembolsar:cobrado"]);
   assert.equal(d.final, "compensated");
 });
 
-test("si el paso 1 falla, no hay nada hecho que deshacer", async () => {
-  const { a, hechas } = acciones(["cobrar"]);
+test("if step 1 fails, there is nothing done to undo", async () => {
+  const { a, done } = acciones(["cobrar"]);
   const d = new Journal();
   const r = await runCheckout("s3", a, d, newEnvelope("x@v1", "prueba", {}));
   assert.equal(r.status, "compensated");
-  // se intento, asi que se deshace igual: la compensacion tolera que no haya nada
-  assert.deepEqual(hechas, ["reembolsar:sin-cobro"]);
+  // it was attempted, so it gets undone all the same: the compensation tolerates finding nothing
+  assert.deepEqual(done, ["reembolsar:sin-cobro"]);
 });
 
-test("una compensacion que falla deja la saga atascada, y se nota", async () => {
+test("a compensation that fails leaves the saga stuck, and it shows", async () => {
   const { a } = acciones(["pagar", "reembolsar"]);
   const d = new Journal();
   await assert.rejects(
@@ -3151,50 +3153,50 @@ test("una compensacion que falla deja la saga atascada, y se nota", async () => 
   assert.equal(d.final, "stuck");
 });
 
-test("el barrido retoma una saga colgada y la compensa", async () => {
+test("the sweep resumes a stranded saga and compensates it", async () => {
   const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", { orderId: "o-1" });
-  // una saga que quedo con el paso 1 en `intentando`: el proceso que la tenia
-  // en vuelo se murio justo despues de llamar y antes de anotar el resultado
+  // a saga left with step 1 in `attempting`: the process that had it in flight
+  // died right after calling and before recording the result
   d.rows.set("colgada", { step: 1, status: "attempting", data: e, updatedAt: 0 });
-  const { a, hechas } = acciones([]);
+  const { a, done } = acciones([]);
   const r = await sweepCheckout(a, d);
   assert.equal(r.claimed, 1);
   assert.equal(r.compensated, 1);
   assert.equal(r.completed, 0);
   assert.equal(r.pending, false);
-  // un paso en duda no se reintenta: se deshace
-  assert.deepEqual(hechas, ["reembolsar:sin-cobro"]);
+  // a step in doubt is not retried: it is undone
+  assert.deepEqual(done, ["reembolsar:sin-cobro"]);
 });
 
-test("al retomar, la compensacion recibe lo que el diario guardo", async () => {
+test("on resume, the compensation receives what the journal saved", async () => {
   const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", {});
-  // el paso 1 quedo HECHO en otro proceso, y su salida esta en el diario
+  // step 1 was left DONE in another process, and its output is in the journal
   d.rows.set("colgada", {
     step: 1, status: "done", data: e, updatedAt: 0,
     outputs: { 1: { ok: "cobrado" } },
   });
-  // el paso 2 falla, asi que hay que deshacer el 1 con lo que el 1 devolvio
-  const { a, hechas } = acciones(["pagar"]);
+  // step 2 fails, so step 1 has to be undone with what step 1 returned
+  const { a, done } = acciones(["pagar"]);
   const r = await sweepCheckout(a, d);
   assert.equal(r.compensated, 1);
-  // "sin-cobro" aqui querria decir que el cast del diario dejo todo undefined
-  assert.deepEqual(hechas, ["reembolsar:cobrado"]);
+  // "sin-cobro" here would mean the journal's cast left everything undefined
+  assert.deepEqual(done, ["reembolsar:cobrado"]);
 });
 
-test("el barrido no toca una saga que va en camino", async () => {
+test("the sweep does not touch a saga that is on its way", async () => {
   const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", {});
   d.rows.set("viva", { step: 1, status: "attempting", data: e, updatedAt: Date.now() });
-  const { a, hechas } = acciones([]);
+  const { a, done } = acciones([]);
   const r = await sweepCheckout(a, d);
-  // barrer una saga viva seria un segundo coordinador sobre los mismos pasos
+  // sweeping a live saga would be a second coordinator over the same steps
   assert.equal(r.claimed, 0);
-  assert.deepEqual(hechas, []);
+  assert.deepEqual(done, []);
 });
 
-test("reclamar reclama: el segundo barredor no ve la misma saga", async () => {
+test("claim claims: the second sweeper does not see the same saga", async () => {
   const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", {});
   d.rows.set("colgada", { step: 1, status: "done", data: e, updatedAt: 0 });
@@ -3205,22 +3207,22 @@ test("reclamar reclama: el segundo barredor no ve la misma saga", async () => {
   assert.equal(segundo.length, 0);
 });
 
-test("una saga atascada se cuenta y no se reintenta", async () => {
+test("a stuck saga is counted and not retried", async () => {
   const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", {});
   d.rows.set("colgada", { step: 1, status: "attempting", data: e, updatedAt: 0 });
-  const { a, hechas } = acciones(["reembolsar"]);
+  const { a, done } = acciones(["reembolsar"]);
   const r = await sweepCheckout(a, d);
-  // la pasada no aborta: cuenta la atascada y sigue
+  // the pass does not abort: it counts the stuck one and carries on
   assert.equal(r.stuck, 1);
   assert.equal(d.final, "stuck");
-  assert.deepEqual(hechas, []);
-  // y ya cerrada como atascada, el barrido siguiente no la vuelve a tomar
+  assert.deepEqual(done, []);
+  // and once closed as stuck, the next sweep does not take it again
   const other = await sweepCheckout(a, d);
   assert.equal(other.claimed, 0);
 });
 
-test("si se llena el limite, el barrido lo dice", async () => {
+test("if the limit fills up, the sweep says so", async () => {
   const d = new Journal();
   const e = newEnvelope("x@v1", "prueba", {});
   for (const id of ["a", "b", "c"]) {
@@ -3229,11 +3231,11 @@ test("si se llena el limite, el barrido lo dice", async () => {
   const { a } = acciones([]);
   const r = await sweepCheckout(a, d, 2);
   assert.equal(r.claimed, 2);
-  // un tope silencioso se lee como "no habia mas"
+  // a silent cap reads as "there was nothing more"
   assert.equal(r.pending, true);
 });
 
-test("el ultimo paso no lleva compensacion, y el resto si", () => {
+test("the last step carries no compensation, and the rest do", () => {
   assert.equal(checkoutSteps.length, 2);
   assert.equal(checkoutSteps[0].undo, "banco.reembolsar");
   assert.equal(checkoutSteps[1].undo, null);
@@ -3243,7 +3245,7 @@ test("el ultimo paso no lleva compensacion, y el resto si", () => {
     .unwrap();
     let out = Command::new("node")
         .args(["--test", "axon.saga.test.ts"])
-        .current_dir(destino)
+        .current_dir(target_dir)
         .output()
         .expect("node --test");
     let printed = format!(
@@ -3253,14 +3255,14 @@ test("el ultimo paso no lleva compensacion, y el resto si", () => {
     );
     assert!(
         out.status.success(),
-        "el coordinador generado no compensa como dice:\n{printed}"
+        "the generated coordinator does not compensate as it claims:\n{printed}"
     );
     assert!(printed.contains("pass 11"), "{printed}");
 }
 
-/// Las reglas de la saga: cada una bloquea una forma distinta de quedarse a
-/// medias. Sin ellas la saga se genera igual y falla el dia que hay que
-/// compensar, que es el peor dia para descubrirlo.
+/// The saga rules: each one blocks a different way of ending up half done.
+/// Without them the saga still gets generated and fails the day something has
+/// to be compensated, which is the worst day to find out.
 #[test]
 fn the_saga_rules_block() {
     let dir = std::env::temp_dir().join("axon-saga-reglas");
@@ -3344,7 +3346,7 @@ timeout_ms = 5000
                          step int NOT NULL,\n  state text NOT NULL,\n  \
                          data jsonb NOT NULL,\n  updated timestamptz NOT NULL\n);\n";
 
-    // un paso intermedio sin compensacion
+    // an intermediate step with no compensation
     let err = run(
         r#"[saga.checkout]
 on = "checkout"
@@ -3358,7 +3360,7 @@ steps = [
     assert!(err.contains("has no `undo`, and it is not the last one"), "{err}");
     assert!(err.contains("dual-write with more steps"), "{err}");
 
-    // una compensacion que no es idempotente
+    // a compensation that is not idempotent
     let err = run(
         r#"[saga.checkout]
 on = "checkout"
@@ -3372,7 +3374,7 @@ steps = [
     assert!(err.contains("is not `idempotent`"), "{err}");
     assert!(err.contains("applies the effect twice"), "{err}");
 
-    // el presupuesto no cubre la suma de los pasos
+    // the budget does not cover the sum of the steps
     let err = run(
         r#"[saga.checkout]
 on = "checkout"
@@ -3386,7 +3388,7 @@ steps = [
     assert!(err.contains("add up to 11000ms"), "{err}");
     assert!(err.contains("compensating something that later succeeds"), "{err}");
 
-    // sin la tabla del diario, un reinicio pierde la saga
+    // without the journal's table, a restart loses the saga
     let err = run(
         r#"[saga.checkout]
 on = "checkout"
@@ -3399,8 +3401,8 @@ steps = [
     );
     assert!(err.contains("the `saga_checkout` table is missing"), "{err}");
 
-    // sin `data` no se puede retomar: las acciones necesitan la llamada, y el
-    // proceso que la tenia en memoria es el que se murio
+    // without `data` it cannot be resumed: the actions need the call, and the
+    // process that had it in memory is the one that died
     let err = run(
         r#"[saga.checkout]
 on = "checkout"
@@ -3415,8 +3417,8 @@ steps = [
     assert!(err.contains("has no `data` column"), "{err}");
     assert!(err.contains("goes"), "{err}");
 
-    // y una fecha guardada como texto: la comparacion del barrido compila y
-    // ordena mal, asi que se saltaria sagas colgadas sin decir nada
+    // and a date stored as text: the sweep's comparison compiles and sorts
+    // wrong, so it would skip stranded sagas without saying anything
     let err = run(
         r#"[saga.checkout]
 on = "checkout"
@@ -3432,7 +3434,7 @@ steps = [
     assert!(err.contains("has to be timestamp"), "{err}");
     assert!(err.contains("would skip stranded sagas"), "{err}");
 
-    // un `undo` que no existe
+    // an `undo` that does not exist
     let err = run(
         r#"[saga.checkout]
 on = "checkout"
@@ -3445,7 +3447,7 @@ steps = [
     );
     assert!(err.contains("`banco` does not offer `devolver`"), "{err}");
 
-    // un paso que nadie declaro como dependencia: no hay con que llamarlo
+    // a step nobody declared as a dependency: there is nothing to call it with
     let dir2 = std::env::temp_dir().join("axon-saga-dep");
     let _ = std::fs::remove_dir_all(&dir2);
     std::fs::create_dir_all(dir2.join("sql")).unwrap();
@@ -3479,7 +3481,7 @@ timeout_ms = 3000
     assert!(err.contains("without declaring it in `[[depends]]`"), "{err}");
     assert!(err.contains("The resilient client"), "{err}");
 
-    // y una saga bajo `consistency = "strong"`
+    // and a saga under `consistency = "strong"`
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("sql")).unwrap();
     std::fs::write(dir.join("sql/001_init.expand.sql"), TABLA).unwrap();
@@ -3504,8 +3506,8 @@ steps = [
     assert!(err.contains("the real guarantee of the flow is eventual"), "{err}");
 }
 
-/// Un manifiesto con event sourcing y una vista. Lo usan el test del `fold` y
-/// el de las reglas.
+/// A manifest with event sourcing and a view. The `fold` test and the rules
+/// test both use it.
 fn fixture_es(suffix: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("axon-es-{suffix}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -3523,8 +3525,8 @@ CREATE TABLE cuenta_event (
   type       text NOT NULL,
   data       jsonb NOT NULL,
   en         timestamptz NOT NULL DEFAULT now(),
-  -- Sin este UNIQUE, dos escrituras concurrentes sobre el mismo stream entran
-  -- las dos con la misma version y nadie ve un error.
+  -- Without this UNIQUE, two concurrent writes on the same stream both get in
+  -- with the same version and nobody sees an error.
   UNIQUE (stream_id, version)
 );
 
@@ -3542,9 +3544,9 @@ CREATE TABLE view_saldos (
   posicion   bigint NOT NULL
 );
 
--- La shadow: misma forma que la vista. `verify` comprueba que COINCIDAN, porque
--- una shadow con una columna de menos deja una vista incompleta al intercambiar
--- y eso se veria el dia de la reconstruccion.
+-- The shadow: the same shape as the view. `verify` checks they MATCH, because a
+-- shadow with one column fewer leaves an incomplete view after the swap, and
+-- that would show up on the day of the rebuild.
 CREATE TABLE view_saldos_sombra (
   stream_id  uuid PRIMARY KEY,
   centavos   bigint NOT NULL,
@@ -3567,9 +3569,9 @@ version = "1.0.0"
 owner = "equipo"
 tier = "1"
 
-# Este fixture prueba el stream, la vista y las snapshots, no la warehouse: sin esto
-# `axon infra` rechaza el plan porque la warehouse por defecto no has camino de
-# ingesta en todos los targets.
+# This fixture tests the stream, the view and the snapshots, not the warehouse:
+# without this `axon infra` rejects the plan because the default warehouse has
+# no ingest path on every target.
 [analytics]
 export = false
 
@@ -3588,8 +3590,9 @@ centavos = "int"
 [emits."cuenta.cerrada@v1"]
 streamId = "uuid"
 
-# Los eventos del agregado se publican, y el stream ya es durable: el traspaso al
-# bus va en la misma transaccion que el append. `verify` lo exige.
+# The aggregate's events get published, and the stream is already durable: the
+# handover to the bus goes in the same transaction as the append. `verify`
+# requires it.
 [patterns]
 outbox = true
 
@@ -3607,9 +3610,9 @@ state = "postgres"
 migrations = "sql/"
 "#;
 
-/// El `fold` no se valida leyendo el switch: se corre. Lo que has que pasar
-/// es que un hueco en las versiones REVIENTE en vez de dar un estado que nunca
-/// existio, y que un evento no declarado no se ignore.
+/// The `fold` is not validated by reading the switch: it is run. What has to
+/// happen is that a gap in the versions BLOWS UP instead of giving a state
+/// that never existed, and that an undeclared event is not ignored.
 #[test]
 fn the_generated_fold_rebuilds_and_refuses() {
     if !has("node") {
@@ -3618,7 +3621,7 @@ fn the_generated_fold_rebuilds_and_refuses() {
     }
     let dir = fixture_es("fold");
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
-    assert!(ok, "el fixture no esta limpio:\n{err}");
+    assert!(ok, "the fixture is not clean:\n{err}");
 
     let (ts, err, ok) = axon(&[
         "build",
@@ -3626,11 +3629,11 @@ fn the_generated_fold_rebuilds_and_refuses() {
         dir.to_str().unwrap(),
     ]);
     assert!(ok, "{err}");
-    let destino = dir.join("prueba");
-    std::fs::create_dir_all(&destino).unwrap();
-    std::fs::write(destino.join("contratos.ts"), &ts).unwrap();
+    let target_dir = dir.join("prueba");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    std::fs::write(target_dir.join("contratos.ts"), &ts).unwrap();
     std::fs::write(
-        destino.join("es.test.ts"),
+        target_dir.join("es.test.ts"),
         r#"import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cuentaFold, cuentaEvents, cuentaLoad, cuentaSnapshot, cuentaSnapshotRules,
@@ -3651,7 +3654,7 @@ const rules: CuentaRules<Saldo> = {
 const ev = (version: number, type: string, data: unknown) =>
   ({ version, type, data, at: "2020-01-01T00:00:00.000Z" });
 
-test("el estado sale del flujo, no de una fila", () => {
+test("the state comes from the stream, not from a row", () => {
   const r = cuentaFold(rules, "c1", [
     ev(1, "cuenta.abierta@v1", { streamId: "c1" }),
     ev(2, "cuenta.depositada@v1", { streamId: "c1", centavos: 500 }),
@@ -3661,7 +3664,7 @@ test("el estado sale del flujo, no de una fila", () => {
   assert.deepEqual(r.state, { abierta: true, centavos: 750, cerrada: false });
 });
 
-test("un hueco en las versiones revienta en vez de dar un estado que nunca existio", () => {
+test("a gap in the versions blows up instead of giving a state that never existed", () => {
   assert.throws(
     () => cuentaFold(rules, "c1", [
       ev(1, "cuenta.abierta@v1", { streamId: "c1" }),
@@ -3671,14 +3674,14 @@ test("un hueco en las versiones revienta en vez de dar un estado que nunca exist
   );
 });
 
-test("un evento que el manifiesto no declara no se ignora", () => {
+test("an event the manifest does not declare is not ignored", () => {
   assert.throws(
     () => cuentaFold(rules, "c1", [ev(1, "cuenta.robada@v1", {})]),
     /is not a declared event of the aggregate/,
   );
 });
 
-test("desde una foto, el fold sigue desde ahi", () => {
+test("from a snapshot, the fold carries on from there", () => {
   const r = cuentaFold(rules, "c1",
     [ev(8, "cuenta.depositada@v1", { streamId: "c1", centavos: 100 })],
     { version: 7, state: { abierta: true, centavos: 900, cerrada: false } });
@@ -3686,40 +3689,40 @@ test("desde una foto, el fold sigue desde ahi", () => {
   assert.equal(r.state.centavos, 1000);
 });
 
-test("los eventos del agregado son los del manifiesto", () => {
+test("the aggregate's events are the manifest's", () => {
   assert.deepEqual([...cuentaEvents],
     ["cuenta.abierta@v1", "cuenta.depositada@v1", "cuenta.cerrada@v1"]);
 });
 
-test("una foto de otra version de reglas no se usa", async () => {
+test("a snapshot of another rules version is not used", async () => {
   const events = [
     ev(1, "cuenta.abierta@v1", { streamId: "c1" }),
     ev(2, "cuenta.depositada@v1", { streamId: "c1", centavos: 500 }),
     ev(3, "cuenta.depositada@v1", { streamId: "c1", centavos: 250 }),
   ];
-  // Un flujo con UNA foto guardada, de la version de reglas equivocada. Lo que
-  // has que pasar es que no se use: rehidratar de ahi daria 99999 centavos.
+  // A stream with ONE saved snapshot, of the wrong rules version. What has to
+  // happen is that it does not get used: rehydrating from there would give 99999 cents.
   const stream = {
     pedidas: [] as number[],
     async read(_id: string, from = 0) { return events.filter((e) => e.version > from); },
     async append() { return 0; },
     async snapshot(_id: string, rules: number) {
       this.pedidas.push(rules);
-      // solo devuelve la de la version pedida, como el SQL generado
+      // it only returns the one for the requested version, like the generated SQL
       return rules === 1 ? { version: 2, state: { abierta: true, centavos: 99999, cerrada: false } } : null;
     },
     async saveSnapshot() {},
   };
   const r = await cuentaLoad(rules, stream, "c1");
-  // pidio la version vigente, no la que habia guardada
+  // it asked for the current version, not the one that was saved
   assert.deepEqual(stream.pedidas, [cuentaSnapshotRules]);
   assert.notEqual(cuentaSnapshotRules, 1);
-  // y el estado salio del flujo entero, no de la foto envenenada
+  // and the state came from the whole stream, not from the poisoned snapshot
   assert.equal(r.state.centavos, 750);
   assert.equal(r.version, 3);
 });
 
-test("solo se fotografia en la cadencia declarada", async () => {
+test("snapshots are taken only at the declared cadence", async () => {
   const saved: number[] = [];
   const stream = {
     async read() { return []; },
@@ -3731,11 +3734,11 @@ test("solo se fotografia en la cadencia declarada", async () => {
   for (let v = 0; v <= 4; v++) {
     await cuentaSnapshot(stream, "c1", v, state);
   }
-  // cada 2, y nunca en la version 0: una foto del estado inicial no cachea nada
+  // every 2, and never at version 0: a snapshot of the initial state caches nothing
   assert.deepEqual(saved, [2, 4]);
 });
 
-test("reconstruir prepara la sombra, repone las fechas y cambia al final", async () => {
+test("rebuilding prepares the shadow, restores the dates and swaps at the end", async () => {
   const order: string[] = [];
   const projection = {
     async prepare() { order.push("prepare"); },
@@ -3749,29 +3752,29 @@ test("reconstruir prepara la sombra, repone las fechas y cambia al final", async
       return [
         { version: 1, type: "cuenta.abierta@v1", data: { streamId: "c1" }, at: "2020-01-01T00:00:00.000Z" },
         { version: 2, type: "cuenta.depositada@v1", data: { streamId: "c1", centavos: 500 }, at: "2020-01-02T00:00:00.000Z" },
-        // este NO es de la vista: la vista solo declara abierta y depositada
+        // this one is NOT the view's: the view only declares opened and deposited
         { version: 3, type: "cuenta.cerrada@v1", data: { streamId: "c1" }, at: "2020-01-03T00:00:00.000Z" },
       ];
     },
     async append() { return 0; },
   };
   const aplicados = await rebuildSaldos(projection, stream);
-  // preparar va PRIMERO y el intercambio AL FINAL: hasta ese momento nadie ve
-  // nada de la reconstruccion, que es todo el punto de la sombra
+  // prepare goes FIRST and the swap AT THE END: until that moment nobody sees
+  // anything of the rebuild, which is the whole point of the shadow
   assert.equal(order[0], "prepare");
   assert.equal(order[order.length - 1], "swap");
-  // y la fecha es la del FLUJO, no la de ahora: rellenarla reescribiria el
-  // historial en silencio
+  // and the date is the STREAM's, not now's: filling it in would rewrite
+  // history in silence
   assert.deepEqual(order.slice(1, -1), [
     "abierta:2020-01-01T00:00:00.000Z:1",
     "deposito:500:2",
   ]);
-  // el evento que la vista no declara se salta, no revienta: esta en el flujo
-  // por derecho propio
+  // the event the view does not declare is skipped, it does not blow up: it is
+  // in the stream by its own right
   assert.equal(aplicados, 2);
 });
 
-test("la limpieza pide la version vigente, no una cualquiera", async () => {
+test("the prune asks for the current version, not any old one", async () => {
   let asked = -1;
   const stream = {
     async read() { return []; },
@@ -3781,14 +3784,15 @@ test("la limpieza pide la version vigente, no una cualquiera", async () => {
     async pruneSnapshots(rules: number) { asked = rules; return 7; },
   };
   const borradas = await pruneCuenta(stream);
-  // Pedir otra version borraria justo las que SI se usan, y el sintoma seria
-  // que todo reconstruye desde el flujo sin que nadie sepa por que.
+  // Asking for another version would delete exactly the ones that ARE used,
+  // and the symptom would be everything rebuilding from the stream with
+  // nobody knowing why.
   assert.equal(asked, cuentaSnapshotRules);
   assert.equal(borradas, 7);
   assert.equal(pruneRouteCuenta, "POST /internal/aggregate/cuenta/prune");
 });
 
-test("la vista solo acepta los eventos que declara, y le llega la posicion", async () => {
+test("the view only accepts the events it declares, and the position reaches it", async () => {
   const vistas: string[] = [];
   const projection: SaldosProjection = {
     async applyCuentaAbiertaV1(e, posicion) { vistas.push(`abierta:${posicion}`); },
@@ -3797,8 +3801,8 @@ test("la vista solo acepta los eventos que declara, y le llega la posicion", asy
   await saldosApply(projection, newEnvelope("cuenta.abierta@v1", "p", { streamId: "c1" }), 11);
   await saldosApply(projection, newEnvelope("cuenta.depositada@v1", "p", { streamId: "c1", centavos: 300 }), 12);
   assert.deepEqual(vistas, ["abierta:11", "deposito:300:12"]);
-  // `cuenta.cerrada@v1` NO esta en la vista: llegar aqui seria una suscripcion
-  // que nadie pidio
+  // `cuenta.cerrada@v1` is NOT in the view: arriving here would be a
+  // subscription nobody asked for
   await assert.rejects(
     () => saldosApply(projection, newEnvelope("cuenta.cerrada@v1", "p", {}), 13),
     /is not a declared event of the view/,
@@ -3811,7 +3815,7 @@ test("la vista solo acepta los eventos que declara, y le llega la posicion", asy
     .unwrap();
     let out = Command::new("node")
         .args(["--test", "es.test.ts"])
-        .current_dir(&destino)
+        .current_dir(&target_dir)
         .output()
         .expect("node --test");
     let printed = format!(
@@ -3821,13 +3825,13 @@ test("la vista solo acepta los eventos que declara, y le llega la posicion", asy
     );
     assert!(
         out.status.success(),
-        "el fold generado no reconstruye como dice:\n{printed}"
+        "the generated fold does not rebuild as it claims:\n{printed}"
     );
     assert!(printed.contains("pass 10"), "{printed}");
 }
 
-/// Las reglas de event sourcing y CQRS: cada una bloquea una forma de tener un
-/// flujo que no es un flujo, o una vista que miente.
+/// The event sourcing and CQRS rules: each one blocks a way of having a
+/// stream that is not a stream, or a view that lies.
 #[test]
 fn the_event_sourcing_rules_block() {
     let dir = std::env::temp_dir().join("axon-es-reglas");
@@ -3841,22 +3845,22 @@ fn the_event_sourcing_rules_block() {
         err
     };
 
-    // el UNIQUE que hace posible la version optimista. Se quita el bloque
-    // entero para no dejar una coma huerfana: un DDL que no parsea haria que
-    // este test pase por el motivo equivocado.
-    let sin_unique = DDL_ES.replace(
+    // the UNIQUE that makes optimistic versioning possible. The whole block is
+    // removed so as not to leave an orphan comma: a DDL that does not parse
+    // would make this test pass for the wrong reason.
+    let without_unique = DDL_ES.replace(
         "  en         timestamptz NOT NULL DEFAULT now(),\n  \
-         -- Sin este UNIQUE, dos escrituras concurrentes sobre el mismo stream entran\n  \
-         -- las dos con la misma version y nadie ve un error.\n  \
+         -- Without this UNIQUE, two concurrent writes on the same stream both get in\n  \
+         -- with the same version and nobody sees an error.\n  \
          UNIQUE (stream_id, version)\n",
         "  en         timestamptz NOT NULL DEFAULT now()\n",
     );
-    assert!(!sin_unique.contains("UNIQUE"), "la variante no quito el UNIQUE");
-    let err = run(MANIFIESTO_ES, &sin_unique);
+    assert!(!without_unique.contains("UNIQUE"), "the variant did not remove the UNIQUE");
+    let err = run(MANIFIESTO_ES, &without_unique);
     assert!(err.contains("has no UNIQUE on (stream_id, version)"), "{err}");
     assert!(err.contains("depends on what order they are read in"), "{err}");
 
-    // un agregado fundado en un evento que el servicio no emite
+    // an aggregate founded on an event the service does not emit
     let foreign = MANIFIESTO_ES.replace(
         r#"events = ["cuenta.abierta@v1", "cuenta.depositada@v1", "cuenta.cerrada@v1"]"#,
         r#"events = ["cuenta.abierta@v1", "other.cosa@v1"]"#,
@@ -3865,68 +3869,68 @@ fn the_event_sourcing_rules_block() {
     assert!(err.contains("does not declare it emits"), "{err}");
     assert!(err.contains("this is a view, not an aggregate"), "{err}");
 
-    // la vista sin donde anotar hasta donde llego
-    let sin_cp = DDL_ES.replace("CREATE TABLE view_saldos_checkpoint", "CREATE TABLE otra_tabla");
-    let err = run(MANIFIESTO_ES, &sin_cp);
+    // the view with nowhere to record how far it got
+    let without_checkpoint = DDL_ES.replace("CREATE TABLE view_saldos_checkpoint", "CREATE TABLE otra_tabla");
+    let err = run(MANIFIESTO_ES, &without_checkpoint);
     assert!(err.contains("view_saldos_checkpoint"), "{err}");
     assert!(err.contains("reprocesses from the beginning"), "{err}");
 
-    // una vista mas vieja que el presupuesto del servicio
+    // a view staler than the service's budget
     let stale = MANIFIESTO_ES.replace("max_staleness_ms = 3000", "max_staleness_ms = 9000");
     let err = run(&stale, DDL_ES);
     assert!(err.contains("allows 9000ms of lag"), "{err}");
     assert!(err.contains("cannot honour what it promised"), "{err}");
 
-    // y una vista bajo `consistency = "strong"`
+    // and a view under `consistency = "strong"`
     let strong = MANIFIESTO_ES
         .replace("consistency = \"eventual\"", "consistency = \"strong\"")
         .replace("max_staleness_ms = 5000\n", "");
     let err = run(&strong, DDL_ES);
     assert!(err.contains("stale by definition"), "{err}");
 
-    // la sombra que no coincide con la vista
-    let sombra_corta = DDL_ES.replace(
+    // the shadow that does not match the view
+    let short_shadow = DDL_ES.replace(
         "CREATE TABLE view_saldos_sombra (\n  stream_id  uuid PRIMARY KEY,\n  centavos   bigint NOT NULL,\n  posicion   bigint NOT NULL\n);",
         "CREATE TABLE view_saldos_sombra (\n  stream_id  uuid PRIMARY KEY,\n  posicion   bigint NOT NULL\n);",
     );
-    // la guarda compara contra el original: el mismo texto tambien esta en la
-    // vista viva, asi que buscarlo suelto no dice si el reemplazo aplico
-    assert_ne!(sombra_corta, DDL_ES, "la variante no aplico");
-    let err = run(MANIFIESTO_ES, &sombra_corta);
+    // the guard compares against the original: the same text is also in the
+    // live view, so searching for it loose does not say whether the replace applied
+    assert_ne!(short_shadow, DDL_ES, "the variant did not apply");
+    let err = run(MANIFIESTO_ES, &short_shadow);
     assert!(err.contains("`view_saldos_sombra` has no `centavos` column"), "{err}");
     assert!(err.contains("only then would it show"), "{err}");
 
-    // y sin sombra: reconstruir en el sitio sirve una vista incompleta
-    let sin_sombra = DDL_ES.replace("CREATE TABLE view_saldos_sombra", "CREATE TABLE otra_sombra");
-    let err = run(MANIFIESTO_ES, &sin_sombra);
+    // and with no shadow: rebuilding in place serves an incomplete view
+    let without_shadow = DDL_ES.replace("CREATE TABLE view_saldos_sombra", "CREATE TABLE otra_sombra");
+    let err = run(MANIFIESTO_ES, &without_shadow);
     assert!(err.contains("`view_saldos_sombra` is missing"), "{err}");
     assert!(err.contains("fewer rows than there are"), "{err}");
 
-    // el punto de la vista, sin flujo en la clave: un flujo pisa al otro
+    // the view's checkpoint, with no stream in the key: one stream overwrites the other
     let cp_global = DDL_ES.replace(
         "  view_name  text NOT NULL,\n  -- per STREAM: an event's version is its position inside ITS stream, so a\n  -- single number for the whole view identifies nothing as soon as there is\n  -- more than one stream\n  stream_id  uuid NOT NULL,\n  position   bigint NOT NULL,\n  PRIMARY KEY (view_name, stream_id)\n",
         "  view_name  text PRIMARY KEY,\n  stream_id  uuid NOT NULL,\n  position   bigint NOT NULL\n",
     );
-    assert!(!cp_global.contains("PRIMARY KEY (view_name, stream_id)"), "la variante no aplico");
+    assert!(!cp_global.contains("PRIMARY KEY (view_name, stream_id)"), "the variant did not apply");
     let err = run(MANIFIESTO_ES, &cp_global);
     assert!(err.contains("has no key on (view_name, stream_id)"), "{err}");
     assert!(err.contains("One stream would overwrite another"), "{err}");
 
-    // fotos declaradas sin tabla, y sin la columna que las hace seguras
-    let sin_tabla = DDL_ES.replace("CREATE TABLE cuenta_snapshot", "CREATE TABLE otra_foto");
-    let err = run(MANIFIESTO_ES, &sin_tabla);
+    // snapshots declared with no table, and without the column that makes them safe
+    let without_table = DDL_ES.replace("CREATE TABLE cuenta_snapshot", "CREATE TABLE otra_foto");
+    let err = run(MANIFIESTO_ES, &without_table);
     assert!(err.contains("with no `cuenta_snapshot` table"), "{err}");
 
-    let sin_reglas = DDL_ES.replace("  rules     int  NOT NULL,\n", "");
-    assert_ne!(sin_reglas, DDL_ES, "la variante no aplico");
-    let err = run(MANIFIESTO_ES, &sin_reglas);
+    let without_rules = DDL_ES.replace("  rules     int  NOT NULL,\n", "");
+    assert_ne!(without_rules, DDL_ES, "the variant did not apply");
+    let err = run(MANIFIESTO_ES, &without_rules);
     assert!(err.contains("has no `rules` column"), "{err}");
     assert!(
         err.contains("no longer matches replaying the stream"),
         "{err}"
     );
 
-    // una foto por evento no es una cache
+    // one snapshot per event is not a cache
     let cada_uno = MANIFIESTO_ES.replace("snapshot_every = 2", "snapshot_every = 1");
     let (out, _, _) = {
         let _ = std::fs::remove_dir_all(&dir);
@@ -3937,27 +3941,27 @@ fn the_event_sourcing_rules_block() {
     };
     assert!(
         out.contains("a second copy of the stream"),
-        "una foto por evento no aviso:\n{out}"
+        "one snapshot per event raised no warning:\n{out}"
     );
 
-    // un agregado que publica sin outbox: el dual-write que el flujo evitaba
-    let sin_outbox = MANIFIESTO_ES.replace("outbox = true", "outbox = false");
-    assert!(sin_outbox.contains("outbox = false"), "la variante no aplico");
-    let err = run(&sin_outbox, DDL_ES);
+    // an aggregate publishing with no outbox: the dual-write the stream avoided
+    let without_outbox = MANIFIESTO_ES.replace("outbox = true", "outbox = false");
+    assert!(without_outbox.contains("outbox = false"), "the variant did not apply");
+    let err = run(&without_outbox, DDL_ES);
     assert!(err.contains("needs `[patterns] outbox = true`"), "{err}");
     assert!(
         err.contains("the event is recorded and nobody received it"),
         "{err}"
     );
 
-    // el flujo es append-only, y no como recomendacion
+    // the stream is append-only, and not as a recommendation
     let err = run(
         MANIFIESTO_ES,
         &format!("{DDL_ES}\nUPDATE cuenta_event SET data = '{{}}'::jsonb WHERE version = 1;\n"),
     );
     assert!(err.contains("is the stream of `cuenta`"), "{err}");
     assert!(err.contains("a past that did not happen"), "{err}");
-    // y ni siquiera marcado como `.contract.sql`: para eso no hay permiso
+    // and not even marked as `.contract.sql`: there is no permission for that
     let dir2 = std::env::temp_dir().join("axon-es-append");
     let _ = std::fs::remove_dir_all(&dir2);
     std::fs::create_dir_all(dir2.join("sql")).unwrap();
@@ -3969,10 +3973,10 @@ fn the_event_sourcing_rules_block() {
     .unwrap();
     std::fs::write(dir2.join("libro.toml"), MANIFIESTO_ES).unwrap();
     let (_, err, ok) = axon(&["verify", dir2.to_str().unwrap()]);
-    assert!(!ok, "un DELETE sobre el flujo paso por estar en un .contract.sql");
+    assert!(!ok, "a DELETE on the stream got through by living in a .contract.sql");
     assert!(err.contains("is the stream of `cuenta`"), "{err}");
 
-    // un evento del agregado que ninguna transicion de la maquina emite
+    // an aggregate event no machine transition emits
     let maquina = MANIFIESTO_ES.replace(
         "[aggregate.cuenta]",
         "[machine.cuenta]\ninitial = \"nueva\"\nfinal = [\"cerrada\"]\n\n\
@@ -3985,15 +3989,15 @@ fn the_event_sourcing_rules_block() {
     assert!(err.contains("would not know which state to take it to"), "{err}");
 }
 
-/// El hueco que esto cierra: el esquema de la bodega se generaba para tres
-/// dialectos y solo GCP tenia camino de ingesta. Se podia aplicar el esquema en
-/// Snowflake, desplegar, y quedarse con tablas vacias sin un solo error — que
-/// es indistinguible de "no paso nada en el negocio".
+/// The gap this closes: the warehouse schema was generated for three dialects
+/// and only GCP had an ingest path. The schema could be applied on Snowflake,
+/// deployed, and left with empty tables without a single error —which is
+/// indistinguishable from "nothing happened in the business".
 #[test]
 fn ingest_is_not_promised_without_a_path() {
-    // Cada combinacion cableada has que rendir, y el recurso que lleva los
-    // eventos has que estar ahi. Un target que "rinde" sin el recurso es el
-    // mismo silencio con otra forma.
+    // Every wired combination has to render, and the resource that carries the
+    // events has to be there. A target that "renders" without the resource is
+    // the same silence in another shape.
     for (target, warehouse, marker) in [
         ("gcp", "bigquery", "bigquery_config"),
         ("aws", "clickhouse", "aws_kinesis_firehose_delivery_stream"),
@@ -4006,35 +4010,35 @@ fn ingest_is_not_promised_without_a_path() {
         assert!(ok, "{target}+{warehouse}: {err}");
         assert!(
             out.contains(marker),
-            "{target}+{warehouse} rinde sin `{marker}`: nada llevaria los eventos a la bodega"
+            "{target}+{warehouse} renders with no `{marker}`: nothing would carry the events to the warehouse"
         );
     }
-    // Y lo que no has camino se RECHAZA, con el nombre de la combinacion y
-    // que hacer al respecto.
+    // And what has no path is REFUSED, with the name of the combination and
+    // what to do about it.
     for (target, warehouse) in [("gcp", "clickhouse"), ("aws", "bigquery"), ("k8s", "bigquery")] {
         let f = tuned(warehouse);
         let (_, err, ok) = axon(&["infra", &f, "--target", target]);
-        assert!(!ok, "{target}+{warehouse} rindio sin camino de ingesta");
+        assert!(!ok, "{target}+{warehouse} rendered with no ingest path");
         assert!(err.contains("has no ingest path"), "{err}");
         assert!(err.contains("the tables would stay empty"), "{err}");
-        assert!(err.contains("export = false"), "no dice que hacer:\n{err}");
+        assert!(err.contains("export = false"), "it does not say what to do:\n{err}");
     }
-    // El cargador local sale del mismo sitio que el esquema: si las rutas del
-    // JSON no coincidieran con las columnas, la carga fallaria en la bodega y
-    // no aqui.
+    // The local loader comes from the same place as the schema: if the JSON's
+    // paths did not match the columns, the load would fail at the warehouse
+    // and not here.
     let (sql, err, ok) = axon(&["analytics", "examples", "--load", "local.ndjson"]);
     assert!(ok, "{err}");
     assert!(sql.contains("INSERT INTO axon.order_placed_v1"), "{sql}");
-    // el hash sale con salt por parametro, nunca el valor
+    // the hash comes out salted from a parameter, never the value
     assert!(sql.contains("SHA256(concat({salt:String}"), "{sql}");
-    assert!(!sql.contains("AS customer_email,"), "el correo viaja en claro:\n{sql}");
-    // idempotente: un cargador periodico corre muchas veces sobre el mismo log
+    assert!(!sql.contains("AS customer_email,"), "the address travels in plaintext:\n{sql}");
+    // idempotent: a periodic loader runs many times over the same log
     assert!(sql.contains("NOT IN (SELECT event_id FROM"), "{sql}");
 }
 
-/// El drift de la bodega no da error en ninguna parte: un campo nuevo que la
-/// tabla no has se carga como nada, y una columna vieja se queda con los
-/// datos que tenia. Las dos cosas dan consultas que devuelven numeros.
+/// Warehouse drift raises an error nowhere: a new field the table does not
+/// have loads as nothing, and an old column keeps the data it had. Both give
+/// queries that return numbers.
 #[test]
 fn warehouse_drift_is_detected() {
     let dir = std::env::temp_dir().join("axon-bodega-check");
@@ -4042,8 +4046,8 @@ fn warehouse_drift_is_detected() {
     std::fs::create_dir_all(&dir).unwrap();
     let tsv = dir.join("real.tsv");
 
-    // El volcado que corresponde a lo declarado, armado a mano a partir del
-    // esquema generado: si esto no diera 0, el resto del test no diria nada.
+    // The dump matching what is declared, built by hand from the generated
+    // schema: if this did not give 0, the rest of the test would say nothing.
     let real = "\
 order_placed_v1\tevent_id\tString
 order_placed_v1\tevent_type\tString
@@ -4075,7 +4079,7 @@ total = "money"
 
 pii = []
 "#;
-    // `pii` va como campo del servicio, no dentro de emits
+    // `pii` goes as a service field, not inside emits
     let manifest = manifest.replace("pii = []\n", "");
     let manifest = manifest.replace(
         "tier = \"1\"",
@@ -4098,51 +4102,52 @@ pii = []
     };
 
     let (printed, ok) = check(real);
-    assert!(ok, "el volcado que coincide dio diferencias:\n{printed}");
+    assert!(ok, "the matching dump reported differences:\n{printed}");
     assert!(printed.contains("0 differences"), "{printed}");
 
-    // una columna declarada que la tabla no has
+    // a declared column the table does not have
     let missing = real.replace("order_placed_v1\ttotal_amount\tNullable(Int64)\n", "");
     let (printed, ok) = check(&missing);
-    assert!(!ok, "una columna que falta paso limpio");
+    assert!(!ok, "a missing column passed clean");
     assert!(printed.contains("`order_placed_v1.total_amount` is missing"), "{printed}");
     assert!(printed.contains("that field is stored nowhere"), "{printed}");
 
-    // un tipo que no es el mismo: una fecha guardada como texto ordena mal
+    // a type that is not the same: a date stored as text sorts wrong
     let kind = real.replace(
         "order_placed_v1\tevent_time\tDateTime64(3)",
         "order_placed_v1\tevent_time\tString",
     );
     let (printed, ok) = check(&kind);
-    assert!(!ok, "una fecha como texto paso limpio");
+    assert!(!ok, "a date as text passed clean");
     assert!(printed.contains("is text in the warehouse"), "{printed}");
 
-    // el correo en claro junto al hash: el manifiesto dice `hash` y el valor
-    // viejo sigue ahi
+    // the plaintext address next to the hash: the manifest says `hash` and the
+    // old value is still there
     let claro = format!("{real}order_placed_v1\tcustomer_email\tNullable(String)\n");
     let (printed, ok) = check(&claro);
-    assert!(!ok, "el correo en claro paso limpio");
+    assert!(!ok, "the plaintext address passed clean");
     assert!(printed.contains("exists in plaintext"), "{printed}");
     assert!(printed.contains("keeps the addresses it already had"), "{printed}");
 
-    // una columna de mas es un aviso, no un error: no rompe nada
+    // an extra column is a warning, not an error: it breaks nothing
     let sobra = format!("{real}order_placed_v1\tsobra\tString\n");
     let (printed, ok) = check(&sobra);
-    assert!(ok, "una columna de mas bloqueo:\n{printed}");
+    assert!(ok, "an extra column blocked:\n{printed}");
     assert!(printed.contains("Left over from an earlier version"), "{printed}");
 
-    // Y lo que mas importa: un volcado vacio NO puede dar 0 diferencias. Es el
-    // resultado de correr la consulta contra la bodega equivocada, y leerlo
-    // como "todo bien" es peor que no comprobar.
+    // And what matters most: an empty dump CANNOT give 0 differences. That is
+    // the result of running the query against the wrong warehouse, and reading
+    // it as "all fine" is worse than not checking.
     let (printed, ok) = check("");
-    assert!(!ok, "un volcado vacio dio 0 diferencias");
+    assert!(!ok, "an empty dump reported 0 differences");
     assert!(printed.contains("has no columns at all"), "{printed}");
     assert!(printed.contains("reads as everything being fine"), "{printed}");
 }
 
-/// La config de Vector se valida con `vector validate`: el parser que la va a
-/// leer es el que dice si esta bien. Un `route` con una rama sin consumidor, o
-/// un campo mal, salen ahi y no el dia que falte un evento en la bodega.
+/// The Vector config is validated with `vector validate`: the parser that
+/// will read it is the one that says whether it is right. A `route` with a
+/// branch and no consumer, or a wrong field, show up there and not the day an
+/// event goes missing from the warehouse.
 #[test]
 fn the_vector_config_validates() {
     if !has("docker") {
@@ -4156,16 +4161,16 @@ fn the_vector_config_validates() {
     assert!(ok, "{err}");
     std::fs::write(dir.join("vector.yaml"), &cfg).unwrap();
 
-    // Una source_for por evento, no una comodin con router: un router deja una rama
-    // `_unmatched`, y el evento que cae ahi se descarta en silencio.
-    assert!(!cfg.contains("type: route"), "un router deja eventos sin consumidor");
-    assert!(cfg.contains("queue: axon-warehouse"), "sin queue group, cada replica escribe la misma fila");
-    // El salt del hash entra por variable, nunca en el archivo generado.
+    // One source per event, not a wildcard with a router: a router leaves an
+    // `_unmatched` branch, and the event that lands there is dropped in silence.
+    assert!(!cfg.contains("type: route"), "a router leaves events with no consumer");
+    assert!(cfg.contains("queue: axon-warehouse"), "with no queue group, every replica writes the same row");
+    // The hash's salt comes in through a variable, never in the generated file.
     assert!(cfg.contains("get_env_var!(\"AXON_PII_SALT\")"), "{cfg}");
-    assert!(!cfg.contains("customer_email\":"), "el correo viaja en claro:\n{cfg}");
-    // Un campo que la tabla no has es un error, no algo que se descarta.
+    assert!(!cfg.contains("customer_email\":"), "the address travels in plaintext:\n{cfg}");
+    // A field the table does not have is an error, not something to drop.
     assert!(cfg.contains("skip_unknown_fields: false"), "{cfg}");
-    // El buffer en disco: en memoria, un reinicio pierde lo no escrito.
+    // The buffer on disk: in memory, a restart loses what was not written.
     assert!(cfg.contains("type: disk"), "{cfg}");
 
     let out = Command::new("docker")
@@ -4176,8 +4181,8 @@ fn the_vector_config_validates() {
             "-e", "AXON_PII_SALT=s",
             "-v", &format!("{}:/etc/vector:ro", dir.display()),
             "timberio/vector:0.44.0-alpine",
-            // `--no-environment` no comprueba conexiones: aqui no hay broker ni
-            // bodega, y lo que se valida es la config, no el entorno.
+            // `--no-environment` does not check connections: there is no broker
+            // and no warehouse here, and what is validated is the config, not the environment.
             "validate", "--no-environment", "/etc/vector/vector.yaml",
         ])
         .output()
@@ -4188,11 +4193,11 @@ fn the_vector_config_validates() {
         String::from_utf8_lossy(&out.stderr)
     );
     if printed.contains("Unable to find image") || printed.contains("Cannot connect to the Docker daemon") {
-        eprintln!("salteado: sin la imagen de vector");
+        eprintln!("skipped: the vector image is missing");
         return;
     }
-    assert!(out.status.success(), "vector no valida la config generada:\n{printed}");
-    // un aviso hoy es un evento perdido manana
-    assert!(!printed.contains("warning"), "valida con avisos:\n{printed}");
-    assert!(!printed.contains("no consumers"), "una rama sin consumidor:\n{printed}");
+    assert!(out.status.success(), "vector does not validate the generated config:\n{printed}");
+    // a warning today is a lost event tomorrow
+    assert!(!printed.contains("warning"), "it validates with warnings:\n{printed}");
+    assert!(!printed.contains("no consumers"), "a branch with no consumer:\n{printed}");
 }
