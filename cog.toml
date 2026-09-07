@@ -14,6 +14,17 @@ branch_whitelist = ["main"]
 skip_ci = "[skip ci]"
 skip_untracked = false
 
+# La version del binario es parte del release: sin esto `cog bump` tagea v0.2.0
+# y `axon --version` sigue contestando la anterior, que es la clase de deriva
+# que este proyecto persigue en todo lo demas. El `cargo build` esta para que
+# Cargo.lock quede en el mismo commit que Cargo.toml.
+pre_bump_hooks = [
+  "sed -i.bak 's/^version = \"[^\"]*\"/version = \"{{version}}\"/' Cargo.toml",
+  "rm -f Cargo.toml.bak",
+  "cargo build --release",
+  "git add Cargo.toml Cargo.lock",
+]
+
 # El hook rechaza el commit antes de crearlo: `cog install-hook --all`.
 [git_hooks.commit-msg]
 script = """#!/bin/sh
