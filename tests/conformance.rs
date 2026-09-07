@@ -1222,7 +1222,7 @@ public = true
     );
     let (rls, _, _) = axon(&["rls", "examples"]);
     assert!(
-        rls.contains(r#"'[redactado]'::text AS "customer_email""#),
+        rls.contains(r#"'[redacted]'::text AS "customer_email""#),
         "la vista no enmascaro la columna:\n{rls}"
     );
 }
@@ -1247,7 +1247,7 @@ fn la_rls_generada_aisla_de_verdad() {
         "identificador sin citar"
     );
     // el rol se crea una vez, no una por servicio
-    assert_eq!(sql.matches("CREATE ROLE axon_lectura").count(), 1);
+    assert_eq!(sql.matches("CREATE ROLE axon_reader").count(), 1);
 
     let dir = std::env::temp_dir().join("axon-rls-sql");
     let _ = std::fs::remove_dir_all(&dir);
@@ -1261,7 +1261,7 @@ fn la_rls_generada_aisla_de_verdad() {
         r#"
 CREATE ROLE app LOGIN PASSWORD 'x';
 GRANT ALL ON ALL TABLES IN SCHEMA public TO app;
-GRANT SELECT ON "order_enmascarada" TO app;
+GRANT SELECT ON "order_masked" TO app;
 INSERT INTO "order" (id, customer_id, total_cents, status, tenant_id, customer_email)
 VALUES ('11111111-1111-4111-8111-111111111111','cccccccc-0000-4000-8000-000000000001',100,'placed','aaaaaaaa-0000-4000-8000-000000000001','ana@ejemplo.mx'),
        ('22222222-2222-4222-8222-222222222222','cccccccc-0000-4000-8000-000000000002',200,'placed','bbbbbbbb-0000-4000-8000-000000000002','beto@ejemplo.mx');
@@ -1271,7 +1271,7 @@ SET axon.tenant = 'aaaaaaaa-0000-4000-8000-000000000001';
 SELECT 'INQUILINO_A=' || count(*) || ':' || min(customer_email) FROM "order";
 SET axon.tenant = 'bbbbbbbb-0000-4000-8000-000000000002';
 SELECT 'INQUILINO_B=' || count(*) || ':' || min(customer_email) FROM "order";
-SELECT 'ENMASCARADA=' || min(customer_email) FROM "order_enmascarada";
+SELECT 'MASKED=' || min(customer_email) FROM "order_masked";
 "#,
     );
     std::fs::write(dir.join("todo.sql"), &todo).unwrap();
@@ -1362,7 +1362,7 @@ SELECT 'ENMASCARADA=' || min(customer_email) FROM "order_enmascarada";
         "fuga entre inquilinos:\n{salida}"
     );
     assert!(
-        salida.contains("ENMASCARADA=[redactado]"),
+        salida.contains("MASKED=[redacted]"),
         "la vista no enmascara:\n{salida}"
     );
 
@@ -1412,7 +1412,7 @@ SELECT 'TRAS_RESET=' || coalesce(NULLIF(current_setting('axon.tenant', true), ''
 
     // y la prescripcion generada dice exactamente eso
     assert!(
-        sql.contains("NUNCA un `SET` de"),
+        sql.contains("NEVER a session `SET`"),
         "la migracion no prescribe como fijar el inquilino"
     );
     assert!(

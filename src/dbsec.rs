@@ -1,44 +1,45 @@
-//! Politicas de acceso a datos: RLS por fila y vistas enmascaradas por columna.
+//! Data access policies: per-row RLS and per-column masked views.
 //!
-//! Sale del cruce de dos cosas que axon ya sabe: el esquema real (leido de las
-//! migraciones con un parser SQL) y los campos declarados PII. La salida es una
-//! migracion mas, porque el esquema lo gobiernan las migraciones y no un
-//! comando que se corre a mano y se olvida.
+//! It comes from crossing two things axon already knows: the real schema (read
+//! from the migrations with a SQL parser) and the fields declared PII. The
+//! output is one more migration, because the schema is governed by the
+//! migrations and not by a command someone runs by hand and forgets.
 use crate::manifest::*;
 
-/// Tablas del propio framework: no llevan inquilino ni datos personales.
-const PROPIAS: [&str; 2] = ["outbox", "inbox_seen"];
+/// The framework's own tables: they carry no tenant and no personal data.
+const OWN_TABLES: [&str; 2] = ["outbox", "inbox_seen"];
 
-/// `order` es palabra reservada, y no es la unica. Todo identificador va citado.
+/// `order` is a reserved word, and not the only one. Every identifier is quoted.
 fn q(n: &str) -> String {
     format!("\"{}\"", n.replace('"', ""))
 }
 
-/// Regla de enmascarado para pg_anon, elegida por el TIPO de la columna.
+/// The masking rule for pg_anon, chosen by the column's TYPE.
 ///
-/// Por el tipo y no por el nombre a proposito. Adivinar la regla porque una
-/// columna se llama `email` es la misma heuristica que hace fallible al
-/// `create-dict` de pg_anon, y falla en los dos sentidos: no reconoce `correo`
-/// y se equivoca con `email_template`. El tipo esta declarado; el nombre no
+/// By type and not by name, on purpose. Guessing the rule because a column is
+/// called `email` is the same heuristic that makes pg_anon's `create-dict`
+/// fallible, and it fails in both directions: it does not recognise `correo`
+/// and it gets `email_template` wrong. The type is declared; the name is not
 /// significa nada.
 ///
-/// Lo que axon garantiza es la COBERTURA: ningun campo declarado `pii` se
-/// queda sin regla. La regla en si es editable —para preservar el formato de
-/// un correo o un telefono— y el diccionario se versiona como cualquier otro
+/// What axon guarantees is COVERAGE: no field declared `pii` is left without a
+/// rule. The rule itself is editable —to preserve the format of an email
+/// address or a phone number— and the dictionary is versioned like any other
 /// archivo.
 ///
-/// Solo se usan `md5`, `date_trunc` y los literales, que son de Postgres, y
-/// `anon_funcs.digest`, que documenta pg_anon e instala en el destino. Nada
-/// inventado: una funcion que no existe hace fallar el dump a mitad de camino.
+/// Only `md5`, `date_trunc` and the literals are used, which are Postgres's,
+/// plus `anon_funcs.digest`, which pg_anon documents and installs at the
+/// destination. Nothing invented: a function that does not exist makes the dump
+/// fail halfway through.
 fn regla_pg_anon(c: &Column) -> String {
     let n = &c.name;
     let t = c.ty.as_str();
     if t.starts_with("uuid") {
-        // md5 da 32 hex, que castea a uuid, y el formato se preserva. El
-        // ::text de adentro es obligatorio: md5(uuid) no existe.
+        // md5 gives 32 hex chars, which cast to uuid, and the format is
+        // preserved. The inner ::text is mandatory: md5(uuid) does not exist.
         format!("md5(\\\"{n}\\\"::text)::uuid")
     } else if t.starts_with("timestamp") || t.starts_with("date") {
-        // se conserva el ano y se pierde el resto: sirve para agregados
+        // the year is kept and the rest is lost: useful for aggregates
         format!("date_trunc('year', \\\"{n}\\\")")
     } else if t.starts_with("json") {
         "'{}'::jsonb".to_string()
@@ -58,78 +59,75 @@ fn regla_pg_anon(c: &Column) -> String {
     }
 }
 
-/// Diccionario sensible de pg_anon, derivado de lo mismo que las vistas: el
-/// esquema real y los campos `pii`.
+/// pg_anon's sensitive dictionary, derived from the same things as the views:
+/// the real schema and the `pii` fields.
 ///
-/// Resuelve un problema distinto al de las vistas. Las vistas protegen la
-/// consulta viva: un rol de analitica nunca ve el dato crudo. pg_anon hace una
-/// COPIA enmascarada, para poblar staging o darle datos realistas a alguien
-/// que no debe ver los de verdad. Se complementan.
+/// It solves a different problem from the views. The views protect the live
+/// query: an analytics role never sees the raw data. pg_anon makes a masked
+/// COPY, to populate staging or give realistic data to somebody who must not
+/// see the real thing. They complement each other.
 ///
-/// Lo que axon aporta es que el diccionario no se escribe ni se escanea: sale
-/// declarado. El `create-dict` de pg_anon detecta datos sensibles por
-/// heuristica, y una heuristica se equivoca en los dos sentidos.
+/// What axon adds is that the dictionary is neither written nor scanned for:
+/// it comes out declared. pg_anon's `create-dict` detects sensitive data by
+/// heuristic, and a heuristic gets it wrong in both directions.
 pub fn build_pg_anon(ms: &[Manifest]) -> String {
-    let esquemas = schemas(ms);
-    let mut entradas = Vec::new();
-    let mut excluidas = Vec::new();
+    let schemas = schemas(ms);
+    let mut entries = Vec::new();
+    let mut excluded = Vec::new();
     for m in ms.iter().filter(|m| !m.external) {
-        let Some(tablas) = esquemas.get(&m.service) else {
+        let Some(tables) = schemas.get(&m.service) else {
             continue;
         };
         let pii = &m.pii;
-        for (t, cols) in tablas {
-            if PROPIAS.contains(&t.as_str()) {
-                // El outbox lleva el payload de cada evento en un jsonb: es el
-                // ultimo lugar donde uno buscaria una fuga. Y una copia para
-                // desarrollo no necesita la cola pendiente ni los ids vistos.
-                excluidas.push(format!(
-                    "        {{\"schema\": \"public\", \"table\": \"{t}\"}},  # infraestructura de axon"
+        for (t, cols) in tables {
+            if OWN_TABLES.contains(&t.as_str()) {
+                // The outbox carries every event's payload in a jsonb: the last
+                // place anyone would look for a leak. And a copy for development
+                // needs neither the pending queue nor the ids already seen.
+                excluded.push(format!(
+                    "        {{\"schema\": \"public\", \"table\": \"{t}\"}},  # axon's own infrastructure"
                 ));
                 continue;
             }
-            let sensibles: Vec<&Column> =
+            let sensitive: Vec<&Column> =
                 cols.cols.iter().filter(|c| is_pii(pii, &c.name)).collect();
-            if sensibles.is_empty() {
+            if sensitive.is_empty() {
                 continue;
             }
-            let campos: Vec<String> = sensibles
+            let fields: Vec<String> = sensitive
                 .iter()
                 .map(|c| format!("                \"{}\": \"{}\",", c.name, regla_pg_anon(c)))
                 .collect();
-            entradas.push(format!(
+            entries.push(format!(
                 "        {{  # {}\n            \"schema\": \"public\",\n            \"table\": \"{t}\",\n            \"fields\": {{\n{}\n            }},\n        }},",
                 m.service,
-                campos.join("\n")
+                fields.join("\n")
             ));
         }
     }
     let mut o = vec![
-        "# generated by axon — do not edit. Diccionario sensible de pg_anon:".to_string(),
+        "# generated by axon — do not edit. pg_anon's sensitive dictionary:".to_string(),
         "#   axon rls manifests/ --target pg_anon > sens_dict.py".to_string(),
         "#   pg_anon --mode=dump --prepared-sens-dict-file=sens_dict.py ...".to_string(),
         "#".to_string(),
-        "# Sale de los campos `pii` del manifiesto cruzados con el esquema real, asi".to_string(),
-        "# que no hace falta el escaneo heuristico de `create-dict`: lo que es sensible"
-            .to_string(),
-        "# esta declarado, no adivinado.".to_string(),
+        "# It comes from the manifest's `pii` fields crossed with the real schema, so".to_string(),
+        "# `create-dict`'s heuristic scan is not needed: what is sensitive is".to_string(),
+        "# declared, not guessed.".to_string(),
         "#".to_string(),
-        "# pg_anon hace pseudonimizacion, no anonimizacion irreversible: la copia sigue"
-            .to_string(),
-        "# siendo dato personal. Lo dice su propia documentacion, y conviene recordarlo"
-            .to_string(),
-        "# antes de mandarla a un tercero.".to_string(),
+        "# pg_anon does pseudonymisation, not irreversible anonymisation: the copy is".to_string(),
+        "# still personal data. Its own documentation says so, and it is worth".to_string(),
+        "# remembering before sending it to a third party.".to_string(),
         "{".to_string(),
         "    \"dictionary\": [".to_string(),
     ];
-    if entradas.is_empty() {
-        o.push("        # ningun servicio declara campos `pii`".to_string());
+    if entries.is_empty() {
+        o.push("        # no service declares `pii` fields".to_string());
     }
-    o.extend(entradas);
+    o.extend(entries);
     o.push("    ],".to_string());
-    if !excluidas.is_empty() {
+    if !excluded.is_empty() {
         o.push("    \"dictionary_exclude\": [".to_string());
-        o.extend(excluidas);
+        o.extend(excluded);
         o.push("    ],".to_string());
     }
     o.push("}".to_string());
@@ -138,159 +136,165 @@ pub fn build_pg_anon(ms: &[Manifest]) -> String {
 }
 
 pub fn build(ms: &[Manifest]) -> String {
-    let esquemas = schemas(ms);
+    let schemas = schemas(ms);
     let mut o = vec![
         "-- generated by axon — do not edit:".to_string(),
-        "--   axon rls manifests/ > sql-policies/<servicio>/010_rls.sql".to_string(),
+        "--   axon rls manifests/ > sql-policies/<service>/R__rls.sql".to_string(),
         "--".to_string(),
-        "-- Va en `sql-policies/`, NO en `sql/`, y se aplica despues de las".to_string(),
-        "-- migraciones. Dos razones: una politica no es un cambio de esquema, y".to_string(),
-        "-- `axon verify` lee `sql/` con un parser SQL que no entiende `DO $$`.".to_string(),
-        "-- El target local ya trae el job que lo aplica a cada nodo.".to_string(),
+        "-- `R__`, Flyway's repeatable prefix, and not a version: a policy file is".to_string(),
+        "-- regenerated WHOLE from the manifest, so its checksum changes whenever a".to_string(),
+        "-- `pii` field or a `tenant_column` does. As a versioned migration that is a".to_string(),
+        "-- checksum mismatch and nothing gets applied; as a repeatable one Flyway".to_string(),
+        "-- re-runs it, which is exactly what regenerating means. Every statement".to_string(),
+        "-- here tolerates being applied twice.".to_string(),
         "--".to_string(),
-        "-- COMO SE FIJA EL INQUILINO, y por que importa tanto como la politica:".to_string(),
+        "-- This goes in `sql-policies/`, NOT in `sql/`, and is applied after the".to_string(),
+        "-- migrations. Two reasons: a policy is not a schema change, and `axon".to_string(),
+        "-- verify` reads `sql/` with a SQL parser that does not understand `DO $$`.".to_string(),
+        "-- The local target already ships the job that applies it to every node.".to_string(),
+        "--".to_string(),
+        "-- HOW THE TENANT IS PINNED, and why it matters as much as the policy:".to_string(),
         "--".to_string(),
         "--   BEGIN;".to_string(),
-        "--   SET LOCAL axon.tenant = '<uuid>';   -- LOCAL, no SET a secas".to_string(),
-        "--   ... las consultas ...".to_string(),
+        "--   SET LOCAL axon.tenant = '<uuid>';   -- LOCAL, not a bare SET".to_string(),
+        "--   ... the queries ...".to_string(),
         "--   COMMIT;".to_string(),
         "--".to_string(),
-        "-- Medido contra Postgres 16, no inferido:".to_string(),
-        "--   * conexion limpia + solo SET LOCAL  -> tras el COMMIT la GUC queda SIN FIJAR"
+        "-- Measured against Postgres 16, not inferred:".to_string(),
+        "--   * clean connection + only SET LOCAL -> after the COMMIT the GUC is UNSET"
             .to_string(),
-        "--   * un solo `SET` de sesion, una vez  -> tras el COMMIT, SET LOCAL revierte a ESE"
+        "--   * one session `SET`, once           -> after the COMMIT, SET LOCAL reverts to THAT"
             .to_string(),
-        "--     valor, no a nada. La fuga persiste aunque el resto del codigo use SET LOCAL"
+        "--     value, not to nothing. The leak persists even if the rest of the code uses"
             .to_string(),
-        "--     correctamente, hasta que alguien haga RESET ALL o se recicle la conexion."
-            .to_string(),
-        "--".to_string(),
-        "-- De ahi la regla, que es mas fuerte que \"usá SET LOCAL\": NUNCA un `SET` de"
-            .to_string(),
-        "-- sesion sobre `axon.tenant`, en ningun lado. Uno solo envenena la conexion para"
-            .to_string(),
-        "-- todos los que vengan despues, y si hay un pooler en modo transaccion delante,"
-            .to_string(),
-        "-- la siguiente peticion —de OTRO inquilino— recibe esa conexion con el valor".to_string(),
-        "-- anterior puesto. Eso no da error: devuelve las filas del inquilino equivocado."
+        "--     SET LOCAL correctly, until somebody does RESET ALL or the connection recycles."
             .to_string(),
         "--".to_string(),
-        "-- Y el rol importa tanto como la politica: un SUPERUSER o un rol con".to_string(),
-        "-- BYPASSRLS se salta TODA politica, y FORCE ROW LEVEL SECURITY no lo remedia."
+        "-- Hence the rule, which is stronger than \"use SET LOCAL\": NEVER a session `SET`"
             .to_string(),
-        "-- Por eso esta migracion crea `axon_app` y le da a el los permisos. Medido:"
+        "-- on `axon.tenant`, anywhere. A single one poisons the connection for everyone"
             .to_string(),
-        "-- consultando como el dueno superusuario, la politica no filtra NADA y el".to_string(),
-        "-- resultado es identico al de una base sin RLS. El `SET LOCAL ROLE axon_app`"
+        "-- who comes after, and if there is a pooler in transaction mode in front, the"
             .to_string(),
-        "-- es lo que la enciende, y va junto al del inquilino en la misma transaccion."
+        "-- next request —from ANOTHER tenant— gets that connection with the previous".to_string(),
+        "-- value set. That raises no error: it returns the wrong tenant's rows."
             .to_string(),
         "--".to_string(),
-        "-- Lo que esta migracion NO puede garantizar: `set_config()` con parametro"
+        "-- And the role matters as much as the policy: a SUPERUSER or a role with".to_string(),
+        "-- BYPASSRLS skips EVERY policy, and FORCE ROW LEVEL SECURITY does not fix it."
             .to_string(),
-        "-- bindeado —lo que emiten varios ORM— puede no ser interceptado por un pooler;"
+        "-- That is why this migration creates `axon_app` and grants it the permissions."
             .to_string(),
-        "-- preferi `SET LOCAL` literal.".to_string(),
+        "-- Measured: querying as the superuser owner, the policy filters NOTHING and".to_string(),
+        "-- the result is identical to a database with no RLS. The `SET LOCAL ROLE"
+            .to_string(),
+        "-- axon_app` is what switches it on, and it goes next to the tenant's in the same transaction."
+            .to_string(),
+        "--".to_string(),
+        "-- What this migration CANNOT guarantee: `set_config()` with a bound parameter"
+            .to_string(),
+        "-- —what several ORMs emit— may not be intercepted by a pooler; literal `SET"
+            .to_string(),
+        "-- LOCAL` was preferred.".to_string(),
     ];
-    let cabeza = o.len();
+    let head = o.len();
     for m in ms.iter().filter(|m| !m.external) {
-        let Some(tablas) = esquemas.get(&m.service) else {
+        let Some(tables) = schemas.get(&m.service) else {
             continue;
         };
         let pii = &m.pii;
 
-        for (t, cols) in tablas {
-            if PROPIAS.contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
+        for (t, cols) in tables {
+            if OWN_TABLES.contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
                 continue;
             }
-            // ---- RLS por fila ----
+            // ---- per-row RLS ----
             if let Some(tenant) = &m.infra.tenant_column {
                 if cols.has(tenant) {
                     let (tq, cq) = (q(t), q(tenant));
                     o.push(format!(
-                        "\n-- {svc}.{t}: aislamiento por inquilino\n\
+                        "\n-- {svc}.{t}: per-tenant isolation\n\
                          ALTER TABLE {tq} ENABLE ROW LEVEL SECURITY;\n\
-                         -- FORCE: la politica aplica tambien al dueno de la tabla, que es\n\
-                         -- quien suele saltarsela sin darse cuenta.\n\
+                         -- FORCE: the policy applies to the table's owner too, which is\n\
+                         -- who usually skips it without noticing.\n\
                          ALTER TABLE {tq} FORCE ROW LEVEL SECURITY;\n\
                          DROP POLICY IF EXISTS {pol} ON {tq};\n\
                          CREATE POLICY {pol} ON {tq}\n  \
                            USING ({cq} = NULLIF(current_setting('axon.tenant', true), '')::uuid)\n  \
                            WITH CHECK ({cq} = NULLIF(current_setting('axon.tenant', true), '')::uuid);\n\
-                         -- Los permisos van al rol de la aplicacion, no al dueno: el dueno\n\
-                         -- tiene FORCE encima, pero un superusuario se salta la politica y\n\
-                         -- ninguna clausula lo remedia. Con esto la politica tiene a quien\n\
-                         -- aplicarsele.\n\
+                         -- The permissions go to the application's role, not the owner: the\n\
+                         -- owner has FORCE on top, but a superuser skips the policy and no\n\
+                         -- clause fixes that. With this the policy has somebody to apply to.\n\
                          GRANT SELECT, INSERT, UPDATE, DELETE ON {tq} TO axon_app;",
                         svc = m.service,
-                        pol = q(&format!("{t}_inquilino")),
+                        pol = q(&format!("{t}_tenant")),
                     ));
                 }
             }
-            // ---- enmascarado por columna ----
-            let sensibles: Vec<&Column> =
+            // ---- per-column masking ----
+            let sensitive: Vec<&Column> =
                 cols.cols.iter().filter(|c| is_pii(pii, &c.name)).collect();
-            if !sensibles.is_empty() {
-                let proyeccion: Vec<String> = cols
+            if !sensitive.is_empty() {
+                let projection: Vec<String> = cols
                     .cols
                     .iter()
                     .map(|c| {
-                        if sensibles.iter().any(|s| s.name == c.name) {
-                            format!("  '[redactado]'::text AS {}", q(&c.name))
+                        if sensitive.iter().any(|s| s.name == c.name) {
+                            format!("  '[redacted]'::text AS {}", q(&c.name))
                         } else {
                             format!("  {}", q(&c.name))
                         }
                     })
                     .collect();
-                let (tq, vq) = (q(t), q(&format!("{t}_enmascarada")));
+                let (tq, vq) = (q(t), q(&format!("{t}_masked")));
                 o.push(format!(
-                    "\n-- {svc}.{t}: vista enmascarada. Al rol de lectura se le da esta,\n\
-                     -- nunca la tabla: asi un SELECT * de analitica no puede filtrar PII.\n\
+                    "\n-- {svc}.{t}: masked view. The read role is given this one and\n\
+                     -- never the table: that way an analytics SELECT * cannot leak PII.\n\
                      CREATE OR REPLACE VIEW {vq} AS SELECT\n{}\nFROM {tq};\n\
-                     REVOKE ALL ON {tq} FROM axon_lectura;\n\
-                     GRANT SELECT ON {vq} TO axon_lectura;",
-                    proyeccion.join(",\n"),
+                     REVOKE ALL ON {tq} FROM axon_reader;\n\
+                     GRANT SELECT ON {vq} TO axon_reader;",
+                    projection.join(",\n"),
                     svc = m.service,
                 ));
             }
         }
     }
-    // el rol se crea una vez, no una por servicio
-    if o.iter().skip(cabeza).any(|l| l.contains("axon_app")) {
+    // the role is created once, not once per service
+    if o.iter().skip(head).any(|l| l.contains("axon_app")) {
         o.insert(
-            cabeza,
-            "\n-- El rol con el que la aplicacion consulta. Sin LOGIN a proposito: se\n\
-             -- entra con el rol de despliegue y se adopta este dentro de la\n\
-             -- transaccion, junto con el inquilino, y los dos mueren en el COMMIT:\n\
+            head,
+            "\n-- The role the application queries with. Without LOGIN on purpose: you\n\
+             -- come in with the deploy role and adopt this one inside the\n\
+             -- transaction, next to the tenant, and both die at the COMMIT:\n\
              --\n\
              --   BEGIN;\n\
-             --   SET LOCAL ROLE axon_app;            -- deja de ser superusuario\n\
-             --   SET LOCAL axon.tenant = '<uuid>';   -- y pasa a ser un inquilino\n\
-             --   ... las consultas ...\n\
+             --   SET LOCAL ROLE axon_app;            -- stop being a superuser\n\
+             --   SET LOCAL axon.tenant = '<uuid>';   -- and become a tenant\n\
+             --   ... the queries ...\n\
              --   COMMIT;\n\
              --\n\
-             -- Sin esto la politica existe y no aplica: el rol por defecto de un\n\
-             -- Postgres recien creado es superusuario, y la aplicacion \"funciona\"\n\
-             -- en local viendo todas las filas de todos los inquilinos.\n\
+             -- Without this the policy exists and does not apply: the default role\n\
+             -- of a freshly created Postgres is a superuser, and the application\n\
+             -- \"works\" locally while seeing every row of every tenant.\n\
              DO $$ BEGIN\n  \
                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'axon_app') THEN\n    \
                  CREATE ROLE axon_app NOLOGIN NOSUPERUSER NOBYPASSRLS;\n  END IF;\nEND $$;"
                 .to_string(),
         );
     }
-    if o.len() > cabeza && o.iter().any(|l| l.contains("axon_lectura")) {
+    if o.len() > head && o.iter().any(|l| l.contains("axon_reader")) {
         o.insert(
-            cabeza,
-            "\n-- El rol de lectura existe para analitica y soporte: nunca ve la tabla cruda.\n\
+            head,
+            "\n-- The read role exists for analytics and support: it never sees the raw table.\n\
              DO $$ BEGIN\n  \
-               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'axon_lectura') THEN\n    \
-                 CREATE ROLE axon_lectura NOLOGIN;\n  END IF;\nEND $$;"
+               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'axon_reader') THEN\n    \
+                 CREATE ROLE axon_reader NOLOGIN;\n  END IF;\nEND $$;"
                 .to_string(),
         );
     }
-    if o.len() <= cabeza {
+    if o.len() <= head {
         o.push(
-            "\n-- Nada que generar: ningun servicio declara `tenant_column` ni campos `pii`."
+            "\n-- Nothing to generate: no service declares `tenant_column` or `pii` fields."
                 .into(),
         );
     }
