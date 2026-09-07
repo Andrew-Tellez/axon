@@ -31,12 +31,28 @@ errors = [
   { code = "order_rejected", status = 422, detail = "the order does not pass the rules" },
 ]
 
+# Dos versiones del MISMO endpoint, y la vieja declara que se esta muriendo.
+# `deprecated` y `sunset` viajan en la respuesta —RFC 9745 y 8594— y el
+# `successor` sale como un Link, asi que quien la llama se entera desde donde la
+# llama y no desde un anuncio que no leyo.
 [methods.getOrder]
 http = "GET /v1/tenants/{tenantId}/orders/{orderId}"
 auth = "required"
 timeout_ms = 2000
 in = { tenantId = "uuid", orderId = "uuid" }
 out = { orderId = "uuid", status = "string", total = "money" }
+deprecated = "2026-09-01"
+sunset = "2027-12-31"
+successor = "getOrderV2"
+
+# La v2 devuelve el cliente, que es lo que la v1 no daba y obligaba a una
+# segunda llamada.
+[methods.getOrderV2]
+http = "GET /v2/tenants/{tenantId}/orders/{orderId}"
+auth = "required"
+timeout_ms = 2000
+in = { tenantId = "uuid", orderId = "uuid" }
+out = { orderId = "uuid", status = "string", total = "money", customerId = "uuid" }
 
 [[depends]]
 service = "payments"

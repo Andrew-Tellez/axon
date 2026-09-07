@@ -2190,7 +2190,7 @@ fn the_declared_routes_reach_the_code() {
     let (ts, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
     assert!(
         ts.contains(
-            r#"export const httpRoutes = ["POST /v1/tenants/{tenantId}/orders", "GET /v1/tenants/{tenantId}/orders/{orderId}"]"#
+            r#"export const httpRoutes = ["POST /v1/tenants/{tenantId}/orders", "GET /v1/tenants/{tenantId}/orders/{orderId}", "GET /v2/tenants/{tenantId}/orders/{orderId}"]"#
         ),
         "{ts}"
     );
@@ -5147,4 +5147,431 @@ fn the_generated_client_only_retries_what_is_declared_retriable() {
     assert_eq!(payout["409"]["x-axon-code"], "merchant_ceiling", "{payout}");
     assert_eq!(payout["409"]["x-axon-retriable"], false, "{payout}");
     assert_eq!(payout["503"]["x-axon-retriable"], true, "{payout}");
+}
+
+/// The rules for a retired version refute. What makes them worth having is
+/// that a deprecation announced in a chat thread is not a deprecation: it has
+/// to have a date, a successor, and somebody able to say who is still calling.
+#[test]
+fn the_retirement_rules_block() {
+    let dir = std::env::temp_dir().join("axon-sunset");
+    let base = r#"service = "shop"
+version = "1.0.0"
+owner = "team"
+tier = "1"
+"#;
+    let method = |extra: &str| {
+        format!(
+            "[methods.read]\nhttp = \"GET /v1/things\"\nauth = \"required\"\n\
+             in = {{ id = \"uuid\" }}\nout = {{ id = \"uuid\" }}\n{extra}"
+        )
+    };
+    let run = |extra: &str| -> String {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shop.toml"), format!("{base}{}", method(extra))).unwrap();
+        let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        assert!(!ok, "it passed clean:\n{extra}");
+        err
+    };
+
+    // a version that dies without ever having been marked as dying
+    let err = run("sunset = \"2027-01-01\"\n");
+    assert!(err.contains("has `sunset` and no `deprecated`"), "{err}");
+    assert!(err.contains("the day it stops answering"), "{err}");
+
+    // no window to migrate in
+    let err = run("deprecated = \"2027-06-01\"\nsunset = \"2027-01-01\"\n");
+    assert!(err.contains("there is no window to migrate in"), "{err}");
+
+    // past its own date and still declared, the same criterion as an expired flag
+    let err = run("deprecated = \"2020-01-01\"\nsunset = \"2020-06-01\"\n");
+    assert!(err.contains("sunset on 2020-06-01"), "{err}");
+    assert!(err.contains("renewed as a decision"), "{err}");
+
+    // a date that is not a date, and a successor that is not a method
+    let err = run("deprecated = \"soon\"\n");
+    assert!(err.contains("is not in YYYY-MM-DD form"), "{err}");
+    let err = run("deprecated = \"2026-01-01\"\nsuccessor = \"readV2\"\n");
+    assert!(err.contains("is not a method of the service"), "{err}");
+    let err = run("deprecated = \"2026-01-01\"\nsuccessor = \"read\"\n");
+    assert!(err.contains("its own `successor`"), "{err}");
+
+    // and the one only a platform-wide view can answer: who still calls it.
+    // Inside one repo this is a grep; across twenty services it is the question
+    // nobody can answer.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        format!(
+            "{base}{}",
+            method(
+                "deprecated = \"2026-01-01\"\nsunset = \"2027-01-01\"\nsuccessor = \"readV2\"\n\
+                    [methods.readV2]\nhttp = \"GET /v2/things\"\nauth = \"required\"\n\
+                    in = { id = \"uuid\" }\nout = { id = \"uuid\" }\n"
+            )
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("front.toml"),
+        "service = \"front\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+         [[depends]]\nservice = \"shop\"\nmethod = \"read\"\ntimeout_ms = 1000\n",
+    )
+    .unwrap();
+    // a warning is not an error: it comes out on stdout and does not fail CI on
+    // its own. Naming who calls it is the point — deciding is the team's
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "a deprecated dependency blocked the build");
+    assert!(
+        out.contains("front calls shop.read, which is deprecated and sunsets on 2027-01-01"),
+        "{out}"
+    );
+    assert!(out.contains("the successor is `readV2`"), "{out}");
+}
+
+/// The retirement is projected onto the three places a caller can find out
+/// from: the headers of the response, the caller's own client, and the
+/// published document. The demo measures the first one against containers.
+#[test]
+fn the_retirement_travels_where_the_caller_looks() {
+    // the headers, with the formats each RFC asks for and not the manifest's
+    // ISO date, which a client could not parse
+    let (ts, err, ok) = axon(&["build", "examples/orders.toml", "examples"]);
+    assert!(ok, "{err}");
+    assert!(
+        ts.contains("\"sunset\": \"Fri, 31 Dec 2027 00:00:00 GMT\""),
+        "the Sunset is not an HTTP-date:\n{ts}"
+    );
+    assert!(
+        ts.contains("\"deprecation\": \"@1788220800\""),
+        "the Deprecation is not an sf-date"
+    );
+    assert!(
+        ts.contains("rel=\\\"successor-version\\\"") && ts.contains("/v2/tenants/"),
+        "the successor does not travel as a Link"
+    );
+    // the current version announces nothing: there is nothing to announce
+    assert!(
+        !ts.contains("\"GET /v2/tenants/{tenantId}/orders/{orderId}\": {"),
+        "the successor came out marked as retired too"
+    );
+
+    // the caller's client: `@deprecated` is read by the editor and by review
+    let (ts, err, ok) = axon(&["build", "examples/payments.toml", "examples"]);
+    assert!(ok, "{err}");
+    assert!(
+        ts.contains("@deprecated orders.getOrder is deprecated; it sunsets on 2027-12-31"),
+        "the client does not say that what it calls is dying:\n{ts}"
+    );
+
+    // and the published document
+    let (api, err, ok) = axon(&["openapi", "examples"]);
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&api).unwrap();
+    let v1 = &v["paths"]["/v1/tenants/{tenantId}/orders/{orderId}"]["get"];
+    assert_eq!(v1["deprecated"], true, "{v1}");
+    assert_eq!(v1["x-axon-sunset"], "2027-12-31", "{v1}");
+    assert_eq!(
+        v1["x-axon-successor"], "/v2/tenants/{tenantId}/orders/{orderId}",
+        "{v1}"
+    );
+    let v2 = &v["paths"]["/v2/tenants/{tenantId}/orders/{orderId}"]["get"];
+    assert!(
+        v2["deprecated"].is_null(),
+        "the v2 came out deprecated: {v2}"
+    );
+}
+
+/// The dated-version scheme, generated and RUN.
+///
+/// Unlike the rest of the demo this is not measured against containers: the
+/// example uses the path scheme, so what runs here is `tsc --strict` plus
+/// `node --test` over the emitted chain. It is still the real tool of the
+/// ecosystem and not axon's own asserts.
+#[test]
+fn the_version_adapters_chain_in_the_right_order() {
+    if !has("node") {
+        eprintln!("salteado: node no esta instalado");
+        return;
+    }
+    let dir = std::env::temp_dir().join("axon-apiver");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        r#"service = "shop"
+version = "1.0.0"
+owner = "team"
+tier = "1"
+
+[api]
+versioning = "header"
+header = "X-Api-Version"
+default = "2026-09-01"
+support_window_days = 365
+lts_window_days = 1095
+
+[[api.version]]
+date = "2026-01-15"
+lts = true
+sunset = "2029-01-15"
+
+[[api.version]]
+date = "2026-05-01"
+deprecated = "2026-09-01"
+sunset = "2027-06-01"
+
+[[api.version]]
+date = "2026-09-01"
+
+[methods.getOrder]
+http = "GET /orders/{orderId}"
+auth = "required"
+timeout_ms = 2000
+in = { orderId = "uuid" }
+out = { orderId = "uuid", status = "string", customer = "json" }
+
+[methods.getOrder.at."2026-05-01"]
+out = { orderId = "uuid", status = "string", customerId = "uuid" }
+adapter = "downgradeTo202605"
+
+[methods.getOrder.at."2026-01-15"]
+out = { orderId = "uuid", state = "string", customerId = "uuid" }
+adapter = "downgradeTo202601"
+"#,
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "the header scheme does not verify clean:\n{err}");
+
+    let (ts, err, ok) = axon(&[
+        "build",
+        dir.join("shop.toml").to_str().unwrap(),
+        dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "{err}");
+    // each adapter receives the shape the one above it produced: that is what
+    // makes the chain a chain and not two independent translations
+    assert!(
+        ts.contains("response(out: GetOrderOutAt20260501): GetOrderOutAt20260115;"),
+        "the chain is not typed step by step:\n{ts}"
+    );
+    std::fs::write(dir.join("contracts.ts"), &ts).unwrap();
+
+    // The person's side, which is the whole point of the scheme: one
+    // implementation and N small translations, not N implementations.
+    //
+    // It goes in its own file with no `node:` imports so `tsc --strict` can
+    // check it without @types/node: what has to typecheck is the adapter
+    // against the interface the manifest generated.
+    std::fs::write(
+        dir.join("adapters.ts"),
+        r#"import { adaptGetOrder, resolveApiVersion, apiVersionHeaders,
+         type Adapters, type GetOrderOut } from "./contracts.ts";
+
+export const adapters: Adapters = {
+  downgradeTo202605: {
+    response: (out) => ({ orderId: out.orderId, status: out.status,
+                          customerId: (out.customer as { id: string }).id }),
+  },
+  downgradeTo202601: {
+    response: (out) => ({ orderId: out.orderId, state: out.status, customerId: out.customerId }),
+  },
+};
+
+export const answer: GetOrderOut = { orderId: "o1", status: "placed", customer: { id: "c1" } };
+export const asOf = (pinned?: string) =>
+  adaptGetOrder(resolveApiVersion(pinned), answer, adapters);
+export const headersFor = (pinned: string) => apiVersionHeaders(resolveApiVersion(pinned));
+export { resolveApiVersion };
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("api.test.ts"),
+        r#"import { test } from "node:test";
+import assert from "node:assert/strict";
+import { asOf, answer, headersFor, resolveApiVersion } from "./adapters.ts";
+import { AxonProblem } from "./contracts.ts";
+
+test("an unpinned caller gets the current shape", () => {
+  assert.deepEqual(asOf(), answer);
+});
+
+test("a pinned version gets the shape that version promised", () => {
+  assert.deepEqual(asOf("2026-05-01"), { orderId: "o1", status: "placed", customerId: "c1" });
+});
+
+test("the oldest one comes out of the whole chain, in order", () => {
+  // TWO adapters applied one after the other: `state` exists only in the
+  // oldest shape, and `customerId` only after the first step
+  assert.deepEqual(asOf("2026-01-15"), { orderId: "o1", state: "placed", customerId: "c1" });
+});
+
+test("an undeclared version is a 400 and not a guess", () => {
+  try {
+    resolveApiVersion("2020-01-01");
+    assert.fail("it accepted a version nobody declared");
+  } catch (e) {
+    assert.ok(e instanceof AxonProblem);
+    assert.equal(e.status, 400);
+    assert.equal(e.code, "unknown_api_version");
+  }
+});
+
+test("the response says the answer depends on the header, and carries the cycle", () => {
+  const h = headersFor("2026-05-01");
+  assert.equal(h["vary"], "X-Api-Version");
+  assert.equal(h["x-api-version"], "2026-05-01");
+  assert.equal(h["sunset"], "Tue, 01 Jun 2027 00:00:00 GMT");
+  assert.ok(h["deprecation"].startsWith("@"));
+});
+"#,
+    )
+    .unwrap();
+
+    let tsc = Command::new("npx")
+        .args([
+            "-y",
+            "-p",
+            "typescript@5",
+            "tsc",
+            "--noEmit",
+            "--strict",
+            "--target",
+            "es2022",
+            "--lib",
+            "es2022,dom",
+            "--module",
+            "nodenext",
+            "--moduleResolution",
+            "nodenext",
+            "--allowImportingTsExtensions",
+            "adapters.ts",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("npx");
+    assert!(
+        tsc.status.success(),
+        "the adapters do not typecheck:\n{}{}",
+        String::from_utf8_lossy(&tsc.stdout),
+        String::from_utf8_lossy(&tsc.stderr)
+    );
+
+    let out = Command::new("node")
+        .args(["--test", "api.test.ts"])
+        .current_dir(&dir)
+        .output()
+        .expect("node --test");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "the chain does not run:\n{printed}");
+    assert!(printed.contains("in order"), "{printed}");
+    assert!(printed.contains("fail 0"), "{printed}");
+}
+
+/// The maintenance cycle refutes. The promise "we support a version for a
+/// year" is worth what it can be checked with: here it is a window in days,
+/// applied to every declared version.
+#[test]
+fn the_version_cycle_rules_block() {
+    let dir = std::env::temp_dir().join("axon-cycle");
+    let head = |api: &str| {
+        format!(
+            "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+             [api]\nversioning = \"header\"\n{api}\n\
+             [methods.read]\nhttp = \"GET /things\"\nauth = \"required\"\n\
+             in = {{ id = \"uuid\" }}\nout = {{ id = \"uuid\" }}\n"
+        )
+    };
+    let run = |body: String| -> String {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shop.toml"), body).unwrap();
+        let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        assert!(!ok, "it passed clean");
+        err
+    };
+
+    // an LTS with no date is not a promise
+    let err = run(head(
+        "[[api.version]]\ndate = \"2026-01-15\"\nlts = true\n\n\
+                        [[api.version]]\ndate = \"2026-09-01\"\n",
+    ));
+    assert!(err.contains("has no `sunset`"), "{err}");
+    assert!(err.contains("it is a hope"), "{err}");
+
+    // the declared window, applied: 90 days of support against a promise of 365
+    let err = run(head(
+        "support_window_days = 365\n\n\
+         [[api.version]]\ndate = \"2026-01-15\"\nsunset = \"2026-04-15\"\n\n\
+         [[api.version]]\ndate = \"2026-09-01\"\n",
+    ));
+    assert!(err.contains("is served for 90 days"), "{err}");
+    assert!(err.contains("window is 365"), "{err}");
+
+    // an LTS that dies before the ordinary version that follows it
+    let err = run(head(
+        "[[api.version]]\ndate = \"2026-01-15\"\nlts = true\nsunset = \"2027-01-15\"\n\n\
+         [[api.version]]\ndate = \"2026-05-01\"\nsunset = \"2028-05-01\"\n\n\
+         [[api.version]]\ndate = \"2026-09-01\"\n",
+    ));
+    assert!(err.contains("dies before `2026-05-01`"), "{err}");
+    assert!(err.contains("just a label"), "{err}");
+
+    // a version out of order adapts backwards
+    let err = run(head(
+        "[[api.version]]\ndate = \"2026-09-01\"\n\n[[api.version]]\ndate = \"2026-01-15\"\n",
+    ));
+    assert!(err.contains("comes after a newer one"), "{err}");
+
+    // and a shape from the past with nobody to translate it, which is the one
+    // that decides whether one implementation can serve an old version
+    let versions = "[[api.version]]\ndate = \"2026-01-15\"\nsunset = \"2028-01-15\"\n\n\
+                    [[api.version]]\ndate = \"2026-09-01\"\n";
+    let err = run(format!(
+        "{}{versions}[methods.read.at.\"2026-01-15\"]\nout = {{ id = \"uuid\", name = \"string\" }}\n",
+        head("")
+    ));
+    assert!(err.contains("declares no `adapter`"), "{err}");
+    assert!(err.contains("What changed: name"), "{err}");
+
+    // a version that changed nothing is an adapter that copies
+    let err = run(format!(
+        "{}{versions}[methods.read.at.\"2026-01-15\"]\nout = {{ id = \"uuid\" }}\nadapter = \"back\"\n",
+        head("")
+    ));
+    assert!(err.contains("declares the same shape"), "{err}");
+
+    // the two schemes at once: the route versions AND the header versions
+    let err = run(format!(
+        "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+         [api]\nversioning = \"header\"\n{versions}\n\
+         [methods.read]\nhttp = \"GET /v1/things\"\nauth = \"required\"\n\
+         in = {{ id = \"uuid\" }}\nout = {{ id = \"uuid\" }}\n"
+    ));
+    assert!(
+        err.contains("versions the route while `[api]` versions by header"),
+        "{err}"
+    );
+
+    // and one platform, one scheme: `[api]` cannot differ between services
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("shop.toml"), format!("{}{versions}", head(""))).unwrap();
+    std::fs::write(
+        dir.join("front.toml"),
+        "service = \"front\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n",
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "two schemes at once passed clean:\n{err}");
+    assert!(err.contains("declare different `[api]`"), "{err}");
+    assert!(err.contains("one decision for the whole platform"), "{err}");
 }

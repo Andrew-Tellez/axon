@@ -100,6 +100,18 @@ export interface GetOrderOut {
   total: { amount: number; currency: string };
 }
 
+export interface GetOrderV2In {
+  tenantId: string;
+  orderId: string;
+}
+
+export interface GetOrderV2Out {
+  orderId: string;
+  status: string;
+  total: { amount: number; currency: string };
+  customerId: string;
+}
+
 export const manifest = {
   "service": "orders",
   "version": "2.0.0",
@@ -142,7 +154,11 @@ export const manifest = {
           "retriable": false,
           "detail": "the order does not pass the rules"
         }
-      ]
+      ],
+      "deprecated": null,
+      "sunset": null,
+      "successor": null,
+      "at": {}
     },
     "getOrder": {
       "in": {
@@ -160,7 +176,34 @@ export const manifest = {
       "rate_limit": null,
       "timeout_ms": 2000,
       "paginated": false,
-      "errors": []
+      "errors": [],
+      "deprecated": "2026-09-01",
+      "sunset": "2027-12-31",
+      "successor": "getOrderV2",
+      "at": {}
+    },
+    "getOrderV2": {
+      "in": {
+        "tenantId": "uuid",
+        "orderId": "uuid"
+      },
+      "out": {
+        "orderId": "uuid",
+        "status": "string",
+        "total": "money",
+        "customerId": "uuid"
+      },
+      "http": "GET /v2/tenants/{tenantId}/orders/{orderId}",
+      "idempotent": false,
+      "auth": "required",
+      "rate_limit": null,
+      "timeout_ms": 2000,
+      "paginated": false,
+      "errors": [],
+      "deprecated": null,
+      "sunset": null,
+      "successor": null,
+      "at": {}
     }
   },
   "depends": [
@@ -187,6 +230,14 @@ export const manifest = {
     "export": true,
     "pii": "hash",
     "warehouse": "clickhouse"
+  },
+  "api": {
+    "versioning": null,
+    "header": null,
+    "default": null,
+    "support_window_days": null,
+    "lts_window_days": null,
+    "version": []
   },
   "pooler": {
     "engine": "pgdog",
@@ -295,12 +346,25 @@ export abstract class OrdersService {
   }
   abstract placeOrder(input: PlaceOrderIn, e: Envelope<unknown>): Promise<PlaceOrderOut>;
   abstract getOrder(input: GetOrderIn, e: Envelope<unknown>): Promise<GetOrderOut>;
+  abstract getOrderV2(input: GetOrderV2In, e: Envelope<unknown>): Promise<GetOrderV2Out>;
 }
 
 
 /** HTTP routes the manifest declares. Startup must fail if any of them
  *  has no handler: a 404 in production tells nobody. */
-export const httpRoutes = ["POST /v1/tenants/{tenantId}/orders", "GET /v1/tenants/{tenantId}/orders/{orderId}"] as const;
+export const httpRoutes = ["POST /v1/tenants/{tenantId}/orders", "GET /v1/tenants/{tenantId}/orders/{orderId}", "GET /v2/tenants/{tenantId}/orders/{orderId}"] as const;
+
+
+/** Headers of a retired version, by route. The router adds them to
+ *  whatever it answers: `Deprecation` (RFC 9745), `Sunset` (RFC 8594) and
+ *  the successor as a `Link` (RFC 8288).
+ *
+ *  Deprecated is not gone: the route keeps answering what it always
+ *  answered, and it says so on the way out. */
+export const retiredRoutes: Record<string, Record<string, string>> = {
+  "GET /v1/tenants/{tenantId}/orders/{orderId}": { "deprecation": "@1788220800", "sunset": "Fri, 31 Dec 2027 00:00:00 GMT", "link": "</v2/tenants/{tenantId}/orders/{orderId}>; rel=\"successor-version\"" },
+};
+
 
 
 /** The CAP side declared in the manifest: eventual/degrade.

@@ -64,6 +64,19 @@
       },
       "http": "GET /v1/tenants/{tenantId}/orders/{orderId}"
     },
+    "orders.getOrderV2": {
+      "in": {
+        "tenantId": "uuid",
+        "orderId": "uuid"
+      },
+      "out": {
+        "orderId": "uuid",
+        "status": "string",
+        "total": "money",
+        "customerId": "uuid"
+      },
+      "http": "GET /v2/tenants/{tenantId}/orders/{orderId}"
+    },
     "orders.placeOrder": {
       "in": {
         "tenantId": "uuid",

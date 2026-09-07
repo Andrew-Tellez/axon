@@ -200,6 +200,10 @@ export function serve(
   // It is passed in and not imported because the runtime is shared and each
   // service's codes are its own.
   toProblem?: (err: unknown, e?: Envelope<unknown>) => { status: number },
+  // The generated `retiredRoutes`: keyed by route, so there is nothing to wire
+  // per endpoint. Deprecated is not gone — the route answers what it always
+  // answered and says so on the way out.
+  retired: Record<string, Record<string, string>> = {},
 ) {
   const missing = declared.filter((d) => !(d in routes));
   if (missing.length) {
@@ -254,7 +258,7 @@ export function serve(
         await trace(root);
         try {
           const out = await r.fn(body, root, params);
-          res.writeHead(200, { "content-type": "application/json" });
+          res.writeHead(200, { "content-type": "application/json", ...retired[r.key] });
           res.end(JSON.stringify(out));
         } catch (err) {
           // It is not rethrown: createServer's handler is async, so a throw here
@@ -276,7 +280,7 @@ export function serve(
             console.error(`[${process.env.AXON_SERVICE}] ${r.key} failed:`, err);
             annotate({ "error.type": String(err) });
           }
-          res.writeHead(status, { "content-type": "application/problem+json" });
+          res.writeHead(status, { "content-type": "application/problem+json", ...retired[r.key] });
           res.end(JSON.stringify({ ...body, status }));
         }
       },

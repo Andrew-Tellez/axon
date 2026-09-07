@@ -14,6 +14,7 @@ mod plugin;
 mod pooler;
 mod trace;
 mod verify;
+mod versions;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -34,7 +35,8 @@ struct Cli {
 enum Cmd {
     /// manifest -> contracts and base class
     Build {
-        manifest: PathBuf,
+        /// a path, or the URL of a service that serves its own manifest
+        manifest: String,
         /// The other manifests: that is where the type of what this service consumes comes from.
         sources: Vec<String>,
         #[arg(long, default_value = "ts")]
@@ -113,6 +115,8 @@ enum Cmd {
         #[arg(long)]
         vector: bool,
     },
+    /// the API's maintenance cycle: what each version is, and what changed
+    Versions { sources: Vec<String> },
     /// reconciles the declared CAP side with the patterns in use
     Cap {
         sources: Vec<String>,
@@ -157,7 +161,13 @@ enum Cmd {
         target: String,
     },
     /// manifests -> OpenAPI 3.1 (one catalogue for the whole platform)
-    Openapi { sources: Vec<String> },
+    Openapi {
+        sources: Vec<String>,
+        /// the document as of a dated version (`[api] versioning = "header"`):
+        /// the shapes are the ones that version promised, not today's
+        #[arg(long = "api-version")]
+        api_version: Option<String>,
+    },
     /// manifest -> test scaffolding (unit, integration, e2e)
     Test {
         manifest: PathBuf,
@@ -200,7 +210,7 @@ fn run() -> Result<ExitCode, String> {
             sources,
             lang,
         } => {
-            let m = manifest::load(&manifest)?;
+            let m = manifest::load_any(&manifest)?;
             let all = if sources.is_empty() {
                 vec![]
             } else {
@@ -414,6 +424,9 @@ fn run() -> Result<ExitCode, String> {
                 }
             }
         }
+        Cmd::Versions { sources } => {
+            print!("{}", versions::report(&manifest::discover(&sources)?))
+        }
         Cmd::Cap { sources, services } => {
             println!(
                 "{}",
@@ -477,11 +490,28 @@ fn run() -> Result<ExitCode, String> {
                 }
             )
         }
-        Cmd::Openapi { sources } => println!(
-            "{}",
-            serde_json::to_string_pretty(&api::openapi(&manifest::discover(&sources)?))
-                .map_err(|e| e.to_string())?
-        ),
+        Cmd::Openapi {
+            sources,
+            api_version,
+        } => {
+            let ms = manifest::discover(&sources)?;
+            if let Some(v) = &api_version {
+                let api = ms.iter().find(|m| !m.external).map(|m| &m.api);
+                if api.is_none_or(|a| a.find(v).is_none()) {
+                    return Err(format!(
+                        "`{v}` is not a declared version of the API. Declared: {}",
+                        api.map(|a| a.dates().join(", "))
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| "none".into())
+                    ));
+                }
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&api::openapi_at(&ms, api_version.as_deref()))
+                    .map_err(|e| e.to_string())?
+            )
+        }
         Cmd::Test {
             manifest,
             sources,

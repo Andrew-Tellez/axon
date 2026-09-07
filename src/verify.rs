@@ -833,9 +833,12 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     m.service
                 ));
             }
+            // With `versioning = "header"` the route carries no version on
+            // purpose: it is the caller who pins one, and the same route serves
+            // every version.
             match meth.path() {
-                Some(p) if !p.starts_with("/v") => errors.push(format!(
-                    "{}.{name}: `{p}` has no version in the path; use /v1/...",
+                Some(p) if !m.api.by_header() && !p.starts_with("/v") => errors.push(format!(
+                    "{}.{name}: `{p}` has no version in the path; use /v1/... or declare                      `[api] versioning = \"header\"`",
                     m.service
                 )),
                 _ => {}
@@ -872,6 +875,370 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     "{}.{name}: paginated but does not return a `cursor`; offset breaks as it grows",
                     m.service
                 ));
+            }
+        }
+    }
+
+    // The API's versioning, and its maintenance cycle.
+    //
+    // A platform decision: `verify` requires every service to declare the same
+    // one, for the same reason it requires one warehouse. With two schemes at
+    // once a caller has to know which service it is talking to before it can
+    // know how to ask for a version, which is the opposite of what versioning
+    // is for.
+    let internal: Vec<&Manifest> = ms.iter().filter(|m| !m.external).collect();
+    if let Some(first) = internal.first() {
+        for other in internal.iter().skip(1) {
+            if other.api.versioning != first.api.versioning
+                || other.api.dates() != first.api.dates()
+                || other.api.default != first.api.default
+            {
+                errors.push(format!(
+                    "{} and {} declare different `[api]`. The versioning is one decision for \
+                     the whole platform: with two, whoever calls has to know which service \
+                     it is talking to before it can know how to ask for a version",
+                    first.service, other.service
+                ));
+                break;
+            }
+        }
+    }
+    let api = internal.first().map(|m| &m.api);
+    if let Some(api) = api {
+        match api.versioning.as_deref() {
+            None | Some("path") | Some("header") => {}
+            Some(other) => errors.push(format!(
+                "[api] `versioning = \"{other}\"` does not exist; use \"path\" or \"header\""
+            )),
+        }
+        if !api.by_header() && !api.versions.is_empty() {
+            errors.push(
+                "[api] declares dated versions with `versioning` that is not \"header\"; in \
+                 the path scheme the version IS the route, and these would be served by nobody"
+                    .to_string(),
+            );
+        }
+        if api.by_header() && api.versions.is_empty() {
+            errors.push(
+                "[api] `versioning = \"header\"` with no `[[api.version]]`; there is nothing \
+                 for the caller to pin"
+                    .to_string(),
+            );
+        }
+        let mut previous: Option<(i64, i64, i64)> = None;
+        let mut seen: IndexMap<String, ()> = IndexMap::new();
+        for v in &api.versions {
+            let Some(d) = date(&v.date) else {
+                errors.push(format!(
+                    "[api] version `{}` is not in YYYY-MM-DD form",
+                    v.date
+                ));
+                continue;
+            };
+            if seen.insert(v.date.clone(), ()).is_some() {
+                errors.push(format!("[api] version `{}` is declared twice", v.date));
+            }
+            // Ordered oldest first: the adapter chain is applied in this order,
+            // so a list out of order does not read badly, it adapts backwards.
+            if previous.is_some_and(|p| d < p) {
+                errors.push(format!(
+                    "[api] version `{}` comes after a newer one. The list is the order the \
+                     adapters are applied in, so out of order it adapts backwards",
+                    v.date
+                ));
+            }
+            previous = Some(d);
+
+            // The maintenance cycle, which is the part that can be refuted.
+            match (&v.sunset, v.lts) {
+                (None, true) => errors.push(format!(
+                    "[api] the LTS `{}` has no `sunset`. \"Long term\" with no date is not a \
+                     promise, it is a hope, and it is why a version from years ago is still up",
+                    v.date
+                )),
+                (Some(su), _) => match date(su) {
+                    None => errors.push(format!(
+                        "[api] `{}`: `sunset = \"{su}\"` is not in YYYY-MM-DD form",
+                        v.date
+                    )),
+                    Some(sd) => {
+                        if sd < d {
+                            errors.push(format!(
+                                "[api] `{}` sunsets on {su}, before it shipped",
+                                v.date
+                            ));
+                        }
+                        if sd < ahora {
+                            errors.push(format!(
+                                "[api] `{}` sunset on {su} and it is still declared. Either the \
+                                 version goes or the date gets renewed as a decision somebody makes",
+                                v.date
+                            ));
+                        }
+                        // The declared window, applied. Without this the promise
+                        // lives in a blog post and dies in a sprint.
+                        let window = if v.lts {
+                            api.lts_window_days.or(api.support_window_days)
+                        } else {
+                            api.support_window_days
+                        };
+                        if let Some(w) = window {
+                            let lived = epoch_days(sd) - epoch_days(d);
+                            if lived < w {
+                                errors.push(format!(
+                                    "[api] `{}` is served for {lived} days and the declared \
+                                     {}window is {w}",
+                                    v.date,
+                                    if v.lts { "LTS " } else { "" }
+                                ));
+                            }
+                        }
+                    }
+                },
+                (None, false) => {
+                    if api.newest().map(|n| n.date.as_str()) != Some(v.date.as_str()) {
+                        warnings.push(format!(
+                            "[api] `{}` is not the newest and has no `sunset`; a version with \
+                             no death date does not die",
+                            v.date
+                        ));
+                    }
+                }
+            }
+            if let (Some(dep), Some(su)) = (
+                v.deprecated.as_deref().and_then(date),
+                v.sunset.as_deref().and_then(date),
+            ) {
+                if su < dep {
+                    errors.push(format!(
+                        "[api] `{}` sunsets before it is deprecated; there is no window to \
+                         migrate in",
+                        v.date
+                    ));
+                }
+            }
+            // An LTS that dies before the ordinary version that follows it is
+            // not long-term at all.
+            if v.lts {
+                if let Some(mine) = v.sunset.as_deref().and_then(date) {
+                    for other in api.versions.iter().filter(|o| !o.lts && o.date > v.date) {
+                        if other
+                            .sunset
+                            .as_deref()
+                            .and_then(date)
+                            .is_some_and(|o| o > mine)
+                        {
+                            errors.push(format!(
+                                "[api] the LTS `{}` dies before `{}`, which is not LTS. Then it \
+                                 is not long-term support, it is just a label",
+                                v.date, other.date
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(def) = &api.default {
+            if api.find(def).is_none() {
+                errors.push(format!(
+                    "[api] `default = \"{def}\"` is not one of the declared versions"
+                ));
+            } else if api.newest().map(|n| &n.date) != Some(def) {
+                warnings.push(format!(
+                    "[api] the default is `{def}` and the newest is `{}`; a new integration \
+                     that pins nothing lands on an old version",
+                    api.newest().map(|n| n.date.as_str()).unwrap_or_default()
+                ));
+            }
+        }
+    }
+    // The two schemes cannot be mixed, and a shape from the past needs somebody
+    // to translate it: that is what makes one implementation able to serve a
+    // version from years ago.
+    for m in ms.iter().filter(|m| !m.external) {
+        for (name, meth) in &m.methods {
+            if m.api.by_header() {
+                if let Some(p) = meth.path() {
+                    if p.starts_with("/v")
+                        && p.get(2..3)
+                            .is_some_and(|c| c.chars().all(|c| c.is_ascii_digit()))
+                    {
+                        errors.push(format!(
+                            "{}.{name}: `{p}` versions the route while `[api]` versions by \
+                             header; two schemes at once means two answers to the same question",
+                            m.service
+                        ));
+                    }
+                }
+            } else if !meth.at.is_empty() {
+                errors.push(format!(
+                    "{}.{name}: declares `at` shapes and `[api] versioning` is not \"header\"; \
+                     in the path scheme an old shape is an old route",
+                    m.service
+                ));
+            }
+            let mut adapters: IndexMap<&str, &str> = IndexMap::new();
+            for (ver, shape) in &meth.at {
+                if m.api.find(ver).is_none() {
+                    errors.push(format!(
+                        "{}.{name}: `at.\"{ver}\"` is not a declared version of the API",
+                        m.service
+                    ));
+                    continue;
+                }
+                let input_changed = !shape.input.is_empty() && shape.input != meth.input;
+                let output_changed = !shape.output.is_empty() && shape.output != meth.output;
+                if !input_changed && !output_changed {
+                    errors.push(format!(
+                        "{}.{name}: `at.\"{ver}\"` declares the same shape as the current one. \
+                         A version only gets declared where something CHANGED; equal, it is an \
+                         adapter that copies and a version nobody needed",
+                        m.service
+                    ));
+                    continue;
+                }
+                match &shape.adapter {
+                    None => {
+                        let changed: Vec<&str> = shape
+                            .output
+                            .keys()
+                            .filter(|k| meth.output.get(*k) != shape.output.get(*k))
+                            .chain(
+                                meth.output
+                                    .keys()
+                                    .filter(|k| !shape.output.contains_key(*k)),
+                            )
+                            .map(|s| s.as_str())
+                            .collect();
+                        errors.push(format!(
+                            "{}.{name}: `at.\"{ver}\"` changes the shape and declares no \
+                             `adapter`. What changed: {}. Without somebody translating it, \
+                             whoever pinned that version receives the new shape and finds out \
+                             when it breaks",
+                            m.service,
+                            if changed.is_empty() {
+                                "the input".to_string()
+                            } else {
+                                changed.join(", ")
+                            }
+                        ));
+                    }
+                    Some(a) => {
+                        if let Some(prev) = adapters.insert(a.as_str(), ver.as_str()) {
+                            errors.push(format!(
+                                "{}.{name}: `{a}` adapts `{prev}` and `{ver}`. One adapter per \
+                                 step: chained, the same function would have to translate two \
+                                 different shapes",
+                                m.service
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // A retired version. The point of declaring it is that the announcement
+    // stops living in a chat thread: it travels in the response, it is in the
+    // OpenAPI, and `verify` can name who is still calling what is about to die.
+    for m in ms.iter().filter(|m| !m.external) {
+        for (name, meth) in &m.methods {
+            for (field, value) in [("deprecated", &meth.deprecated), ("sunset", &meth.sunset)] {
+                if let Some(v) = value {
+                    if date(v).is_none() {
+                        errors.push(format!(
+                            "{}.{name}: `{field} = \"{v}\"` is not in YYYY-MM-DD form",
+                            m.service
+                        ));
+                    }
+                }
+            }
+            // A version that dies without ever having been marked as dying: the
+            // caller finds out the day the route answers 404.
+            if meth.sunset.is_some() && meth.deprecated.is_none() {
+                errors.push(format!(
+                    "{}.{name}: has `sunset` and no `deprecated`; whoever calls it finds out \
+                     the day it stops answering",
+                    m.service
+                ));
+            }
+            if let (Some(d), Some(su)) = (
+                meth.deprecated.as_deref().and_then(date),
+                meth.sunset.as_deref().and_then(date),
+            ) {
+                if su < d {
+                    errors.push(format!(
+                        "{}.{name}: it sunsets on {} and is deprecated from {}; there is no \
+                         window to migrate in",
+                        m.service,
+                        meth.sunset.as_deref().unwrap_or_default(),
+                        meth.deprecated.as_deref().unwrap_or_default()
+                    ));
+                }
+            }
+            // Past its own date and still being served. Same criterion as an
+            // expired flag: either it gets removed or the date gets renewed as
+            // an explicit decision.
+            if let Some(su) = meth.sunset.as_deref().and_then(date) {
+                if su < ahora {
+                    errors.push(format!(
+                        "{}.{name}: sunset on {} and it is still declared. Either the version \
+                         goes or the date gets renewed as a decision somebody makes",
+                        m.service,
+                        meth.sunset.as_deref().unwrap_or_default()
+                    ));
+                }
+            }
+            match &meth.successor {
+                Some(su) if su == name => {
+                    errors.push(format!("{}.{name}: it is its own `successor`", m.service))
+                }
+                Some(su) if !m.methods.contains_key(su) => errors.push(format!(
+                    "{}.{name}: `successor = \"{su}\"` is not a method of the service",
+                    m.service
+                )),
+                None if meth.deprecated.is_some() => warnings.push(format!(
+                    "{}.{name}: deprecated with no `successor`; whoever calls it learns that \
+                     it is dying and not where to go",
+                    m.service
+                )),
+                _ => {}
+            }
+            if meth.deprecated.is_some() && meth.sunset.is_none() {
+                warnings.push(format!(
+                    "{}.{name}: deprecated with no `sunset`; a deprecation with no date does \
+                     not end, and the version stays up for years",
+                    m.service
+                ));
+            }
+        }
+    }
+    // And the one that only a platform-wide view can see: somebody still calls
+    // what is about to die. Inside a single repo this is a grep; across twenty
+    // services it is the question nobody can answer.
+    for m in ms.iter().filter(|m| !m.external) {
+        for d in &m.depends {
+            let tgt = d.target();
+            if let Some(sig) = ms
+                .iter()
+                .find(|o| o.service == tgt)
+                .and_then(|o| o.methods.get(&d.method))
+            {
+                if sig.retiring() {
+                    warnings.push(format!(
+                        "{} calls {tgt}.{}, which is deprecated{}{}",
+                        m.service,
+                        d.method,
+                        sig.sunset
+                            .as_deref()
+                            .map(|s| format!(" and sunsets on {s}"))
+                            .unwrap_or_default(),
+                        sig.successor
+                            .as_deref()
+                            .map(|s| format!("; the successor is `{s}`"))
+                            .unwrap_or_default()
+                    ));
+                }
             }
         }
     }

@@ -159,7 +159,11 @@ export const manifest = {
           "retriable": true,
           "detail": "the issuer is not answering"
         }
-      ]
+      ],
+      "deprecated": null,
+      "sunset": null,
+      "successor": null,
+      "at": {}
     },
     "refundPayment": {
       "in": {
@@ -182,7 +186,11 @@ export const manifest = {
           "retriable": true,
           "detail": "the refund did not go through"
         }
-      ]
+      ],
+      "deprecated": null,
+      "sunset": null,
+      "successor": null,
+      "at": {}
     },
     "payoutMerchant": {
       "in": {
@@ -211,7 +219,11 @@ export const manifest = {
           "retriable": true,
           "detail": "the payout rail is saturated"
         }
-      ]
+      ],
+      "deprecated": null,
+      "sunset": null,
+      "successor": null,
+      "at": {}
     }
   },
   "depends": [
@@ -294,6 +306,14 @@ export const manifest = {
     "export": true,
     "pii": "exclude",
     "warehouse": "clickhouse"
+  },
+  "api": {
+    "versioning": null,
+    "header": null,
+    "default": null,
+    "support_window_days": null,
+    "lts_window_days": null,
+    "version": []
   },
   "pooler": {
     "engine": "none",
@@ -470,6 +490,8 @@ export const paymentCan = (state: PaymentState, action: PaymentAction) => paymen
 /** HTTP routes the manifest declares. Startup must fail if any of them
  *  has no handler: a 404 in production tells nobody. */
 export const httpRoutes = ["POST /v1/payments", "POST /v1/payments/{paymentId}/refunds", "POST /v1/payouts"] as const;
+
+
 
 
 /** The CAP side declared in the manifest: strong/reject.
@@ -703,7 +725,8 @@ export class Clients {
   constructor(transport: Transport) {
     this.transport = transport;
   }
-  /** orders.getOrder · timeout 1000ms · 3 retries · breaker true */
+  /** orders.getOrder · timeout 1000ms · 3 retries · breaker true
+   *  @deprecated orders.getOrder is deprecated; it sunsets on 2027-12-31; use `getOrderV2` */
   async ordersGetOrder(input: OrdersGetOrderIn, e: Envelope<unknown>): Promise<OrdersGetOrderOut> {
     const attempt = () => withPolicy("orders.getOrder", { timeoutMs: 1000, retries: 3, breaker: true }, async () =>
       (await this.transport.call("orders", "getOrder", input, headers(e, true))) as OrdersGetOrderOut);

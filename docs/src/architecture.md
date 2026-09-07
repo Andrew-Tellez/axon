@@ -62,6 +62,7 @@ flowchart TB
   MAN --> DBS["dbsec.rs<br/><i>RLS, masked views,<br/>pg_anon</i>"]
   MAN --> POOL["pooler.rs<br/><i>pgdog.toml + users</i>"]
   MAN --> CAP["cap.rs<br/><i>CAP consequences</i>"]
+  MAN --> VERS["versions.rs<br/><i>the API's<br/>maintenance cycle</i>"]
   MAN --> LOAD["carga.rs<br/><i>k6 script + verdict</i>"]
   MAN --> API["api.rs<br/><i>OpenAPI + testkit</i>"]
   MAN --> BASE["baseline.rs<br/><i>published contracts</i>"]
@@ -72,7 +73,7 @@ flowchart TB
   EMIT -.-> PLUG
   INF -.-> PLUG
 
-  MAIN["main.rs<br/><i>the CLI: 21 commands</i>"] --> MAN
+  MAIN["main.rs<br/><i>the CLI: 22 commands</i>"] --> MAN
   COL["color.rs · trace.rs"] --> MAIN
 ```
 

@@ -164,6 +164,9 @@ step "declared vs occurred retries"
 step "the declared failures, measured"
 ./check-errors.sh
 
+step "two versions of the same endpoint, and the retirement of the old one"
+./check-versions.sh
+
 step "declared vs applied rollout"
 python3 check-flags.py "localhost:${AXON_FLAGS_PORT:-8016}" charge_v2 10
 

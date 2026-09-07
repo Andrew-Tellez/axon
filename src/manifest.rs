@@ -42,6 +42,37 @@ pub struct Method {
     /// not retried at all.
     #[serde(default)]
     pub errors: Vec<Failure>,
+    /// The date it stopped being the version to use, in YYYY-MM-DD. Its presence
+    /// is what makes the method deprecated.
+    ///
+    /// A version is not retired by announcing it in a chat: it is retired when
+    /// every caller stops calling it, and for that they have to find out from
+    /// the same place they call. Declared here it travels in the response —RFC
+    /// 9745— so a client sees it in its own logs, and `verify` can name who is
+    /// still calling it.
+    pub deprecated: Option<String>,
+    /// The date it stops being served, in YYYY-MM-DD. RFC 8594.
+    ///
+    /// A deprecation with no date does not end: v1 stays up for years because
+    /// nobody can point at the day it dies.
+    pub sunset: Option<String>,
+    /// The method that replaces it. It becomes a `Link rel="successor-version"`,
+    /// because telling somebody that what they use is dying without saying what
+    /// to use instead moves the problem, it does not solve it.
+    pub successor: Option<String>,
+    /// The shape of this method as of an older version, keyed by version.
+    ///
+    /// Only what CHANGED gets declared: a version with no entry here did not
+    /// change this method, and the adapter chain skips it.
+    #[serde(default)]
+    pub at: IndexMap<String, Shape>,
+}
+
+impl Method {
+    /// Whether it carries a declared retirement of any kind.
+    pub fn retiring(&self) -> bool {
+        self.deprecated.is_some() || self.sunset.is_some()
+    }
 }
 
 /// A declared failure of a method.
@@ -173,6 +204,120 @@ impl Cap {
             "SERIALIZABLE"
         }
     }
+}
+
+/// The API's versioning.
+///
+/// `"path"` —the default— puts the version in the route: `/v1/...` and `/v2/...`
+/// are two methods that coexist, and the old one declares its retirement.
+///
+/// `"header"` is what Stripe does: the route never changes, the caller pins a
+/// dated version, and the server keeps ONE implementation —the current one—
+/// plus an adapter per version that changed a shape. That is what lets a
+/// version from years ago stay alive: nobody maintains N implementations, they
+/// maintain N small adapters.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Api {
+    /// `"path"` or `"header"`. Absent means `"path"`, which is what a service
+    /// that never thought about this already does.
+    pub versioning: Option<String>,
+    /// The header the caller pins with. Defaults to `X-Api-Version`.
+    pub header: Option<String>,
+    /// What an unpinned caller gets. Normally the newest.
+    pub default: Option<String>,
+    /// The maintenance cycle, in days: nothing gets retired before this long
+    /// after it shipped. It is the promise a platform makes, and the only way
+    /// to make it refutable — without it, "we support it for a year" lives in
+    /// a blog post and dies in a sprint.
+    pub support_window_days: Option<i64>,
+    /// The same, for a version marked `lts`. If an LTS does not live longer
+    /// than a normal one, the label says nothing.
+    pub lts_window_days: Option<i64>,
+    /// The dated versions, oldest first, as `[[api.version]]` entries.
+    ///
+    /// They are entries and not bare strings because a version carries more
+    /// than its date: whether it is long-term support and when it dies. A list
+    /// of strings cannot say either, and both are what a caller plans around.
+    #[serde(rename = "version")]
+    pub versions: Vec<Version>,
+}
+
+/// One dated version of the API.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Version {
+    /// The day it shipped, and its id: the caller pins this string.
+    pub date: String,
+    /// The day it stopped being the one to use. A version older than the
+    /// current one is not automatically deprecated: it can be supported for
+    /// years, and that is the difference this field carries.
+    pub deprecated: Option<String>,
+    /// Long-term support: it lives longer than the ones around it, which is a
+    /// promise somebody makes to whoever integrates.
+    #[serde(default)]
+    pub lts: bool,
+    /// When it stops being served. Required on an LTS: "long term" with no date
+    /// is not a promise, it is a hope, and it is what leaves a version from
+    /// years ago alive because nobody can point at the day it dies.
+    pub sunset: Option<String>,
+}
+
+impl Version {
+    /// Where it is in the maintenance cycle, given today and which one is
+    /// current. Derived, not declared: a version stops being current the day a
+    /// newer one ships, and nobody should have to remember to write that down.
+    pub fn stage(&self, today: (i64, i64, i64), current: &str) -> &'static str {
+        let past = |d: &Option<String>| d.as_deref().and_then(date).is_some_and(|d| d <= today);
+        if past(&self.sunset) {
+            "retired"
+        } else if self.date == current {
+            "current"
+        } else if past(&self.deprecated) {
+            "deprecated"
+        } else if self.lts {
+            "lts"
+        } else {
+            "supported"
+        }
+    }
+}
+
+impl Api {
+    pub fn by_header(&self) -> bool {
+        self.versioning.as_deref() == Some("header")
+    }
+    pub fn header_name(&self) -> &str {
+        self.header.as_deref().unwrap_or("X-Api-Version")
+    }
+    /// The newest declared version: what a new integration should get.
+    pub fn newest(&self) -> Option<&Version> {
+        self.versions.last()
+    }
+    /// What an unpinned caller gets.
+    pub fn current(&self) -> Option<&str> {
+        self.default
+            .as_deref()
+            .or_else(|| self.newest().map(|v| v.date.as_str()))
+    }
+    pub fn dates(&self) -> Vec<&str> {
+        self.versions.iter().map(|v| v.date.as_str()).collect()
+    }
+    pub fn find(&self, date: &str) -> Option<&Version> {
+        self.versions.iter().find(|v| v.date == date)
+    }
+}
+
+/// The shape of a method as of an older version, and who adapts it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Shape {
+    #[serde(rename = "in", default)]
+    pub input: Fields,
+    #[serde(rename = "out", default)]
+    pub output: Fields,
+    /// The adapter that translates between this shape and the current one. The
+    /// field mapping is business logic and a person writes it; what axon
+    /// generates is the typed obligation and the chain that applies it.
+    pub adapter: Option<String>,
 }
 
 /// What happens to this service's events once they reach the warehouse.
@@ -743,6 +888,12 @@ pub struct Manifest {
     /// Export to the data warehouse.
     #[serde(default)]
     pub analytics: Analytics,
+    /// How the API is versioned. A platform decision, and `verify` requires
+    /// every service to declare the same one: two schemes at once means the
+    /// caller has to know which service it is talking to before it can know
+    /// how to ask for a version.
+    #[serde(default)]
+    pub api: Api,
     /// Pooler or sharder in front of the database. See `Pooler`.
     #[serde(default)]
     pub pooler: Pooler,
@@ -839,6 +990,23 @@ pub fn load(path: &Path) -> Result<Manifest, String> {
 
 /// Merges manifests from disk and from live services. A service publishes its
 /// own at /.well-known/axon.json; an external one is frozen into a *.external.toml.
+/// One manifest, from a path or from a URL.
+///
+/// The subject of a `build` can be a running service too: what it serves at
+/// `/.well-known/axon.json` is its contract right now, which is the point of
+/// serving it. Whoever generates a client against a live peer wants the peer's
+/// answer and not the copy somebody remembered to commit.
+pub fn load_any(source: &str) -> Result<Manifest, String> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        discover(std::slice::from_ref(&source.to_string()))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("{source}: it served no manifest"))
+    } else {
+        load(Path::new(source))
+    }
+}
+
 pub fn discover(sources: &[String]) -> Result<Vec<Manifest>, String> {
     let mut out = Vec::new();
     for s in sources {
@@ -1341,6 +1509,36 @@ pub fn today() -> (i64, i64, i64) {
         .map(|d| d.as_secs() as i64 / 86_400)
         .unwrap_or(0);
     civil(days)
+}
+
+/// The inverse of `civil`: days since the epoch from a civil date. Hinnant
+/// again, because the two headers of a retirement do not take an ISO date —
+/// `Deprecation` is an sf-date in seconds and `Sunset` is an HTTP-date.
+pub fn epoch_days((y, m, d): (i64, i64, i64)) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// `Sun, 31 Dec 2027 00:00:00 GMT`: the format RFC 8594 asks for, which is the
+/// one RFC 9110 calls IMF-fixdate.
+pub fn http_date(ymd: (i64, i64, i64)) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = epoch_days(ymd);
+    // 1970-01-01 was a Thursday, and the table starts there
+    let dow = DAYS[days.rem_euclid(7) as usize];
+    let (y, m, d) = ymd;
+    format!(
+        "{dow}, {d:02} {} {y:04} 00:00:00 GMT",
+        MONTHS[(m - 1).clamp(0, 11) as usize]
+    )
 }
 
 fn civil(epoch_days: i64) -> (i64, i64, i64) {

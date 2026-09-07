@@ -23,15 +23,39 @@ fn schema(fields: &Fields) -> Value {
 }
 
 /// A single document for every service: the platform's catalogue.
-pub fn openapi(ms: &[Manifest]) -> Value {
+/// The document as of a dated version.
+///
+/// `at` is what a caller pinned. The shape that applies to it is the OLDEST
+/// declared shape at or after that version: a version with no entry for a
+/// method did not change it, so what it sees is whatever the next one that did
+/// change it promised. That is the same rule the generated adapter chain
+/// applies, and if the two disagreed the document would describe an API nobody
+/// serves.
+pub fn openapi_at(ms: &[Manifest], at: Option<&str>) -> Value {
     let mut paths: Map<String, Value> = Map::new();
     for m in ms {
         for (name, meth) in &m.methods {
             let (Some(verb), Some(path)) = (meth.verb(), meth.path()) else {
                 continue;
             };
+            // The shape as of the pinned version, when there is one.
+            let shape = at.and_then(|v| {
+                meth.at
+                    .iter()
+                    .filter(|(k, _)| k.as_str() >= v)
+                    .min_by_key(|(k, _)| k.as_str())
+                    .map(|(_, s)| s)
+            });
+            let input = shape
+                .filter(|s| !s.input.is_empty())
+                .map(|s| &s.input)
+                .unwrap_or(&meth.input);
+            let output = shape
+                .filter(|s| !s.output.is_empty())
+                .map(|s| &s.output)
+                .unwrap_or(&meth.output);
             let body = if meth.mutating() {
-                json!({"required": true, "content": {"application/json": {"schema": schema(&meth.input)}}})
+                json!({"required": true, "content": {"application/json": {"schema": schema(input)}}})
             } else {
                 Value::Null
             };
@@ -39,12 +63,25 @@ pub fn openapi(ms: &[Manifest]) -> Value {
                 "operationId": name,
                 "tags": [m.service],
                 "responses": {
-                    "200": {"description": "ok", "content": {"application/json": {"schema": schema(&meth.output)}}},
+                    "200": {"description": "ok", "content": {"application/json": {"schema": schema(output)}}},
                     // uniform errors across the whole platform
                     "default": {"description": "error", "content": {"application/problem+json":
                         {"schema": {"$ref": "#/components/schemas/Problem"}}}}
                 }
             });
+            // A retired version says so in the document that gets published,
+            // which is the one a client generator reads.
+            if meth.deprecated.is_some() {
+                op["deprecated"] = json!(true);
+                op["x-axon-deprecated"] = json!(meth.deprecated);
+            }
+            if let Some(su) = &meth.sunset {
+                op["x-axon-sunset"] = json!(su);
+            }
+            if let Some(su) = &meth.successor {
+                op["x-axon-successor"] =
+                    json!(m.methods.get(su).and_then(|o| o.path()).unwrap_or(su));
+            }
             // One response per declared failure. `default` still covers what
             // nobody declared; these say which code arrives and whether trying
             // again can end differently, which is the part a generated client
@@ -79,9 +116,33 @@ pub fn openapi(ms: &[Manifest]) -> Value {
                 .insert(verb.to_lowercase(), op);
         }
     }
+    let api = ms.iter().find(|m| !m.external).map(|m| &m.api);
+    // With the header scheme the version is a parameter of every operation, and
+    // the answer depends on it: a cache that does not know that serves one
+    // caller's shape to another.
+    if let Some(api) = api.filter(|a| a.by_header()) {
+        for (_, item) in paths.iter_mut() {
+            if let Some(ops) = item.as_object_mut() {
+                for (_, op) in ops.iter_mut() {
+                    let p = json!({
+                        "name": api.header_name(), "in": "header", "required": false,
+                        "schema": {"type": "string", "enum": api.dates()},
+                        "description": "the dated version the caller pins; absent is the default"
+                    });
+                    match op["parameters"].as_array_mut() {
+                        Some(ps) => ps.push(p),
+                        None => op["parameters"] = json!([p]),
+                    }
+                }
+            }
+        }
+    }
     json!({
         "openapi": "3.1.0",
-        "info": {"title": "axon", "version": "1.0.0",
+        "info": {"title": "axon",
+                 "version": at.map(|v| v.to_string())
+                     .or_else(|| api.and_then(|a| a.current().map(|c| c.to_string())))
+                     .unwrap_or_else(|| "1.0.0".into()),
                  "description": "Generated from the manifests. Do not edit."},
         "paths": paths,
         "components": {"schemas": {

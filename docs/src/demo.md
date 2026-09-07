@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **39 checks against reality**: not against a mock,
+brings the whole system up and makes **42 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -113,6 +113,15 @@ OK: the system does exactly what it declares
     HTTP 422  {"type":"about:axon/orders/order_rejected","title":"order_rejected","status":422,...}
   OK: order_rejected with 422, the status and the code the manifest declares
 
+==> two versions of the same endpoint, and the retirement of the old one
+  declared in the generated code: deprecation @1788220800, sunset Fri, 31 Dec 2027 00:00:00 GMT
+  the v1 of the endpoint: what it answers and what it announces
+    HTTP 200  Deprecation: @1788220800  Sunset: Fri, 31 Dec 2027 00:00:00 GMT
+    Link: </v2/tenants/{tenantId}/orders/{orderId}>; rel="successor-version"
+  OK: it still answers 200 and goes out with the declared Deprecation and Sunset
+  OK: the Link points at the v2, so nobody has to guess where to go
+  OK: the v2 answers the same plus the customer, and announces nothing: it is the current one
+
 ==> declared vs applied rollout
   declared 10%  measured 10.7%  (32 of 300)
   OK: sticky per tenant, and the percentage applies
@@ -184,6 +193,7 @@ shortest way to show one thing:
 | `./check-es.sh` | optimistic concurrency, view lag, the relay, snapshots, prune, rebuild with the shadow, and the transactional outbox |
 | `./check-retries.sh` | the declared retries, occurring, and what they buy |
 | `./check-errors.sh` | a declared failure: the final one arrives once, the retriable one uses the whole budget |
+| `./check-versions.sh` | two versions of the same endpoint, and the headers the retired one really sends |
 | `./check-pooler.sh` | tenant isolation through pgdog in transaction mode |
 | `./check-warehouse.sh` | schema, funnel, metrics, PII and drift detection |
 | `python3 check-flags.py localhost:8016 charge_v2 10` | the rollout, applied and sticky |

@@ -122,6 +122,92 @@ The demo measures it: the same route and the same policy, and the final failure 
 **once** while the retriable one arrives `1 + retries` times. See
 [The demo, measured](./demo.md).
 
+## `[api]`: how the API is versioned
+
+Two schemes, and `verify` requires the whole platform to declare the same one — with
+two, a caller has to know which service it is talking to before it can know how to ask
+for a version.
+
+**`"path"` (the default).** The version is the route: `/v1/...` and `/v2/...` are two
+methods that coexist, and the old one declares its retirement.
+
+```toml
+[methods.getOrder]
+http = "GET /v1/tenants/{tenantId}/orders/{orderId}"
+out  = { orderId = "uuid", status = "string", total = "money" }
+deprecated = "2026-09-01"     # RFC 9745, in the response
+sunset     = "2027-12-31"     # RFC 8594: the day it stops being served
+successor  = "getOrderV2"     # Link rel="successor-version"
+
+[methods.getOrderV2]
+http = "GET /v2/tenants/{tenantId}/orders/{orderId}"
+out  = { orderId = "uuid", status = "string", total = "money", customerId = "uuid" }
+```
+
+Deprecated is not gone: the route keeps answering what it always answered and says so on
+the way out, with the formats each RFC asks for — `Deprecation` is an sf-date in seconds
+and `Sunset` an HTTP-date, neither of them the manifest's ISO date. `verify` names who is
+still calling it, which inside one repo is a grep and across twenty services is the
+question nobody can answer.
+
+**`"header"` (the Stripe scheme).** The route never changes. The caller pins a dated
+version, the server keeps ONE implementation —the current one— and an adapter per version
+that changed a shape. That is what lets a version from years ago stay alive: nobody
+maintains N implementations, they maintain N small adapters.
+
+```toml
+[api]
+versioning = "header"
+header     = "X-Api-Version"
+default    = "2026-09-01"      # what an unpinned caller gets
+support_window_days = 365      # nothing dies before a year
+lts_window_days     = 1095     # an LTS lives three
+
+[[api.version]]
+date   = "2026-01-15"
+lts    = true
+sunset = "2029-01-15"
+
+[[api.version]]
+date       = "2026-05-01"
+deprecated = "2026-09-01"
+sunset     = "2027-06-01"
+
+[[api.version]]
+date = "2026-09-01"
+
+[methods.getOrder]
+http = "GET /orders/{orderId}"          # the route carries no version
+out  = { orderId = "uuid", status = "string", customer = "json" }
+
+# Only what CHANGED gets declared. A version with no entry did not change this
+# method, and the chain skips it.
+[methods.getOrder.at."2026-05-01"]
+out     = { orderId = "uuid", status = "string", customerId = "uuid" }
+adapter = "downgradeTo202605"
+```
+
+What comes out of that:
+
+| Projection | What it gets |
+| --- | --- |
+| The types | one interface per old shape, and the adapter's, typed step by step: each one receives what the one above it produced |
+| The chain | `adaptGetOrder(version, answer, adapters)`, applied newest → oldest, and `versionedRoutes` keyed by route |
+| The resolution | `resolveApiVersion(pinned)`: absent is the default, unknown is a `400 unknown_api_version` — guessing which version somebody meant is worse than saying no |
+| The headers | `Vary` always, the resolved version echoed, and the retirement of the pinned version if it has one |
+| `axon openapi --api-version <date>` | the document as of that version: the shapes it promised, not today's |
+| `axon versions` | the maintenance cycle: stage, days left, and what changed at each step |
+
+The field mapping is business logic and a person writes it. What axon generates is the
+plumbing and the **obligation**: a version declared with a changed shape and no
+implementation does not compile.
+
+`verify` refutes: an LTS with no `sunset` ("long term" with no date is not a promise), a
+version served for less than the declared window, an LTS that dies before the ordinary
+version that follows it, versions out of order —the list is the order the adapters are
+applied in—, a past sunset still declared, a shape that changed with no `adapter` (naming
+the fields), a shape identical to the current one, and the two schemes at once.
+
 ## `[aggregate.<name>]` and `[view.<name>]`
 
 ```toml

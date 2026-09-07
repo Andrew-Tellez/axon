@@ -60,9 +60,33 @@ retriable. See [`errors` on a method](./manifest.md#errors-on-a-method).
 
 It runs with `node --test`, with no dependencies.
 
-## `axon openapi <sources>`
+## `axon versions <sources>`
+The API's maintenance cycle, read out loud: which version is current, which are still
+supported, how many days each has left, and what changed at each step. It does not block
+— that is `verify`'s job — it tells you what nobody can see.
+
+```console
+$ axon versions manifests/
+versioning = header (X-Api-Version)  3 versions · default 2026-09-01 · support window 365d
+
+  2026-09-01  current  no death date
+
+  2026-05-01  supported  267d left · sunset 2027-06-01
+    · shop.getOrder  adapter downgradeGetOrderTo202605 · changed: customer
+
+  2026-01-15  lts  861d left · sunset 2029-01-15
+    · shop.getOrder  adapter downgradeGetOrderTo202601 · changed: status, customer
+```
+
+Under `versioning = "path"` it lists the routes that declared a retirement instead.
+
+## `axon openapi <sources> [--api-version <date>]`
 OpenAPI 3.1 for the whole platform in one document. `Idempotency-Key` mandatory on
 mutating methods and `application/problem+json` (RFC 7807) as the uniform error.
+
+With `--api-version` it emits the document **as of** a dated version: the shapes that
+version promised, not today's. Under the header scheme every operation also carries the
+version header as a parameter, with the declared versions as its `enum`.
 
 ## `axon discover <sources>`
 A JSON registry: version, owner, methods with inputs and outputs, events emitted and

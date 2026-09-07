@@ -1,6 +1,8 @@
 // The business logic. The only thing a person writes.
 import { OrdersService, fail, problem, httpRoutes, manifest, type PlaceOrderIn, type PlaceOrderOut,
-         type GetOrderIn, type GetOrderOut, type Envelope } from "./contracts.ts";
+         retiredRoutes,
+         type GetOrderIn, type GetOrderOut,
+         type GetOrderV2In, type GetOrderV2Out, type Envelope } from "./contracts.ts";
 import { startTelemetry } from "../telemetry.ts";
 import { NotFound, bus, connectBroker, serve, waitForDb } from "../runtime.ts";
 import type pg from "pg";
@@ -67,6 +69,20 @@ class Orders extends OrdersService {
     return { orderId };
   }
 
+  /** The v2 of the same read: it returns the customer too, which is what the
+   *  v1 did not give and forced a second call. It is the same row — versioning
+   *  an endpoint is not duplicating the logic. */
+  async getOrderV2(input: GetOrderV2In): Promise<GetOrderV2Out> {
+    const v1 = await this.getOrder(input);
+    const { rows } = await this.#asTenant(input.tenantId, (c) =>
+      c.query(`SELECT customer_id FROM "order" WHERE tenant_id = $1 AND id = $2`, [
+        input.tenantId,
+        input.orderId,
+      ]),
+    );
+    return { ...v1, customerId: rows[0].customer_id };
+  }
+
   async getOrder(input: GetOrderIn): Promise<GetOrderOut> {
     // `tenant_id` in the WHERE is not redundant with the RLS: it is what tells
     // the sharder which node to go to. Without it, the query is not answered
@@ -101,9 +117,13 @@ serve(
       svc.placeOrder({ ...body, tenantId: params.tenantId }, e),
     "GET /v1/tenants/{tenantId}/orders/{orderId}": (_body, _e, params) =>
       svc.getOrder({ tenantId: params.tenantId, orderId: params.orderId }),
+    "GET /v2/tenants/{tenantId}/orders/{orderId}": (_body, _e, params) =>
+      svc.getOrderV2({ tenantId: params.tenantId, orderId: params.orderId }),
   },
   // startup fails if the manifest declares a route with no handler
   httpRoutes,
   // the declared failures, projected as problem+json
   problem,
+  // and the retirement of the v1, projected as the headers of its response
+  retiredRoutes,
 );

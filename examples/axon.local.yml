@@ -322,7 +322,7 @@ services:
       retries: 30
     labels:
       - traefik.enable=true
-      - traefik.http.routers.orders.rule=PathPrefix(`/v1/tenants`)
+      - traefik.http.routers.orders.rule=PathPrefix(`/v1/tenants`) || PathPrefix(`/v2/tenants`)
       - traefik.http.services.orders.loadbalancer.server.port=8080
   payments:
     build:

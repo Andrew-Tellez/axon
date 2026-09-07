@@ -42,6 +42,27 @@ has to be fixed cannot end up underneath.
 | A public route with no `rate_limit` or no `timeout_ms` | error |
 | A paginated method that does not return a `cursor` | error |
 
+## Versioning and its cycle
+
+| | |
+| --- | --- |
+| Two services declaring a different `[api]` | error |
+| A route with no version under `versioning = "path"` | error |
+| A route that versions the path under `versioning = "header"` | error |
+| `at` shapes with a `versioning` that is not `"header"` | error |
+| An LTS with no `sunset` | error |
+| A version served for less than the declared window | error |
+| An LTS that dies before a newer version that is not LTS | error |
+| Versions out of order, duplicated, or with a malformed date | error |
+| A `sunset` already past and still declared | error |
+| An `at` shape that changed with no `adapter` | error |
+| An `at` shape identical to the current one | error |
+| One adapter for two versions | error |
+| `sunset` with no `deprecated` on a method | error |
+| A method deprecated with no `successor` or no `sunset` | warning |
+| Somebody calling a method that is deprecated | warning |
+| A `default` that is not the newest version | warning |
+
 ## Declared failures
 
 | | |

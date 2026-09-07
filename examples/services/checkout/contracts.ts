@@ -141,7 +141,11 @@ export const manifest = {
           "retriable": false,
           "detail": "the compensation did not get through; the sweep takes it from here"
         }
-      ]
+      ],
+      "deprecated": null,
+      "sunset": null,
+      "successor": null,
+      "at": {}
     }
   },
   "depends": [
@@ -186,6 +190,14 @@ export const manifest = {
     "export": true,
     "pii": "exclude",
     "warehouse": "clickhouse"
+  },
+  "api": {
+    "versioning": null,
+    "header": null,
+    "default": null,
+    "support_window_days": null,
+    "lts_window_days": null,
+    "version": []
   },
   "pooler": {
     "engine": "none",
@@ -914,6 +926,8 @@ export async function rebuildConversion(
 /** HTTP routes the manifest declares. Startup must fail if any of them
  *  has no handler: a 404 in production tells nobody. */
 export const httpRoutes = ["POST /v1/checkouts"] as const;
+
+
 
 
 /** The CAP side declared in the manifest: eventual/reject.
