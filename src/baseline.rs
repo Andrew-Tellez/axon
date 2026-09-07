@@ -112,42 +112,42 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
         ));
     }
 
-    for (ev, antes) in &b.events {
+    for (ev, before) in &b.events {
         match ahora.events.get(ev) {
             None => errors.push(format!(
                 "{ev}: it was published by {} and nobody emits it any more; its consumers are \
                  still deployed. If it really is being retired, remove it from {ARCHIVO} in the \
                  same PR",
-                antes.owner
+                before.owner
             )),
-            Some(hoy) if hoy.owner != antes.owner => errors.push(format!(
+            Some(now_) if now_.owner != before.owner => errors.push(format!(
                 "{ev}: changed owner, from {} to {}; an event has exactly one owner",
-                antes.owner, hoy.owner
+                before.owner, now_.owner
             )),
-            Some(hoy) if hoy.fields != antes.fields => {
-                for (field, kind) in &antes.fields {
-                    match hoy.fields.get(field) {
+            Some(now_) if now_.fields != before.fields => {
+                for (field, kind) in &before.fields {
+                    match now_.fields.get(field) {
                         None => errors.push(format!(
                             "{ev}: field `{field}` disappeared from a published version; \
                              publish {} instead",
-                            siguiente(ev)
+                            next_version(ev)
                         )),
                         Some(t) if t != kind => errors.push(format!(
                             "{ev}.{field}: changed from `{kind}` to `{t}` in a published version; \
                              publish {} instead",
-                            siguiente(ev)
+                            next_version(ev)
                         )),
                         _ => {}
                     }
                 }
-                for field in hoy.fields.keys() {
-                    if !antes.fields.contains_key(field) {
+                for field in now_.fields.keys() {
+                    if !before.fields.contains_key(field) {
                         // Every axon field is required: adding one breaks the old
                         // producers just as removing one breaks the consumers.
                         errors.push(format!(
                             "{ev}: new field `{field}` in a published version; \
                              publish {} instead",
-                            siguiente(ev)
+                            next_version(ev)
                         ));
                     }
                 }
@@ -156,22 +156,22 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
         }
     }
 
-    for (key, antes) in &b.methods {
+    for (key, before) in &b.methods {
         match ahora.methods.get(key) {
             None => errors.push(format!(
-                "{key}: estaba publicado y ya no existe; sus llamadores siguen desplegados"
+                "{key}: it was published and no longer exists; its callers are still deployed"
             )),
-            Some(hoy) => {
-                if hoy.http != antes.http {
+            Some(now_) => {
+                if now_.http != before.http {
                     let r = |o: &Option<String>| o.clone().unwrap_or_else(|| "(no route)".into());
                     errors.push(format!(
                         "{key}: the route changed from `{}` to `{}`; the clients point at the old one",
-                        r(&antes.http),
-                        r(&hoy.http)
+                        r(&before.http),
+                        r(&now_.http)
                     ));
                 }
-                for (field, kind) in &antes.output {
-                    match hoy.output.get(field) {
+                for (field, kind) in &before.output {
+                    match now_.output.get(field) {
                         None => errors.push(format!(
                             "{key}: stopped returning `{field}`; the callers read it"
                         )),
@@ -181,13 +181,13 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
                         _ => {}
                     }
                 }
-                for (field, kind) in &hoy.input {
-                    match antes.input.get(field) {
+                for (field, kind) in &now_.input {
+                    match before.input.get(field) {
                         None => errors.push(format!(
                             "{key}: new input `{field}`, required; the old callers do not send it"
                         )),
-                        Some(antes_tipo) if antes_tipo != kind => errors.push(format!(
-                            "{key}: input `{field}` changed from `{antes_tipo}` to `{kind}`"
+                        Some(before_kind) if before_kind != kind => errors.push(format!(
+                            "{key}: input `{field}` changed from `{before_kind}` to `{kind}`"
                         )),
                         _ => {}
                     }
@@ -199,7 +199,7 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
 }
 
 /// `order.placed@v1` -> `order.placed@v2`
-fn siguiente(ev: &str) -> String {
+fn next_version(ev: &str) -> String {
     match ev.rsplit_once("@v") {
         Some((base, n)) => match n.parse::<u32>() {
             Ok(v) => format!("`{base}@v{}`", v + 1),
