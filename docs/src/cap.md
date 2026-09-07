@@ -33,16 +33,16 @@ puede prometer.
 ```console
 $ axon cap manifests/ -s payments
 payments  [CP]  consistency = strong, on_partition = reject
-  x dependencia        contradice  se llama a `orders`, que es AP, en una ruta
-                                   sincrona: la garantia de la ruta es la del mas debil
-  ! saga               cuesta      `refund` compensa un paso anterior. Una compensacion
-                                   es consistencia eventual por construccion: el estado
-                                   propio es CP, el FLUJO no
-  i outbox             implica     el estado propio queda consistente, pero los
-                                   consumidores lo ven tarde
-  i standby HA         implica     no rompe la consistencia: del standby no se lee. Es
-                                   lo unico de esta lista que mejora la disponibilidad
-                                   sin costo en la C
+  x dependency         contradicts  `orders`, which is AP, is called on a synchronous
+                                    path: the path's guarantee is the weaker one
+  ! saga               costs  `refund` compensates an earlier step. A compensation is
+                              eventual consistency by construction: your own state is
+                              CP, the FLOW is not
+  i outbox             implies  your own state stays consistent, but consumers see it
+                                late: the relay publishes after the commit
+  i standby HA         implies  it breaks no consistency: nobody reads from the standby,
+                                it only takes over. It is the only thing on this list
+                                that improves availability at no cost in the C
 ```
 
 **`x` lo bloquea `verify`, `!` es un costo que pagás, `i` es una consecuencia que

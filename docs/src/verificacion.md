@@ -4,11 +4,11 @@ Lo que convierte al manifiesto en algo más que documentación.
 
 ```console
 $ axon verify manifests/
-error  billing consume payment.refunded@v1 pero nadie lo emite
-error  payments.payment.stuck no es final y no tiene salida; es un deadlock
-error  orders.payment.order_id -> payment: FK cruza el limite de servicio
-aviso  payments es strong y llama a orders que es eventual
-falla  4 servicios, 3 errores, 1 avisos
+error  billing consumes payment.refunded@v1 but nobody emits it
+error  payments.payment.stuck is not final and has no way out; it is a deadlock
+error  orders.payment.order_id: an FK to payment crosses the service boundary
+warn   payments is `strong` and calls orders, which is `eventual`
+fail   4 services, 3 errors, 1 warnings
 ```
 
 Sale con código 1 si hay errores. Los errores van primero: en una lista larga, lo que
@@ -93,8 +93,8 @@ lo que se publicó.
 ```console
 $ axon baseline manifests/ > manifests/axon.baseline.json   # al publicar
 $ axon verify manifests/
-error  order.placed@v1.total: cambio de `money` a `int` en una version publicada;
-       publica `order.placed@v2` en su lugar
+error  order.placed@v1.total: changed from `money` to `int` in a published version;
+       publish order.placed@v2 instead
 ```
 
 | | |

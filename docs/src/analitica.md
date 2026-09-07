@@ -26,10 +26,11 @@ Declarada, `axon infra` puede cablear la ingesta — o negarse:
 
 ```console
 $ axon infra manifests/ --target gcp
-error  `[analytics] warehouse = "clickhouse"` no tiene camino de ingesta en `gcp`. El
-       esquema se genera igual y las tablas se quedarian vacias sin un solo error.
-       Combinaciones cableadas: gcp+bigquery, aws+snowflake, aws+clickhouse,
-       local+clickhouse. O `export = false` si este entorno no exporta.
+error  `[analytics] warehouse = "clickhouse"` has no ingest path on `gcp`. The schema
+       gets generated all the same and the tables would stay empty without a single
+       error. Wired combinations: gcp+bigquery, aws+snowflake, aws+clickhouse,
+       local+clickhouse, k8s+clickhouse. Or `export = false` if this environment does
+       not export.
 ```
 
 | target + bodega | qué se despliega |
@@ -96,9 +97,9 @@ Con `pii = "hash"` se exporta un SHA-256 con salt, para poder contar clientes ú
 guardar el correo. Y `verify` avisa de lo que eso sigue siendo:
 
 ```console
-aviso  orders: exporta 2 campos personales hasheados a la bodega. Un hash no es
-       anonimizacion: identifica a la misma persona entre tablas, asi que sirve
-       para contar y tambien para cruzar
+warn   orders: exports 2 hashed personal fields to the warehouse. A hash is not
+       anonymisation: it identifies the same person across tables, so it works for
+       counting and for joining alike
 ```
 
 ## El embudo sale de la cadena declarada

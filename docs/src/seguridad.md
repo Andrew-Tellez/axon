@@ -43,16 +43,16 @@ con un parser SQL) y los campos `pii` — y emite una migración más:
 ```sql
 ALTER TABLE "order" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "order" FORCE ROW LEVEL SECURITY;   -- también al dueño de la tabla
-CREATE POLICY "order_inquilino" ON "order"
+CREATE POLICY "order_tenant" ON "order"
   USING ("tenant_id" = current_setting('axon.tenant', true)::uuid)
   WITH CHECK ("tenant_id" = current_setting('axon.tenant', true)::uuid);
 
-CREATE OR REPLACE VIEW "order_enmascarada" AS SELECT
+CREATE OR REPLACE VIEW "order_masked" AS SELECT
   id, customer_id, total_cents, status, tenant_id,
-  '[redactado]'::text AS "customer_email"
+  '[redacted]'::text AS "customer_email"
 FROM "order";
-REVOKE ALL ON "order" FROM axon_lectura;
-GRANT SELECT ON "order_enmascarada" TO axon_lectura;
+REVOKE ALL ON "order" FROM axon_reader;
+GRANT SELECT ON "order_masked" TO axon_reader;
 ```
 
 La regla de `verify` es la que importa: **una tabla que se olvida de la columna del
@@ -61,7 +61,7 @@ todos.** Ese es el modo de fallo silencioso que la declaración elimina.
 
 El suite no lee ese SQL: lo aplica a un Postgres real y comprueba que sin inquilino se
 ven 0 filas, que cada inquilino ve solo la suya, que escribir para otro se rechaza, y
-que la vista devuelve `[redactado]`.
+que la vista devuelve `[redacted]`.
 
 ## Una copia enmascarada, con `pg_anon`
 

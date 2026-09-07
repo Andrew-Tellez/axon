@@ -91,7 +91,7 @@ snapshot_every = 0
 
 [view.saldos]
 on = ["cuenta.abierta@v1", "cuenta.depositada@v1"]
-table = "vista_saldos"    # por defecto `vista_<nombre>`
+table = "view_saldos"     # por defecto `view_<nombre>`
 max_staleness_ms = 3000
 ```
 

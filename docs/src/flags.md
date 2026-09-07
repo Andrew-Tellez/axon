@@ -24,9 +24,9 @@ falla:
 
 ```console
 $ axon verify manifests/
-error  payments.cobro_v2: vencio el 2026-12-31. O se limpia la rama muerta, o se
-       renueva la fecha con una decision explicita: dejarlo vencido no es ninguna
-       de las dos
+error  payments.cobro_v2: expired on 2026-12-31. Either the dead branch gets cleaned
+       up or the date gets renewed as an explicit decision: leaving it expired is
+       neither
 ```
 
 Si de verdad es permanente —un interruptor de emergencia, un corte por región— se
@@ -39,8 +39,8 @@ Un porcentaje sin `sticky_by` se evalúa **por petición**: la misma entidad tom
 en una llamada y el otro en la siguiente, y con estado de por medio queda a medio migrar.
 
 ```console
-error  payments.cobro_v2: rollout al 10% sin `sticky_by`. Evaluado por peticion, la
-       misma entidad toma un camino y despues el otro, y queda a medio migrar
+error  payments.cobro_v2: rollout at 10% with no `sticky_by`. Evaluated per request,
+       the same entity takes one path and then the other, and ends up half-migrated
 ```
 
 Y el campo por el que se fija tiene que **existir en algún contrato** —una entrada de
@@ -52,7 +52,7 @@ aunque uno quiera:
 
 ```ts
 export const flagCobroV2 = (flags: Flags, tenant_id: string): Promise<boolean> =>
-  flags.evaluar("cobro_v2", false, { targetingKey: tenant_id, tenant_id });
+  flags.evaluate("cobro_v2", false, { targetingKey: tenant_id, tenant_id });
 ```
 
 Un `kill_switch` con `rollout` también es un error: se apaga entero o no sirve de nada.
@@ -86,10 +86,10 @@ El accesor sale con el tipo correcto:
 
 ```ts
 export const flagProveedorDeCobro = (flags: Flags, tenant_id: string): Promise<string> =>
-  flags.evaluar("proveedor_de_cobro", "stripe", { targetingKey: tenant_id, tenant_id });
+  flags.evaluate("proveedor_de_cobro", "stripe", { targetingKey: tenant_id, tenant_id });
 
 export const flagLimiteDeReintentos = (flags: Flags): Promise<number> =>
-  flags.evaluar("limite_de_reintentos", 3, {});
+  flags.evaluate("limite_de_reintentos", 3, {});
 ```
 
 Y `verify` bloquea dos errores propios de las variantes: un `default_variant` que no

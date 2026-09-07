@@ -90,12 +90,12 @@ export interface CompraOutputs {
 }
 
 export interface CompraActions {
-  /** paso 1 · payments.capturePayment */
+  /** step 1 · payments.capturePayment */
   step1CapturePayment(e: Envelope<unknown>, prior: CompraOutputs): Promise<PaymentsCapturePaymentOut>;
-  /** deshace el paso 1 · payments.refundPayment · recibe lo que devolvieron los pasos
+  /** undoes step 1 · payments.refundPayment · receives what the earlier steps returned,
    *  anteriores, y tiene que tolerar que no haya nada que deshacer */
   undo1RefundPayment(e: Envelope<unknown>, prior: CompraOutputs): Promise<void>;
-  /** paso 2 · payments.payoutMerchant */
+  /** step 2 · payments.payoutMerchant */
   step2PayoutMerchant(e: Envelope<unknown>, prior: CompraOutputs): Promise<PaymentsPayoutMerchantOut>;
 }
 ```
@@ -133,10 +133,10 @@ la deja silenciosamente inconsistente, que es el peor resultado posible.
 ```sql
 CREATE TABLE saga_checkout (
   id           uuid        PRIMARY KEY,  -- el id del flujo; el correlationId sirve
-  paso         int         NOT NULL,
-  estado       text        NOT NULL,
-  datos        jsonb       NOT NULL,     -- el envelope que la arranco
-  actualizado  timestamptz NOT NULL      -- cuando avanzo por ultima vez
+  step         int         NOT NULL,
+  status       text        NOT NULL,
+  data         jsonb       NOT NULL,     -- el envelope que la arranco
+  updated      timestamptz NOT NULL      -- cuando avanzo por ultima vez
 );
 ```
 
@@ -210,9 +210,9 @@ Dos instancias del servicio barren a la vez. Si el barrido *listara* las sagas c
 las dos tomarían la misma. En Postgres el reclamo y el filtro son **la misma sentencia**:
 
 ```sql
-UPDATE saga_checkout SET actualizado = now()
- WHERE estado IN ('intentando','hecho') AND actualizado < $1
- RETURNING id, datos
+UPDATE saga_checkout SET updated = now()
+ WHERE status IN ('attempting','done') AND updated < $1
+ RETURNING id, data
 ```
 
 Tocar `actualizado` *es* el reclamo: el otro barredor ya no la ve. Y si este proceso muere
@@ -271,17 +271,17 @@ sequenceDiagram
   autonumber
   participant coord as almacen·checkout
   participant banco
-  Note over coord: presupuesto 20000ms
+  Note over coord: budget 20000ms
   coord->>banco: 1 cobrar
   banco-->>coord: ok
   coord->>banco: 2 pagarProveedor
   banco-->>coord: ok
-  Note over coord: hasta aca, el camino feliz
+  Note over coord: up to here, the happy path
   rect rgba(200,80,80,0.12)
-  Note over coord: si un paso falla, se deshace lo intentado en orden INVERSO
-  Note over coord: paso 2 sin compensacion: es el ultimo
-  coord->>banco: deshacer 1 · reembolsar
-  banco-->>coord: ok (idempotente)
+  Note over coord: if a step fails, what was attempted is undone in REVERSE order
+  Note over coord: step 2 with no compensation: it is the last one
+  coord->>banco: undo 1 · reembolsar
+  banco-->>coord: ok (idempotent)
   end
 ```
 
@@ -424,18 +424,19 @@ después depende de en qué orden se lean las filas. `axon verify` lo exige.
 
 ```console
 $ axon verify manifests/
-error  libro.cuenta: `cuenta_event` sin UNIQUE sobre (stream_id, version). Dos escrituras
-       concurrentes sobre el mismo flujo entran las dos con la misma version, sin un solo
-       error, y el estado que se reconstruye depende de en que orden se lean
+error  libro.cuenta: `cuenta_event` has no UNIQUE on (stream_id, version). Two
+       concurrent writes to the same stream both land with the same version, with no
+       error at all, and the state that gets rebuilt depends on what order they are
+       read in
 ```
 
 ### Append-only, y no como recomendación
 
 ```console
-error  libro/002_arreglo.contract.sql: `DELETE` sobre `cuenta_event`, que es el flujo de
-       `cuenta`. Un flujo es append-only: cambiar un evento pasado deja un pasado que no
-       ocurrio, y todo lo que se reconstruya despues va a ser coherente con esa mentira.
-       Para corregir se agrega un evento nuevo, no se edita el viejo
+error  libro/002_arreglo.contract.sql: `DELETE` on `cuenta_event`, which is the stream
+       of `cuenta`. A stream is append-only: changing a past event leaves a past that
+       did not happen, and everything rebuilt afterwards will be consistent with that
+       lie. To correct something you add a new event, you do not edit the old one
 ```
 
 A diferencia del resto de las tablas, aquí **no hay `.contract.sql` que lo habilite**. Una
@@ -450,9 +451,9 @@ un caso por evento declarado. Cómo cada evento cambia el estado lo escribe quie
 ```ts
 export interface CuentaRules<CuentaEstado> {
   initial(streamId: string): CuentaEstado;
-  applyCuentaAbiertaV1(estado: CuentaEstado, e: CuentaAbiertaV1): CuentaEstado;
-  applyCuentaDepositadaV1(estado: CuentaEstado, e: CuentaDepositadaV1): CuentaEstado;
-  applyCuentaCerradaV1(estado: CuentaEstado, e: CuentaCerradaV1): CuentaEstado;
+  applyCuentaAbiertaV1(state: CuentaState, e: CuentaAbiertaV1): CuentaState;
+  applyCuentaDepositadaV1(state: CuentaState, e: CuentaDepositadaV1): CuentaState;
+  applyCuentaCerradaV1(state: CuentaState, e: CuentaCerradaV1): CuentaState;
 }
 ```
 
@@ -565,10 +566,11 @@ Con event sourcing el flujo ya es durable, así que **nadie publica en línea**:
 
 ```console
 $ axon verify manifests/
-error  checkout.compra: un agregado cuyos eventos se publican necesita `[patterns] outbox
-       = true`. El flujo ya es durable, asi que publicar en linea deja una ventana en la
-       que el evento esta anotado y nadie lo recibio, y publicar antes de anotar deja lo
-       contrario. El traspaso va en la MISMA transaccion que el append
+error  checkout.compra: an aggregate whose events get published needs `[patterns]
+       outbox = true`. The stream is already durable, so publishing inline leaves a
+       window where the event is recorded and nobody received it, and publishing before
+       recording leaves the opposite. The handoff goes in the SAME transaction as the
+       append
 ```
 
 Las dos filas —el evento del flujo y la del outbox— entran en **una** transacción, o no
@@ -625,10 +627,10 @@ vigente:
 CREATE TABLE compra_snapshot (
   stream_id  uuid  NOT NULL,
   version    int   NOT NULL,
-  reglas     int   NOT NULL,   -- con que version de las reglas se calculo
-  estado     jsonb NOT NULL,
+  rules      int   NOT NULL,   -- con que version de las reglas se calculo
+  state      jsonb NOT NULL,
   en         timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (stream_id, version, reglas)
+  PRIMARY KEY (stream_id, version, rules)
 );
 ```
 
@@ -643,9 +645,9 @@ export const compraSnapshotEvery   = 50;
 export const compraSnapshotRules = 1;
 
 /** De la ultima foto valida, y solo el resto del flujo desde ahi. */
-export async function compraLoad<E>(reglas, flujo: SnapshottingStream, streamId)
+export async function compraLoad<E>(rules, stream: SnapshottingStream, streamId)
 /** Fotografia si toca. Devuelve si la guardo, para poder medirlo. */
-export async function compraSnapshot<E>(flujo, streamId, version, estado)
+export async function compraSnapshot<E>(stream, streamId, version, state)
 ```
 
 Los dos números salen del manifiesto: nadie los teclea dos veces. Y `SnapshottingStream` sólo se
@@ -812,9 +814,9 @@ dentro de **su** flujo. Con un flujo parecía funcionar; con varios no identific
 vista se salta eventos o los reprocesa sin que nada avise.
 
 ```console
-error  checkout.conversion: `vista_conversion_checkpoint` sin clave sobre (vista,
-       stream_id). Un flujo pisaria el punto de otro, y la vista se saltaria eventos o los
-       reprocesaria sin que nada avise
+error  checkout.conversion: `view_conversion_checkpoint` has no key on (view_name,
+       stream_id). One stream would overwrite another's position, and the view would
+       skip events or reprocess them without anything warning about it
 ```
 
 Y al arreglarlo apareció un hueco mayor: **el lector de esquema no plegaba `ALTER TABLE ADD
@@ -829,11 +831,11 @@ hace que el intercambio deje una vista **incompleta**, y eso se descubriría el 
 reconstrucción:
 
 ```console
-error  libro.saldos: `vista_saldos_sombra` sin la columna `centavos` que tiene
-       `vista_saldos`. El intercambio dejaria una vista sin ese dato, y recien ahi se veria
-error  libro.saldos: se puede reconstruir y falta `vista_saldos_sombra`. Reconstruir en el
-       sitio deja la vista incompleta mientras corre, y se sigue leyendo: los que
-       preguntan reciben menos filas de las que hay, sin un error
+error  libro.saldos: `view_saldos_sombra` has no `centavos` column, which `view_saldos`
+       does. The swap would leave a view without that data, and only then would it show
+error  libro.saldos: it can be rebuilt and `view_saldos_sombra` is missing. Rebuilding
+       in place leaves the view incomplete while it runs, and it keeps being read:
+       whoever asks gets fewer rows than there are, with no error
 ```
 
 Y un tipo distinto entre las dos también es un error: al intercambiar, la vista cambia de

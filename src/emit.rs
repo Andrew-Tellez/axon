@@ -997,7 +997,7 @@ fn seq_saga(m: &Manifest, name: &str, sg: &Saga) -> String {
         }
     }
     o.push(format!(
-        "  Note over coord: presupuesto {}",
+        "  Note over coord: budget {}",
         match sg.timeout_ms {
             Some(ms) => format!("{ms}ms"),
             None => "undeclared".to_string(),
@@ -1017,8 +1017,8 @@ fn seq_saga(m: &Manifest, name: &str, sg: &Saga) -> String {
         match &step.undo {
             Some(u) => {
                 if let Some((svc, met)) = Step::parts(u) {
-                    o.push(format!("  coord->>{svc}: deshacer {} · {met}", i + 1));
-                    o.push(format!("  {svc}-->>coord: ok (idempotente)"));
+                    o.push(format!("  coord->>{svc}: undo {} · {met}", i + 1));
+                    o.push(format!("  {svc}-->>coord: ok (idempotent)"));
                 }
             }
             None => o.push(format!(

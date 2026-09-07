@@ -99,10 +99,10 @@ petición.
 
 ```console
 $ axon verify manifests/
-error  orders.getOrder: no recibe `tenant_id` y la base esta repartida por esa columna.
-       El router rechaza la consulta que no filtra por el inquilino (`no multi tenant
-       id`), y el sharder no sabe a que nodo mandarla. Agregala a `in`, normalmente
-       tambien a la ruta
+error  orders.getOrder: does not receive `tenant_id` and the database is sharded by
+       that column. The router rejects a query that does not filter by tenant (`no
+       multi tenant id`), and the sharder does not know which node to send it to. Add
+       it to `in`, and usually to the route as well
 ```
 
 Buscar por clave primaria deja de alcanzar, y eso no es una limitación del pooler: es lo
@@ -112,10 +112,10 @@ que significa repartir por inquilino.
 
 ```console
 $ axon verify manifests/
-error  p: `mode = "transaction"` con `tenant_column` y sin `tenant_binding = "set_local"`.
-       La conexion vuelve al pool en cada COMMIT y se le entrega a otro inquilino: una
-       GUC de sesion sobrevive y la siguiente peticion lee las filas del anterior, sin
-       un error. `SET LOCAL` muere con la transaccion
+error  p: `mode = "transaction"` with `tenant_column` and no `tenant_binding =
+       "set_local"`. The connection goes back to the pool at every COMMIT and is handed
+       to another tenant: a session GUC survives and the next request reads the previous
+       tenant's rows, with no error. `SET LOCAL` dies with the transaction
 ```
 
 En modo transacción la conexión física se recicla entre inquilinos. Si el inquilino se
@@ -159,9 +159,9 @@ fuga de `set_config()`, y está en rojo mientras su corrección no esté integra
 
 ```console
 $ axon verify manifests/
-error  g: `state = "neo4j"` no esta soportado. Motores nativos: postgres. Un motor
-       distinto se resuelve con un plugin `axon-infra-neo4j`, que recibe el plan
-       neutral por stdin
+error  g: `state = "neo4j"` is not supported. Native engines: postgres. A different
+       one is served by an `axon-infra-neo4j` plugin, which receives the neutral plan
+       on stdin
 ```
 
 Hoy el único motor nativo es `postgres`. El plan es soportar más familias —series
