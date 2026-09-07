@@ -224,7 +224,8 @@ pub fn review(m: &Manifest, json: &str) -> Result<(Vec<String>, Vec<String>), St
     // taking what was not measured as fine.
     if r.metrics.values().all(|m| m.thresholds.is_empty()) {
         return Err(
-            "the summary carries no thresholds: run k6 with the script `axon load` generates".into(),
+            "the summary carries no thresholds: run k6 with the script `axon load` generates"
+                .into(),
         );
     }
 

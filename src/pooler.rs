@@ -126,8 +126,10 @@ pub fn build(ms: &[Manifest], target: &str, only: Option<&str>) -> Result<String
         "#".to_string(),
         match target {
             "local" => "# The hosts are the containers `axon infra --target local` brings up.",
-            _ => "# The nodes come from variables: a generated file is no place for a\n\
-                  # password or for an environment's topology.",
+            _ => {
+                "# The nodes come from variables: a generated file is no place for a\n\
+                  # password or for an environment's topology."
+            }
         }
         .to_string(),
         String::new(),

@@ -162,10 +162,7 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         // makes it impossible to write the event outside the transaction that
         // changes the state. Without an outbox there is no transaction to share.
         let (signature, step) = if m.patterns.outbox {
-            (
-                "data: {}, tx: unknown, cause?: Envelope<unknown>",
-                ", tx",
-            )
+            ("data: {}, tx: unknown, cause?: Envelope<unknown>", ", tx")
         } else {
             ("data: {}, cause?: Envelope<unknown>", "")
         };
@@ -196,8 +193,7 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     }
     if !m.consumes.is_empty() {
         cls.push(
-            "  /** Single entry point: routes by type and deduplicates by envelope id. */"
-                .into(),
+            "  /** Single entry point: routes by type and deduplicates by envelope id. */".into(),
         );
         cls.push("  dispatch(e: Envelope<unknown>): Promise<void> {".into());
         cls.push("    return this.inbox.once(e.id, async () => {".into());
@@ -562,7 +558,6 @@ fn salida_de(m: &Manifest, r: &str) -> String {
     }
 }
 
-
 /// The aggregate: the event store and the `fold`.
 ///
 /// The mechanical part is generated —the append with an optimistic version, the
@@ -612,7 +607,7 @@ pub fn aggregates_ts(m: &Manifest) -> String {
              this.expected = expected;\n  \
            }\n\
          }\n"
-            .to_string(),
+        .to_string(),
     ];
     if m.aggregate.values().any(|a| a.snapshot_every > 0) {
         o.push(
@@ -784,8 +779,7 @@ pub fn aggregates_ts(m: &Manifest) -> String {
 
 /// The projection: one case per declared event, and where it left off.
 pub fn views_ts(m: &Manifest) -> String {
-    let mut o = vec![
-        "\n/** Where a view records how far it got.\n \
+    let mut o = vec!["\n/** Where a view records how far it got.\n \
          *\n \
          *  Without this, a restart either reprocesses from the beginning or skips\n \
          *  what it did not get to apply. Both give a wrong view, and neither raises\n \
@@ -807,8 +801,7 @@ pub fn views_ts(m: &Manifest) -> String {
             *  work. */\n  \
            read(view: string, streamId: string): Promise<number>;\n\
          }\n"
-            .to_string(),
-    ];
+    .to_string()];
     // Rebuilding a view is only possible if its events are available LOCALLY.
     // The ones that arrived over the bus are gone: they were consumed. So the
     // function is generated only when every event of the view belongs to an
@@ -852,7 +845,7 @@ pub fn views_ts(m: &Manifest) -> String {
              export interface StreamSource {\n  \
                streams(): Promise<string[]>;\n\
              }\n"
-                .to_string(),
+            .to_string(),
         );
     }
     for (name, vi) in &m.view {
@@ -1012,7 +1005,9 @@ fn seq_saga(m: &Manifest, name: &str, sg: &Saga) -> String {
     o.push("  Note over coord: up to here, the happy path".to_string());
     // the way back: in reverse order, which is the only correct one
     o.push("  rect rgba(200,80,80,0.12)".to_string());
-    o.push("  Note over coord: if a step fails, what was attempted is undone in REVERSE order".into());
+    o.push(
+        "  Note over coord: if a step fails, what was attempted is undone in REVERSE order".into(),
+    );
     for (i, step) in sg.steps.iter().enumerate().rev() {
         match &step.undo {
             Some(u) => {
@@ -1044,10 +1039,7 @@ pub fn build_seq(ms: &[Manifest], root: &str, solo_eventos: bool) -> Result<Stri
         .collect();
     // A saga is a flow too, and its own has a branch no event diagram shows:
     // the compensation.
-    if let Some((m, sg)) = ms
-        .iter()
-        .find_map(|m| m.saga.get(root).map(|sg| (m, sg)))
-    {
+    if let Some((m, sg)) = ms.iter().find_map(|m| m.saga.get(root).map(|sg| (m, sg))) {
         return Ok(seq_saga(m, root, sg));
     }
     if !emitter.contains_key(root) {

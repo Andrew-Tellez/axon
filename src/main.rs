@@ -371,8 +371,8 @@ fn run() -> Result<ExitCode, String> {
                 return Ok(ExitCode::SUCCESS);
             }
             if introspect || check.is_some() {
-                let d = bi::dialect(&target)
-                    .ok_or_else(|| format!("unknown warehouse `{target}`"))?;
+                let d =
+                    bi::dialect(&target).ok_or_else(|| format!("unknown warehouse `{target}`"))?;
                 if introspect {
                     print!("{}", bi::introspect(&d, &dataset));
                     return Ok(ExitCode::SUCCESS);

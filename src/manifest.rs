@@ -799,7 +799,9 @@ impl Table {
 
 pub type Tables = IndexMap<String, Table>;
 
-use sqlparser::ast::{AlterTableOperation, ColumnOption, ObjectType, RenameTableNameKind, Statement, TableConstraint};
+use sqlparser::ast::{
+    AlterTableOperation, ColumnOption, ObjectType, RenameTableNameKind, Statement, TableConstraint,
+};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
@@ -1017,7 +1019,8 @@ pub fn parse_ddl(text: &str, origin: &str, into: &mut Tables) {
                                 let dropped: Vec<String> = column_names.iter().map(ident).collect();
                                 tb.cols.retain(|c| !dropped.contains(&c.name));
                                 // uniqueness over a dropped column no longer exists
-                                tb.uniques.retain(|u| !u.iter().any(|c| dropped.contains(c)));
+                                tb.uniques
+                                    .retain(|u| !u.iter().any(|c| dropped.contains(c)));
                             }
                         }
                         _ => {}

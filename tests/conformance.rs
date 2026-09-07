@@ -60,10 +60,7 @@ fn tuned(warehouse: &str) -> String {
         text = match warehouse {
             // k8s has no ingest path: what fits is exactly what the error
             // message says, `export = false`
-            "none" => text.replace(
-                "[analytics]",
-                "[analytics]\nexport = false",
-            ),
+            "none" => text.replace("[analytics]", "[analytics]\nexport = false"),
             other => text.replace(
                 "warehouse = \"clickhouse\"",
                 &format!("warehouse = \"{other}\""),
@@ -145,7 +142,9 @@ fn traceability_is_not_optional() {
         ts.contains("tx: unknown, cause?: Envelope<unknown>"),
         "the emitter with an outbox does not require the transaction:\n{ts}"
     );
-    assert!(ts.contains("stage(newEnvelope(\"payment.captured@v1\", \"payments\", data, cause), tx)"));
+    assert!(
+        ts.contains("stage(newEnvelope(\"payment.captured@v1\", \"payments\", data, cause), tx)")
+    );
     // with no outbox there is no transaction to share, and asking for one would be noise
     let (without, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
     assert!(without.contains("this.bus.publish(newEnvelope"));
@@ -162,7 +161,10 @@ fn traceability_is_not_optional() {
 fn migrations_folded_into_the_er_diagram() {
     let (er, _, _) = axon(&["er", "examples"]);
     assert!(er.contains("ORDER ||--o{ ORDER_ITEM : order_id"));
-    assert!(er.contains("text provider_ref"), "ADD COLUMN was not folded");
+    assert!(
+        er.contains("text provider_ref"),
+        "ADD COLUMN was not folded"
+    );
     assert!(!er.contains("currency"), "DROP COLUMN was not folded");
 }
 
@@ -205,7 +207,10 @@ CREATE INDEX ledger_entry_account_idx ON "ledger_entry" (account_id, posted_at D
     let (er, err, ok) = axon(&["er", dir.to_str().unwrap()]);
     assert!(ok, "{err}");
     // PRIMARY KEY and FOREIGN KEY declared at table level, not on the column
-    assert!(er.contains("uuid id PK"), "table-level PK not resolved:\n{er}");
+    assert!(
+        er.contains("uuid id PK"),
+        "table-level PK not resolved:\n{er}"
+    );
     assert!(
         er.contains("uuid account_id FK"),
         "table-level FK not resolved:\n{er}"
@@ -286,7 +291,10 @@ fn a_key_added_later_counts() {
     assert!(ok, "{err}");
     // the added column is there, and the PK is marked
     assert!(er.contains("stream_id"), "{er}");
-    assert!(er.contains("PK"), "the PK added later was not marked:\n{er}");
+    assert!(
+        er.contains("PK"),
+        "the PK added later was not marked:\n{er}"
+    );
 }
 
 /// A rename in a LATER migration has to count. It was invisible, and with that
@@ -318,10 +326,22 @@ fn a_later_rename_counts() {
     .unwrap();
     let (er, err, ok) = axon(&["er", dir.to_str().unwrap()]);
     assert!(ok, "{err}");
-    assert!(er.contains("POINT {"), "the renamed table does not show up:\n{er}");
-    assert!(!er.to_lowercase().contains("punto"), "the old table is still in the schema:\n{er}");
-    assert!(er.contains("view_name"), "the renamed column does not show up:\n{er}");
-    assert!(!er.contains("vista"), "the old column is still there:\n{er}");
+    assert!(
+        er.contains("POINT {"),
+        "the renamed table does not show up:\n{er}"
+    );
+    assert!(
+        !er.to_lowercase().contains("punto"),
+        "the old table is still in the schema:\n{er}"
+    );
+    assert!(
+        er.contains("view_name"),
+        "the renamed column does not show up:\n{er}"
+    );
+    assert!(
+        !er.contains("vista"),
+        "the old column is still there:\n{er}"
+    );
     // the PK survives the rename, under the new name
     assert!(er.contains("PK"), "the PK was lost in the rename:\n{er}");
 }
@@ -410,7 +430,10 @@ fn every_target_deploys_the_workload() {
         ("k8s", "kind: Deployment"),
     ] {
         let (out, _, _) = axon(&["infra", &source_for(target), "--target", target]);
-        assert!(out.contains(marker), "{target} does not deploy the workload");
+        assert!(
+            out.contains(marker),
+            "{target} does not deploy the workload"
+        );
     }
     // and delivery reaches somebody: no subscriptions into the void
     let (gcp, _, _) = axon(&["infra", &source_for("gcp"), "--target", "gcp"]);
@@ -695,7 +718,10 @@ fn the_generated_ci_is_valid_yaml() {
     for line in yml.lines() {
         let t = line.trim_start();
         if t.starts_with("- run:") || t.starts_with("run:") {
-            assert!(!t.ends_with('\\'), "multiline run with no scalar block: {t}");
+            assert!(
+                !t.ends_with('\\'),
+                "multiline run with no scalar block: {t}"
+            );
         }
     }
     assert!(
@@ -730,7 +756,10 @@ fn the_ci_hardcodes_no_cloud() {
     // with no target no platform is invented
     let (without, _, _) = axon(&["ci", "examples/payments.toml"]);
     for cloud in ["gcloud", "aws ecs", "kubectl"] {
-        assert!(!without.contains(cloud), "with no --target `{cloud}` showed up");
+        assert!(
+            !without.contains(cloud),
+            "with no --target `{cloud}` showed up"
+        );
     }
     assert!(
         without.contains("axon verify"),
@@ -784,7 +813,10 @@ on = "fantasma"
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("is neither a method nor a consumed event"), "{err}");
+    assert!(
+        err.contains("is neither a method nor a consumed event"),
+        "{err}"
+    );
     assert!(err.contains("deadlock"), "{err}");
 }
 
@@ -1020,10 +1052,7 @@ fn the_generated_testkit_runs() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        out.status.success(),
-        "the generated tests fail:\n{printed}"
-    );
+    assert!(out.status.success(), "the generated tests fail:\n{printed}");
     assert!(printed.contains("propagates the causal chain"), "{printed}");
     assert!(printed.contains("does not repeat the effect"), "{printed}");
     assert!(printed.contains("fail 0"), "{printed}");
@@ -1041,7 +1070,10 @@ fn the_edge_and_the_buckets_come_from_the_plan() {
         ("k8s", "kind: HTTPRoute"),
     ] {
         let (out, _, _) = axon(&["infra", &source_for(target), "--target", target]);
-        assert!(out.contains(marker), "{target} did not generate the edge ({marker})");
+        assert!(
+            out.contains(marker),
+            "{target} did not generate the edge ({marker})"
+        );
     }
     // auth and rate limit reach the configuration, they do not stay in the manifest
     let (k, _, _) = axon(&["infra", &source_for("k8s"), "--target", "k8s"]);
@@ -1063,7 +1095,10 @@ fn the_edge_and_the_buckets_come_from_the_plan() {
 
     // public implies a CDN; private implies it carries none
     let (g, _, _) = axon(&["infra", &source_for("gcp"), "--target", "gcp"]);
-    assert!(g.contains("enable_cdn  = true"), "a public bucket with no CDN");
+    assert!(
+        g.contains("enable_cdn  = true"),
+        "a public bucket with no CDN"
+    );
     assert!(
         g.contains("default_ttl = 86400"),
         "the cache_ttl did not reach the CDN"
@@ -1604,10 +1639,7 @@ fn the_declared_policy_is_executed() {
         o.contains(r#"export const isolationLevel = "READ COMMITTED""#),
         "{o}"
     );
-    assert!(
-        o.contains("export const maxStalenessMs = 3000"),
-        "{o}"
-    );
+    assert!(o.contains("export const maxStalenessMs = 3000"), "{o}");
     // `degrade` forces passing the degraded path; `reject` does not accept it
     assert!(
         o.contains("fallback: () => Promise<PaymentsCapturePaymentOut>"),
@@ -2219,7 +2251,9 @@ fn the_flags_are_verified() {
         "{ts}"
     );
     assert!(
-        ts.contains(r#"flags.evaluate("charge_v2", false, { targetingKey: tenant_id, tenant_id })"#),
+        ts.contains(
+            r#"flags.evaluate("charge_v2", false, { targetingKey: tenant_id, tenant_id })"#
+        ),
         "{ts}"
     );
     assert!(
@@ -2303,7 +2337,10 @@ fn the_cap_report_reconciles_the_patterns() {
         "{out}"
     );
     // costs: a compensation is eventual consistency by construction
-    assert!(out.contains("your own state is CP, the FLOW is not"), "{out}");
+    assert!(
+        out.contains("your own state is CP, the FLOW is not"),
+        "{out}"
+    );
     // implies: the outbox does not break your guarantee, it breaks the flow's
     assert!(out.contains("consumers see it late"), "{out}");
     // and the standby is the only thing giving availability at no cost in consistency
@@ -2314,7 +2351,10 @@ fn the_cap_report_reconciles_the_patterns() {
     // without `orders` loaded there would be no way to know the dependency is AP
     let (only, _, _) = axon(&["cap", "examples", "-s", "payments"]);
     assert!(only.contains("payments"), "{only}");
-    assert!(!only.contains("\norders "), "the filter did not narrow:\n{only}");
+    assert!(
+        !only.contains("\norders "),
+        "the filter did not narrow:\n{only}"
+    );
     assert!(only.contains("`orders`, which is AP, is called"), "{only}");
 
     let (nothing, _, _) = axon(&["cap", "examples", "-s", "inexistente"]);
@@ -2345,7 +2385,10 @@ fn the_colours_respect_the_destination() {
         String::from_utf8_lossy(&forzado.stdout),
         String::from_utf8_lossy(&forzado.stderr)
     );
-    assert!(coloured.contains("\x1b[1;33m"), "it did not colour with CLICOLOR_FORCE");
+    assert!(
+        coloured.contains("\x1b[1;33m"),
+        "it did not colour with CLICOLOR_FORCE"
+    );
 
     // NO_COLOR wins over the forcing, which is the convention
     let plain = Command::new(env!("CARGO_BIN_EXE_axon"))
@@ -2545,10 +2588,7 @@ fn the_documentation_examples_validate() {
             checked += 1;
         }
     }
-    assert!(
-        pages >= 10,
-        "only {pages} pages of docs/src were read"
-    );
+    assert!(pages >= 10, "only {pages} pages of docs/src were read");
     assert!(checked >= 10, "only {checked} examples were checked");
     eprintln!("{checked} manifest examples across {pages} pages");
 }
@@ -2722,10 +2762,7 @@ fn the_sharding_rules_block() {
         &format!("{base}pitr = true\nbackup_retention_days = 7\n"),
     );
     assert!(!ok);
-    assert!(
-        msg.contains("no consistent recovery point"),
-        "{msg}"
-    );
+    assert!(msg.contains("no consistent recovery point"), "{msg}");
 }
 
 /// The engine has to exist. `state = "neo4j"` used to pass `verify` with no
@@ -2863,10 +2900,7 @@ fn the_pooler_rules_block() {
     // every COMMIT and is handed to another tenant
     let (msg, ok) = probar("[pooler]\nengine = \"pgdog\"\nmode = \"transaction\"\nshards = 2\n");
     assert!(!ok);
-    assert!(
-        msg.contains("no `tenant_binding = \"set_local\"`"),
-        "{msg}"
-    );
+    assert!(msg.contains("no `tenant_binding = \"set_local\"`"), "{msg}");
     assert!(msg.contains("reads the previous tenant's rows"), "{msg}");
 
     // declaring it lets it through
@@ -3099,7 +3133,10 @@ fn the_sweep_is_deployed_on_all_four_targets() {
     // On k8s the network policy has to let the sweep's pod in: otherwise the
     // CronJob applies, the curl never arrives and only the history says so.
     let (k, _, _) = axon(&["infra", f, "--target", "k8s"]);
-    assert!(k.contains("axon.dev/sweep"), "the sweep's pod does not get in");
+    assert!(
+        k.contains("axon.dev/sweep"),
+        "the sweep's pod does not get in"
+    );
     assert_eq!(
         k.matches("axon.dev/sweep").count(),
         2,
@@ -3117,7 +3154,10 @@ fn the_sweep_is_deployed_on_all_four_targets() {
     ] {
         let (out, err, ok) = axon(&["infra", es.to_str().unwrap(), "--target", target]);
         assert!(ok, "{target}: {err}");
-        assert!(out.contains(marker), "{target} does not deploy the snapshot prune");
+        assert!(
+            out.contains(marker),
+            "{target} does not deploy the snapshot prune"
+        );
         assert!(
             out.contains("/internal/aggregate/cuenta/prune"),
             "{target} does not point at the prune route"
@@ -3473,7 +3513,10 @@ steps = [
 ]"#,
         TABLA,
     );
-    assert!(err.contains("has no `undo`, and it is not the last one"), "{err}");
+    assert!(
+        err.contains("has no `undo`, and it is not the last one"),
+        "{err}"
+    );
     assert!(err.contains("dual-write with more steps"), "{err}");
 
     // a compensation that is not idempotent
@@ -3502,7 +3545,10 @@ steps = [
         TABLA,
     );
     assert!(err.contains("add up to 11000ms"), "{err}");
-    assert!(err.contains("compensating something that later succeeds"), "{err}");
+    assert!(
+        err.contains("compensating something that later succeeds"),
+        "{err}"
+    );
 
     // without the journal's table, a restart loses the saga
     let err = run(
@@ -3515,7 +3561,10 @@ steps = [
 ]"#,
         "CREATE TABLE otra (id uuid PRIMARY KEY);\n",
     );
-    assert!(err.contains("the `saga_checkout` table is missing"), "{err}");
+    assert!(
+        err.contains("the `saga_checkout` table is missing"),
+        "{err}"
+    );
 
     // without `data` it cannot be resumed: the actions need the call, and the
     // process that had it in memory is the one that died
@@ -3594,7 +3643,10 @@ timeout_ms = 3000
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir2.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("without declaring it in `[[depends]]`"), "{err}");
+    assert!(
+        err.contains("without declaring it in `[[depends]]`"),
+        "{err}"
+    );
     assert!(err.contains("The resilient client"), "{err}");
 
     // and a saga under `consistency = "strong"`
@@ -3619,7 +3671,10 @@ steps = [
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("the real guarantee of the flow is eventual"), "{err}");
+    assert!(
+        err.contains("the real guarantee of the flow is eventual"),
+        "{err}"
+    );
 }
 
 /// A manifest with event sourcing and a view. The `fold` test and the rules
@@ -3971,10 +4026,19 @@ fn the_event_sourcing_rules_block() {
          UNIQUE (stream_id, version)\n",
         "  en         timestamptz NOT NULL DEFAULT now()\n",
     );
-    assert!(!without_unique.contains("UNIQUE"), "the variant did not remove the UNIQUE");
+    assert!(
+        !without_unique.contains("UNIQUE"),
+        "the variant did not remove the UNIQUE"
+    );
     let err = run(MANIFIESTO_ES, &without_unique);
-    assert!(err.contains("has no UNIQUE on (stream_id, version)"), "{err}");
-    assert!(err.contains("depends on what order they are read in"), "{err}");
+    assert!(
+        err.contains("has no UNIQUE on (stream_id, version)"),
+        "{err}"
+    );
+    assert!(
+        err.contains("depends on what order they are read in"),
+        "{err}"
+    );
 
     // an aggregate founded on an event the service does not emit
     let foreign = MANIFIESTO_ES.replace(
@@ -3986,7 +4050,10 @@ fn the_event_sourcing_rules_block() {
     assert!(err.contains("this is a view, not an aggregate"), "{err}");
 
     // the view with nowhere to record how far it got
-    let without_checkpoint = DDL_ES.replace("CREATE TABLE view_saldos_checkpoint", "CREATE TABLE otra_tabla");
+    let without_checkpoint = DDL_ES.replace(
+        "CREATE TABLE view_saldos_checkpoint",
+        "CREATE TABLE otra_tabla",
+    );
     let err = run(MANIFIESTO_ES, &without_checkpoint);
     assert!(err.contains("view_saldos_checkpoint"), "{err}");
     assert!(err.contains("reprocesses from the beginning"), "{err}");
@@ -4013,11 +4080,17 @@ fn the_event_sourcing_rules_block() {
     // live view, so searching for it loose does not say whether the replace applied
     assert_ne!(short_shadow, DDL_ES, "the variant did not apply");
     let err = run(MANIFIESTO_ES, &short_shadow);
-    assert!(err.contains("`view_saldos_shadow` has no `centavos` column"), "{err}");
+    assert!(
+        err.contains("`view_saldos_shadow` has no `centavos` column"),
+        "{err}"
+    );
     assert!(err.contains("only then would it show"), "{err}");
 
     // and with no shadow: rebuilding in place serves an incomplete view
-    let without_shadow = DDL_ES.replace("CREATE TABLE view_saldos_shadow", "CREATE TABLE other_shadow");
+    let without_shadow = DDL_ES.replace(
+        "CREATE TABLE view_saldos_shadow",
+        "CREATE TABLE other_shadow",
+    );
     let err = run(MANIFIESTO_ES, &without_shadow);
     assert!(err.contains("`view_saldos_shadow` is missing"), "{err}");
     assert!(err.contains("fewer rows than there are"), "{err}");
@@ -4027,9 +4100,15 @@ fn the_event_sourcing_rules_block() {
         "  view_name  text NOT NULL,\n  -- per STREAM: an event's version is its position inside ITS stream, so a\n  -- single number for the whole view identifies nothing as soon as there is\n  -- more than one stream\n  stream_id  uuid NOT NULL,\n  position   bigint NOT NULL,\n  PRIMARY KEY (view_name, stream_id)\n",
         "  view_name  text PRIMARY KEY,\n  stream_id  uuid NOT NULL,\n  position   bigint NOT NULL\n",
     );
-    assert!(!cp_global.contains("PRIMARY KEY (view_name, stream_id)"), "the variant did not apply");
+    assert!(
+        !cp_global.contains("PRIMARY KEY (view_name, stream_id)"),
+        "the variant did not apply"
+    );
     let err = run(MANIFIESTO_ES, &cp_global);
-    assert!(err.contains("has no key on (view_name, stream_id)"), "{err}");
+    assert!(
+        err.contains("has no key on (view_name, stream_id)"),
+        "{err}"
+    );
     assert!(err.contains("One stream would overwrite another"), "{err}");
 
     // snapshots declared with no table, and without the column that makes them safe
@@ -4062,7 +4141,10 @@ fn the_event_sourcing_rules_block() {
 
     // an aggregate publishing with no outbox: the dual-write the stream avoided
     let without_outbox = MANIFIESTO_ES.replace("outbox = true", "outbox = false");
-    assert!(without_outbox.contains("outbox = false"), "the variant did not apply");
+    assert!(
+        without_outbox.contains("outbox = false"),
+        "the variant did not apply"
+    );
     let err = run(&without_outbox, DDL_ES);
     assert!(err.contains("needs `[patterns] outbox = true`"), "{err}");
     assert!(
@@ -4089,7 +4171,10 @@ fn the_event_sourcing_rules_block() {
     .unwrap();
     std::fs::write(dir2.join("libro.toml"), MANIFIESTO_ES).unwrap();
     let (_, err, ok) = axon(&["verify", dir2.to_str().unwrap()]);
-    assert!(!ok, "a DELETE on the stream got through by living in a .contract.sql");
+    assert!(
+        !ok,
+        "a DELETE on the stream got through by living in a .contract.sql"
+    );
     assert!(err.contains("is the stream of `cuenta`"), "{err}");
 
     // an aggregate event no machine transition emits
@@ -4102,7 +4187,10 @@ fn the_event_sourcing_rules_block() {
     );
     let err = run(&maquina, DDL_ES);
     assert!(err.contains("no transition of `cuenta` emits it"), "{err}");
-    assert!(err.contains("would not know which state to take it to"), "{err}");
+    assert!(
+        err.contains("would not know which state to take it to"),
+        "{err}"
+    );
 }
 
 /// The gap this closes: the warehouse schema was generated for three dialects
@@ -4131,13 +4219,20 @@ fn ingest_is_not_promised_without_a_path() {
     }
     // And what has no path is REFUSED, with the name of the combination and
     // what to do about it.
-    for (target, warehouse) in [("gcp", "clickhouse"), ("aws", "bigquery"), ("k8s", "bigquery")] {
+    for (target, warehouse) in [
+        ("gcp", "clickhouse"),
+        ("aws", "bigquery"),
+        ("k8s", "bigquery"),
+    ] {
         let f = tuned(warehouse);
         let (_, err, ok) = axon(&["infra", &f, "--target", target]);
         assert!(!ok, "{target}+{warehouse} rendered with no ingest path");
         assert!(err.contains("has no ingest path"), "{err}");
         assert!(err.contains("the tables would stay empty"), "{err}");
-        assert!(err.contains("export = false"), "it does not say what to do:\n{err}");
+        assert!(
+            err.contains("export = false"),
+            "it does not say what to do:\n{err}"
+        );
     }
     // The local loader comes from the same place as the schema: if the JSON's
     // paths did not match the columns, the load would fail at the warehouse
@@ -4147,7 +4242,10 @@ fn ingest_is_not_promised_without_a_path() {
     assert!(sql.contains("INSERT INTO axon.order_placed_v1"), "{sql}");
     // the hash comes out salted from a parameter, never the value
     assert!(sql.contains("SHA256(concat({salt:String}"), "{sql}");
-    assert!(!sql.contains("AS customer_email,"), "the address travels in plaintext:\n{sql}");
+    assert!(
+        !sql.contains("AS customer_email,"),
+        "the address travels in plaintext:\n{sql}"
+    );
     // idempotent: a periodic loader runs many times over the same log
     assert!(sql.contains("NOT IN (SELECT event_id FROM"), "{sql}");
 }
@@ -4197,10 +4295,7 @@ pii = []
 "#;
     // `pii` goes as a service field, not inside emits
     let manifest = manifest.replace("pii = []\n", "");
-    let manifest = manifest.replace(
-        "tier = \"1\"",
-        "tier = \"1\"\npii = [\"customerEmail\"]",
-    );
+    let manifest = manifest.replace("tier = \"1\"", "tier = \"1\"\npii = [\"customerEmail\"]");
     std::fs::write(dir.join("tienda.toml"), &manifest).unwrap();
     let d = dir.to_str().unwrap();
 
@@ -4225,8 +4320,14 @@ pii = []
     let missing = real.replace("order_placed_v1\ttotal_amount\tNullable(Int64)\n", "");
     let (printed, ok) = check(&missing);
     assert!(!ok, "a missing column passed clean");
-    assert!(printed.contains("`order_placed_v1.total_amount` is missing"), "{printed}");
-    assert!(printed.contains("that field is stored nowhere"), "{printed}");
+    assert!(
+        printed.contains("`order_placed_v1.total_amount` is missing"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("that field is stored nowhere"),
+        "{printed}"
+    );
 
     // a type that is not the same: a date stored as text sorts wrong
     let kind = real.replace(
@@ -4243,13 +4344,19 @@ pii = []
     let (printed, ok) = check(&claro);
     assert!(!ok, "the plaintext address passed clean");
     assert!(printed.contains("exists in plaintext"), "{printed}");
-    assert!(printed.contains("keeps the addresses it already had"), "{printed}");
+    assert!(
+        printed.contains("keeps the addresses it already had"),
+        "{printed}"
+    );
 
     // an extra column is a warning, not an error: it breaks nothing
     let sobra = format!("{real}order_placed_v1\tsobra\tString\n");
     let (printed, ok) = check(&sobra);
     assert!(ok, "an extra column blocked:\n{printed}");
-    assert!(printed.contains("Left over from an earlier version"), "{printed}");
+    assert!(
+        printed.contains("Left over from an earlier version"),
+        "{printed}"
+    );
 
     // And what matters most: an empty dump CANNOT give 0 differences. That is
     // the result of running the query against the wrong warehouse, and reading
@@ -4257,7 +4364,10 @@ pii = []
     let (printed, ok) = check("");
     assert!(!ok, "an empty dump reported 0 differences");
     assert!(printed.contains("has no columns at all"), "{printed}");
-    assert!(printed.contains("reads as everything being fine"), "{printed}");
+    assert!(
+        printed.contains("reads as everything being fine"),
+        "{printed}"
+    );
 }
 
 /// The Vector config is validated with `vector validate`: the parser that
@@ -4279,11 +4389,20 @@ fn the_vector_config_validates() {
 
     // One source per event, not a wildcard with a router: a router leaves an
     // `_unmatched` branch, and the event that lands there is dropped in silence.
-    assert!(!cfg.contains("type: route"), "a router leaves events with no consumer");
-    assert!(cfg.contains("queue: axon-warehouse"), "with no queue group, every replica writes the same row");
+    assert!(
+        !cfg.contains("type: route"),
+        "a router leaves events with no consumer"
+    );
+    assert!(
+        cfg.contains("queue: axon-warehouse"),
+        "with no queue group, every replica writes the same row"
+    );
     // The hash's salt comes in through a variable, never in the generated file.
     assert!(cfg.contains("get_env_var!(\"AXON_PII_SALT\")"), "{cfg}");
-    assert!(!cfg.contains("customer_email\":"), "the address travels in plaintext:\n{cfg}");
+    assert!(
+        !cfg.contains("customer_email\":"),
+        "the address travels in plaintext:\n{cfg}"
+    );
     // A field the table does not have is an error, not something to drop.
     assert!(cfg.contains("skip_unknown_fields: false"), "{cfg}");
     // The buffer on disk: in memory, a restart loses what was not written.
@@ -4291,15 +4410,22 @@ fn the_vector_config_validates() {
 
     let out = Command::new("docker")
         .args([
-            "run", "--rm",
-            "-e", "AXON_WAREHOUSE_USER=u",
-            "-e", "AXON_WAREHOUSE_PASSWORD=p",
-            "-e", "AXON_PII_SALT=s",
-            "-v", &format!("{}:/etc/vector:ro", dir.display()),
+            "run",
+            "--rm",
+            "-e",
+            "AXON_WAREHOUSE_USER=u",
+            "-e",
+            "AXON_WAREHOUSE_PASSWORD=p",
+            "-e",
+            "AXON_PII_SALT=s",
+            "-v",
+            &format!("{}:/etc/vector:ro", dir.display()),
             "timberio/vector:0.44.0-alpine",
             // `--no-environment` does not check connections: there is no broker
             // and no warehouse here, and what is validated is the config, not the environment.
-            "validate", "--no-environment", "/etc/vector/vector.yaml",
+            "validate",
+            "--no-environment",
+            "/etc/vector/vector.yaml",
         ])
         .output()
         .expect("docker run vector");
@@ -4308,12 +4434,23 @@ fn the_vector_config_validates() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    if printed.contains("Unable to find image") || printed.contains("Cannot connect to the Docker daemon") {
+    if printed.contains("Unable to find image")
+        || printed.contains("Cannot connect to the Docker daemon")
+    {
         eprintln!("skipped: the vector image is missing");
         return;
     }
-    assert!(out.status.success(), "vector does not validate the generated config:\n{printed}");
+    assert!(
+        out.status.success(),
+        "vector does not validate the generated config:\n{printed}"
+    );
     // a warning today is a lost event tomorrow
-    assert!(!printed.contains("warning"), "it validates with warnings:\n{printed}");
-    assert!(!printed.contains("no consumers"), "a branch with no consumer:\n{printed}");
+    assert!(
+        !printed.contains("warning"),
+        "it validates with warnings:\n{printed}"
+    );
+    assert!(
+        !printed.contains("no consumers"),
+        "a branch with no consumer:\n{printed}"
+    );
 }

@@ -100,9 +100,7 @@ pub fn informe(ms: &[Manifest], only: &[String]) -> String {
             n => hs.push(Hallazgo {
                 level: Level::Contradicts,
                 pattern: "read replicas".into(),
-                text: format!(
-                    "{n} replicas read under a CP promise: a replica lags"
-                ),
+                text: format!("{n} replicas read under a CP promise: a replica lags"),
             }),
         }
 
@@ -219,8 +217,7 @@ pub fn informe(ms: &[Manifest], only: &[String]) -> String {
             hs.push(Hallazgo {
                 level: Level::Implies,
                 pattern: "degrade".into(),
-                text: "there are no dependencies to degrade: the choice changes nothing yet"
-                    .into(),
+                text: "there are no dependencies to degrade: the choice changes nothing yet".into(),
             });
         }
 

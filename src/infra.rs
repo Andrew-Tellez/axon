@@ -2,8 +2,8 @@
 //! target renders it. A provider with no target of its own is served by
 //! `axon plan`, which emits the plan's JSON for you to render.
 use crate::manifest::*;
-use serde::Serialize;
 use indexmap::IndexMap;
+use serde::Serialize;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Serialize)]
@@ -1480,7 +1480,9 @@ services:
             let ultimo = if s.policies { "policies" } else { "migrate" };
             let espera: Vec<String> = nodes(s)
                 .iter()
-                .map(|(_, h)| format!("{ultimo}-{h}: {{ condition: service_completed_successfully }}"))
+                .map(|(_, h)| {
+                    format!("{ultimo}-{h}: {{ condition: service_completed_successfully }}")
+                })
                 .collect();
             o.push_str(&format!(
                 "  pooler-{svc}:

@@ -828,7 +828,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         for (name, meth) in &m.methods {
             let Some(http) = &meth.http else { continue };
             if let Some(prev) = routes.insert(http.clone(), m.service.clone()) {
-                errors.push(format!("`{http}` is declared by {prev} and by {}", m.service));
+                errors.push(format!(
+                    "`{http}` is declared by {prev} and by {}",
+                    m.service
+                ));
             }
             match meth.path() {
                 Some(p) if !p.starts_with("/v") => errors.push(format!(
@@ -905,7 +908,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         let svc = &m.service;
         for (name, sg) in &m.saga {
             if sg.steps.is_empty() {
-                errors.push(format!("{svc}.{name}: a saga with no steps coordinates nothing"));
+                errors.push(format!(
+                    "{svc}.{name}: a saga with no steps coordinates nothing"
+                ));
                 continue;
             }
 
@@ -1002,7 +1007,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         return None;
                     };
                     let Some(me) = otro.methods.get(met) else {
-                        errors.push(format!("{svc}.{name}.{field}: `{s}` does not offer `{met}`"));
+                        errors.push(format!(
+                            "{svc}.{name}.{field}: `{s}` does not offer `{met}`"
+                        ));
                         return None;
                     };
                     // The step is invoked with the generated client, and that client
@@ -1022,7 +1029,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     // The step's budget is the CALLER's, not the one the other
                     // service declares for itself, and with the retries inside:
                     // the coordinator waits for what `[[depends]]` says.
-                    let unitario = dep.and_then(|d| d.timeout_ms).or(me.timeout_ms).unwrap_or(0);
+                    let unitario = dep
+                        .and_then(|d| d.timeout_ms)
+                        .or(me.timeout_ms)
+                        .unwrap_or(0);
                     let intentos = dep.map(|d| d.retries + 1).unwrap_or(1);
                     Some((unitario * intentos, me))
                 };
@@ -1061,10 +1071,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             presupuesto += ms;
                         }
                         if *u == step.call {
-                            errors.push(format!(
-                                "{svc}.{name}: step {} compensates itself",
-                                i + 1
-                            ));
+                            errors.push(format!("{svc}.{name}: step {} compensates itself", i + 1));
                         }
                     }
                 }
@@ -1132,7 +1139,11 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     )),
                     Some(maq) => {
                         for ev in &ag.events {
-                            if !maq.transitions.values().any(|t| t.emits.as_ref() == Some(ev)) {
+                            if !maq
+                                .transitions
+                                .values()
+                                .any(|t| t.emits.as_ref() == Some(ev))
+                            {
                                 errors.push(format!(
                                     "{svc}.{name}: `{ev}` belongs to the aggregate and no \
                                      transition of `{mac}` emits it. The generated `fold` \
@@ -1167,7 +1178,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 )),
                 Some(t) => {
                     for (col, what) in [
-                        ("stream_id", "which instance of the aggregate this event belongs to"),
+                        (
+                            "stream_id",
+                            "which instance of the aggregate this event belongs to",
+                        ),
                         ("version", "its position in the stream"),
                         ("type", "which of the declared events it is"),
                         ("data", "su contenido"),
@@ -1202,8 +1216,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // be consistent with that lie. There is no `.contract.sql` that
             // enables it, unlike every other table.
             for f in migrations_of(m) {
-                let text = std::fs::read_to_string(&f).unwrap_or_default().to_lowercase();
-                let nombre_archivo = f.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let text = std::fs::read_to_string(&f)
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let nombre_archivo = f
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 for verbo in ["update", "delete from", "truncate"] {
                     // look for the verb AND the table in the same statement
                     for sent in text.split(';') {
@@ -1527,7 +1547,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if d.retries > 0 && !d.breaker {
                 warnings.push(format!(
                     "{svc} -> {tgt}.{}: retries with no `breaker = true`; retries amplify \
-                     the other side's outage", d.method));
+                     the other side's outage",
+                    d.method
+                ));
             }
         }
     }
@@ -1540,7 +1562,11 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         // file can be renamed without any hurry.
         let mut vistas: IndexMap<String, String> = IndexMap::new();
         for f in migrations_of(m) {
-            let name = f.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let name = f
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             let Some((ver, _)) = name.split_once('_') else {
                 continue;
             };

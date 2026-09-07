@@ -36,7 +36,8 @@ fn parse(text: &str) -> Result<Value, String> {
     if let Ok(v) = serde_json::from_str(text) {
         return Ok(v);
     }
-    serde_yaml_ng::from_str(text).map_err(|e| format!("this is neither valid JSON nor valid YAML: {e}"))
+    serde_yaml_ng::from_str(text)
+        .map_err(|e| format!("this is neither valid JSON nor valid YAML: {e}"))
 }
 
 /// An event with fields and, if it came declared, its handler name.

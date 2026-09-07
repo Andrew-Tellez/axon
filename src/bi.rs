@@ -139,7 +139,6 @@ pub fn dialect(name: &str) -> Option<Dialect> {
     })
 }
 
-
 /// The local target's loader: it carries the envelope log into ClickHouse.
 ///
 /// The log is written by the target itself —`AXON_TRACE_LOG` is in the
@@ -168,7 +167,8 @@ pub fn loader(ms: &[Manifest], base: &str, log: &str) -> String {
             "  JSONExtractString(l, 'id')            AS event_id".to_string(),
             "  JSONExtractString(l, 'type')          AS event_type".to_string(),
             "  JSONExtractString(l, 'source')        AS source".to_string(),
-            "  parseDateTime64BestEffort(JSONExtractString(l, 'time'), 3) AS event_time".to_string(),
+            "  parseDateTime64BestEffort(JSONExtractString(l, 'time'), 3) AS event_time"
+                .to_string(),
             // the trace_id is the second field of the W3C traceparent
             "  splitByChar('-', JSONExtractString(l, 'traceparent'))[2] AS trace_id".to_string(),
             "  JSONExtractString(l, 'correlationId') AS correlation_id".to_string(),
@@ -196,7 +196,9 @@ pub fn loader(ms: &[Manifest], base: &str, log: &str) -> String {
                 } else if kind == "int" || (kind == "money" && !n.ends_with("_currency")) {
                     sel.push(format!("  JSONExtractInt(l, {route}) AS {n}"));
                 } else {
-                    sel.push(format!("  nullIf(JSONExtractString(l, {route}), '') AS {n}"));
+                    sel.push(format!(
+                        "  nullIf(JSONExtractString(l, {route}), '') AS {n}"
+                    ));
                 }
             }
         }
@@ -210,7 +212,6 @@ pub fn loader(ms: &[Manifest], base: &str, log: &str) -> String {
     }
     o.join("\n")
 }
-
 
 /// The query that dumps the warehouse's REAL schema.
 ///
@@ -262,7 +263,11 @@ fn family(t: &str) -> &'static str {
         .trim();
     if t.contains("date") || t.contains("time") {
         "a date"
-    } else if t.contains("int") || t.contains("numeric") || t.contains("decimal") || t.contains("float") {
+    } else if t.contains("int")
+        || t.contains("numeric")
+        || t.contains("decimal")
+        || t.contains("float")
+    {
         "a number"
     } else if t.contains("bool") {
         "a boolean"
@@ -290,7 +295,8 @@ pub fn review(ms: &[Manifest], d: &Dialect, real: &str) -> (Vec<String>, Vec<Str
         if fields.len() < 3 {
             continue;
         }
-        present.entry(fields[0].to_lowercase())
+        present
+            .entry(fields[0].to_lowercase())
             .or_default()
             .insert(fields[1].to_lowercase(), fields[2].to_string());
     }
@@ -336,7 +342,11 @@ pub fn review(ms: &[Manifest], d: &Dialect, real: &str) -> (Vec<String>, Vec<Str
                 continue;
             }
             for (n, ty) in columns(d, field, kind) {
-                let name = if sensible { format!("{n}_hash") } else { n.clone() };
+                let name = if sensible {
+                    format!("{n}_hash")
+                } else {
+                    n.clone()
+                };
                 declared.insert(name, if sensible { (d.kind)("string") } else { ty });
                 // the plaintext value cannot stay there after moving to a hash
                 if sensible && real_cols.contains_key(&n) {
@@ -378,7 +388,6 @@ pub fn review(ms: &[Manifest], d: &Dialect, real: &str) -> (Vec<String>, Vec<Str
     }
     (errors, warnings)
 }
-
 
 /// Vector config: the ingest path for a cluster.
 ///
@@ -595,7 +604,11 @@ pub fn build(ms: &[Manifest], d: &Dialect) -> String {
                 let kind = (d.kind)(t);
                 // in ClickHouse nullability goes in the type, not in a suffix
                 if d.name == "clickhouse" {
-                    let kind = if nullable { kind } else { without_nullable(&kind) };
+                    let kind = if nullable {
+                        kind
+                    } else {
+                        without_nullable(&kind)
+                    };
                     format!("  {n} {kind}")
                 } else {
                     format!("  {n} {kind}{}", if nullable { "" } else { " NOT NULL" })

@@ -294,8 +294,7 @@ pub fn build(ms: &[Manifest]) -> String {
     }
     if o.len() <= head {
         o.push(
-            "\n-- Nothing to generate: no service declares `tenant_column` or `pii` fields."
-                .into(),
+            "\n-- Nothing to generate: no service declares `tenant_column` or `pii` fields.".into(),
         );
     }
     o.push(String::new());
