@@ -2601,6 +2601,110 @@ fn the_documentation_examples_validate() {
     eprintln!("{checked} manifest examples across {pages} pages");
 }
 
+/// The three projections nothing asserted: the event topology, the class diagram
+/// and the registry. They are the answer to "who consumes this event and what
+/// breaks if I change a field on it", so what is checked is that the RELATIONSHIP
+/// is in them —not that they render prettily— and that an external service is
+/// told apart from one of your own.
+#[test]
+fn the_diagrams_and_the_registry_carry_the_relationships() {
+    // --- axon graph: the topology -----------------------------------------
+    let (graph, err, ok) = axon(&["graph", "examples"]);
+    assert!(ok, "{err}");
+    // the emitter reaches its event, and the event reaches its consumer: those
+    // two edges together are the chain nobody can read from five repos
+    assert!(
+        graph.contains("orders -- order.placed@v1 --> order_placed_v1((order.placed@v1))"),
+        "the emitter's edge is missing:\n{graph}"
+    );
+    assert!(
+        graph.contains("order_placed_v1((order.placed@v1)) --> payments"),
+        "the consumer's edge is missing:\n{graph}"
+    );
+    // a synchronous call is a different edge from an event: reading them the
+    // same way is how a distributed monolith looks like an event-driven system
+    assert!(
+        graph.contains("payments -. getOrder .-> orders"),
+        "the synchronous dependency is missing:\n{graph}"
+    );
+    // and an external service is drawn as external, because you cannot change it
+    assert!(graph.contains("stripe([stripe])"), "{graph}");
+    assert!(
+        graph.contains("payments -. charges.create .-> stripe"),
+        "{graph}"
+    );
+
+    // --- axon classes: the same manifest, another projection ---------------
+    let (classes, err, ok) = axon(&["classes", "examples"]);
+    assert!(ok, "{err}");
+    assert!(classes.starts_with("classDiagram"), "{classes}");
+    // services and events are different kinds of thing, and the diagram says so
+    assert!(
+        classes.contains("class PaymentsService {") && classes.contains("<<service>>"),
+        "{classes}"
+    );
+    assert!(
+        classes.contains("class OrderPlacedV1 {") && classes.contains("<<event>>"),
+        "{classes}"
+    );
+    // emitting is a dependency and calling is another: `..>` vs `-->`
+    assert!(
+        classes.contains("OrdersService ..> OrderPlacedV1 : emits"),
+        "the emission is missing:\n{classes}"
+    );
+    assert!(
+        classes.contains("PaymentsService --> OrdersService : getOrder"),
+        "the call is missing:\n{classes}"
+    );
+    // the method's signature comes from the contract, not from the code
+    assert!(
+        classes.contains("+placeOrder(PlaceOrderIn) PlaceOrderOut"),
+        "{classes}"
+    );
+
+    // --- axon discover: the registry --------------------------------------
+    let (json, err, ok) = axon(&["discover", "examples"]);
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&json).expect("registry json");
+    for svc in ["orders", "payments", "checkout", "stripe"] {
+        assert!(!v[svc].is_null(), "{svc} is not in the registry:\n{json}");
+    }
+    // what it is for: which method, what goes in, what comes out
+    assert_eq!(v["orders"]["methods"]["placeOrder"]["in"]["total"], "money");
+    assert_eq!(
+        v["orders"]["methods"]["placeOrder"]["out"]["orderId"],
+        "uuid"
+    );
+    // and who emits and who consumes, which is the question that starts it all
+    assert!(
+        v["orders"]["emits"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("order.placed@v1")),
+        "{json}"
+    );
+    assert!(
+        v["payments"]["consumes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("order.placed@v1")),
+        "{json}"
+    );
+    // an external service is marked as such: a contract you can read and cannot
+    // change is not the same as one of your own
+    assert_eq!(v["stripe"]["external"], true);
+    assert_eq!(v["orders"]["external"], false);
+    // and every entry says where it came from, so a registry merged from disk
+    // and from live services can be told apart
+    assert!(
+        v["orders"]["source"]
+            .as_str()
+            .unwrap()
+            .ends_with("orders.toml"),
+        "{json}"
+    );
+}
+
 /// A declared metric is a view next to the funnels, in the dialect of each
 /// warehouse, and it has to be valid SQL in all three: a `sum` over a `money`
 /// field adds up its amount column, and the time bucket is a different function
