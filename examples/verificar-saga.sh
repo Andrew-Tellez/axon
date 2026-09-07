@@ -50,7 +50,7 @@ else
   exit 1
 fi
 # y el diario lo dice
-estado=$(sql -c "SELECT estado FROM saga_compra ORDER BY actualizado DESC LIMIT 1")
+estado=$(sql -c "SELECT status FROM saga_compra ORDER BY updated DESC LIMIT 1")
 [ "$estado" = "compensated" ] || { echo "  FALLO: el diario dice '$estado'"; exit 1; }
 
 # --- el retome, que es lo que el diario hace posible ---------------------
@@ -66,7 +66,7 @@ pago=$(printf '%s' "$cobro" | sed 's/.*"paymentId":"\([^"]*\)".*/\1/')
 [ -n "$pago" ] || { echo "  FALLO: no se pudo cobrar para el montaje"; exit 1; }
 
 SAGA=$(sql -c "SELECT gen_random_uuid()")
-sql -v ON_ERROR_STOP=1 -c "INSERT INTO saga_compra (id, paso, estado, datos, salidas, actualizado)
+sql -v ON_ERROR_STOP=1 -c "INSERT INTO saga_compra (id, step, status, data, outputs, updated)
   VALUES ('$SAGA', 1, 'done',
     '{\"id\":\"$SAGA\",\"type\":\"POST /v1/checkouts\",\"source\":\"demo\",\"time\":\"2026-01-01T00:00:00Z\",
       \"traceparent\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\",
@@ -84,7 +84,7 @@ esac
 # el reembolso salio del paymentId que el DIARIO guardo, no de una variable
 estado=$(sql_pagos -c "SELECT status FROM payment WHERE id = '$pago'")
 [ "$estado" = "refunded" ] || { echo "  FALLO: el pago quedo en '$estado'"; exit 1; }
-final=$(sql -c "SELECT estado FROM saga_compra WHERE id = '$SAGA'")
+final=$(sql -c "SELECT status FROM saga_compra WHERE id = '$SAGA'")
 [ "$final" = "compensated" ] || { echo "  FALLO: el diario dice '$final'"; exit 1; }
 echo "  OK: retomada desde el diario, compensada, y el reembolso alcanzo al cobro"
 

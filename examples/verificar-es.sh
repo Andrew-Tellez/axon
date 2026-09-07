@@ -188,7 +188,7 @@ fi
 # que reproducir el flujo entero. Se compara el estado guardado contra el que
 # sale de la vista, que se construyo evento por evento sin usar fotos.
 echo "  la foto contra la vista, que se construyo sin fotos"
-en_foto=$(sql -c "SELECT estado->>'estado' FROM compra_snapshot WHERE stream_id = '$FOTO' ORDER BY version DESC LIMIT 1" | tr -d ' \r\n')
+en_foto=$(sql -c "SELECT state->>'estado' FROM compra_snapshot WHERE stream_id = '$FOTO' ORDER BY version DESC LIMIT 1" | tr -d ' \r\n')
 en_vista=$(sql -c "SELECT estado FROM view_conversion WHERE stream_id = '$FOTO'" | tr -d ' \r\n')
 if [ "$en_foto" = "$en_vista" ]; then
   echo "  OK: la foto dice '$en_foto' y la proyeccion, que no la uso, dice lo mismo"
@@ -201,7 +201,7 @@ fi
 # foto de OTRA version de reglas se ignora. Se ensucia una a proposito y el
 # servicio tiene que seguir dando el estado correcto.
 echo "  una foto con reglas viejas, envenenada a proposito"
-sql -v ON_ERROR_STOP=1 -c "INSERT INTO compra_snapshot (stream_id, version, reglas, estado)
+sql -v ON_ERROR_STOP=1 -c "INSERT INTO compra_snapshot (stream_id, version, rules, state)
   VALUES ('$FOTO', $ver, $((reglas - 1)),
           '{\"estado\":\"basura\",\"centavos\":-1,\"paymentId\":null}'::jsonb)" > /dev/null
 # una compra nueva sobre el MISMO flujo tiene que salir del estado real, no de
@@ -210,10 +210,10 @@ ultima=$(sql -c "SELECT max(version) FROM compra_event WHERE stream_id = '$FOTO'
 sql -v ON_ERROR_STOP=1 -c "INSERT INTO compra_event (id, stream_id, version, type, data)
   VALUES (gen_random_uuid(), '$FOTO', $((ultima + 1)), 'compra.compensada@v1',
           '{\"streamId\":\"$FOTO\",\"motivo\":\"prueba de foto\"}'::jsonb)" > /dev/null
-buenas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE stream_id = '$FOTO' AND reglas = $reglas" | tr -d ' \r\n')
-malas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE stream_id = '$FOTO' AND reglas <> $reglas" | tr -d ' \r\n')
-centavos=$(sql -c "SELECT (estado->>'centavos')::bigint FROM compra_snapshot
-                    WHERE stream_id = '$FOTO' AND reglas = $reglas ORDER BY version DESC LIMIT 1" | tr -d ' \r\n')
+buenas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE stream_id = '$FOTO' AND rules = $reglas" | tr -d ' \r\n')
+malas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE stream_id = '$FOTO' AND rules <> $reglas" | tr -d ' \r\n')
+centavos=$(sql -c "SELECT (state->>'centavos')::bigint FROM compra_snapshot
+                    WHERE stream_id = '$FOTO' AND rules = $reglas ORDER BY version DESC LIMIT 1" | tr -d ' \r\n')
 if [ "$malas" -ge 1 ] && [ "$buenas" -ge 1 ] && [ "$centavos" -gt 0 ]; then
   echo "  OK: la foto de reglas $((reglas - 1)) convive con la vigente, que dice $centavos centavos"
   echo "  i que el codigo la IGNORE lo prueba el testkit: aqui se comprueba que"
@@ -327,12 +327,12 @@ $COMPOSE up -d --wait checkout > /dev/null 2>&1
 # una foto es una cache: lo peor que pasa es reconstruir desde el flujo.
 echo "  la limpieza de fotos que la version vigente no usa"
 antes=$(sql -c "SELECT count(*) FROM compra_snapshot" | tr -d ' \r\n')
-viejas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE reglas <> $reglas" | tr -d ' \r\n')
+viejas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE rules <> $reglas" | tr -d ' \r\n')
 [ "$viejas" -ge 1 ] || { echo "  FALLO: el montaje no dejo ninguna foto de otra version"; exit 1; }
 borradas=$(curl -sS --fail-with-body -m 30 -X POST "$CHECKOUT/internal/aggregate/compra/prune" \
   | sed 's/.*"borradas":\([0-9]*\).*/\1/')
 despues=$(sql -c "SELECT count(*) FROM compra_snapshot" | tr -d ' \r\n')
-quedan_viejas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE reglas <> $reglas" | tr -d ' \r\n')
+quedan_viejas=$(sql -c "SELECT count(*) FROM compra_snapshot WHERE rules <> $reglas" | tr -d ' \r\n')
 echo "    $antes fotos, borro $borradas, quedan $despues"
 if [ "$quedan_viejas" -eq 0 ] && [ "$borradas" -ge "$viejas" ] && [ "$despues" -lt "$antes" ]; then
   echo "  OK: las de otra version se fueron, y de cada flujo queda solo la mas nueva"

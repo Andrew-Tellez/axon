@@ -50,22 +50,22 @@ class Journal implements SagaJournal {
 
   async open(id: string, _saga: string, e: Envelope<unknown>) {
     await this.#db.query(
-      `INSERT INTO saga_compra (id, paso, estado, datos) VALUES ($1, 0, 'open', $2)
+      `INSERT INTO saga_compra (id, step, status, data) VALUES ($1, 0, 'open', $2)
        ON CONFLICT (id) DO NOTHING`,
       [id, JSON.stringify(e)],
     );
   }
 
   async mark(id: string, step: number, status: string, output?: unknown) {
-    // la salida se guarda en la MISMA sentencia que el estado: en dos, un corte
-    // entre ellas deja el paso hecho y su resultado perdido
+    // la salida se guarda en la MISMA sentencia que el status: en dos, un corte
+    // entre ellas deja el step hecho y su resultado perdido
     await this.#db.query(
-      // La clave del paso va como parametro APARTE del numero: usar el mismo
+      // La clave del step va como parametro APARTE del numero: usar el mismo
       // `$2` como int y como text deja el tipo ambiguo y Postgres lo rechaza.
       `UPDATE saga_compra
-          SET paso = $2::int, estado = $3, actualizado = now(),
-              salidas = CASE WHEN $5::jsonb IS NULL THEN salidas
-                             ELSE coalesce(salidas, '{}'::jsonb) || jsonb_build_object($4::text, $5::jsonb) END
+          SET step = $2::int, status = $3, updated = now(),
+              outputs = CASE WHEN $5::jsonb IS NULL THEN outputs
+                             ELSE coalesce(outputs, '{}'::jsonb) || jsonb_build_object($4::text, $5::jsonb) END
         WHERE id = $1`,
       [id, step, status, String(step), output === undefined ? null : JSON.stringify(output)],
     );
@@ -73,39 +73,39 @@ class Journal implements SagaJournal {
 
   async close(id: string, status: SagaStatus) {
     await this.#db.query(
-      `UPDATE saga_compra SET estado = $2, actualizado = now() WHERE id = $1`,
+      `UPDATE saga_compra SET status = $2, updated = now() WHERE id = $1`,
       [id, status],
     );
   }
 
   async read(id: string) {
     const { rows } = await this.#db.query(
-      `SELECT paso, estado, coalesce(salidas, '{}'::jsonb) AS salidas
-         FROM saga_compra WHERE id = $1 AND estado <> 'open'`,
+      `SELECT step, status, coalesce(outputs, '{}'::jsonb) AS outputs
+         FROM saga_compra WHERE id = $1 AND status <> 'open'`,
       [id],
     );
     if (!rows[0]) return null;
     return {
-      step: Number(rows[0].paso),
-      status: rows[0].estado as string,
-      outputs: rows[0].salidas as Record<number, unknown>,
+      step: Number(rows[0].step),
+      status: rows[0].status as string,
+      outputs: rows[0].outputs as Record<number, unknown>,
     };
   }
 
   async claim(_saga: string, olderThan: Date, limit: number) {
     const { rows } = await this.#db.query(
-      `UPDATE saga_compra SET actualizado = now()
+      `UPDATE saga_compra SET updated = now()
         WHERE id IN (
           SELECT id FROM saga_compra
-           WHERE estado IN ('open','attempting','done') AND actualizado < $1
-           ORDER BY actualizado
+           WHERE status IN ('open','attempting','done') AND updated < $1
+           ORDER BY updated
            LIMIT $2
            FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, datos`,
+        RETURNING id, data`,
       [olderThan, limit],
     );
-    return rows.map((r: any) => ({ id: r.id as string, data: r.datos as Envelope<unknown> }));
+    return rows.map((r: any) => ({ id: r.id as string, data: r.data as Envelope<unknown> }));
   }
 }
 
@@ -114,7 +114,7 @@ class Journal implements SagaJournal {
  *  `append` recibe la version que el llamador creia vigente. El UNIQUE
  *  (stream_id, version) es lo que la hace valer: si otro escribio en medio, la
  *  insercion falla y quien la recibe vuelve a leer. Sin el UNIQUE las dos
- *  entrarian y el estado reconstruido dependeria del orden de lectura. */
+ *  entrarian y el status reconstruido dependeria del orden de lectura. */
 class Stream implements SnapshottingStream {
   #db: pg.Pool;
   #outbox: Outbox<pg.PoolClient>;
@@ -123,29 +123,29 @@ class Stream implements SnapshottingStream {
     this.#outbox = o;
   }
 
-  /** Solo las fotos de la version de reglas vigente. Una de otra version se
-   *  ignora y el estado se reconstruye entero: lento y correcto, en ese
+  /** Solo las fotos de la version de rules vigente. Una de otra version se
+   *  ignora y el status se reconstruye entero: lento y correcto, en ese
    *  orden. */
   async snapshot(streamId: string, rules: number) {
     const { rows } = await this.#db.query(
-      `SELECT version, estado FROM compra_snapshot
-        WHERE stream_id = $1 AND reglas = $2 ORDER BY version DESC LIMIT 1`,
+      `SELECT version, state FROM compra_snapshot
+        WHERE stream_id = $1 AND rules = $2 ORDER BY version DESC LIMIT 1`,
       [streamId, rules],
     );
-    return rows[0] ? { version: Number(rows[0].version), state: rows[0].estado } : null;
+    return rows[0] ? { version: Number(rows[0].version), state: rows[0].state } : null;
   }
 
   async saveSnapshot(streamId: string, version: number, rules: number, state: unknown) {
     await this.#db.query(
-      `INSERT INTO compra_snapshot (stream_id, version, reglas, estado)
+      `INSERT INTO compra_snapshot (stream_id, version, rules, state)
        VALUES ($1,$2,$3,$4)
-       ON CONFLICT (stream_id, version, reglas) DO NOTHING`,
+       ON CONFLICT (stream_id, version, rules) DO NOTHING`,
       [streamId, version, rules, JSON.stringify(state)],
     );
   }
 
   /** Borra lo que la version vigente no usa: las fotos de otra version de
-   *  reglas, y todas menos la mas nueva de cada flujo.
+   *  rules, y todas menos la mas nueva de cada flujo.
    *
    *  Una sola sentencia: en dos —primero las viejas, despues las de otra
    *  version— una limpieza interrumpida a la mitad deja un estado que nadie
@@ -154,9 +154,9 @@ class Stream implements SnapshottingStream {
   async pruneSnapshots(rules: number) {
     const { rowCount } = await this.#db.query(
       `DELETE FROM compra_snapshot s
-        WHERE s.reglas <> $1
+        WHERE s.rules <> $1
            OR s.version < (SELECT max(version) FROM compra_snapshot
-                            WHERE stream_id = s.stream_id AND reglas = $1)`,
+                            WHERE stream_id = s.stream_id AND rules = $1)`,
       [rules],
     );
     return rowCount ?? 0;

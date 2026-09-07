@@ -113,7 +113,7 @@ echo "    HTTP $r"
 pago=$(sql_pagos -c "SELECT id FROM payment WHERE order_id = '$ORDEN' LIMIT 1" | tr -d ' \r\n')
 llamadas=$(sql_pagos -c "SELECT count(*) FROM intento WHERE metodo = 'refund' AND payment_id = '$pago'")
 atascada=$($COMPOSE exec -T db-checkout env PGPASSWORD=local psql -qtAX -U postgres -d checkout \
-  -c "SELECT count(*) FROM saga_compra WHERE estado = 'stuck'")
+  -c "SELECT count(*) FROM saga_compra WHERE status = 'stuck'")
 if [ "$r" = "500" ] && [ "$llamadas" -eq $((r_refund + 1)) ] && [ "$atascada" -ge 1 ]; then
   echo "  OK: $llamadas llamadas, la saga quedo ATASCADA y la respuesta no lo oculto"
 else

@@ -949,10 +949,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         // tell a stranded saga from one still on its way.
                         for (col, what) in [
                             ("id", "the flow's id"),
-                            ("paso", "how far it got"),
-                            ("estado", "whether the step was attempted or completed"),
-                            ("datos", "the envelope that started it, so it can be resumed"),
-                            ("actualizado", "when it last moved, for the sweep"),
+                            ("step", "how far it got"),
+                            ("status", "whether the step was attempted or completed"),
+                            ("data", "the envelope that started it, so it can be resumed"),
+                            ("updated", "when it last moved, for the sweep"),
                         ] {
                             match t.col(col) {
                                 None => errors.push(format!(
@@ -962,8 +962,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                                     // A wrong type raises no error: it gives a
                                     // comparison that compiles and compares wrong.
                                     let esperado = match col {
-                                        "datos" => "json",
-                                        "actualizado" => "timestamp",
+                                        "data" => "json",
+                                        "updated" => "timestamp",
                                         _ => continue,
                                     };
                                     if !c.ty.to_lowercase().contains(esperado) {
@@ -1236,9 +1236,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         for (col, what, kind) in [
                             ("stream_id", "which instance the snapshot is of", ""),
                             ("version", "how far into the stream it covers", ""),
-                            ("estado", "the computed state", "json"),
+                            ("state", "the computed state", "json"),
                             (
-                                "reglas",
+                                "rules",
                                 "which rules version it was computed with: without this column, \
                                  an old snapshot gets rehydrated with new rules and gives a \
                                  state that no longer matches replaying the stream, with no \
