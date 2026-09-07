@@ -40,11 +40,11 @@ fn parse(text: &str) -> Result<Value, String> {
 }
 
 /// An event with fields and, if it came declared, its handler name.
-type Evento = (String, Vec<(String, String)>);
+type Event = (String, Vec<(String, String)>);
 
 // ---------- AsyncAPI 3.x ----------
 
-fn v3(doc: &Value) -> Result<(Vec<Evento>, Vec<Evento>), String> {
+fn v3(doc: &Value) -> Result<(Vec<Event>, Vec<Event>), String> {
     let (mut emits, mut consumes) = (vec![], vec![]);
     let ops = doc.get("operations").and_then(Value::as_object);
     for (_, op) in ops.into_iter().flatten() {
@@ -70,8 +70,8 @@ fn v3(doc: &Value) -> Result<(Vec<Evento>, Vec<Evento>), String> {
                 .unwrap_or_default(),
         };
         for m in msgs {
-            let campos = campos_de(doc, m);
-            let ev = (evento(&direccion), campos);
+            let fields = campos_de(doc, m);
+            let ev = (evento(&direccion), fields);
             match accion {
                 "send" => emits.push(ev),
                 "receive" => consumes.push(ev),
@@ -92,7 +92,7 @@ fn v3(doc: &Value) -> Result<(Vec<Evento>, Vec<Evento>), String> {
 /// the app exposes for others to read (what it emits). It is the reverse of
 /// what the word suggests, and it is the number one cause of mistakes when
 /// reading 2.x.
-fn v2(doc: &Value) -> Result<(Vec<Evento>, Vec<Evento>), String> {
+fn v2(doc: &Value) -> Result<(Vec<Event>, Vec<Event>), String> {
     let (mut emits, mut consumes) = (vec![], vec![]);
     let canales = doc
         .get("channels")
@@ -202,7 +202,7 @@ fn handler(ev: &str) -> String {
     )
 }
 
-fn toml(service: &str, version: Option<&str>, emits: &[Evento], consumes: &[Evento]) -> String {
+fn toml(service: &str, version: Option<&str>, emits: &[Event], consumes: &[Event]) -> String {
     let mut o = vec![
         "# imported from AsyncAPI by axon.".to_string(),
         "# The TODOs are what the document does not say and `axon verify` will demand.".to_string(),
@@ -212,13 +212,13 @@ fn toml(service: &str, version: Option<&str>, emits: &[Evento], consumes: &[Even
     if let Some(v) = version {
         o.push(format!("version = \"{v}\""));
     }
-    o.push("owner = \"TODO\"   # equipo responsable".into());
-    o.push("tier  = \"TODO\"   # criticidad: decide SLO y alertas".into());
+    o.push("owner = \"TODO\"   # the team responsible".into());
+    o.push("tier  = \"TODO\"   # criticality: decides SLO and alerts".into());
 
-    for (ev, campos) in dedup(emits) {
+    for (ev, fields) in dedup(emits) {
         o.push(String::new());
         o.push(format!("[emits.\"{ev}\"]"));
-        for (k, t) in campos {
+        for (k, t) in fields {
             o.push(format!("{k} = \"{t}\""));
         }
     }
@@ -236,10 +236,10 @@ fn toml(service: &str, version: Option<&str>, emits: &[Evento], consumes: &[Even
 }
 
 /// An event can appear in several operations; the manifest declares it once.
-fn dedup(evs: &[Evento]) -> Vec<Evento> {
-    let mut vistos = std::collections::HashSet::new();
+fn dedup(evs: &[Event]) -> Vec<Event> {
+    let mut seen = std::collections::HashSet::new();
     evs.iter()
-        .filter(|(ev, _)| vistos.insert(ev.clone()))
+        .filter(|(ev, _)| seen.insert(ev.clone()))
         .cloned()
         .collect()
 }
