@@ -6,7 +6,7 @@
 //! propio, pero si hace que los consumidores la vean tarde — eso no es un bug,
 //! es una propiedad, y conviene que este escrita en alguna parte antes de que
 //! alguien la descubra en un incidente.
-use crate::color::{amarillo, azul, fuerte, gris, rojo, verde};
+use crate::color::{blue, bold, green, grey, red, yellow};
 use crate::manifest::*;
 
 /// Nivel de un hallazgo, que decide el color y el orden.
@@ -25,7 +25,7 @@ struct Hallazgo {
 /// Rellena a lo ancho ANTES de colorear: `{:<18}` cuenta los bytes de la
 /// secuencia ANSI, asi que padear texto ya coloreado desalinea las columnas.
 fn columna(t: &str, ancho: usize) -> String {
-    fuerte(&format!("{t:<ancho$}"))
+    bold(&format!("{t:<ancho$}"))
 }
 
 /// `solo` filtra por nombre de servicio. Se filtra al final y no al cargar,
@@ -44,9 +44,9 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
         let lado = if cap.eventual() { "AP" } else { "CP" };
         o.push(format!(
             "\n{}  {}  {}",
-            fuerte(&m.service),
-            azul(&format!("[{lado}]")),
-            gris(&format!(
+            bold(&m.service),
+            blue(&format!("[{lado}]")),
+            grey(&format!(
                 "consistency = {}, on_partition = {}{}",
                 cap.consistency,
                 cap.on_partition,
@@ -58,7 +58,7 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
         if !cap.declarado {
             o.push(format!(
                 "  {} el lado no esta declarado: se asumio CP, que falla cerrado",
-                amarillo("~")
+                yellow("~")
             ));
         }
 
@@ -222,7 +222,7 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
         }
 
         if hs.is_empty() {
-            o.push(format!("  {} nada que reconciliar", verde("ok")));
+            o.push(format!("  {} nada que reconciliar", green("ok")));
         }
         hs.sort_by_key(|h| match h.nivel {
             Nivel::Contradice => 0,
@@ -231,9 +231,9 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
         });
         for h in hs {
             let (marca, etiqueta) = match h.nivel {
-                Nivel::Contradice => (rojo("x"), rojo("contradice")),
-                Nivel::Cuesta => (amarillo("!"), amarillo("cuesta")),
-                Nivel::Implica => (azul("i"), azul("implica")),
+                Nivel::Contradice => (red("x"), red("contradice")),
+                Nivel::Cuesta => (yellow("!"), yellow("cuesta")),
+                Nivel::Implica => (blue("i"), blue("implica")),
             };
             o.push(format!(
                 "  {marca} {} {etiqueta}  {}",
@@ -244,11 +244,11 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
     }
 
     if o.is_empty() {
-        return format!("{} ningun servicio con ese nombre", amarillo("aviso"));
+        return format!("{} ningun servicio con ese nombre", yellow("aviso"));
     }
     o.push(format!(
         "\n{}",
-        gris(
+        grey(
             "x contradice lo declarado y `axon verify` lo bloquea · ! es un costo que se paga \
              · i es una consecuencia que conviene conocer"
         )

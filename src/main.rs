@@ -318,10 +318,10 @@ fn run() -> Result<ExitCode, String> {
             // Errors first: they are what has to be fixed, and in a long list
             // what matters cannot end up at the bottom.
             for e in &r.errors {
-                eprintln!("{} {}", color::rojo("error"), realzar(e));
+                eprintln!("{} {}", color::red("error"), realzar(e));
             }
             for w in &r.warnings {
-                println!("{}  {}", color::amarillo("warn"), realzar(w));
+                println!("{}  {}", color::yellow("warn"), realzar(w));
             }
             let resumen = format!(
                 "{} services, {} errors, {} warnings",
@@ -330,11 +330,11 @@ fn run() -> Result<ExitCode, String> {
                 r.warnings.len()
             );
             if r.errors.is_empty() && r.warnings.is_empty() {
-                println!("{} {}", color::verde("ok"), color::gris(&resumen));
+                println!("{} {}", color::green("ok"), color::grey(&resumen));
             } else if r.errors.is_empty() {
-                println!("{}  {}", color::amarillo("near"), color::gris(&resumen));
+                println!("{}  {}", color::yellow("near"), color::grey(&resumen));
             } else {
-                println!("{} {}", color::rojo("fail"), color::gris(&resumen));
+                println!("{} {}", color::red("fail"), color::grey(&resumen));
             }
             if !r.errors.is_empty() {
                 return Ok(ExitCode::FAILURE);
@@ -382,10 +382,10 @@ fn run() -> Result<ExitCode, String> {
                     .map_err(|e| format!("{}: {e}", ruta.display()))?;
                 let (errores, avisos) = bi::revisar(&ms, &d, &real);
                 for a in &avisos {
-                    eprintln!("{}", color::amarillo(&format!("warn: {a}")));
+                    eprintln!("{}", color::yellow(&format!("warn: {a}")));
                 }
                 for e in &errores {
-                    eprintln!("{}", color::rojo(&format!("error: {e}")));
+                    eprintln!("{}", color::red(&format!("error: {e}")));
                 }
                 println!(
                     "axon: la bodega tiene {} {} con el manifiesto",
@@ -531,14 +531,14 @@ fn realzar(msg: &str) -> String {
     // Sin color, el mensaje sale tal cual: quitar los acentos graves cambiaria
     // el contenido, y un realce no debe cambiar lo que dice el texto. Lo
     // descubri rompiendo nueve pruebas que verifican los mensajes.
-    if !color::activos() {
+    if !color::enabled() {
         return msg.to_string();
     }
     let mut out = String::with_capacity(msg.len());
     let mut dentro = false;
     for parte in msg.split('`') {
         if dentro {
-            out.push_str(&color::fuerte(parte));
+            out.push_str(&color::bold(parte));
         } else {
             out.push_str(parte);
         }

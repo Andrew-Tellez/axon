@@ -1073,7 +1073,7 @@ pub fn build_seq(ms: &[Manifest], root: &str, solo_eventos: bool) -> Result<Stri
     if solo_eventos {
         // Misma forma que `axon trace --seq`: la cadena causal de eventos, sin
         // las llamadas sincronas, que la traza de envelopes no puede ver.
-        out.push(format!("  cliente->>{}: {root}", emitter[root]));
+        out.push(format!("  client->>{}: {root}", emitter[root]));
         eventos(ms, &emitter, root, 0, &mut seen, &mut out);
     } else {
         walk(ms, &emitter, &external, root, 0, &mut seen, &mut out);

@@ -1,6 +1,6 @@
-//! Debug local: reconstruye lo que REALMENTE paso desde la cadena causal.
-//! No hace falta un colector ni un dashboard — el causationId ya esta en cada
-//! envelope, asi que un log NDJSON alcanza.
+//! Local debugging: rebuilds what ACTUALLY happened from the causal chain.
+//! No collector and no dashboard needed — the causationId is already in every
+//! envelope, so an NDJSON log is enough.
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -19,17 +19,17 @@ pub struct Envelope {
 }
 
 pub fn parse(text: &str) -> Vec<Envelope> {
-    // El broker entrega al menos una vez, asi que un log real trae el mismo
-    // envelope repetido. Un mensaje existe una vez: gana la primera aparicion.
-    let mut vistos = std::collections::HashSet::new();
+    // The broker delivers at least once, so a real log carries the same
+    // envelope more than once. A message exists once: the first appearance wins.
+    let mut seen = std::collections::HashSet::new();
     text.lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<Envelope>(l).ok())
-        .filter(|e| vistos.insert(e.id.clone()))
+        .filter(|e| seen.insert(e.id.clone()))
         .collect()
 }
 
-/// Arbol causal por flujo de negocio. Lo que se lee a las 3am.
+/// The causal tree per business flow. What gets read at 3am.
 pub fn tree(evs: &[Envelope], only: Option<&str>) -> String {
     let mut kids: HashMap<Option<String>, Vec<&Envelope>> = HashMap::new();
     for e in evs {
@@ -42,11 +42,11 @@ pub fn tree(evs: &[Envelope], only: Option<&str>) -> String {
     let mut flows: Vec<&&Envelope> = kids.get(&None).into_iter().flatten().collect();
     flows.sort_by(|a, b| a.time.cmp(&b.time));
     for root in flows {
-        out.push(format!("flujo {}", root.correlation_id));
+        out.push(format!("flow {}", root.correlation_id));
         render(root, &kids, "", true, &mut out);
     }
     if out.is_empty() {
-        out.push("(sin eventos raiz: el log esta incompleto o todos tienen causationId)".into());
+        out.push("(no root events: the log is incomplete, or every one has a causationId)".into());
     }
     out.join("\n")
 }
@@ -77,15 +77,15 @@ fn render(
     }
 }
 
-/// Un evento del dominio lleva version: `dominio.hecho@vN`. Lo demas en el log
-/// es un borde (una request HTTP, una llamada RPC): origina la cadena pero no
-/// es parte de ella.
-fn es_evento(t: &str) -> bool {
+/// A domain event carries a version: `domain.thing@vN`. Everything else in the
+/// log is an edge (an HTTP request, an RPC call): it originates the chain but is
+/// not part of it.
+fn is_event(t: &str) -> bool {
     t.contains('@')
 }
 
-/// El flujo real como mermaid, en la misma forma que `axon seq --events`, para
-/// que diffear el esperado contra el real sea una comparacion de texto.
+/// The real flow as mermaid, in the same shape `axon seq --events` produces, so
+/// that diffing expected against real is a text comparison.
 pub fn sequence(evs: &[Envelope], only: Option<&str>) -> String {
     let by_id: HashMap<&str, &Envelope> = evs.iter().map(|e| (e.id.as_str(), e)).collect();
     let mut out = vec!["sequenceDiagram".to_string(), "  autonumber".to_string()];
@@ -95,17 +95,17 @@ pub fn sequence(evs: &[Envelope], only: Option<&str>) -> String {
         .collect();
     rows.sort_by(|a, b| a.time.cmp(&b.time));
     for e in rows {
-        if !es_evento(&e.kind) {
+        if !is_event(&e.kind) {
             continue;
         }
-        // Si la causa no es un evento del dominio, la cadena empieza afuera.
+        // If the cause is not a domain event, the chain starts outside.
         let from = e
             .causation_id
             .as_deref()
             .and_then(|c| by_id.get(c))
-            .filter(|p| es_evento(&p.kind))
+            .filter(|p| is_event(&p.kind))
             .map(|p| p.source.as_str())
-            .unwrap_or("cliente");
+            .unwrap_or("client");
         out.push(format!("  {from}->>{}: {}", e.source, e.kind));
     }
     out.join("\n")

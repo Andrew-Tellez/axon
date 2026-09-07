@@ -1,19 +1,19 @@
-//! Colores para la salida. Sin dependencias: son cuatro secuencias ANSI.
+//! Colours for the output. No dependencies: four ANSI sequences.
 //!
-//! Azul informa, amarillo advierte, rojo bloquea. La jerarquia importa mas que
-//! el color: en una lista de treinta lineas, lo que hay que arreglar tiene que
-//! saltar sin leerla entera.
+//! Blue informs, yellow warns, red blocks. The hierarchy matters more than the
+//! colour: in a thirty-line list, what has to be fixed must stand out without
+//! reading the whole thing.
 //!
-//! Se apagan solos cuando la salida no es una terminal —un pipe, un log de CI,
-//! un archivo— porque ahi las secuencias son basura que ensucia el diff. Y
-//! respetan `NO_COLOR`, que es la convencion, y `CLICOLOR_FORCE` para el caso
-//! contrario.
+//! They turn themselves off when the output is not a terminal —a pipe, a CI
+//! log, a file— because there the sequences are noise that dirties the diff.
+//! And they honour `NO_COLOR`, which is the convention, and `CLICOLOR_FORCE`
+//! for the opposite case.
 use std::io::IsTerminal;
 use std::sync::OnceLock;
 
-/// Si el destino admite color. Publico porque quien resalta texto necesita
-/// saberlo: sin color, el realce no debe alterar el contenido.
-pub fn activos() -> bool {
+/// Whether the destination accepts colour. Public because whoever highlights
+/// text needs to know: with no colour, highlighting must not alter the content.
+pub fn enabled() -> bool {
     static A: OnceLock<bool> = OnceLock::new();
     *A.get_or_init(|| {
         if std::env::var_os("NO_COLOR").is_some() {
@@ -22,41 +22,41 @@ pub fn activos() -> bool {
         if std::env::var_os("CLICOLOR_FORCE").is_some() {
             return true;
         }
-        // stderr y stdout se juzgan juntos: mezclar coloreado y plano en el
-        // mismo reporte se lee peor que no colorear nada
+        // stderr and stdout are judged together: mixing coloured and plain in
+        // the same report reads worse than not colouring at all
         std::io::stdout().is_terminal() && std::io::stderr().is_terminal()
     })
 }
 
-fn pintar(codigo: &str, texto: &str) -> String {
-    if activos() {
-        format!("\x1b[{codigo}m{texto}\x1b[0m")
+fn paint(code: &str, text: &str) -> String {
+    if enabled() {
+        format!("\x1b[{code}m{text}\x1b[0m")
     } else {
-        texto.to_string()
+        text.to_string()
     }
 }
 
-/// Rojo: hay que corregirlo antes de seguir.
-pub fn rojo(t: &str) -> String {
-    pintar("1;31", t)
+/// Red: fix it before going any further.
+pub fn red(t: &str) -> String {
+    paint("1;31", t)
 }
-/// Amarillo: conviene mirarlo, no bloquea.
-pub fn amarillo(t: &str) -> String {
-    pintar("1;33", t)
+/// Yellow: worth a look, does not block.
+pub fn yellow(t: &str) -> String {
+    paint("1;33", t)
 }
-/// Azul: informacion y consejo.
-pub fn azul(t: &str) -> String {
-    pintar("1;34", t)
+/// Blue: information and advice.
+pub fn blue(t: &str) -> String {
+    paint("1;34", t)
 }
-/// Verde: salio bien.
-pub fn verde(t: &str) -> String {
-    pintar("1;32", t)
+/// Green: it went well.
+pub fn green(t: &str) -> String {
+    paint("1;32", t)
 }
-/// Gris: contexto secundario, para que no compita con lo importante.
-pub fn gris(t: &str) -> String {
-    pintar("2", t)
+/// Grey: secondary context, so it does not compete with what matters.
+pub fn grey(t: &str) -> String {
+    paint("2", t)
 }
-/// Negrita sin color, para resaltar un nombre dentro de una frase.
-pub fn fuerte(t: &str) -> String {
-    pintar("1", t)
+/// Bold with no colour, to highlight a name inside a sentence.
+pub fn bold(t: &str) -> String {
+    paint("1", t)
 }

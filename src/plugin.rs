@@ -1,17 +1,17 @@
-//! Plugins: el modelo de `git` y `protoc`. Un plugin es un ejecutable en el
-//! PATH llamado `axon-<clase>-<nombre>`. Recibe JSON por stdin y escribe por
-//! stdout. Sin ABI, sin cargar librerias, sin infierno de versiones: puede
-//! estar escrito en cualquier lenguaje, incluso ser un script de shell.
+//! Plugins: the `git` and `protoc` model. A plugin is an executable on the
+//! PATH named `axon-<kind>-<name>`. It reads JSON on stdin and writes on
+//! stdout. No ABI, no library loading, no version hell: it can be written in
+//! any language, and it can be a shell script.
 //!
-//!   axon build --lang go        -> axon-gen-go        <- el manifiesto
-//!   axon infra --target pulumi  -> axon-infra-pulumi  <- el plan neutral
-//!   axon verify                 -> axon-check-*       <- todos los manifiestos
+//!   axon build --lang go        -> axon-gen-go        <- the manifest
+//!   axon infra --target pulumi  -> axon-infra-pulumi  <- the neutral plan
+//!   axon verify                 -> axon-check-*       <- every manifest
 use serde::Deserialize;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// Hallazgo que devuelve un `axon-check-*`. Un plugin de gobernanza puede
-/// bloquear el pipeline igual que una regla nativa.
+/// A finding returned by an `axon-check-*`. A governance plugin can block the
+/// pipeline exactly like a native rule.
 #[derive(Debug, Deserialize)]
 pub struct Finding {
     pub level: String, // "error" | "warn"
@@ -34,9 +34,9 @@ pub fn run(name: &str, input: &str) -> Result<String, String> {
         .wait_with_output()
         .map_err(|e| format!("{name}: {e}"))?;
     if !out.status.success() {
-        return Err(format!("{name}: salio con {}", out.status));
+        return Err(format!("{name}: exited with {}", out.status));
     }
-    String::from_utf8(out.stdout).map_err(|e| format!("{name}: salida no es UTF-8: {e}"))
+    String::from_utf8(out.stdout).map_err(|e| format!("{name}: output is not UTF-8: {e}"))
 }
 
 pub fn exists(name: &str) -> bool {
@@ -52,7 +52,7 @@ fn which(name: &str) -> Option<std::path::PathBuf> {
     })
 }
 
-/// Todos los `axon-check-*` visibles en el PATH, ordenados y sin duplicados.
+/// Every `axon-check-*` visible on the PATH, sorted and deduplicated.
 pub fn checks() -> Vec<String> {
     let mut found: Vec<String> = std::env::var_os("PATH")
         .map(|paths| {
