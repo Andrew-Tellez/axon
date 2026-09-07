@@ -307,11 +307,12 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 _ => {}
             }
 
-            // Un rollout por peticion hace que la MISMA entidad tome un camino
-            // en una llamada y el otro en la siguiente. Con estado de por
-            // medio, eso deja datos a medio migrar.
-            // el orden importa: un kill switch con rollout es un error propio,
-            // no un caso del sticky que falta
+            // A per-request rollout makes the SAME entity take one path on one
+            // call and the other on the next. With state involved, that leaves
+            // data half-migrated.
+            //
+            // The order of these checks matters: a kill switch with a rollout is
+            // an error of its own, not a case of the missing sticky field.
             match f.rollout {
                 Some(_) if f.kill_switch => errors.push(format!(
                     "{svc}.{nombre}: `kill_switch` with `rollout`. An emergency switch turns everything \
@@ -326,9 +327,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 )),
                 _ => {}
             }
-            // A default variant that does not exist makes evaluation
-            // caiga siempre al valor del codigo, y el flag deja de servir en
-            // silencio: se ve como "el rollout no hace nada".
+            // A default variant that does not exist makes evaluation always
+            // fall back to the value in the code, and the flag quietly stops
+            // doing anything: it looks like "the rollout does nothing".
             let variantes = f.variantes();
             let defecto = f.variante_defecto();
             if !variantes.contains_key(&defecto) {
@@ -362,8 +363,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                      by default is not a gradual rollout: it is a deploy"
                 ));
             }
-            // El campo por el que se fija tiene que existir en algun contrato,
-            // o la decision se fija por un dato que el servicio no recibe.
+            // The field it is pinned by has to exist in some contract, or the
+            // decision is pinned by data the service never receives.
             if let Some(campo) = &f.sticky_by {
                 let conocido = m.infra.tenant_column.as_deref() == Some(campo.as_str())
                     || m.methods.values().any(|me| me.input.contains_key(campo))
@@ -375,8 +376,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     });
                 if !conocido {
                     errors.push(format!(
-                        "{svc}.{nombre}: se fija por `{campo}`, que no aparece en ningun contrato \
-                         ni es la columna del inquilino; el servicio no lo recibe"
+                        "{svc}.{nombre}: is pinned by `{campo}`, which appears in no contract and is not \
+                         the tenant column; the service never receives it"
                     ));
                 }
             }
@@ -491,8 +492,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
         }
         if let (Some(ppool), Some(tope)) = (pl.pool_size, m.infra.max_connections) {
-            // el pooler abre ESTE tanto a CADA motor, y los nodos y las
-            // replicas son motores distintos, cada uno con su propio tope
+            // the pooler opens THIS many to EACH engine, and the nodes and the
+            // replicas are different engines, each with its own limit
             let reservado = if m.patterns.outbox { 5 } else { 2 };
             if ppool + reservado > tope {
                 errors.push(format!(
@@ -530,7 +531,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
-    // ---- el motor tiene que existir ----
+    // ---- the engine has to exist ----
     for m in ms.iter().filter(|m| !m.external) {
         let Some(motor) = &m.infra.state else {
             continue;
@@ -607,8 +608,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                  the tier"
             ));
         }
-        // High availability is not a backup: a standby replicates the DROP TABLE
-        // en segundos. Son dos problemas distintos con dos soluciones distintas.
+        // High availability is not a backup: a standby replicates the DROP
+        // TABLE within seconds. Two different problems with two different
+        // solutions.
         match inf.backup_retention_days {
             None if tier0 => errors.push(format!(
                 "{svc}: `tier = \"0\"` with no `backup_retention_days`. High availability is not a \
@@ -632,8 +634,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             ));
         }
 
-        // Una replica va con retraso. Leer de ella y prometer consistencia
-        // fuerte es la contradiccion del teorema, escrita en dos lugares.
+        // A replica lags. Reading from it and promising strong consistency is
+        // the theorem's contradiction, written in two places.
         if inf.read_replicas.unwrap_or(0) > 0 && !m.cap.eventual() {
             errors.push(format!(
                 "{svc}: reads from {} replicas and declares `consistency = \"strong\"`. A replica \
@@ -1172,7 +1174,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     ] {
                         if !t.tiene(col) {
                             errors.push(format!(
-                                "{svc}.{nombre}: `{tabla}` sin columna `{col}`: ahi va {para}"
+                                "{svc}.{nombre}: `{tabla}` has no `{col}` column: that is where {para} goes"
                             ));
                         }
                     }
@@ -1417,17 +1419,17 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
-    // maquinas de estado: estados muertos, inalcanzables y disparadores fantasma
+    // state machines: dead states, unreachable ones and phantom triggers
     for m in ms.iter().filter(|m| !m.external) {
         for (name, mac) in &m.machine {
             let states = mac.states();
             if !states.contains(&mac.initial) {
                 errors.push(format!(
-                    "{}.{name}: estado inicial `{}` no aparece en ninguna transicion",
+                    "{}.{name}: initial state `{}` appears in no transition",
                     m.service, mac.initial
                 ));
             }
-            // alcanzabilidad desde el inicial
+            // reachability from the initial state
             let mut reach = vec![mac.initial.clone()];
             let mut grew = true;
             while grew {
@@ -1442,14 +1444,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             for st in &states {
                 if !reach.contains(st) {
                     errors.push(format!(
-                        "{}.{name}: estado `{st}` inalcanzable desde `{}`",
+                        "{}.{name}: state `{st}` is unreachable from `{}`",
                         m.service, mac.initial
                     ));
                 }
                 let sale = mac.transitions.values().any(|t| t.from.contains(st));
                 if !sale && !mac.final_states.contains(st) {
                     errors.push(format!(
-                        "{}.{name}: `{st}` no es final y no tiene salida; es un deadlock",
+                        "{}.{name}: `{st}` is not final and has no way out; it is a deadlock",
                         m.service
                     ));
                 }
@@ -1457,21 +1459,21 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             for (act, t) in &mac.transitions {
                 if !states.contains(&t.to) {
                     errors.push(format!(
-                        "{}.{name}.{act}: destino `{}` desconocido",
+                        "{}.{name}.{act}: unknown target `{}`",
                         m.service, t.to
                     ));
                 }
-                // el disparador tiene que existir de verdad
+                // the trigger has to actually exist
                 if !m.methods.contains_key(&t.on) && !m.consumes.contains_key(&t.on) {
                     errors
                         .push(format!(
-                        "{}.{name}.{act}: la dispara `{}`, que no es ni metodo ni evento consumido",
+                        "{}.{name}.{act}: triggered by `{}`, which is neither a method nor a consumed event",
                         m.service, t.on));
                 }
                 if let Some(ev) = &t.emits {
                     if !m.emits.contains_key(ev) {
                         errors.push(format!(
-                            "{}.{name}.{act}: emite `{ev}`, que el servicio no declara emitir",
+                            "{}.{name}.{act}: emits `{ev}`, which the service does not declare it emits",
                             m.service
                         ));
                     }
@@ -1479,7 +1481,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if let Some(c) = &t.compensates {
                     if !mac.transitions.contains_key(c) {
                         errors.push(format!(
-                            "{}.{name}.{act}: compensa `{c}`, que no existe",
+                            "{}.{name}.{act}: compensates `{c}`, which does not exist",
                             m.service
                         ));
                     }
@@ -1500,14 +1502,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             match known.get(tgt) {
                 None => errors.push(format!("{svc} depende de {tgt}, sin manifiesto conocido")),
                 Some(t) if !t.methods.contains_key(&d.method) => errors.push(format!(
-                    "{svc} llama {tgt}.{}, que {tgt} no expone",
+                    "{svc} calls {tgt}.{}, which {tgt} does not expose",
                     d.method
                 )),
                 _ => {}
             }
             if d.timeout_ms.is_none() {
                 errors.push(format!(
-                    "{svc} -> {tgt}.{}: sin `timeout_ms`; una llamada sin presupuesto de tiempo \
+                    "{svc} -> {tgt}.{}: no `timeout_ms`; a network call with no time budget \
                      propaga la caida del otro lado",
                     d.method
                 ));
@@ -1518,19 +1520,19 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     .is_some_and(|t| t.methods.get(&d.method).is_some_and(|m| m.is_idempotent()))
             {
                 errors.push(format!(
-                    "{svc} reintenta {tgt}.{}, que no se declara idempotente",
+                    "{svc} retries {tgt}.{}, which is not declared idempotent",
                     d.method
                 ));
             }
             if d.retries > 0 && !d.breaker {
                 warnings.push(format!(
-                    "{svc} -> {tgt}.{}: reintentos sin `breaker = true`; los reintentos amplifican \
+                    "{svc} -> {tgt}.{}: retries with no `breaker = true`; retries amplify \
                      la caida del otro lado", d.method));
             }
         }
     }
 
-    // migraciones: expand -> migrate -> contract, y orden determinista
+    // migrations: expand -> migrate -> contract, and a deterministic order
     for m in ms {
         // Dos migraciones con la misma version: Flyway se niega a aplicar
         // NINGUNA, asi que el despliegue se cae con la base a medio migrar. Lo
@@ -1561,7 +1563,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             let text = std::fs::read_to_string(&f).unwrap_or_default();
             if destructive(&text, &f.display().to_string()) && !name.contains(".contract.") {
                 errors.push(format!(
-                    "{}/{name}: migracion destructiva sin marcar como `.contract.sql` \
+                    "{}/{name}: destructive migration not marked as `.contract.sql` \
                      (expand -> migrate -> contract)",
                     m.service
                 ));
@@ -1574,14 +1576,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             };
             if !numerado {
                 warnings.push(format!(
-                    "{}/{name}: sin prefijo numerico, el orden no es determinista",
+                    "{}/{name}: no numeric prefix, so the order is not deterministic",
                     m.service
                 ));
             }
         }
     }
 
-    // database per service: ninguna FK cruza el limite
+    // database per service: no FK crosses the boundary
     let by_svc = schemas(ms);
     let mut owner_of: IndexMap<&str, &str> = IndexMap::new();
     for (svc, tables) in &by_svc {
@@ -1608,7 +1610,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
 
     for (ev, (owner, _)) in &emitters {
         if !ms.iter().any(|m| m.consumes.contains_key(*ev)) {
-            warnings.push(format!("{ev} ({owner}) no tiene consumidores"));
+            warnings.push(format!("{ev} ({owner}) has no consumers"));
         }
     }
     Report { errors, warnings }

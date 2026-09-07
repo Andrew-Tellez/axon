@@ -291,8 +291,8 @@ fn run() -> Result<ExitCode, String> {
                 r.warnings.extend(avisos);
             } else {
                 r.warnings.push(format!(
-                    "sin {}: `verify` no puede detectar un cambio incompatible en una \
-                     version ya publicada. Generalo con `axon baseline`",
+                    "no {}: `verify` cannot detect a breaking change in an already \
+                     published version. Generate it with `axon baseline`",
                     baseline::ARCHIVO
                 ));
             }
@@ -315,16 +315,16 @@ fn run() -> Result<ExitCode, String> {
                     Err(e) => r.warnings.push(format!("[{bin}] no corrio: {e}")),
                 }
             }
-            // Los errores primero: son lo que hay que arreglar, y en una lista
-            // larga lo importante no puede quedar debajo.
+            // Errors first: they are what has to be fixed, and in a long list
+            // what matters cannot end up at the bottom.
             for e in &r.errors {
                 eprintln!("{} {}", color::rojo("error"), realzar(e));
             }
             for w in &r.warnings {
-                println!("{}  {}", color::amarillo("aviso"), realzar(w));
+                println!("{}  {}", color::amarillo("warn"), realzar(w));
             }
             let resumen = format!(
-                "{} servicios, {} errores, {} avisos",
+                "{} services, {} errors, {} warnings",
                 ms.len(),
                 r.errors.len(),
                 r.warnings.len()
@@ -332,9 +332,9 @@ fn run() -> Result<ExitCode, String> {
             if r.errors.is_empty() && r.warnings.is_empty() {
                 println!("{} {}", color::verde("ok"), color::gris(&resumen));
             } else if r.errors.is_empty() {
-                println!("{}  {}", color::amarillo("casi"), color::gris(&resumen));
+                println!("{}  {}", color::amarillo("near"), color::gris(&resumen));
             } else {
-                println!("{} {}", color::rojo("falla"), color::gris(&resumen));
+                println!("{} {}", color::rojo("fail"), color::gris(&resumen));
             }
             if !r.errors.is_empty() {
                 return Ok(ExitCode::FAILURE);
@@ -382,7 +382,7 @@ fn run() -> Result<ExitCode, String> {
                     .map_err(|e| format!("{}: {e}", ruta.display()))?;
                 let (errores, avisos) = bi::revisar(&ms, &d, &real);
                 for a in &avisos {
-                    eprintln!("{}", color::amarillo(&format!("aviso: {a}")));
+                    eprintln!("{}", color::amarillo(&format!("warn: {a}")));
                 }
                 for e in &errores {
                     eprintln!("{}", color::rojo(&format!("error: {e}")));

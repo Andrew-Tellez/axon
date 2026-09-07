@@ -123,7 +123,7 @@ fn el_reparto_no_se_renderiza_donde_no_existe() {
 fn ejemplos_limpios() {
     let (out, err, ok) = axon(&["verify", "examples"]);
     assert!(ok, "verify fallo: {err}");
-    assert!(out.contains("0 errores"), "{out}");
+    assert!(out.contains("0 errors"), "{out}");
 }
 
 #[test]
@@ -240,7 +240,7 @@ CREATE INDEX ledger_entry_account_idx ON "ledger_entry" (account_id, posted_at D
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("destructiva sin marcar"), "{err}");
+    assert!(err.contains("destructive migration not marked"), "{err}");
 
     // y el SQL que no se puede parsear falla ruidosamente, nunca en silencio
     std::fs::write(
@@ -402,7 +402,7 @@ method = "charge"
         "no `tier`",
         "has no version in the path",
         "mutates with no `idempotent = true`",
-        "sin `timeout_ms`",
+        "no `timeout_ms`",
     ] {
         assert!(
             err.contains(esperado),
@@ -692,7 +692,7 @@ on = "fantasma"
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("no es ni metodo ni evento consumido"), "{err}");
+    assert!(err.contains("is neither a method nor a consumed event"), "{err}");
     assert!(err.contains("deadlock"), "{err}");
 }
 
@@ -1364,9 +1364,9 @@ fn una_version_publicada_es_inmutable() {
     let dir = preparar("limpio");
     let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(ok, "{err}");
-    assert!(out.contains("0 errores"), "{out}");
+    assert!(out.contains("0 errors"), "{out}");
     assert!(
-        !out.contains("sin registrar"),
+        !out.contains("not recorded"),
         "el baseline recien tomado ya tiene huecos"
     );
 
@@ -1389,11 +1389,11 @@ fn una_version_publicada_es_inmutable() {
         "total = \"int\"",
     );
     assert!(
-        err.contains("cambio de `money` a `int` en una version publicada"),
+        err.contains("changed from `money` to `int` in a published version"),
         "{err}"
     );
     assert!(
-        err.contains("publica `order.placed@v2`"),
+        err.contains("publish `order.placed@v2`"),
         "no dice que hacer:\n{err}"
     );
 
@@ -1405,7 +1405,7 @@ fn una_version_publicada_es_inmutable() {
         "\ntotal = \"money\"\nchannel = \"string\"\n",
     );
     assert!(
-        err.contains("campo nuevo `channel` en una version publicada"),
+        err.contains("new field `channel` in a published version"),
         "{err}"
     );
 
@@ -1417,7 +1417,7 @@ fn una_version_publicada_es_inmutable() {
         "http = \"POST /v1/pedidos\"",
     );
     assert!(
-        err.contains("la ruta cambio de `POST /v1/tenants/{tenantId}/orders`"),
+        err.contains("the route changed from `POST /v1/tenants/{tenantId}/orders`"),
         "{err}"
     );
     assert!(
@@ -1433,7 +1433,7 @@ fn una_version_publicada_es_inmutable() {
         "[emits.\"order.placed@v2\"]",
     );
     assert!(
-        err.contains("estaba publicado por orders y ya nadie lo emite"),
+        err.contains("it was published by orders and nobody emits it any more"),
         "{err}"
     );
 
@@ -1473,13 +1473,13 @@ fn una_version_publicada_es_inmutable() {
     .unwrap();
     let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(ok, "un contrato nuevo no es un error");
-    assert!(out.contains("sin registrar"), "{out}");
+    assert!(out.contains("not recorded"), "{out}");
 
     // y sin baseline, `verify` tiene que decir que no puede ver esto
     let dir = preparar("sin_baseline");
     std::fs::remove_file(dir.join("axon.baseline.json")).unwrap();
     let (out, _, _) = axon(&["verify", dir.to_str().unwrap()]);
-    assert!(out.contains("sin axon.baseline.json"), "{out}");
+    assert!(out.contains("no axon.baseline.json"), "{out}");
 }
 
 /// La resiliencia declarada tiene que ejecutarse, no solo validarse: era la
@@ -2110,7 +2110,7 @@ fn los_flags_se_verifican() {
          sticky_by = \"no_existe\"\n"
     ));
     assert!(!ok);
-    assert!(msg.contains("no aparece en ningun contrato"), "{msg}");
+    assert!(msg.contains("appears in no contract"), "{msg}");
 
     // un kill switch sin expires es lo correcto, y no molesta
     let (_, ok) = probar(&format!(
