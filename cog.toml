@@ -1,14 +1,17 @@
 # Convención de commits: Conventional Commits, verificada por cocogitto.
 # La misma que `patterns`, para no tener dos convenciones entre repos.
 #
-# El changelog no se escribe a mano: `cog bump --auto` lee los commits desde el
-# último tag, decide si el salto es patch, minor o major, escribe la sección
-# nueva en CHANGELOG.md, commitea y tagea. Ese tag dispara el release.
+# `cog bump --auto` lee los commits desde el último tag, decide si el salto es
+# patch, minor o major, mueve la versión del binario, commitea y tagea. Ese tag
+# dispara el release. La sección del CHANGELOG se escribe a mano.
 tag_prefix = "v"
 from_latest_tag = false
 ignore_merge_commits = true
 ignore_fixup_commits = true
-disable_changelog = false
+# El changelog se escribe a mano: es prosa curada que explica POR QUE cambio algo,
+# no la lista de commits, y el formato Keep a Changelog no es el que cog escribe.
+# cog sigue decidiendo el salto de version y el tag.
+disable_changelog = true
 disable_bump_commit = false
 branch_whitelist = ["main"]
 skip_ci = "[skip ci]"

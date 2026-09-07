@@ -7,10 +7,45 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
-## [No liberado]
+## [0.2.0] — 2026-09-07
 
 ### Añadido
 
+- **Sagas declarables.** `[saga.<n>]` declara los pasos y su compensación; axon genera el
+  coordinador completo —avance, compensación en orden inverso, presupuesto de tiempo— y el
+  barrido que retoma la saga que quedó colgada, desplegado en los cuatro targets. El demo
+  lo mide contra contenedores: compensa, retoma desde el journal y no vuelve a barrer una
+  saga cerrada.
+- **Event sourcing y CQRS declarables.** El flujo como fuente de verdad con `UNIQUE
+  (stream_id, version)`, el `fold` que rechaza huecos, fotos con versión de reglas —caché,
+  no verdad— y su borrado, punto de control por flujo, y reconstrucción sobre una tabla
+  sombra para que nadie lea una vista a medias. Con el relay como único que publica, y la
+  regla que lo exige.
+- **Bodega y BI.** Una tabla por evento y los embudos derivados de la cadena causal
+  declarada, en tres dialectos —BigQuery, Snowflake y ClickHouse—, cada uno validado con
+  su propio parser. Camino de ingesta en `local` y en k8s con Vector, detección de drift
+  contra `information_schema`, y el PII excluido o hasheado según se declare.
+- **Métricas de negocio declarables.** `[metrics.<n>]` baja a una vista en la bodega junto
+  a los embudos. Lo que hace que valga declararlas es lo que `verify` refuta: una métrica
+  sobre un evento que nadie emite, una suma sobre algo que no es número, una dimensión que
+  el evento no declara y una dimensión que es un campo personal.
+- **Fallas declarables.** `errors` en un método, declarado igual que `in` y `out`, porque
+  cómo falla un método es parte de su contrato. `retriable` **cambia el cliente generado**:
+  una falla que el otro lado declaró final no se reintenta. De la misma declaración salen
+  la tabla y un `fail()` tipado, el cuerpo `problem+json`, una respuesta por código en
+  `axon openapi`, y una suite del testkit que sujeta a las tres.
+- **pgdog desde el manifiesto**, con las reglas que lo hacen seguro, levantado en el target
+  `local` y con el aislamiento por tenant medido: 20 de 20 conexiones vieron solo lo suyo.
+- **Escalado, alta disponibilidad y pruebas de carga medibles**: `pool_size`,
+  `max_connections`, réplicas, standby, backups y PITR, con `axon load` y sus umbrales.
+- **Feature flags con OpenFeature**, servidos por flagd, con `owner`, caducidad, rollout
+  pegajoso y las reglas que nadie más impone.
+- **`axon cap`**: no bloquea, explica las consecuencias de la combinación que declaraste.
+- **El registro, desde lo que está CORRIENDO.** Cada servicio sirve su manifiesto en
+  `/.well-known/axon.json` y `axon discover` lo cruza con el repo.
+- **Documentación versionada** en mdBook, con cada bloque ```toml pasando por `axon
+  verify`, la salida citada buscada en el código que la imprime, y dos páginas nuevas: la
+  arquitectura en diagramas y el demo medido.
 - **OpenTelemetry en los cuatro targets.** axon no trae un SDK ni inventa un formato:
   el `traceparent` del envelope ya es el contexto W3C que propaga OTel. Lo que aporta
   es levantar el backend en `local` (Jaeger) e inyectar las variables estándar en los
@@ -20,8 +55,31 @@ perderlas.
 - `demo.sh` verifica la forma del árbol de spans en CI: un solo raíz, cero huérfanos y
   la traza cruzando los dos servicios.
 
+### Cambiado
+
+- **Todo lo que se lee está en inglés**: mensajes, identificadores y comentarios del
+  compilador, los tests, el ejemplo y el libro. Los commits y este changelog siguen en
+  español, que es la lengua en la que se decide.
+- El demo pasó de 6 a **16 secciones y 39 comprobaciones** contra contenedores reales, y
+  se diagnostica solo cuando falla en CI.
+
 ### Corregido
 
+- El cron golpeaba una ruta que nadie servía: el código generado servía `/sweep` y
+  `/prune` mientras la infraestructura seguía emitiendo los nombres viejos. El `curl ...
+  || true` se comía el 404, así que el barrido de sagas y el borrado de fotos llevaban
+  tiempo sin correr sin que nada avisara. Ahora la ruta sale de una sola función y un test
+  la compara en los dos sentidos.
+- El outbox recibía su propia conexión en vez de la transacción de quien llama, que es
+  exactamente el dual-write que el outbox existe para evitar: si la transacción se
+  revierte, el cambio de estado no ocurre y el evento sí.
+- El chequeo de drift de la bodega borraba el histórico al restaurar, y el cargador casaba
+  columnas por posición: al volver una columna al final, el importe se guardaba en la
+  moneda y la métrica contestaba NULL sin error. Los dos se encontraron corriendo el demo
+  dos veces seguidas.
+- El demo pasaba en macOS y fallaba en Linux: ClickHouse hacía `chown` de todo lo montado
+  en su `user_files`, y con `.axon` ahí toda escritura posterior del host fallaba. CI
+  llevaba unos 35 commits en rojo por eso y por tres causas más.
 - El envelope generado fijaba los flags del `traceparent` en `01` en vez de heredarlos
   de su causa. Declarar «muestreado» sobre una traza que no lo está deja fragmentos
   colgando de un padre que nunca se exportó, y en la UI se ve como varias trazas
