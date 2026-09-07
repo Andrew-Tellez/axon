@@ -2519,7 +2519,7 @@ fn los_esquemas_de_bodega_son_sql_valido() {
     assert!(g.contains("use_table_schema = true"), "{g}");
     // la bodega tambien necesita DLQ: un mensaje que no encaja no desaparece
     let bodega = g
-        .split("_bodega\" {")
+        .split("_warehouse\" {")
         .nth(1)
         .expect("suscripcion de bodega");
     assert!(
@@ -2956,7 +2956,7 @@ fn el_barrido_se_despliega_en_los_cuatro_targets() {
     let dir = fixture_saga("targets");
     let f = dir.to_str().unwrap();
     for (target, marca) in [
-        ("local", "/internal/saga/checkout/barrer"),
+        ("local", "/internal/saga/checkout/sweep"),
         ("gcp", "resource \"google_cloud_scheduler_job\""),
         ("aws", "resource \"aws_scheduler_schedule\""),
         ("k8s", "kind: CronJob"),
@@ -2966,7 +2966,7 @@ fn el_barrido_se_despliega_en_los_cuatro_targets() {
         assert!(out.contains(marca), "{target} no despliega el barrido");
         // y siempre contra la ruta interna, no contra el edge
         assert!(
-            out.contains("/internal/saga/checkout/barrer"),
+            out.contains("/internal/saga/checkout/sweep"),
             "{target} no apunta a la ruta del barrido"
         );
     }
@@ -2980,9 +2980,9 @@ fn el_barrido_se_despliega_en_los_cuatro_targets() {
     // En k8s la politica de red tiene que dejar entrar al pod del barrido: si
     // no, el CronJob se aplica, el curl no llega y solo lo dice el historial.
     let (k, _, _) = axon(&["infra", f, "--target", "k8s"]);
-    assert!(k.contains("axon.dev/barrido"), "el pod del barrido no entra");
+    assert!(k.contains("axon.dev/sweep"), "el pod del barrido no entra");
     assert_eq!(
-        k.matches("axon.dev/barrido").count(),
+        k.matches("axon.dev/sweep").count(),
         2,
         "la etiqueta va en el pod y en la politica, no en uno solo"
     );
@@ -2991,7 +2991,7 @@ fn el_barrido_se_despliega_en_los_cuatro_targets() {
     // tabla con cada version de reglas.
     let es = fixture_es("cron");
     for (target, marca) in [
-        ("local", "/internal/aggregate/cuenta/limpiar"),
+        ("local", "/internal/aggregate/cuenta/prune"),
         ("gcp", "resource \"google_cloud_scheduler_job\""),
         ("aws", "resource \"aws_scheduler_schedule\""),
         ("k8s", "kind: CronJob"),
@@ -3000,7 +3000,7 @@ fn el_barrido_se_despliega_en_los_cuatro_targets() {
         assert!(ok, "{target}: {err}");
         assert!(out.contains(marca), "{target} no despliega la limpieza de fotos");
         assert!(
-            out.contains("/internal/aggregate/cuenta/limpiar"),
+            out.contains("/internal/aggregate/cuenta/prune"),
             "{target} no apunta a la ruta de limpieza"
         );
     }
@@ -4014,8 +4014,8 @@ fn la_ingesta_no_se_promete_sin_camino() {
         let f = ajustado(bodega);
         let (_, err, ok) = axon(&["infra", &f, "--target", target]);
         assert!(!ok, "{target}+{bodega} rindio sin camino de ingesta");
-        assert!(err.contains("no tiene camino de ingesta"), "{err}");
-        assert!(err.contains("las tablas se quedarian vacias"), "{err}");
+        assert!(err.contains("has no ingest path"), "{err}");
+        assert!(err.contains("the tables would stay empty"), "{err}");
         assert!(err.contains("export = false"), "no dice que hacer:\n{err}");
     }
     // El cargador local sale del mismo sitio que el esquema: si las rutas del

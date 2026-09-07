@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 AXON="${AXON:-../target/release/axon}"
 COMPOSE="docker compose -f axon.local.yml"
 
-ch() { $COMPOSE exec -T bodega clickhouse-client --user local --password local "$@"; }
+ch() { $COMPOSE exec -T warehouse clickhouse-client --user local --password local "$@"; }
 
 echo "  aplicando el esquema generado"
 # El esquema sale con `@dataset` como parametro; en local la base es `axon`.

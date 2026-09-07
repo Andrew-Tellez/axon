@@ -71,7 +71,11 @@ mkdir -p .axon/pgdog/orders
 "$AXON" pooler . --service orders --target local --users > .axon/pgdog/orders/users.toml
 
 paso "levantando broker, bases, migraciones y servicios"
-docker compose -f axon.local.yml up -d --build --wait
+# `--remove-orphans`: un servicio que cambia de nombre deja el contenedor
+# viejo corriendo, y ese sigue ocupando su puerto. El compose nuevo levanta
+# igual y falla al publicar el puerto, que se lee como un problema del puerto
+# y no como lo que es.
+docker compose -f axon.local.yml up -d --build --wait --remove-orphans
 
 rm -f .axon/local.ndjson
 mkdir -p .axon

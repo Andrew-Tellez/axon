@@ -1,6 +1,6 @@
-//! IaC agnostica: el manifiesto produce un PLAN neutral, y cada target lo
-//! renderiza. Un proveedor sin target propio se resuelve con `axon plan`,
-//! que emite el JSON del plan para que lo rendericen ustedes.
+//! Provider-agnostic IaC: the manifest produces a neutral PLAN, and each
+//! target renders it. A provider with no target of its own is served by
+//! `axon plan`, which emits the plan's JSON for you to render.
 use crate::manifest::*;
 use serde::Serialize;
 use indexmap::IndexMap;
@@ -11,16 +11,16 @@ pub struct Topic {
     pub event: String,
     pub name: String,
     pub dlq: String,
-    /// El evento se exporta a la bodega: lleva su propia suscripcion de
-    /// escritura directa, aparte de las de los consumidores.
+    /// The event is exported to the warehouse: it carries its own direct-write
+    /// subscription, separate from the consumers'.
     pub analytics: bool,
-    /// Nombre de la tabla destino.
+    /// Name of the destination table.
     pub table: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Sub {
-    /// Consumidor: tambien es el destino de entrega.
+    /// Consumer: it is also the delivery destination.
     pub service: String,
     pub event: String,
     pub name: String,
@@ -32,24 +32,24 @@ pub struct Store {
     pub service: String,
     pub engine: String,
     pub outbox: bool,
-    /// Standby con failover. No se lee de el, asi que no rompe consistencia.
+    /// Standby with failover. Nobody reads from it, so it breaks no consistency.
     pub ha: bool,
     pub backup_retention_days: u32,
     pub pitr: bool,
-    /// Replicas de las que SI se lee, con el retraso que eso implica.
+    /// Replicas that ARE read from, with the lag that implies.
     pub read_replicas: u32,
     pub pool_size: Option<u32>,
-    /// El tope del motor. `verify` hace la aritmetica contra este numero, asi
-    /// que el numero tiene que APLICARSE: una regla que compara contra un tope
-    /// que nadie fija esta comparando contra el default del motor, que suele
-    /// ser mucho mas bajo.
+    /// The engine's ceiling. `verify` does the arithmetic against this number,
+    /// so the number has to be APPLIED: a rule comparing against a ceiling
+    /// nobody sets is comparing against the engine's default, which is usually
+    /// much lower.
     pub max_connections: Option<u32>,
-    /// El servicio tiene politicas de acceso que aplicar despues de migrar:
-    /// `axon rls`. Van aparte porque una politica no es un cambio de esquema.
+    /// The service has access policies to apply after migrating: `axon rls`.
+    /// They go separately because a policy is not a schema change.
     pub policies: bool,
-    /// Nodos detras del pooler. `None` es sin pooler: el servicio habla
-    /// directo con su motor. `Some(n)` son n motores y un pgdog delante, y el
-    /// renderer que no sepa repartir tiene que fallar, no emitir uno solo.
+    /// Nodes behind the pooler. `None` is no pooler: the service talks
+    /// straight to its engine. `Some(n)` is n engines and a pgdog in front,
+    /// and a renderer that cannot shard has to fail, not emit a single one.
     pub shards: Option<u32>,
 }
 
@@ -66,21 +66,21 @@ pub struct Workload {
     pub min_instances: u32,
     pub max_instances: u32,
     pub port: u16,
-    /// La imagen no se declara: es distinta en cada deploy, asi que sale
-    /// como variable del IaC.
+    /// The image is not declared: it differs on every deploy, so it comes out
+    /// as an IaC variable.
     pub image_var: String,
     pub db: bool,
     pub secrets: Vec<String>,
     pub subscribes: Vec<String>,
-    /// Para los atributos de recurso de OpenTelemetry: una traza sin dueño ni
-    /// criticidad no sirve a las 3am.
+    /// For OpenTelemetry's resource attributes: a trace with no owner and no
+    /// criticality is no use at 3am.
     pub owner: String,
     pub tier: String,
     pub version: String,
 }
 
-/// Una ruta del edge. El gateway no es una fuente de verdad nueva: sale de
-/// los metodos que cada servicio declara con `http`.
+/// An edge route. The gateway is not a new source of truth: it comes from the
+/// methods each service declares with `http`.
 #[derive(Debug, Serialize)]
 pub struct Route {
     pub method: String,
@@ -92,35 +92,35 @@ pub struct Route {
     pub timeout_ms: u32,
 }
 
-/// Un disparo periodico. El unico que existe hoy sale de `[saga.*]`: el
-/// coordinador sabe retomar y hace falta algo que lo llame.
+/// A periodic trigger. The only one that exists today comes from `[saga.*]`:
+/// the coordinator knows how to resume and something has to call it.
 ///
-/// Va por HTTP contra el propio servicio y no como un comando aparte, porque un
-/// comando obliga a un entrypoint distinto en cada lenguaje y esto tiene que
-/// funcionar igual en el generador de Go que en el de TypeScript. Una ruta es
-/// el unico contrato que todos comparten.
+/// It goes over HTTP against the service itself and not as a separate command,
+/// because a command forces a different entrypoint in every language and this
+/// has to work the same in the Go generator as in the TypeScript one. A route
+/// is the only contract they all share.
 #[derive(Debug, Serialize)]
 pub struct Cron {
     pub service: String,
-    /// `saga.checkout`, para nombrar el recurso sin ambiguedad.
+    /// `saga.checkout`, to name the resource unambiguously.
     pub name: String,
     pub path: String,
     pub port: u16,
-    /// Cada cuanto. Sale del presupuesto declarado de la saga: nada se vuelve
-    /// elegible antes, asi que disparar mas seguido es trabajo sin resultado.
+    /// How often. It comes from the saga's declared budget: nothing becomes
+    /// eligible before that, so firing more often is work with no result.
     pub every_ms: u32,
 }
 
 impl Cron {
-    /// El intervalo en minutos, redondeado hacia arriba y con piso en 1: los
-    /// programadores de los tres proveedores hablan en cron de minutos, y un
-    /// intervalo que redondea a 0 se convierte en "cada minuto" sin avisar.
+    /// The interval in minutes, rounded up with a floor of 1: the schedulers of
+    /// all three providers speak in minute-granularity cron, and an interval
+    /// that rounds to 0 silently becomes "every minute".
     pub fn minutes(&self) -> u32 {
         self.every_ms.div_ceil(60_000).max(1)
     }
 
-    /// `rate(...)` de EventBridge: con 1 la unidad va en SINGULAR. `rate(1
-    /// minutes)` no es un aviso, es un error de validacion.
+    /// EventBridge's `rate(...)`: with 1 the unit goes in the SINGULAR.
+    /// `rate(1 minutes)` is not a warning, it is a validation error.
     pub fn rate(&self) -> String {
         match self.minutes() {
             1 => "rate(1 minute)".to_string(),
@@ -129,26 +129,26 @@ impl Cron {
     }
 }
 
-/// Almacenamiento de objetos, y su CDN si es publico.
+/// Object storage, and its CDN if it is public.
 #[derive(Debug, Serialize)]
 pub struct Store2 {
     pub service: String,
     pub name: String,
-    /// Nombre global: los buckets comparten espacio de nombres en todo el mundo.
+    /// Global name: buckets share one namespace worldwide.
     pub bucket: String,
     pub public: bool,
     pub retention_days: Option<u32>,
     pub cache_ttl: u32,
 }
 
-/// Plan neutral. Sin una sola palabra de ningun proveedor.
+/// The neutral plan. Without a single word from any provider.
 #[derive(Debug, Serialize)]
 pub struct Plan {
-    /// Hay flags declarados: el target local levanta flagd con su config.
+    /// There are flags declared: the local target brings up flagd with its config.
     pub flags: bool,
-    /// A que bodega exportan los servicios que exportan. `None` si ninguno lo
-    /// hace. Una sola por plataforma: los eventos de un flujo tienen que caer
-    /// en el mismo lugar o el embudo no se puede armar.
+    /// Which warehouse the exporting services export to. `None` if none does.
+    /// One per platform: the events of one flow have to land in the same place
+    /// or the funnel cannot be assembled.
     pub warehouse: Option<String>,
     pub buckets: Vec<Store2>,
     pub routes: Vec<Route>,
@@ -189,7 +189,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 service: svc.clone(),
                 event: ev.clone(),
                 name: format!("{svc}--{}", topic(ev)),
-                // DLQ siempre: no hay forma de declarar un consumidor sin ella
+                // DLQ always: there is no way to declare a consumer without one
                 max_attempts: 5,
             });
         }
@@ -202,10 +202,10 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 name: format!("fotos.{nombre}"),
                 path: Aggregate::prune_route(nombre),
                 port: m.infra.port.unwrap_or(8080),
-                // Cada hora, y este numero NO sale del manifiesto porque no hay
-                // nada ahi de donde derivarlo: la cadencia de fotos se mide en
-                // eventos, no en tiempo. Lo que importa es que corra alguna vez;
-                // atrasarse solo cuesta espacio.
+                // Hourly, and this number does NOT come from the manifest because
+                // there is nothing there to derive it from: the snapshot cadence is
+                // measured in events, not in time. What matters is that it runs at
+                // all; falling behind only costs space.
                 every_ms: 3_600_000,
             });
         }
@@ -251,8 +251,8 @@ pub fn plan(ms: &[Manifest]) -> Plan {
             buckets.push(Store2 {
                 service: svc.clone(),
                 name: nombre.clone(),
-                // Plantilla neutral: `{project}` lo sustituye cada target con su
-                // propia sintaxis. El plan no lleva interpolacion de nadie.
+                // Neutral template: `{project}` is substituted by each target with
+                // its own syntax. The plan carries nobody's interpolation.
                 bucket: format!("{{project}}-{svc}-{nombre}"),
                 public: b.public,
                 retention_days: b.retention_days,
@@ -301,33 +301,34 @@ pub fn plan(ms: &[Manifest]) -> Plan {
 pub const NATIVE: [&str; 5] = ["local", "gcp", "aws", "k8s", "plan"];
 
 pub fn render(p: &Plan, target: &str) -> Result<String, String> {
-    // Solo `local` sabe levantar los nodos del sharder. Emitir UNA instancia
-    // donde el manifiesto declara cuatro seria el peor resultado posible: la
-    // infraestructura se aplica sin error y el reparto no existe.
+    // Only `local` knows how to bring up the sharder's nodes. Emitting ONE
+    // instance where the manifest declares four would be the worst possible
+    // outcome: the infrastructure applies with no error and the sharding does
+    // not exist.
     if matches!(target, "gcp" | "aws" | "k8s") {
         if let Some(s) = p.stores.iter().find(|s| s.shards.unwrap_or(1) > 1) {
             return Err(format!(
-                "{}: `[pooler] shards = {}` todavia no se renderiza en `{target}`. Hoy el reparto \
-                 solo se levanta en `--target local`; emitir una sola instancia aca aplicaria \
-                 sin error y dejaria el reparto sin existir. `--target plan` da el plan con \
-                 los nodes para renderizarlo con tu plantilla.",
+                "{}: `[pooler] shards = {}` is not rendered on `{target}` yet. Today sharding \
+                 is only brought up on `--target local`; emitting a single instance here would \
+                 apply with no error and leave the sharding non-existent. `--target plan` gives \
+                 the plan with the nodes so you can render it with your own template.",
                 s.service,
                 s.shards.unwrap_or(1)
             ));
         }
     }
-    // El esquema de la bodega se genera para tres dialectos, pero el camino que
-    // lleva los eventos hasta ahi no existe en todas las combinaciones. Sin
-    // este rechazo, `terraform apply` pasa, el esquema se aplica, y las tablas
-    // se quedan VACIAS: nadie ve un error y el embudo no dice nada porque no
-    // hay filas que decir.
-    if let Some(bodega) = &p.warehouse {
-        if target != "plan" && !has_ingest(target, bodega) {
+    // The warehouse schema is generated for three dialects, but the path that
+    // carries the events there does not exist for every combination. Without
+    // this refusal, `terraform apply` passes, the schema applies, and the
+    // tables stay EMPTY: nobody sees an error and the funnel says nothing
+    // because there are no rows to say it with.
+    if let Some(warehouse) = &p.warehouse {
+        if target != "plan" && !has_ingest(target, warehouse) {
             return Err(format!(
-                "`[analytics] warehouse = \"{bodega}\"` no tiene camino de ingesta en \
-                 `{target}`. El esquema se genera igual y las tablas se quedarian vacias \
-                 sin un solo error. Combinaciones cableadas: {}. O `export = false` si \
-                 este entorno no exporta.",
+                "`[analytics] warehouse = \"{warehouse}\"` has no ingest path on \
+                 `{target}`. The schema gets generated all the same and the tables would stay empty \
+                 without a single error. Wired combinations: {}. Or `export = false` if \
+                 this environment does not export.",
                 INGEST
                     .iter()
                     .map(|(t, b)| format!("{t}+{b}"))
@@ -344,16 +345,16 @@ pub fn render(p: &Plan, target: &str) -> Result<String, String> {
         "plan" => serde_json::to_string_pretty(p).map_err(|e| e.to_string()),
         other => Err(format!(
             "target `{other}` desconocido. Nativos: local, gcp, aws, k8s. \
-             Para cualquier otro: `axon infra --target plan` da el plan neutral en JSON \
-             y lo renderizas con tu propia plantilla."
+             For any other: `axon infra --target plan` gives the neutral plan in JSON \
+             and you render it with your own template."
         )),
     }
 }
 
 const HEAD: &str = "# generated by axon — do not edit\n";
 
-/// pgdog solo publica el tag `main`, que se mueve. Actualizarlo es un acto
-/// deliberado, igual que el esquema pineado con el que se valida su config.
+/// pgdog only publishes the `main` tag, which moves. Updating it is a
+/// deliberate act, same as the pinned schema its config is validated against.
 const PGDOG: &str = "16c85d1c6471de9aefbb2eceae1c48080786d74f9aa8bcadd32fe183c26184a3";
 
 fn gcp(p: &Plan) -> String {
@@ -366,24 +367,24 @@ fn gcp(p: &Plan) -> String {
         ));
     }
     if !p.workloads.is_empty() {
-        // el backend de trazas no lo elige axon: solo dice donde exportar
+        // axon does not pick the trace backend: it only says where to export
         o.push(
             "variable \"otlp_endpoint\" {\n  type        = string\n  \
-             description = \"Colector OTLP: Cloud Trace via OpenTelemetry Collector, o el que uses\"\n}\n"
+             description = \"OTLP collector: Cloud Trace via the OpenTelemetry Collector, or whichever you use\"\n}\n"
                 .to_string(),
         );
     }
     if !p.stores.is_empty() {
         o.push(
             "variable \"db_tier\" {\n  type        = string\n  \
-             description = \"Tamano de instancia de Cloud SQL, por ejemplo db-custom-2-7680\"\n}\n"
+             description = \"Cloud SQL instance size, for example db-custom-2-7680\"\n}\n"
                 .to_string(),
         );
     }
     if p.topics.iter().any(|t| t.analytics) {
         o.push(
             "variable \"dataset\" {\n  type        = string\n  \
-             description = \"Dataset de BigQuery donde caen los eventos\"\n}\n"
+             description = \"The BigQuery dataset the events land in\"\n}\n"
                 .to_string(),
         );
     }
@@ -429,7 +430,7 @@ fn gcp(p: &Plan) -> String {
         o.push(format!(
             "resource \"google_cloud_run_v2_service\" \"{s}\" {{\n  name     = \"{svc}\"\n  \
              location = var.region\n  \
-             # [A01] sin ruta publica no hay puerta a internet\n  \
+             # [A01] with no public route there is no door to the internet\n  \
              ingress  = \"{ingress}\"\n  template {{\n    service_account = google_service_account.{s}.email\n    \
              scaling {{\n      min_instance_count = {min}\n      max_instance_count = {max}\n    }}\n    \
              containers {{\n      image = var.{img}\n      ports {{\n        container_port = {port}\n      }}\n\
@@ -481,16 +482,16 @@ fn gcp(p: &Plan) -> String {
     }
     for t in p.topics.iter().filter(|t| t.analytics) {
         let n = tfname(&t.event);
-        // Pub/Sub escribe directo en BigQuery: no hay un proceso intermedio
-        // que mantener, ni uno mas donde el evento pueda perderse.
+        // Pub/Sub writes straight into BigQuery: there is no intermediate
+        // process to keep, nor one more place the event could be lost.
         o.push(format!(
-            "resource \"google_pubsub_subscription\" \"{n}_bodega\" {{\n  \
-             name  = \"bodega--{}\"\n  topic = google_pubsub_topic.{n}.name\n  \
+            "resource \"google_pubsub_subscription\" \"{n}_warehouse\" {{\n  \
+             name  = \"warehouse--{}\"\n  topic = google_pubsub_topic.{n}.name\n  \
              bigquery_config {{\n    \
                table            = \"${{var.project}}.${{var.dataset}}.{}\"\n    \
                use_table_schema = true\n    \
                write_metadata   = true\n  }}\n  \
-             # la bodega tambien necesita DLQ: un mensaje que no encaja en el\n  \
+             # the warehouse needs a DLQ too: a message that does not fit the\n  \
              # esquema no puede desaparecer en silencio\n  \
              dead_letter_policy {{\n    \
                dead_letter_topic     = google_pubsub_topic.{n}_dlq.id\n    \
@@ -500,7 +501,7 @@ fn gcp(p: &Plan) -> String {
     }
     for s in &p.subs {
         let (n, sv) = (tfname(&s.event), tfname(&s.service));
-        // push: la suscripcion entrega al workload, no al vacio
+        // push: the subscription delivers to the workload, not into the void
         o.push(format!(
             "resource \"google_pubsub_subscription\" \"{sv}_{n}\" {{\n  name  = \"{}\"\n  \
              topic = google_pubsub_topic.{n}.name\n  push_config {{\n    \
@@ -513,15 +514,15 @@ fn gcp(p: &Plan) -> String {
     }
     for c in &p.crons {
         let (sv, n) = (tfname(&c.service), tfname(&c.name.replace('.', "-")));
-        // OIDC con la misma cuenta del servicio: la ruta del barrido no puede
-        // ser publica. Un endpoint interno que resulta ser abierto es un
-        // disparador para cualquiera, y este dispara compensaciones.
+        // OIDC with the service's own account: the sweep route cannot be
+        // public. An internal endpoint that turns out to be open is a trigger
+        // for anyone, and this one triggers compensations.
         o.push(format!(
             "resource \"google_cloud_scheduler_job\" \"{sv}_{n}\" {{\n  \
              name     = \"{svc}-{nombre}\"\n  \
              schedule = \"*/{min} * * * *\"\n  \
-             # si una pasada tarda mas que el intervalo, esta se corta antes de\n  \
-             # que arranque la siguiente\n  \
+             # if one pass takes longer than the interval, this one is cut off before\n  \
+             # the next one starts\n  \
              attempt_deadline = \"{plazo}s\"\n  \
              retry_config {{\n    retry_count = 1\n  }}\n  \
              http_target {{\n    \
@@ -544,19 +545,19 @@ fn gcp(p: &Plan) -> String {
              name             = \"{svc}\"\n  \
              database_version = \"POSTGRES_16\"\n  \
              region           = var.region\n  \
-             # una base por servicio quiere decir una INSTANCIA por servicio: con\n  \
-             # todas en la misma, un vecino ruidoso las tira juntas\n  \
+             # database-per-service means one INSTANCE per service: with all of\n  \
+             # them on the same one, a noisy neighbour takes them all down\n  \
              deletion_protection = true\n  \
              settings {{\n    \
                tier              = var.db_tier\n    \
-               # REGIONAL es el standby con failover; del standby no se lee\n    \
+               # REGIONAL is the standby with failover; nobody reads from a standby\n    \
                availability_type = \"{disp}\"\n{conexiones}{respaldo}  }}\n}}\n",
             svc = s.service,
             disp = if s.ha { "REGIONAL" } else { "ZONAL" },
             conexiones = s
                 .max_connections
                 .map(|n| format!(
-                    "    # el tope contra el que `axon verify` hace la aritmetica, aplicado\n    \
+                    "    # the ceiling `axon verify` does the arithmetic against, applied\n    \
                      database_flags {{\n      name  = \"max_connections\"\n      \
                      value = \"{n}\"\n    }}\n"
                 ))
@@ -585,7 +586,7 @@ fn gcp(p: &Plan) -> String {
                  region               = var.region\n  \
                  master_instance_name = google_sql_database_instance.{sv}.name\n  \
                  deletion_protection  = false\n  \
-                 # una replica no lleva respaldo propio: se respalda el primario\n  \
+                 # a replica carries no backup of its own: the primary is backed up\n  \
                  replica_configuration {{\n    failover_target = false\n  }}\n  \
                  settings {{\n    tier              = var.db_tier\n    \
                  availability_type = \"ZONAL\"\n  }}\n}}\n",
@@ -655,26 +656,26 @@ fn aws(p: &Plan) -> String {
     if !p.workloads.is_empty() {
         o.push(
             "variable \"otlp_endpoint\" {\n  type        = string\n  \
-             description = \"Colector OTLP: el ADOT Collector hacia X-Ray, o el que uses\"\n}\n"
+             description = \"OTLP collector: the ADOT Collector into X-Ray, or whichever you use\"\n}\n"
                 .to_string(),
         );
     }
     if p.topics.iter().any(|t| t.analytics) {
         o.push(
             "variable \"firehose_role_arn\" {\n  type        = string\n  \
-             description = \"Rol que Firehose asume para escribir en el bucket de aterrizaje\"\n}\n\
+             description = \"Role Firehose assumes to write into the landing bucket\"\n}\n\
              variable \"sns_firehose_role_arn\" {\n  type        = string\n  \
-             description = \"Rol que SNS asume para entregar a Firehose\"\n}\n\
+             description = \"Role SNS assumes to deliver to Firehose\"\n}\n\
              \n\
-             # El aterrizaje. La bodega carga DESDE aqui con lo suyo —Snowpipe, una\n\
-             # tabla externa— porque ese paso vive del lado de la bodega, no del\n\
-             # proveedor. Lo que axon garantiza es que los eventos LLEGUEN, con el\n\
-             # mismo particionado por fecha que el esquema generado.\n\
-             resource \"aws_s3_bucket\" \"bodega\" {\n  \
-             bucket = \"${var.project}-axon-bodega\"\n}\n\
+             # The landing zone. The warehouse loads FROM here with its own tooling\n\
+             # —Snowpipe, an external table— because that step lives on the warehouse's\n\
+             # side, not the provider's. What axon guarantees is that the events ARRIVE,\n\
+             # with the same date partitioning as the generated schema.\n\
+             resource \"aws_s3_bucket\" \"warehouse\" {\n  \
+             bucket = \"${var.project}-axon-warehouse\"\n}\n\
              \n\
-             resource \"aws_s3_bucket_versioning\" \"bodega\" {\n  \
-             bucket = aws_s3_bucket.bodega.id\n  \
+             resource \"aws_s3_bucket_versioning\" \"warehouse\" {\n  \
+             bucket = aws_s3_bucket.warehouse.id\n  \
              versioning_configuration { status = \"Enabled\" }\n}\n"
                 .to_string(),
         );
@@ -682,12 +683,12 @@ fn aws(p: &Plan) -> String {
     if !p.crons.is_empty() {
         o.push(
             "variable \"scheduler_role_arn\" {\n  type        = string\n  \
-             description = \"Rol que EventBridge Scheduler asume para lanzar la tarea del barrido\"\n}\n\
+             description = \"Role EventBridge Scheduler assumes to launch the sweep task\"\n}\n\
              variable \"ecs_cluster_arn\" {\n  type        = string\n  \
-             description = \"ARN del cluster ECS. El scheduler necesita el ARN, no el nombre, y \
-             armarlo con region y cuenta obligaria a declarar dos variables que ya suelen existir del lado de quien despliega\"\n}\n\
+             description = \"ARN of the ECS cluster. The scheduler needs the ARN, not the name, and \
+             building it from region and account would force declaring two variables that usually already exist on the deployer's side\"\n}\n\
              variable \"task_execution_role_arn\" {\n  type        = string\n  \
-             description = \"Rol de ejecucion de la tarea del barrido\"\n}\n"
+             description = \"Execution role of the sweep task\"\n}\n"
                 .to_string(),
         );
     }
@@ -727,7 +728,7 @@ fn aws(p: &Plan) -> String {
                 tfname(sec)
             ));
         }
-        // la cola que consume este workload, para que el autoscaler la mire
+        // the queue this workload consumes, so the autoscaler watches it
         let queues: Vec<String> = p
             .subs
             .iter()
@@ -761,7 +762,7 @@ fn aws(p: &Plan) -> String {
         ));
         if !queues.is_empty() {
             o.push(format!(
-                "# {svc} escala con la profundidad de sus colas: {}\n\
+                "# {svc} scales with the depth of its queues: {}\n\
                  resource \"aws_appautoscaling_target\" \"{s}\" {{\n  \
                  service_namespace  = \"ecs\"\n  resource_id        = \"service/${{var.ecs_cluster}}/{svc}\"\n  \
                  scalable_dimension = \"ecs:service:DesiredCount\"\n  min_capacity = {min}\n  max_capacity = {max}\n}}\n",
@@ -804,10 +805,10 @@ fn aws(p: &Plan) -> String {
     }
     for c in &p.crons {
         let (sv, n) = (tfname(&c.service), tfname(&c.name.replace('.', "-")));
-        // EventBridge Scheduler no alcanza un endpoint privado: una API
-        // destination tendria que ser publica, y la ruta del barrido no puede
-        // serlo. Asi que lanza una tarea de un disparo en las MISMAS subredes,
-        // que es desde donde el servicio si es alcanzable.
+        // EventBridge Scheduler cannot reach a private endpoint: an API
+        // destination would have to be public, and the sweep route cannot be.
+        // So it launches a one-shot task in the SAME subnets, which is where
+        // the service IS reachable from.
         o.push(format!(
             "resource \"aws_ecs_task_definition\" \"{sv}_{n}\" {{\n  \
              family                   = \"{svc}-{nombre}\"\n  \
@@ -829,8 +830,8 @@ fn aws(p: &Plan) -> String {
             "resource \"aws_scheduler_schedule\" \"{sv}_{n}\" {{\n  \
              name                         = \"{svc}-{nombre}\"\n  \
              schedule_expression          = \"{rate}\"\n  \
-             # sin esto, una ventana perdida se recupera disparando varias veces\n  \
-             # seguidas: varios barridos a la vez sobre las mismas sagas\n  \
+             # without this, a missed window is recovered by firing several times in a\n  \
+             # row: several sweeps at once over the same sagas\n  \
              flexible_time_window {{\n    mode = \"OFF\"\n  }}\n  \
              target {{\n    \
                arn      = var.ecs_cluster_arn\n    \
@@ -847,47 +848,47 @@ fn aws(p: &Plan) -> String {
     }
     for t in p.topics.iter().filter(|t| t.analytics) {
         let n = tfname(&t.event);
-        // Un stream por evento, y no uno para todo: el particionado y el
-        // esquema son por evento, y un solo stream obligaria a separarlos
-        // despues, en la bodega, con una consulta que nadie escribio.
+        // One stream per event, and not one for everything: the partitioning
+        // and the schema are per event, and a single stream would force
+        // splitting them later, in the warehouse, with a query nobody wrote.
         o.push(format!(
-            "resource \"aws_kinesis_firehose_delivery_stream\" \"bodega_{n}\" {{\n  \
-             name        = \"axon-bodega-{tabla}\"\n  \
+            "resource \"aws_kinesis_firehose_delivery_stream\" \"warehouse_{n}\" {{\n  \
+             name        = \"axon-warehouse-{tabla}\"\n  \
              destination = \"extended_s3\"\n  \
              extended_s3_configuration {{\n    \
                role_arn   = var.firehose_role_arn\n    \
-               bucket_arn = aws_s3_bucket.bodega.arn\n    \
-               # el mismo particionado por fecha que `PARTITION BY DATE(event_time)`\n    \
-               # del esquema generado: si no coinciden, la bodega lee de mas\n    \
+               bucket_arn = aws_s3_bucket.warehouse.arn\n    \
+               # the same date partitioning as the generated schema's `PARTITION BY\n    \
+               # DATE(event_time)`: if they do not match, the warehouse reads too much\n    \
                prefix              = \"eventos/{tabla}/dt=!{{timestamp:yyyy-MM-dd}}/\"\n    \
                error_output_prefix = \"errores/{tabla}/dt=!{{timestamp:yyyy-MM-dd}}/\"\n    \
-               # lo que no encaja no se descarta: cae en `errores/` y se puede\n    \
-               # volver a cargar. Es el equivalente del DLQ para la bodega.\n    \
+               # what does not fit is not discarded: it lands in `errores/` and can be\n    \
+               # loaded again. It is the warehouse's equivalent of the DLQ.\n    \
                compression_format  = \"GZIP\"\n    \
                buffering_interval  = 60\n    \
                buffering_size      = 5\n  }}\n}}\n",
             tabla = t.table
         ));
         o.push(format!(
-            "resource \"aws_sns_topic_subscription\" \"bodega_{n}\" {{\n  \
+            "resource \"aws_sns_topic_subscription\" \"warehouse_{n}\" {{\n  \
              topic_arn             = aws_sns_topic.{n}.arn\n  \
              protocol              = \"firehose\"\n  \
-             endpoint              = aws_kinesis_firehose_delivery_stream.bodega_{n}.arn\n  \
+             endpoint              = aws_kinesis_firehose_delivery_stream.warehouse_{n}.arn\n  \
              subscription_role_arn = var.sns_firehose_role_arn\n  \
-             # el envelope entero, no una envoltura de SNS alrededor: la tabla\n  \
-             # generada espera los campos del evento en la raiz\n  \
+             # the whole envelope, not an SNS wrapper around it: the generated\n  \
+             # table expects the event's fields at the root\n  \
              raw_message_delivery  = true\n}}\n"
         ));
     }
     for s in &p.stores {
         let sv = tfname(&s.service);
         if let Some(n) = s.max_connections {
-            // en RDS el tope no es un atributo de la instancia: va en un
-            // parameter group, y sin el la instancia usa el default del motor
+            // on RDS the ceiling is not an instance attribute: it goes in a
+            // parameter group, and without it the instance uses the engine's default
             o.push(format!(
                 "resource \"aws_db_parameter_group\" \"{sv}\" {{\n  \
                  name   = \"{}-axon\"\n  family = \"postgres16\"\n  \
-                 # el tope contra el que `axon verify` hace la aritmetica, aplicado\n  \
+                 # the ceiling `axon verify` does the arithmetic against, applied\n  \
                  parameter {{\n    name  = \"max_connections\"\n    value = \"{n}\"\n    \
                  apply_method = \"pending-reboot\"\n  }}\n}}\n",
                 s.service
@@ -899,10 +900,10 @@ fn aws(p: &Plan) -> String {
              engine            = \"{eng}\"\n  \
              instance_class    = var.db_instance_class\n  \
              allocated_storage = 20\n  \
-             # multi_az es el standby con failover; no se lee de el\n  \
+             # multi_az is the standby with failover; nobody reads from it\n  \
              multi_az                = {ha}\n  \
-             # en RDS, retencion > 0 ya habilita recuperacion a un punto en el\n  \
-             # tiempo: no hay un atributo `pitr` aparte\n  \
+             # on RDS, retention > 0 already enables point-in-time recovery: there\n  \
+             # is no separate `pitr` attribute\n  \
              backup_retention_period = {ret}\n  \
              deletion_protection     = true\n  \
              skip_final_snapshot     = false\n{grupo}}}\n",
@@ -922,7 +923,7 @@ fn aws(p: &Plan) -> String {
                  identifier          = \"{svc}-ro-{i}\"\n  \
                  replicate_source_db = aws_db_instance.{sv}.identifier\n  \
                  instance_class      = var.db_instance_class\n  \
-                 # una replica no lleva respaldo propio\n  \
+                 # a replica carries no backup of its own\n  \
                  backup_retention_period = 0\n  \
                  skip_final_snapshot     = true\n}}\n",
                 svc = s.service
@@ -980,8 +981,8 @@ fn aws(p: &Plan) -> String {
     o.join("\n")
 }
 
-/// Knative Eventing: el target realmente portable — el mismo YAML corre en
-/// cualquier Kubernetes, con el broker que tenga detras (Kafka, RabbitMQ, GCP).
+/// Knative Eventing: the genuinely portable target —the same YAML runs on any
+/// Kubernetes, with whatever broker sits behind it (Kafka, RabbitMQ, GCP).
 fn k8s(p: &Plan) -> String {
     const PROJ: &str = "${PROJECT}";
     let mut o = vec![
@@ -1028,7 +1029,7 @@ spec:
     metadata:
       labels: {{ app: {svc} }}
     spec:
-      # [A05] endurecido por generacion, no por acordarse
+      # [A05] hardened by generation, not by remembering to
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -1096,8 +1097,8 @@ spec:
                 .to_string(),
         );
         for r in &p.routes {
-            // Gateway API no entiende `{param}`: una ruta con parametro se
-            // enruta por prefijo hasta el ultimo segmento fijo.
+            // Gateway API does not understand `{param}`: a route with a
+            // parameter is matched by prefix up to the last fixed segment.
             let (kind, value) = match r.path.find('{') {
                 Some(i) => ("PathPrefix", r.path[..i].trim_end_matches('/').to_string()),
                 None => ("Exact", r.path.clone()),
@@ -1116,7 +1117,7 @@ spec:
   rules:
     - matches:
         - path: {{ type: {kind}, value: {value} }}
-          method: {metodo}
+          method: {method}
       timeouts: {{ request: {t}s }}
       backendRefs:
         - name: {svc}
@@ -1127,30 +1128,31 @@ spec:
                     .rate_limit
                     .map(|v| format!("\n    axon.dev/rate-limit: \"{v}\""))
                     .unwrap_or_default(),
-                metodo = r.method,
+                method = r.method,
                 t = r.timeout_ms / 1000,
                 svc = r.service,
             ));
         }
     }
     for w in &p.workloads {
-        // [A01/A05] denegar por defecto: al pod solo entra el edge, y solo si
-        // el servicio expone rutas. Un servicio sin ruta no es alcanzable
-        // desde fuera, aunque alguien se equivoque en el gateway.
-        let desde_edge = p.routes.iter().any(|r| r.service == w.service);
-        // El barrido de una saga entra por HTTP, asi que si la politica lo deja
-        // fuera el CronJob se aplica sin error y no llega nunca: el barrido no
-        // corre y lo unico que lo dice es el historial de un job que falla.
-        let barrido = p.crons.iter().any(|c| c.service == w.service);
+        // [A01/A05] deny by default: only the edge gets into the pod, and only
+        // if the service exposes routes. A service with no route is not
+        // reachable from outside, even if somebody misconfigures the gateway.
+        //
+        // A saga's sweep comes in over HTTP, so if the policy leaves it out
+        // the CronJob applies with no error and never arrives: the sweep does
+        // not run and the only thing that says so is a failing job's history.
+        let from_edge = p.routes.iter().any(|r| r.service == w.service);
+        let sweep = p.crons.iter().any(|c| c.service == w.service);
         let mut froms = String::new();
-        if desde_edge {
+        if from_edge {
             froms.push_str(
                 "\n    - from:\n        - namespaceSelector:\n            matchLabels: { axon.dev/edge: \"true\" }",
             );
         }
-        if barrido {
+        if sweep {
             froms.push_str(
-                "\n    # solo el pod del barrido\n    - from:\n        - podSelector:\n            matchLabels: { axon.dev/barrido: \"true\" }",
+                "\n    # only the sweep pod\n    - from:\n        - podSelector:\n            matchLabels: { axon.dev/sweep: \"true\" }",
             );
         }
         let reglas = if !froms.is_empty() {
@@ -1191,7 +1193,7 @@ spec:
     for s in &p.secrets {
         o.push(format!(
             "---
-# el value no vive aqui: lo sincroniza External Secrets desde tu vault
+# the value does not live here: External Secrets syncs it from your vault
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret
 metadata:
@@ -1284,22 +1286,22 @@ metadata:
   name: {svc}-{nombre}
 spec:
   schedule: \"*/{min} * * * *\"
-  # `Forbid`: si una pasada tarda mas que el intervalo, la siguiente NO arranca.
-  # Dos barridos a la vez reclaman la misma saga, y aunque `reclamar` lo evita,
-  # no hay razon para apoyarse en eso desde el programador.
+  # `Forbid`: if one pass takes longer than the interval, the next does NOT start.
+  # Two sweeps at once claim the same saga, and although `claim` prevents that,
+  # there is no reason to lean on it from the scheduler.
   concurrencyPolicy: Forbid
-  # el historial es lo unico que queda de un barrido que fallo
+  # the history is all that is left of a sweep that failed
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
-      # sin esto un job atascado se reintenta para siempre
+      # without this a stuck job is retried forever
       backoffLimit: 2
       activeDeadlineSeconds: {plazo}
       template:
         metadata:
-          # la NetworkPolicy del servicio deja entrar exactamente a esto
-          labels: {{ axon.dev/barrido: \"true\" }}
+          # the service's NetworkPolicy lets exactly this in
+          labels: {{ axon.dev/sweep: \"true\" }}
         spec:
           restartPolicy: Never
           containers:
@@ -1329,26 +1331,26 @@ spec:
     }
     o.join("\n")
 }
-
-/// El mismo plan, en tu laptop. Ese es el punto: local y produccion salen de
-/// la misma declaracion, asi que no pueden divergir.
-/// El puerto del host para un servicio en el target local.
+/// The same plan, on your laptop. That is the point: local and production come
+/// out of the same declaration, so they cannot diverge.
+/// The host port for a service on the local target.
 ///
-/// Sale del NOMBRE, no de la posicion. Con el indice, agregar un servicio le
-/// movia el puerto a otro que ya estaba —el compose se levanta igual y quien
-/// tenia `localhost:8080` en un script apunta de golpe a otro servicio—. Con el
-/// nombre, un servicio nuevo no toca los que ya existen.
+/// It comes from the NAME, not the position. With the index, adding a service
+/// moved the port of one that was already there —the compose comes up just the
+/// same and whoever had `localhost:8080` in a script suddenly points at a
+/// different service. With the name, a new service does not touch the
+/// existing ones.
 ///
-/// Las colisiones se resuelven en orden alfabetico, que es estable: si dos
-/// nombres caen en el mismo puerto, el segundo se corre, y sigue haciendolo
-/// igual en la proxima corrida.
+/// Collisions are resolved in alphabetical order, which is stable: if two
+/// names land on the same port, the second one moves, and it keeps doing the
+/// same on the next run.
 fn ports(base: u16, range_: u16, names: &[&str]) -> IndexMap<String, u16> {
     let mut orden: Vec<&str> = names.to_vec();
     orden.sort_unstable();
     let mut out: IndexMap<String, u16> = IndexMap::new();
     for n in orden {
-        // FNV-1a: dos lineas, sin dependencia, y suficiente para repartir
-        // nombres cortos en un rango de cientos.
+        // FNV-1a: two lines, no dependency, and enough to spread short names
+        // across a range of hundreds.
         let mut h: u32 = 2_166_136_261;
         for b in n.as_bytes() {
             h = (h ^ *b as u32).wrapping_mul(16_777_619);
@@ -1362,9 +1364,9 @@ fn ports(base: u16, range_: u16, names: &[&str]) -> IndexMap<String, u16> {
     out
 }
 
-/// Los motores detras de un store: uno solo, o los nodos del sharder. El
-/// nombre del contenedor es tambien el host que ve pgdog, asi que sale de aca
-/// y no de dos lados.
+/// The engines behind a store: one, or the sharder's nodes. The container's
+/// name is also the host pgdog sees, so it comes from here and not from two
+/// places.
 fn nodes(s: &Store) -> Vec<(u32, String)> {
     match s.shards {
         None => vec![(0, node(&s.service, None, 0))],
@@ -1372,10 +1374,10 @@ fn nodes(s: &Store) -> Vec<(u32, String)> {
     }
 }
 
-/// El nombre del contenedor de un motor en el target local. Vive aca y lo usa
-/// tambien `axon pooler --target local`: el pgdog.toml tiene que nombrar
-/// exactamente los hosts que el compose levanta, y dos funciones que
-/// concatenan lo mismo se desincronizan en el primer cambio.
+/// The container name of an engine on the local target. It lives here and
+/// `axon pooler --target local` uses it too: the pgdog.toml has to name
+/// exactly the hosts the compose brings up, and two functions concatenating
+/// the same thing drift apart on the first change.
 pub fn node(svc: &str, shards: Option<u32>, i: u32) -> String {
     match shards {
         None => format!("db-{svc}"),
@@ -1385,8 +1387,8 @@ pub fn node(svc: &str, shards: Option<u32>, i: u32) -> String {
 
 fn local(p: &Plan) -> String {
     const PROJ: &str = "local";
-    // Puertos derivados del nombre: agregar un servicio no le mueve el puerto a
-    // ninguno de los que ya estaban.
+    // Ports derived from the name: adding a service does not move the port of
+    // any of the ones already there.
     let svcs: Vec<&str> = p.workloads.iter().map(|w| w.service.as_str()).collect();
     let apps = ports(8080, 400, &svcs);
     let nodos_todos: Vec<String> = p
@@ -1424,8 +1426,8 @@ services:
             o.push_str(&format!(
                 "  {host}:
     image: postgres:16-alpine
-    # el mismo tope que en produccion: agotar conexiones en local es la unica
-    # forma de descubrirlo antes de que escale
+    # the same ceiling as in production: exhausting connections locally is the
+    # only way to find out before it scales
     command: [\"postgres\", \"-c\", \"max_connections={conexiones}\"]
     environment: {{ POSTGRES_DB: {svc}, POSTGRES_PASSWORD: local }}
     ports: [\"${{AXON_DB_PORT_{v}{sufijo}:-{port}}}:5432\"]
@@ -1444,20 +1446,20 @@ services:
       migrate
 "
             ));
-            // Las politicas van en su propio job y su propio historial: se
-            // aplican DESPUES del esquema, y regenerarlas no es un cambio de
-            // esquema que haya que versionar contra el mismo historial.
+            // The policies go in their own job with their own history: they are
+            // applied AFTER the schema, and regenerating them is not a schema
+            // change to be versioned against the same history.
             if s.policies {
                 o.push_str(&format!(
                     "  policies-{host}:
     image: flyway/flyway:10-alpine
     depends_on: {{ migrate-{host}: {{ condition: service_completed_successfully }} }}
     volumes: [\"./sql-policies/{svc}:/flyway/sql:ro\"]
-    # `baselineOnMigrate`: este historial es el SEGUNDO sobre un esquema que ya
-    # tiene tablas, las creo el otro. Sin eso Flyway se niega a inicializarse
-    # sobre un esquema no vacio, que es la situacion normal aca. Y el comentario
-    # va ACA y no dentro del bloque `>`: ahi dentro un `#` es texto, y termina
-    # siendo un argumento de Flyway.
+    # `baselineOnMigrate`: this history is the SECOND over a schema that already
+    # has tables, created by the other one. Without it Flyway refuses to
+    # initialise over a non-empty schema, which is the normal situation here.
+    # And the comment goes HERE and not inside the `>` block: in there a `#` is
+    # text, and ends up as an argument to Flyway.
     command: >
       -url=jdbc:postgresql://{host}:5432/{svc}
       -user=postgres -password=local -connectRetries=10
@@ -1470,9 +1472,9 @@ services:
                 ));
             }
         }
-        // El pooler solo tiene sentido si hay algo detras y ya migrado: pgdog
-        // parsea la consulta contra el esquema, y contra una base vacia no
-        // sabe a que nodo mandarla.
+        // The pooler only makes sense if there is something behind it and it is
+        // already migrated: pgdog parses the query against the schema, and
+        // against an empty database it does not know which node to send it to.
         if s.shards.is_some() {
             let port = 16432 + (motores[&nodes(s)[0].1] - 15432);
             let ultimo = if s.policies { "policies" } else { "migrate" };
@@ -1482,16 +1484,16 @@ services:
                 .collect();
             o.push_str(&format!(
                 "  pooler-{svc}:
-    # Fijado por digest: pgdog solo publica el tag `main`, que se mueve. Un tag
-    # movil en un archivo generado cambia el binario sin cambiar el diff.
+    # Pinned by digest: pgdog only publishes the `main` tag, which moves. A
+    # moving tag in a generated file changes the binary without changing the diff.
     image: ghcr.io/pgdogdev/pgdog:main@sha256:{PGDOG}
     depends_on: {{ {espera} }}
-    # el workdir de la imagen es /pgdog, de ahi lee su configuracion
+    # the image's workdir is /pgdog, that is where it reads its config from
     volumes: [\"./.axon/pgdog/{svc}:/pgdog:ro\"]
     ports: [\"${{AXON_POOLER_PORT_{v}:-{port}}}:6432\"]
     healthcheck:
-      # contra el pooler, no contra un node: comprueba que pgdog acepta el
-      # protocolo, que es lo unico que el servicio va a ver
+      # against the pooler, not against a node: it checks that pgdog speaks the
+      # protocol, which is the only thing the service will ever see
       test: [\"CMD-SHELL\", \"PGPASSWORD=local psql -h 127.0.0.1 -p 6432 -U postgres -d {svc} -c 'select 1' >/dev/null\"]
       interval: 2s
       retries: 30
@@ -1500,15 +1502,15 @@ services:
             ));
         }
     }
-    // los servicios tuyos, no solo sus dependencias
-    // Jaeger all-in-one acepta OTLP directo, asi que el backend de trazas es
-    // un contenedor y no un colector mas un almacen.
+    // your own services, not just their dependencies
+    // Jaeger all-in-one accepts OTLP directly, so the trace backend is one
+    // container and not a collector plus a store.
     if p.flags {
         o.push_str(
             "  flags:
     image: ghcr.io/open-feature/flagd:v0.12.9
     command: [\"start\", \"--uri\", \"file:/etc/flags/flags.json\"]
-    # 8016 es OFREP, el protocolo REST estandar de OpenFeature
+    # 8016 is OFREP, OpenFeature's standard REST protocol
     ports: [\"${AXON_FLAGS_PORT:-8016}:8016\"]
     volumes: [\"./.axon/flags.json:/etc/flags/flags.json:ro\"]
 ",
@@ -1551,8 +1553,8 @@ services:
     image: traefik:v3
     command:
       - --providers.docker=true
-      # solo lo que declara `traefik.enable`: si no, intenta rutear tambien los
-      # jobs de migracion y llena el log de \"port is missing\"
+      # only what declares `traefik.enable`: otherwise it tries to route the
+      # migration jobs too and fills the log with \"port is missing\"
       - --providers.docker.exposedByDefault=false
       - --entrypoints.web.address=:80
     ports: [\"${AXON_EDGE_PORT:-8000}:80\"]
@@ -1566,14 +1568,14 @@ services:
             "broker: { condition: service_healthy }".to_string(),
             "traza: { condition: service_healthy }".to_string(),
         ];
-        // No arrancar la app antes de que existan sus buckets. Y sin esto,
-        // `up --wait` cuenta el job de creacion como un contenedor caido.
+        // Do not start the app before its buckets exist. And without this,
+        // `up --wait` counts the creation job as a container that died.
         if !env_buckets(p, &w.service, PROJ).is_empty() {
             deps.push("crear-buckets: { condition: service_completed_successfully }".into());
         }
-        // Con pooler, la app NO ve los nodos: ve pgdog. Si el DATABASE_URL
-        // apuntara a un nodo, el reparto se saltaria y en local todo
-        // funcionaria — con una cuarta parte de los datos.
+        // With a pooler, the app does NOT see the nodes: it sees pgdog. If the
+        // DATABASE_URL pointed at a node, the sharding would be skipped and
+        // locally everything would work —with a quarter of the data.
         let store = p.stores.iter().find(|s| s.service == *svc);
         let db_env = match (w.db, store.and_then(|s| s.shards)) {
             (false, _) => String::new(),
@@ -1596,7 +1598,7 @@ services:
         let mut secrets: String = w
             .secrets
             .iter()
-            .map(|s| format!("      # {s}: viene de .env.local\n"))
+            .map(|s| format!("      # {s}: comes from .env.local\n"))
             .collect();
         if !env_buckets(p, &w.service, PROJ).is_empty() {
             secrets.push_str("      AWS_ENDPOINT_URL: http://objetos:9000\n");
@@ -1607,7 +1609,7 @@ services:
         if p.flags {
             secrets.push_str("      AXON_FLAGS_URL: http://flags:8016\n");
         }
-        for (k, v) in env_otel_con(w, "http://traza:4318", true) {
+        for (k, v) in env_otel_with(w, "http://traza:4318", true) {
             secrets.push_str(&format!("      {k}: \"{v}\"\n"));
         }
         o.push_str(&format!(
@@ -1632,15 +1634,16 @@ services:
     }
     for (i, c) in p.crons.iter().enumerate() {
         let svc = &c.service;
-        // Local no simula el programador del proveedor: hace lo mismo que el,
-        // que es golpear la ruta cada tanto. Asi el barrido corre tambien aca y
-        // no se descubre en produccion que la ruta no existia.
+        // Local does not simulate the provider's scheduler: it does the same
+        // thing it does, which is hitting the route every so often. That way
+        // the sweep runs here too, and nobody discovers in production that
+        // the route did not exist.
         o.push_str(&format!(
             "  cron-{n}:
     image: curlimages/curl:8.11.1
     depends_on: {{ {svc}: {{ condition: service_started }} }}
-    # `while` y no `sleep` de una vez: un job que corre una sola vez y termina
-    # deja a `up --wait` contando un contenedor caido
+    # `while` and not a single `sleep`: a job that runs once and exits leaves
+    # `up --wait` counting a container that died
     command: [\"sh\", \"-c\", \"while :; do sleep {seg}; curl -fsS -m 10 -X POST http://{svc}:{port}{path} || true; done\"]
 ",
             n = tfname(&c.name.replace('.', "-")),
@@ -1651,17 +1654,17 @@ services:
         let _ = i;
     }
     if p.topics.iter().any(|t| t.analytics) {
-        // La bodega en local no es un adorno: sin ella el esquema se genera y
-        // nadie comprueba nunca que las columnas y las rutas del JSON
-        // coincidan. Se llena del log de envelopes que este mismo target ya
-        // escribe, asi que la traza y la analitica salen de la misma fuente.
+        // The warehouse in local is not decoration: without it the schema gets
+        // generated and nobody ever checks that the columns and the JSON paths
+        // match. It is filled from the envelope log this same target already
+        // writes, so the trace and the analytics come from one source.
         o.push_str(
-            "  bodega:\n    \
+            "  warehouse:\n    \
              image: clickhouse/clickhouse-server:24.8-alpine\n    \
              environment: { CLICKHOUSE_DB: axon, CLICKHOUSE_USER: local, CLICKHOUSE_PASSWORD: local }\n    \
-             # El log de envelopes, donde `file()` puede leerlo. NO read-only: el\n    \
-             # entrypoint de la imagen hace `chown` de este directorio y con `:ro`\n    \
-             # falla y el contenedor no arranca.\n    \
+             # The envelope log, where `file()` can read it. NOT read-only: the\n    \
+             # image's entrypoint `chown`s this directory and with `:ro` that fails\n    \
+             # and the container does not start.\n    \
              volumes: [\"./.axon:/var/lib/clickhouse/user_files\"]\n    \
              ports: [\"${AXON_BODEGA_PORT:-8123}:8123\"]\n    \
              healthcheck:\n      \
@@ -1670,7 +1673,7 @@ services:
              retries: 30\n",
         );
     }
-    o.push_str("\n# streams JetStream a crear al arrancar:\n");
+    o.push_str("\n# JetStream streams to create at startup:\n");
     for t in &p.topics {
         o.push_str(&format!(
             "#   nats stream add {} --subjects {}\n",
@@ -1678,19 +1681,18 @@ services:
         ));
     }
     o.push_str(
-        "# el log de envelopes cae en ./.axon/local.ndjson -> `axon trace .axon/local.ndjson`\n",
+        "# the envelope log lands in ./.axon/local.ndjson -> `axon trace .axon/local.ndjson`\n",
     );
     o
 }
-
-/// Las mismas rutas del plan, como reglas de Traefik. Local no es un
-/// subsistema aparte: es otro render del mismo edge.
+/// The plan's same routes, as Traefik rules. Local is not a separate
+/// subsystem: it is another render of the same edge.
 fn edge_labels(p: &Plan, svc: &str) -> String {
-    let mias: Vec<&Route> = p.routes.iter().filter(|r| r.service == svc).collect();
-    if mias.is_empty() {
+    let mine: Vec<&Route> = p.routes.iter().filter(|r| r.service == svc).collect();
+    if mine.is_empty() {
         return String::new();
     }
-    let reglas: Vec<String> = mias
+    let reglas: Vec<String> = mine
         .iter()
         .map(|r| {
             let prefijo = match r.path.find('{') {
@@ -1709,12 +1711,11 @@ fn edge_labels(p: &Plan, svc: &str) -> String {
          - traefik.http.routers.{svc}.rule={}\n      \
          - traefik.http.services.{svc}.loadbalancer.server.port={}\n",
         u.join(" || "),
-        mias[0].port
+        mine[0].port
     )
 }
-
-/// El nombre del bucket es distinto en cada entorno, asi que la app lo lee de
-/// una variable, no lo construye. Mismo nombre de variable en los cuatro targets.
+/// The bucket name differs per environment, so the app reads it from a
+/// variable instead of building it. Same variable name on all four targets.
 fn env_buckets(p: &Plan, svc: &str, project: &str) -> Vec<(String, String)> {
     p.buckets
         .iter()
@@ -1727,35 +1728,32 @@ fn env_buckets(p: &Plan, svc: &str, project: &str) -> Vec<(String, String)> {
         })
         .collect()
 }
-
-/// Variables estandar de OpenTelemetry. axon no trae un SDK ni inventa un
-/// formato: el envelope ya propaga `traceparent`, que es el contexto W3C que
-/// usa OTel, asi que basta con levantar el backend y decirle al SDK del equipo
-/// donde exportar. Los atributos de recurso salen del manifiesto.
+/// Standard OpenTelemetry variables. axon ships no SDK and invents no format:
+/// the envelope already propagates `traceparent`, which is the W3C context
+/// OTel uses, so bringing up the backend and telling the team's SDK where to
+/// export is enough. The resource attributes come from the manifest.
 fn env_otel(w: &Workload, endpoint: &str) -> Vec<(String, String)> {
-    env_otel_con(w, endpoint, false)
+    env_otel_with(w, endpoint, false)
 }
-
-/// `todo` fuerza el muestreo completo: el muestreo existe para controlar
-/// volumen en produccion, no para esconderte el 90% de las trazas mientras
-/// depuras en tu laptop.
-fn env_otel_con(w: &Workload, endpoint: &str, all_: bool) -> Vec<(String, String)> {
-    let mut atributos = vec![
+/// `all_` forces full sampling: sampling exists to control volume in
+/// production, not to hide 90% of the traces from you while you debug.
+fn env_otel_with(w: &Workload, endpoint: &str, all_: bool) -> Vec<(String, String)> {
+    let mut attributes = vec![
         format!("service.name={}", w.service),
         format!("axon.owner={}", w.owner),
         format!("axon.tier={}", w.tier),
     ];
     if !w.version.is_empty() {
-        atributos.push(format!("service.version={}", w.version));
+        attributes.push(format!("service.version={}", w.version));
     }
     let mut v = vec![
         ("OTEL_SERVICE_NAME".into(), w.service.clone()),
         ("OTEL_EXPORTER_OTLP_ENDPOINT".into(), endpoint.to_string()),
         ("OTEL_EXPORTER_OTLP_PROTOCOL".into(), "http/protobuf".into()),
-        ("OTEL_RESOURCE_ATTRIBUTES".into(), atributos.join(",")),
+        ("OTEL_RESOURCE_ATTRIBUTES".into(), attributes.join(",")),
     ];
-    // Un servicio tier 0 se muestrea entero: cuando se cae, la traza que falta
-    // es justo la que hacia falta.
+    // A tier 0 service is sampled whole: when it goes down, the missing trace
+    // is exactly the one that was needed.
     if all_ || w.tier == "0" {
         v.push(("OTEL_TRACES_SAMPLER".into(), "parentbased_always_on".into()));
     } else {
