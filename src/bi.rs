@@ -638,7 +638,7 @@ pub fn build(ms: &[Manifest], d: &Dialect) -> String {
         ));
     }
 
-    o.extend(embudos(ms, &evs, d));
+    o.extend(funnels(ms, &evs, d));
     o.push(String::new());
     o.join("\n")
 }
@@ -648,7 +648,7 @@ pub fn build(ms: &[Manifest], d: &Dialect) -> String {
 ///
 /// The steps come from the declared causal chain, the same one `axon seq`
 /// draws. That is what makes the funnel not a guess.
-fn embudos(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
+fn funnels(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
     let emisor: IndexMap<&str, &str> = evs.iter().map(|e| (e.name, e.duenio)).collect();
     let mut o = Vec::new();
 
@@ -705,7 +705,7 @@ fn embudos(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
                 // CASE WHEN and not IF()/IFF(): it is the only thing all three
                 // entienden igual
                 format!(
-                    "  MIN(CASE WHEN event_type = '{e}' THEN event_time END) AS paso_{}_{}",
+                    "  MIN(CASE WHEN event_type = '{e}' THEN event_time END) AS step_{}_{}",
                     n + 1,
                     table(e)
                 )
@@ -717,12 +717,12 @@ fn embudos(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
             .iter()
             .skip(1)
             .map(|e| {
-                let hasta = format!("    MIN(CASE WHEN event_type = '{e}' THEN event_time END)");
-                let desde = format!(
+                let to = format!("    MIN(CASE WHEN event_type = '{e}' THEN event_time END)");
+                let from_ = format!(
                     "    MIN(CASE WHEN event_type = '{}' THEN event_time END)",
                     cadena[0]
                 );
-                format!("  {} AS ms_hasta_{}", (d.diff_ms)(&hasta, &desde), table(e))
+                format!("  {} AS ms_to_{}", (d.diff_ms)(&to, &from_), table(e))
             })
             .collect();
 
@@ -734,7 +734,7 @@ fn embudos(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
              -- latency, not a request\'s.\n\
              CREATE OR REPLACE VIEW {} AS\n\
              SELECT\n  correlation_id,\n{},\n{}\nFROM (\n{}\n)\nGROUP BY correlation_id;",
-            (d.quote)(&format!("@dataset.embudo_{}", table(root))),
+            (d.quote)(&format!("@dataset.funnel_{}", table(root))),
             pasos.join(",\n"),
             saltos.join(",\n"),
             union.join("\n    UNION ALL\n")

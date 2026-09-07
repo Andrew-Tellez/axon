@@ -52,20 +52,20 @@ export interface Outbox<Tx = unknown> { stage(e: Envelope<unknown>, tx: Tx): Pro
  *  happens exactly once. `once` does not re-run an id it has already seen. */
 export interface Inbox { once(id: string, fn: () => Promise<void>): Promise<void>; }
 
-export interface CompraIniciadaV1 {
+export interface CheckoutStartedV1 {
   streamId: string;
   orderId: string;
   amount: { amount: number; currency: string };
 }
 
-export interface CompraCobradaV1 {
+export interface CheckoutChargedV1 {
   streamId: string;
   paymentId: string;
 }
 
-export interface CompraCompensadaV1 {
+export interface CheckoutCompensatedV1 {
   streamId: string;
-  motivo: string;
+  reason: string;
 }
 
 export interface CheckoutIn {
@@ -74,29 +74,29 @@ export interface CheckoutIn {
 }
 
 export interface CheckoutOut {
-  estado: string;
+  state: string;
 }
 
 export const manifest = {
   "service": "checkout",
   "version": "1.0.0",
-  "owner": "equipo-comercio",
+  "owner": "commerce-team",
   "tier": "1",
   "pii": [],
   "external": false,
   "emits": {
-    "compra.iniciada@v1": {
+    "checkout.started@v1": {
       "streamId": "uuid",
       "orderId": "uuid",
       "amount": "money"
     },
-    "compra.cobrada@v1": {
+    "checkout.charged@v1": {
       "streamId": "uuid",
       "paymentId": "uuid"
     },
-    "compra.compensada@v1": {
+    "checkout.compensated@v1": {
       "streamId": "uuid",
-      "motivo": "string"
+      "reason": "string"
     }
   },
   "consumes": {},
@@ -107,7 +107,7 @@ export const manifest = {
         "amount": "money"
       },
       "out": {
-        "estado": "string"
+        "state": "string"
       },
       "http": "POST /v1/checkouts",
       "idempotent": true,
@@ -171,7 +171,7 @@ export const manifest = {
   },
   "machine": {},
   "saga": {
-    "compra": {
+    "checkout": {
       "on": "checkout",
       "steps": [
         {
@@ -187,11 +187,11 @@ export const manifest = {
     }
   },
   "aggregate": {
-    "compra": {
+    "checkout": {
       "events": [
-        "compra.iniciada@v1",
-        "compra.cobrada@v1",
-        "compra.compensada@v1"
+        "checkout.started@v1",
+        "checkout.charged@v1",
+        "checkout.compensated@v1"
       ],
       "machine": null,
       "snapshot_every": 2,
@@ -201,9 +201,9 @@ export const manifest = {
   "view": {
     "conversion": {
       "on": [
-        "compra.iniciada@v1",
-        "compra.cobrada@v1",
-        "compra.compensada@v1"
+        "checkout.started@v1",
+        "checkout.charged@v1",
+        "checkout.compensated@v1"
       ],
       "table": null,
       "max_staleness_ms": 3000
@@ -259,14 +259,14 @@ export abstract class CheckoutService {
     this.outbox = outbox;
   }
   static readonly wellKnown = "/.well-known/axon.json";
-  protected emitCompraIniciadaV1(data: CompraIniciadaV1, tx: unknown, cause?: Envelope<unknown>) {
-    return this.outbox.stage(newEnvelope("compra.iniciada@v1", "checkout", data, cause), tx);
+  protected emitCheckoutStartedV1(data: CheckoutStartedV1, tx: unknown, cause?: Envelope<unknown>) {
+    return this.outbox.stage(newEnvelope("checkout.started@v1", "checkout", data, cause), tx);
   }
-  protected emitCompraCobradaV1(data: CompraCobradaV1, tx: unknown, cause?: Envelope<unknown>) {
-    return this.outbox.stage(newEnvelope("compra.cobrada@v1", "checkout", data, cause), tx);
+  protected emitCheckoutChargedV1(data: CheckoutChargedV1, tx: unknown, cause?: Envelope<unknown>) {
+    return this.outbox.stage(newEnvelope("checkout.charged@v1", "checkout", data, cause), tx);
   }
-  protected emitCompraCompensadaV1(data: CompraCompensadaV1, tx: unknown, cause?: Envelope<unknown>) {
-    return this.outbox.stage(newEnvelope("compra.compensada@v1", "checkout", data, cause), tx);
+  protected emitCheckoutCompensatedV1(data: CheckoutCompensatedV1, tx: unknown, cause?: Envelope<unknown>) {
+    return this.outbox.stage(newEnvelope("checkout.compensated@v1", "checkout", data, cause), tx);
   }
   abstract checkout(input: CheckoutIn, e: Envelope<unknown>): Promise<CheckoutOut>;
 }
@@ -346,15 +346,15 @@ export interface SweepReport {
 
 /** The route the scheduler hits to run one sweep pass. `axon infra`
  *  deploys it on all four targets, so startup has to serve it by calling
- *  `sweepCompra`: a scheduler pointed at a 404 applies without an error and
+ *  `sweepCheckout`: a scheduler pointed at a 404 applies without an error and
  *  sweeps nothing.
  *
  *  It is NOT a declared method, so it does not go out through the
  *  gateway. It triggers compensations: it cannot be public. */
-export const sweepRouteCompra = "POST /internal/saga/compra/sweep" as const;
+export const sweepRouteCheckout = "POST /internal/saga/checkout/sweep" as const;
 
 /** The steps declared in the manifest. Generated: do not edit. */
-export const compraSteps = [
+export const checkoutSteps = [
   { step: 1, run: "payments.capturePayment", undo: "payments.refundPayment" },
   // the last step carries no compensation: if it fails, there is
   // nothing of its own to undo
@@ -365,7 +365,7 @@ export const compraSteps = [
  *  compensating possible after a restart: undoing a step usually needs
  *  the id that step returned, and a variable in memory does not survive
  *  the process that held it. */
-export interface CompraOutputs {
+export interface CheckoutOutputs {
   step1?: PaymentsCapturePaymentOut;
   step2?: PaymentsPayoutMerchantOut;
 }
@@ -373,17 +373,17 @@ export interface CompraOutputs {
 /** One method per step and one per compensation. They are implemented
  *  by whoever knows the data: the coordinator knows the order, not the
  *  contents. */
-export interface CompraActions {
+export interface CheckoutActions {
   /** step 1 · payments.capturePayment */
-  step1CapturePayment(e: Envelope<unknown>, prior: CompraOutputs): Promise<PaymentsCapturePaymentOut>;
+  step1CapturePayment(e: Envelope<unknown>, prior: CheckoutOutputs): Promise<PaymentsCapturePaymentOut>;
   /** undoes step 1 · payments.refundPayment · receives what the earlier steps returned,
    *  and has to tolerate there being nothing to undo */
-  undo1RefundPayment(e: Envelope<unknown>, prior: CompraOutputs): Promise<void>;
+  undo1RefundPayment(e: Envelope<unknown>, prior: CheckoutOutputs): Promise<void>;
   /** step 2 · payments.payoutMerchant */
-  step2PayoutMerchant(e: Envelope<unknown>, prior: CompraOutputs): Promise<PaymentsPayoutMerchantOut>;
+  step2PayoutMerchant(e: Envelope<unknown>, prior: CheckoutOutputs): Promise<PaymentsPayoutMerchantOut>;
 }
 
-/** Runs the `compra` saga.
+/** Runs the `checkout` saga.
  *
  *  Forward until a step fails or the budget runs out; from there in
  *  REVERSE order, undoing only what was attempted. Reverse order is not
@@ -393,9 +393,9 @@ export interface CompraActions {
  *  If `id` already has a journal, it resumes: the step left at
  *  `attempting` gets compensated, because there is no telling whether it
  *  happened. */
-export async function runCompra(
+export async function runCheckout(
   id: string,
-  actions: CompraActions,
+  actions: CheckoutActions,
   journal: SagaJournal,
   e: Envelope<unknown>,
 ): Promise<{ status: SagaStatus; upTo: number; error?: unknown }> {
@@ -404,7 +404,7 @@ export async function runCompra(
   // that it covers the sum of the steps and their compensations.
   const deadline = Date.now() + 60000;
   const previous = await journal.read(id);
-  if (!previous) await journal.open(id, "compra", e);
+  if (!previous) await journal.open(id, "checkout", e);
   // Rehydrated from the journal, not from a variable: on resume this is
   // all that is left of what the earlier steps did.
   //
@@ -412,7 +412,7 @@ export async function runCompra(
   // cast from one shape to the other compiles and leaves everything
   // `undefined`, so the translation is explicit, field by field.
   const saved = previous?.outputs ?? {};
-  const prior: CompraOutputs = {
+  const prior: CheckoutOutputs = {
     step1: saved[1] as PaymentsCapturePaymentOut | undefined,
     step2: saved[2] as PaymentsPayoutMerchantOut | undefined,
   };
@@ -427,12 +427,12 @@ export async function runCompra(
   if (!doubtful) {
     for (let step = done + 1; step <= total; step++) {
       if (Date.now() > deadline) {
-        failure = new Error(`compra: budget exhausted before step ${step}`);
+        failure = new Error(`checkout: budget exhausted before step ${step}`);
         break;
       }
       attempted = step;
       try {
-        await runStepCompra(step, actions, journal, e, id, prior);
+        await runStepCheckout(step, actions, journal, e, id, prior);
         done = step;
       } catch (err) {
         failure = err;
@@ -447,24 +447,24 @@ export async function runCompra(
   // back again: everything that was ATTEMPTED, in reverse order
   for (let step = attempted; step >= 1; step--) {
     try {
-      await undoStepCompra(step, actions, e, prior);
+      await undoStepCheckout(step, actions, e, prior);
       await journal.mark(id, step, "undone");
     } catch (err) {
       await journal.close(id, "stuck");
-      throw new SagaStuck("compra", step, err);
+      throw new SagaStuck("checkout", step, err);
     }
   }
   await journal.close(id, "compensated");
   return { status: "compensated", upTo: done, error: failure };
 }
 
-async function runStepCompra(
+async function runStepCheckout(
   step: number,
-  actions: CompraActions,
+  actions: CheckoutActions,
   journal: SagaJournal,
   e: Envelope<unknown>,
   id: string,
-  prior: CompraOutputs,
+  prior: CheckoutOutputs,
 ): Promise<void> {
   switch (step) {
       case 1:
@@ -482,11 +482,11 @@ async function runStepCompra(
         await journal.mark(id, 2, "done", prior.step2);
         break;
     default:
-      throw new Error(`compra: step ${step} is not declared in the manifest`);
+      throw new Error(`checkout: step ${step} is not declared in the manifest`);
   }
 }
 
-async function undoStepCompra(step: number, actions: CompraActions, e: Envelope<unknown>, prior: CompraOutputs): Promise<void> {
+async function undoStepCheckout(step: number, actions: CheckoutActions, e: Envelope<unknown>, prior: CheckoutOutputs): Promise<void> {
   switch (step) {
       case 1:
         await actions.undo1RefundPayment(e, prior);
@@ -494,11 +494,11 @@ async function undoStepCompra(step: number, actions: CompraActions, e: Envelope<
       case 2:
         break; // no compensation declared: this is the last step
     default:
-      throw new Error(`compra: step ${step} is not declared in the manifest`);
+      throw new Error(`checkout: step ${step} is not declared in the manifest`);
   }
 }
 
-/** One sweep pass: resumes the `compra` sagas that are not moving.
+/** One sweep pass: resumes the `checkout` sagas that are not moving.
  *
  *  It only touches those idle for longer than their own BUDGET
  *  (60000ms). That threshold is not a heuristic: `axon verify` already
@@ -510,13 +510,13 @@ async function undoStepCompra(step: number, actions: CompraActions, e: Envelope<
  *  One left `stuck` is NOT retried: it is counted and left alone. A
  *  compensation that already failed needs a person, and retrying it
  *  quietly hides exactly that. */
-export async function sweepCompra(
-  actions: CompraActions,
+export async function sweepCheckout(
+  actions: CheckoutActions,
   journal: SagaJournal,
   limit = 50,
 ): Promise<SweepReport> {
   const olderThan = new Date(Date.now() - 60000);
-  const stranded = await journal.claim("compra", olderThan, limit);
+  const stranded = await journal.claim("checkout", olderThan, limit);
   const r: SweepReport = {
     claimed: stranded.length,
     completed: 0,
@@ -528,7 +528,7 @@ export async function sweepCompra(
   };
   for (const { id, data } of stranded) {
     try {
-      const out = await runCompra(id, actions, journal, data);
+      const out = await runCheckout(id, actions, journal, data);
       if (out.status === "completed") r.completed++;
       else r.compensated++;
     } catch (err) {
@@ -550,8 +550,8 @@ export async function sweepCompra(
  *  `onPass` receives every pass. Wire it to your metrics: a sweep that
  *  reports nothing is indistinguishable from one that does not run, and
  *  this is the only place from which a stuck saga becomes visible. */
-export function startSweepCompra(
-  actions: CompraActions,
+export function startSweepCheckout(
+  actions: CheckoutActions,
   journal: SagaJournal,
   onPass: (r: SweepReport) => void,
   intervalMs = 60000,
@@ -563,7 +563,7 @@ export function startSweepCompra(
     if (running) return;
     running = true;
     try {
-      onPass(await sweepCompra(actions, journal));
+      onPass(await sweepCheckout(actions, journal));
     } finally {
       running = false;
     }
@@ -643,23 +643,23 @@ export interface SnapshottingStream extends EventStream {
   pruneSnapshots(rules: number): Promise<number>;
 }
 
-/** The events that make up `compra`, as declared in the manifest. */
-export const compraEvents = ["compra.iniciada@v1", "compra.cobrada@v1", "compra.compensada@v1"] as const;
-export type CompraEvent = typeof compraEvents[number];
+/** The events that make up `checkout`, as declared in the manifest. */
+export const checkoutEvents = ["checkout.started@v1", "checkout.charged@v1", "checkout.compensated@v1"] as const;
+export type CheckoutEvent = typeof checkoutEvents[number];
 
 /** The rebuilt state. Its shape is the domain's; what the generator
  *  enforces is that there is one case per declared event. */
-export interface CompraRules<CompraState> {
+export interface CheckoutRules<CheckoutState> {
   /** The state before the first event. */
-  initial(streamId: string): CompraState;
-  applyCompraIniciadaV1(state: CompraState, e: CompraIniciadaV1): CompraState;
-  applyCompraCobradaV1(state: CompraState, e: CompraCobradaV1): CompraState;
-  applyCompraCompensadaV1(state: CompraState, e: CompraCompensadaV1): CompraState;
+  initial(streamId: string): CheckoutState;
+  applyCheckoutStartedV1(state: CheckoutState, e: CheckoutStartedV1): CheckoutState;
+  applyCheckoutChargedV1(state: CheckoutState, e: CheckoutChargedV1): CheckoutState;
+  applyCheckoutCompensatedV1(state: CheckoutState, e: CheckoutCompensatedV1): CheckoutState;
 }
 
 /** Rebuilds the state by applying the stream in order. */
-export function compraFold<E>(
-  rules: CompraRules<E>,
+export function checkoutFold<E>(
+  rules: CheckoutRules<E>,
   streamId: string,
   events: StreamEvent[],
   from?: { version: number; state: E },
@@ -671,33 +671,33 @@ export function compraFold<E>(
     // missing, and rebuilding without it gives a state that never
     // existed.
     if (ev.version !== version + 1) {
-      throw new Error(`compra/${streamId}: expected version ${version + 1} and got ${ev.version}`);
+      throw new Error(`checkout/${streamId}: expected version ${version + 1} and got ${ev.version}`);
     }
-    state = compraApplyEvent(rules, state, ev);
+    state = checkoutApplyEvent(rules, state, ev);
     version = ev.version;
   }
   return { version, state };
 }
 
-function compraApplyEvent<E>(rules: CompraRules<E>, state: E, ev: { type: string; data: unknown }): E {
+function checkoutApplyEvent<E>(rules: CheckoutRules<E>, state: E, ev: { type: string; data: unknown }): E {
   switch (ev.type) {
-      case "compra.iniciada@v1":
-        return rules.applyCompraIniciadaV1(state, ev.data as CompraIniciadaV1);
-      case "compra.cobrada@v1":
-        return rules.applyCompraCobradaV1(state, ev.data as CompraCobradaV1);
-      case "compra.compensada@v1":
-        return rules.applyCompraCompensadaV1(state, ev.data as CompraCompensadaV1);
+      case "checkout.started@v1":
+        return rules.applyCheckoutStartedV1(state, ev.data as CheckoutStartedV1);
+      case "checkout.charged@v1":
+        return rules.applyCheckoutChargedV1(state, ev.data as CheckoutChargedV1);
+      case "checkout.compensated@v1":
+        return rules.applyCheckoutCompensatedV1(state, ev.data as CheckoutCompensatedV1);
     default:
       // An event in the stream the manifest does not declare: the state
       // that would come out of ignoring it is wrong and nobody would know.
-      throw new Error(`compra: `+ev.type+` is not a declared event of the aggregate`);
+      throw new Error(`checkout: `+ev.type+` is not a declared event of the aggregate`);
   }
 }
 
 /** How many events between snapshots, and with which rules version.
  *  Both numbers come from the manifest: nobody types them twice. */
-export const compraSnapshotEvery = 2;
-export const compraSnapshotRules = 1;
+export const checkoutSnapshotEvery = 2;
+export const checkoutSnapshotRules = 1;
 
 /** Loads the state: from the last valid snapshot, and only the rest
  *  of the stream from there.
@@ -705,40 +705,40 @@ export const compraSnapshotRules = 1;
  *  With no snapshot of the current version it rebuilds the whole
  *  thing. That is slow and correct, in that order: a snapshot from
  *  another version would give a wrong state without saying so. */
-export async function compraLoad<E>(
-  rules: CompraRules<E>,
+export async function checkoutLoad<E>(
+  rules: CheckoutRules<E>,
   stream: SnapshottingStream,
   streamId: string,
 ): Promise<{ version: number; state: E }> {
-  const s = await stream.snapshot(streamId, compraSnapshotRules);
+  const s = await stream.snapshot(streamId, checkoutSnapshotRules);
   const from = s ? { version: s.version, state: s.state as E } : undefined;
   const events = await stream.read(streamId, s?.version ?? 0);
-  return compraFold(rules, streamId, events, from);
+  return checkoutFold(rules, streamId, events, from);
 }
 
 /** Snapshots if it is time to. Returns whether it saved one, so it
  *  can be measured: a declared cadence that is not met is a snapshot
  *  nobody knows is missing. */
-export async function compraSnapshot<E>(
+export async function checkoutSnapshot<E>(
   stream: SnapshottingStream,
   streamId: string,
   version: number,
   state: E,
 ): Promise<boolean> {
-  if (version === 0 || version % compraSnapshotEvery !== 0) return false;
-  await stream.saveSnapshot(streamId, version, compraSnapshotRules, state);
+  if (version === 0 || version % checkoutSnapshotEvery !== 0) return false;
+  await stream.saveSnapshot(streamId, version, checkoutSnapshotRules, state);
   return true;
 }
 
 /** The route the scheduler hits to prune the old snapshots.
  *  `axon infra` deploys it on all four targets. */
-export const pruneRouteCompra = "POST /internal/aggregate/compra/prune" as const;
+export const pruneRouteCheckout = "POST /internal/aggregate/checkout/prune" as const;
 
 /** One prune pass. Returns how many snapshots it deleted, so it can
  *  be measured: a prune that reports nothing is indistinguishable from
  *  one that does not run, and what shows up then is the table size. */
-export async function pruneCompra(stream: SnapshottingStream): Promise<number> {
-  return stream.pruneSnapshots(compraSnapshotRules);
+export async function pruneCheckout(stream: SnapshottingStream): Promise<number> {
+  return stream.pruneSnapshots(checkoutSnapshotRules);
 }
 
 
@@ -794,16 +794,16 @@ export interface StreamSource {
  *  adding one to the manifest breaks compilation instead of leaving the
  *  old projection running none the wiser. */
 export interface ConversionProjection {
-  /** compra.iniciada@v1 · stores `position` in the SAME transaction as the effect */
-  applyCompraIniciadaV1(e: Envelope<CompraIniciadaV1>, position: number): Promise<void>;
-  /** compra.cobrada@v1 · stores `position` in the SAME transaction as the effect */
-  applyCompraCobradaV1(e: Envelope<CompraCobradaV1>, position: number): Promise<void>;
-  /** compra.compensada@v1 · stores `position` in the SAME transaction as the effect */
-  applyCompraCompensadaV1(e: Envelope<CompraCompensadaV1>, position: number): Promise<void>;
+  /** checkout.started@v1 · stores `position` in the SAME transaction as the effect */
+  applyCheckoutStartedV1(e: Envelope<CheckoutStartedV1>, position: number): Promise<void>;
+  /** checkout.charged@v1 · stores `position` in the SAME transaction as the effect */
+  applyCheckoutChargedV1(e: Envelope<CheckoutChargedV1>, position: number): Promise<void>;
+  /** checkout.compensated@v1 · stores `position` in the SAME transaction as the effect */
+  applyCheckoutCompensatedV1(e: Envelope<CheckoutCompensatedV1>, position: number): Promise<void>;
 }
 
 export const conversionTable = "view_conversion" as const;
-export const conversionEvents = ["compra.iniciada@v1", "compra.cobrada@v1", "compra.compensada@v1"] as const;
+export const conversionEvents = ["checkout.started@v1", "checkout.charged@v1", "checkout.compensated@v1"] as const;
 /** The declared staleness budget. Older than this does not get served. */
 export const conversionMaxStalenessMs = 3000;
 
@@ -816,12 +816,12 @@ export async function conversionApply(
   position: number,
 ): Promise<void> {
   switch (e.type) {
-      case "compra.iniciada@v1":
-        return projection.applyCompraIniciadaV1(e as Envelope<CompraIniciadaV1>, position);
-      case "compra.cobrada@v1":
-        return projection.applyCompraCobradaV1(e as Envelope<CompraCobradaV1>, position);
-      case "compra.compensada@v1":
-        return projection.applyCompraCompensadaV1(e as Envelope<CompraCompensadaV1>, position);
+      case "checkout.started@v1":
+        return projection.applyCheckoutStartedV1(e as Envelope<CheckoutStartedV1>, position);
+      case "checkout.charged@v1":
+        return projection.applyCheckoutChargedV1(e as Envelope<CheckoutChargedV1>, position);
+      case "checkout.compensated@v1":
+        return projection.applyCheckoutCompensatedV1(e as Envelope<CheckoutCompensatedV1>, position);
     default:
       throw new Error(`conversion: `+e.type+` is not a declared event of the view`);
   }

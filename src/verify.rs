@@ -1352,13 +1352,13 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     .iter()
                     .all(|ev| m.aggregate.values().any(|a| a.events.contains(ev)));
             if propia {
-                let sombra = format!("{}_sombra", table);
+                let shadow = format!("{}_shadow", table);
                 match (
                     tablas.and_then(|t| t.get(&table)),
-                    tablas.and_then(|t| t.get(&sombra)),
+                    tablas.and_then(|t| t.get(&shadow)),
                 ) {
                     (Some(_), None) => errors.push(format!(
-                        "{svc}.{name}: it can be rebuilt and `{sombra}` is missing. Rebuilding in \
+                        "{svc}.{name}: it can be rebuilt and `{shadow}` is missing. Rebuilding in \
                          place leaves the view incomplete while it runs, and it keeps being \
                          read: whoever asks gets fewer rows than there are, with no error"
                     )),
@@ -1366,13 +1366,13 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         for c in &viva.cols {
                             match som.col(&c.name) {
                                 None => errors.push(format!(
-                                    "{svc}.{name}: `{sombra}` has no `{}` column, which `{table}` \
+                                    "{svc}.{name}: `{shadow}` has no `{}` column, which `{table}` \
                                      does. The swap would leave a view without that data, and \
                                      only then would it show",
                                     c.name
                                 )),
                                 Some(o) if o.ty != c.ty => errors.push(format!(
-                                    "{svc}.{name}: `{sombra}.{}` is `{}` and in `{table}` it is \
+                                    "{svc}.{name}: `{shadow}.{}` is `{}` and in `{table}` it is \
                                      `{}`. On the swap, the view changes type without anything \
                                      saying so",
                                     c.name, o.ty, c.ty
@@ -1383,7 +1383,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         for c in &som.cols {
                             if !viva.has(&c.name) {
                                 warnings.push(format!(
-                                    "{svc}.{name}: `{sombra}.{}` is not in `{table}`. It is \
+                                    "{svc}.{name}: `{shadow}.{}` is not in `{table}`. It is \
                                      spare until the next swap, and after that the view is the \
                                      one that has it",
                                     c.name

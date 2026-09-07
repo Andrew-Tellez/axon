@@ -1,5 +1,5 @@
 service = "payments"
-owner = "equipo-pagos"
+owner = "payments-team"
 tier = "0"
 version = "1.2.0"
 transport = "pubsub"
@@ -28,8 +28,8 @@ idempotent = true
 in = { paymentId = "uuid" }
 out = { paymentId = "uuid", status = "string" }
 
-# El pago al comercio, que es el paso que puede fallar despues de haber
-# cobrado: el motivo por el que existe una saga y no una transaccion.
+# The payout to the merchant, which is the step that can fail after the charge
+# already went through: the reason a saga exists instead of a transaction.
 [methods.payoutMerchant]
 http = "POST /v1/payouts"
 auth = "required"
@@ -52,21 +52,21 @@ method = "charges.create"
 timeout_ms = 8000
 breaker = true
 
-# La bodega es una decision de plataforma: `verify` exige que los tres
-# servicios declaren la misma, porque un embudo repartido entre dos bodegas no
-# se puede armar con una consulta.
+# The warehouse is a platform decision: `verify` requires all three services to
+# declare the same one, because a funnel split across two warehouses cannot be
+# assembled with one query.
 [analytics]
 warehouse = "clickhouse"
 
 [infra]
 state = "postgres"
 tenant_column = "tenant_id"
-# `intento` es el registro de intentos de la politica de reintentos: es
-# infraestructura, no dato de inquilino. Exento a proposito y por escrito, que
-# es la unica forma de que la regla RLS siga sirviendo para el resto.
-tenant_exempt = ["intento"]
-# Tier 0: standby con failover, y respaldos aparte —el standby replica un
-# borrado en segundos, asi que no cubre ese caso.
+# `attempt` is the retry policy's attempt log: it is infrastructure, not tenant
+# data. Exempt on purpose and in writing, which is the only way the RLS rule
+# keeps being useful for everything else.
+tenant_exempt = ["attempt"]
+# Tier 0: a standby with failover, and backups separately —the standby
+# replicates a delete in seconds, so it does not cover that case.
 ha = true
 backup_retention_days = 30
 pitr = true
@@ -87,7 +87,7 @@ min_instances = 0
 min_instances = 3
 max_instances = 40
 
-# La unica logica de negocio que vale la pena declarar: la misma en todo lenguaje.
+# The only business logic worth declaring: the same in every language.
 [machine.payment]
 initial = "pending"
 final = ["refunded", "failed"]
@@ -109,48 +109,48 @@ to = "refunded"
 on = "refundPayment"
 compensates = "capture"
 
-# Almacenamiento de objetos. `public` decide si lleva CDN y si el bucket
-# admite lectura anonima: las dos cosas van juntas o ninguna.
-[infra.buckets.recibos]
-retention_days = 2555     # 7 anos, requisito fiscal
+# Object storage. `public` decides whether it carries a CDN and whether the
+# bucket allows anonymous reads: both go together or neither does.
+[infra.buckets.receipts]
+retention_days = 2555     # 7 years, a tax requirement
 
 [infra.buckets.assets]
 public = true
 cache_ttl = 86400
 retention_days = 365
 
-# El dinero no admite un saldo viejo: antes de servir algo desactualizado,
-# no sirve nada.
+# Money does not tolerate a stale balance: rather than serve something out of
+# date, it serves nothing.
 [cap]
 consistency = "strong"
 on_partition = "reject"
 
-# Rollout gradual del cobro nuevo, fijado por inquilino: por peticion, el mismo
-# pago tomaria un camino y despues el otro.
-[flags.cobro_v2]
-owner = "equipo-pagos"
+# A gradual rollout of the new charge path, pinned by tenant: per request, the
+# same payment would take one path and then the other.
+[flags.charge_v2]
+owner = "payments-team"
 expires = "2026-12-31"
 rollout = 10
 sticky_by = "tenant_id"
 
-# Interruptor de emergencia: vive mientras exista Stripe.
-[flags.cortar_stripe]
-owner = "equipo-pagos"
+# An emergency switch: it lives as long as Stripe does.
+[flags.stripe_kill]
+owner = "payments-team"
 kill_switch = true
 
-# Un flag no booleano: OpenFeature admite string, numero y objeto, y un rollout
-# de configuracion —un limite, un proveedor— necesita justamente eso.
-[flags.proveedor_de_cobro]
-owner = "equipo-pagos"
+# A non-boolean flag: OpenFeature allows string, number and object, and a config
+# rollout —a limit, a provider— needs exactly that.
+[flags.charge_provider]
+owner = "payments-team"
 expires = "2027-06-30"
 sticky_by = "tenant_id"
 rollout = 20
 default_variant = "stripe"
 variants = { stripe = "stripe", adyen = "adyen" }
 
-[flags.limite_de_reintentos]
-owner = "equipo-pagos"
+[flags.retry_limit]
+owner = "payments-team"
 kill_switch = true
 default_variant = "normal"
-variants = { normal = 3, degradado = 0 }
+variants = { normal = 3, degraded = 0 }
 

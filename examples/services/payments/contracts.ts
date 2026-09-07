@@ -96,7 +96,7 @@ export interface PayoutMerchantOut {
 export const manifest = {
   "service": "payments",
   "version": "1.2.0",
-  "owner": "equipo-pagos",
+  "owner": "payments-team",
   "tier": "0",
   "pii": [],
   "external": false,
@@ -188,8 +188,8 @@ export const manifest = {
     "max_staleness_ms": null
   },
   "flags": {
-    "cobro_v2": {
-      "owner": "equipo-pagos",
+    "charge_v2": {
+      "owner": "payments-team",
       "variants": {},
       "default_variant": null,
       "expires": "2026-12-31",
@@ -198,8 +198,8 @@ export const manifest = {
       "sticky_by": "tenant_id",
       "kill_switch": false
     },
-    "cortar_stripe": {
-      "owner": "equipo-pagos",
+    "stripe_kill": {
+      "owner": "payments-team",
       "variants": {},
       "default_variant": null,
       "expires": null,
@@ -208,8 +208,8 @@ export const manifest = {
       "sticky_by": null,
       "kill_switch": true
     },
-    "proveedor_de_cobro": {
-      "owner": "equipo-pagos",
+    "charge_provider": {
+      "owner": "payments-team",
       "variants": {
         "stripe": "stripe",
         "adyen": "adyen"
@@ -221,11 +221,11 @@ export const manifest = {
       "sticky_by": "tenant_id",
       "kill_switch": false
     },
-    "limite_de_reintentos": {
-      "owner": "equipo-pagos",
+    "retry_limit": {
+      "owner": "payments-team",
       "variants": {
         "normal": 3,
-        "degradado": 0
+        "degraded": 0
       },
       "default_variant": "normal",
       "expires": null,
@@ -301,7 +301,7 @@ export const manifest = {
     "max_instances": null,
     "port": null,
     "buckets": {
-      "recibos": {
+      "receipts": {
         "public": false,
         "retention_days": 2555,
         "cache_ttl": null
@@ -321,7 +321,7 @@ export const manifest = {
     "shard_key": null,
     "tenant_column": "tenant_id",
     "tenant_exempt": [
-      "intento"
+      "attempt"
     ]
   },
   "env": {
@@ -433,32 +433,32 @@ export interface Flags {
   ): Promise<T>;
 }
 
-/** `cobro_v2`: OpenFeature boolean.
+/** `charge_v2`: OpenFeature boolean.
  *  Pinned by `tenant_id`: the same entity always takes the same path.
  */
-export const flagCobroV2 = (flags: Flags, tenant_id: string): Promise<boolean> =>
-  flags.evaluate("cobro_v2", false, { targetingKey: tenant_id, tenant_id });
+export const flagChargeV2 = (flags: Flags, tenant_id: string): Promise<boolean> =>
+  flags.evaluate("charge_v2", false, { targetingKey: tenant_id, tenant_id });
 
-/** `cortar_stripe`: OpenFeature boolean.
+/** `stripe_kill`: OpenFeature boolean.
  */
-export const flagCortarStripe = (flags: Flags): Promise<boolean> =>
-  flags.evaluate("cortar_stripe", false, {});
+export const flagStripeKill = (flags: Flags): Promise<boolean> =>
+  flags.evaluate("stripe_kill", false, {});
 
-/** `proveedor_de_cobro`: OpenFeature string.
+/** `charge_provider`: OpenFeature string.
  *  Variantes: `stripe` = "stripe", `adyen` = "adyen".
  *  Pinned by `tenant_id`: the same entity always takes the same path.
  */
-export const flagProveedorDeCobro = (flags: Flags, tenant_id: string): Promise<string> =>
-  flags.evaluate("proveedor_de_cobro", "stripe", { targetingKey: tenant_id, tenant_id });
+export const flagChargeProvider = (flags: Flags, tenant_id: string): Promise<string> =>
+  flags.evaluate("charge_provider", "stripe", { targetingKey: tenant_id, tenant_id });
 
-/** `limite_de_reintentos`: OpenFeature number.
- *  Variantes: `normal` = 3, `degradado` = 0.
+/** `retry_limit`: OpenFeature number.
+ *  Variantes: `normal` = 3, `degraded` = 0.
  */
-export const flagLimiteDeReintentos = (flags: Flags): Promise<number> =>
-  flags.evaluate("limite_de_reintentos", 3, {});
+export const flagRetryLimit = (flags: Flags): Promise<number> =>
+  flags.evaluate("retry_limit", 3, {});
 
 /** The flags the manifest declares. A flag that is not here does not exist. */
-export const declaredFlags = ["cobro_v2", "cortar_stripe", "proveedor_de_cobro", "limite_de_reintentos"] as const;
+export const declaredFlags = ["charge_v2", "stripe_kill", "charge_provider", "retry_limit"] as const;
 
 
 /** Everything needed to reach another service. Implemented by whoever

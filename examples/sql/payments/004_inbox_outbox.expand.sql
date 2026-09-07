@@ -1,4 +1,4 @@
--- Las dos tablas que exigen los patrones declarados en el manifiesto.
+-- The two tables the patterns declared in the manifest require.
 CREATE TABLE inbox_seen (
   id           uuid PRIMARY KEY,
   seen_at      timestamptz NOT NULL DEFAULT now()

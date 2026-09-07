@@ -1,2 +1,2 @@
--- contract: destructivo a proposito, despues de que nadie lea la columna.
+-- contract: destructive on purpose, after nobody reads the column any more.
 ALTER TABLE payment DROP COLUMN currency;

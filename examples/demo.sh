@@ -1,47 +1,47 @@
 #!/bin/sh
-# Demo end-to-end: levanta el sistema, dispara un flujo y comprueba que la
-# cadena causal real coincide con la que declara el manifiesto.
+# End-to-end demo: brings the system up, fires one flow and checks that the real
+# causal chain matches the one the manifest declares.
 #
 #   cd examples && ./demo.sh
 set -eu
 cd "$(dirname "$0")"
 AXON="${AXON:-../target/release/axon}"
 
-# Los puertos por defecto los deriva axon del NOMBRE del servicio, para que
-# agregar uno no le mueva el puerto a otro. El demo los fija a proposito: asi el
-# script y el compose hablan del mismo numero sin leerse entre ellos.
+# axon derives the default ports from the service's NAME, so adding one does not
+# move another one's port. The demo pins them on purpose: that way the script and
+# the compose talk about the same number without reading each other.
 export AXON_PORT_orders="${AXON_PORT_orders:-8080}"
 export AXON_PORT_checkout="${AXON_PORT_checkout:-8081}"
 export AXON_PORT_payments="${AXON_PORT_payments:-8082}"
 PORT="$AXON_PORT_orders"
 
-# Cuando esto falla en CI no hay nadie mirando la pantalla: el diagnostico
-# tiene que quedar en el log del run, o se pierde.
-PASO="inicio"
-paso() {
-  PASO="$1"
+# When this fails in CI there is nobody watching the screen: the diagnosis has to
+# stay in the run's log, or it is lost.
+STEP="start"
+step() {
+  STEP="$1"
   echo "==> $1"
 }
 
-diagnostico() {
-  codigo=$?
-  [ "$codigo" -eq 0 ] && return 0
+diagnose() {
+  code=$?
+  [ "$code" -eq 0 ] && return 0
   echo
-  echo "==> FALLO en el paso '$PASO' (codigo $codigo)"
-  # Actions corta a 10 anotaciones por paso, asi que lo esencial va primero y
-  # en una sola: sin esto el resumen del fallo se pierde entre los logs.
+  echo "==> FAILED at step '$STEP' (code $code)"
+  # Actions cuts off at 10 annotations per step, so the essentials go first and in
+  # a single one: without this the failure's summary is lost among the logs.
   if [ -n "${GITHUB_ACTIONS:-}" ]; then
-    estado=$(docker compose -f axon.local.yml ps -a --format '{{.Service}}={{.State}}' 2>/dev/null | tr '\n' ' ')
-    echo "::error title=fallo::paso='$PASO' codigo=$codigo contenedores: $estado"
+    state=$(docker compose -f axon.local.yml ps -a --format '{{.Service}}={{.State}}' 2>/dev/null | tr '\n' ' ')
+    echo "::error title=failure::step='$STEP' code=$code containers: $state"
   fi
   docker compose -f axon.local.yml ps -a || true
   for s in $(docker compose -f axon.local.yml config --services 2>/dev/null); do
     echo
-    echo "--- logs de $s (ultimas 40) ---"
+    echo "--- logs of $s (last 40) ---"
     docker compose -f axon.local.yml logs --tail 40 "$s" 2>&1 || true
-    # En Actions el log del run no es publico, pero las anotaciones si: las
-    # ultimas lineas de cada servicio salen tambien como ::error::
-    # solo de los que no terminaron bien: el resto llenaria el cupo de anotaciones
+    # In Actions the run's log is not public but the annotations are: the last
+    # lines of each service come out as ::error:: too.
+    # Only from the ones that did not end well: the rest would fill the annotation quota
     if [ -n "${GITHUB_ACTIONS:-}" ]; then
       case "$(docker compose -f axon.local.yml ps -a --format '{{.State}}' --status running --status exited "$s" 2>/dev/null)" in
         running|exited) : ;;
@@ -51,114 +51,113 @@ diagnostico() {
     fi
   done
   echo
-  echo "--- envelopes registrados ---"
-  cat .axon/local.ndjson 2>/dev/null || echo "(ninguno)"
-  return "$codigo"
+  echo "--- recorded envelopes ---"
+  cat .axon/local.ndjson 2>/dev/null || echo "(none)"
+  return "$code"
 }
-trap diagnostico EXIT
+trap diagnose EXIT
 
-paso "generando la infraestructura local desde los manifiestos"
+step "generating the local infrastructure from the manifests"
 "$AXON" infra . --target local > axon.local.yml
 
 mkdir -p .axon
-# flagd lee este JSON: los flags tambien salen del manifiesto
+# flagd reads this JSON: the flags come out of the manifest too
 "$AXON" flags . > .axon/flags.json
 
-# pgdog lee dos archivos, y los dos salen del manifiesto. Los hosts que nombra
-# `--target local` son los contenedores que acaba de emitir `axon infra`.
+# pgdog reads two files, and both come out of the manifest. The hosts it names
+# under `--target local` are the containers `axon infra` just emitted.
 mkdir -p .axon/pgdog/orders
 "$AXON" pooler . --service orders --target local > .axon/pgdog/orders/pgdog.toml
 "$AXON" pooler . --service orders --target local --users > .axon/pgdog/orders/users.toml
 
-paso "levantando broker, bases, migraciones y servicios"
-# `--remove-orphans`: un servicio que cambia de nombre deja el contenedor
-# viejo corriendo, y ese sigue ocupando su puerto. El compose nuevo levanta
-# igual y falla al publicar el puerto, que se lee como un problema del puerto
-# y no como lo que es.
+step "bringing up the broker, the databases, the migrations and the services"
+# `--remove-orphans`: a service that changes name leaves the old container
+# running, and that one keeps holding its port. The new compose comes up just the
+# same and fails to publish the port, which reads as a port problem and not as
+# what it is.
 docker compose -f axon.local.yml up -d --build --wait --remove-orphans
 
 rm -f .axon/local.ndjson
 mkdir -p .axon
 
 TENANT="${AXON_TENANT:-11111111-1111-4111-8111-111111111111}"
-paso "POST /v1/tenants/{tenantId}/orders"
-if ! respuesta=$(curl -sS --fail-with-body --max-time 30 \
+step "POST /v1/tenants/{tenantId}/orders"
+if ! response=$(curl -sS --fail-with-body --max-time 30 \
     -X POST "localhost:$PORT/v1/tenants/$TENANT/orders" \
     -H 'content-type: application/json' \
     -d '{"customerId":"11111111-1111-4111-8111-111111111111","total":{"amount":25000,"currency":"MXN"}}' 2>&1); then
-  codigo=$?
-  echo "curl salio $codigo: $respuesta"
-  [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error title=POST::curl=$codigo respuesta=$respuesta"
+  code=$?
+  echo "curl exited $code: $response"
+  [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error title=POST::curl=$code response=$response"
   exit 1
 fi
-echo "$respuesta"
+echo "$response"
 
-paso "esperando a que la cadena se propague"
+step "waiting for the chain to propagate"
 i=0
 while [ "$(wc -l < .axon/local.ndjson 2>/dev/null || echo 0)" -lt 3 ]; do
   i=$((i + 1))
-  [ "$i" -gt 45 ] && { echo "la cadena no se completo"; exit 1; }
+  [ "$i" -gt 45 ] && { echo "the chain did not complete"; exit 1; }
   sleep 1
 done
 
 echo
-paso "cadena causal real"
+step "the real causal chain"
 "$AXON" trace .axon/local.ndjson
 echo
-paso "la traza en OpenTelemetry"
-UI="localhost:${AXON_TRAZA_UI_PORT:-16686}"
+step "the trace in OpenTelemetry"
+UI="localhost:${AXON_TRACE_UI_PORT:-16686}"
 i=0
 until curl -fsS "http://$UI/api/services" 2>/dev/null | grep -q payments; do
   i=$((i + 1))
-  [ "$i" -gt 45 ] && { echo "no llego ninguna traza al colector"; exit 1; }
+  [ "$i" -gt 45 ] && { echo "no trace reached the collector"; exit 1; }
   sleep 1
 done
-python3 verificar-traza.py "$UI"
+python3 check-trace.py "$UI"
 
-paso "esperado (manifiesto) vs real (log de envelopes)"
+step "expected (manifest) vs real (envelope log)"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-# Se acota al flujo que disparo este demo. Comparar un flujo esperado contra
-# TODOS los del log solo funciona si hay exactamente uno, y eso deja de ser
-# cierto en cuanto algo mas toca el sistema —una prueba de carga, por ejemplo.
-FLUJO=$(python3 -c 'import json;print(json.loads(open(".axon/local.ndjson").readline())["correlationId"])')
-"$AXON" seq order.placed@v1 . --events > "$tmp/esperado"
-"$AXON" trace .axon/local.ndjson --seq --correlation "$FLUJO" > "$tmp/real"
-if diff -u "$tmp/esperado" "$tmp/real"; then
-  echo "OK: el sistema hace exactamente lo que declara"
+# It is narrowed to the flow this demo fired. Comparing one expected flow against
+# ALL the ones in the log only works if there is exactly one, and that stops being
+# true as soon as anything else touches the system —a load test, for instance.
+FLOW=$(python3 -c 'import json;print(json.loads(open(".axon/local.ndjson").readline())["correlationId"])')
+"$AXON" seq order.placed@v1 . --events > "$tmp/expected"
+"$AXON" trace .axon/local.ndjson --seq --correlation "$FLOW" > "$tmp/real"
+if diff -u "$tmp/expected" "$tmp/real"; then
+  echo "OK: the system does exactly what it declares"
 else
-  echo "DRIFT: el sistema no hace lo que declara"
+  echo "DRIFT: the system does not do what it declares"
   exit 1
 fi
 
 
-paso "aislamiento por inquilino a traves del pooler"
-./verificar-pooler.sh
+step "tenant isolation through the pooler"
+./check-pooler.sh
 
-paso "la saga: compensacion y retome, medidos"
-./verificar-saga.sh
+step "the saga: compensation and resume, measured"
+./check-saga.sh
 
-paso "event sourcing y CQRS, medidos"
-./verificar-es.sh
+step "event sourcing and CQRS, measured"
+./check-es.sh
 
-paso "reintentos declarados vs ocurridos"
-./verificar-reintentos.sh
+step "declared vs occurred retries"
+./check-retries.sh
 
-paso "rollout declarado vs aplicado"
-python3 verificar-flags.py "localhost:${AXON_FLAGS_PORT:-8016}" cobro_v2 10
+step "declared vs applied rollout"
+python3 check-flags.py "localhost:${AXON_FLAGS_PORT:-8016}" charge_v2 10
 
-paso "la bodega: esquema, embudo y PII"
-./verificar-bodega.sh
+step "the warehouse: schema, funnel and PII"
+./check-warehouse.sh
 
-paso "capacidad declarada vs medida"
+step "declared vs measured capacity"
 if command -v k6 >/dev/null 2>&1; then
-  "$AXON" load orders.toml > .axon/carga.js
-  k6 run --quiet --summary-export=.axon/carga.json \
+  "$AXON" load orders.toml > .axon/load.js
+  k6 run --quiet --summary-export=.axon/load.json \
     --env AXON_BASE="http://localhost:$PORT" \
-    --env AXON_CARGA_DURACION="${AXON_CARGA_DURACION:-10s}" \
-    .axon/carga.js > /dev/null 2>&1 || true
-  "$AXON" load orders.toml --check .axon/carga.json
+    --env AXON_LOAD_DURATION="${AXON_LOAD_DURATION:-10s}" \
+    .axon/load.js > /dev/null 2>&1 || true
+  "$AXON" load orders.toml --check .axon/load.json
 else
-  echo "  salteado: k6 no esta instalado"
+  echo "  skipped: k6 is not installed"
 fi
-

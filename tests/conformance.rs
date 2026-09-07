@@ -1074,26 +1074,26 @@ fn the_edge_and_the_buckets_come_from_the_plan() {
     );
     assert!(g.contains("age = 2555"), "the retention did not arrive");
     assert!(
-        !a.contains("cloudfront_distribution\" \"payments_recibos"),
+        !a.contains("cloudfront_distribution\" \"payments_receipts"),
         "a CDN over a private bucket"
     );
 
     // the bucket's name is a neutral template in the plan
     let (plan, _, _) = axon(&["infra", "examples", "--target", "plan"]);
-    assert!(plan.contains("{project}-payments-recibos"), "{plan}");
+    assert!(plan.contains("{project}-payments-receipts"), "{plan}");
     assert!(
         !plan.contains("var.project"),
         "the neutral plan leaked terraform syntax"
     );
     // and each target substitutes it with its own
-    assert!(g.contains("${var.project}-payments-recibos"));
+    assert!(g.contains("${var.project}-payments-receipts"));
     assert!(
-        a.contains(r#"{ name = "BUCKET_RECIBOS", value = "${var.project}-payments-recibos" }"#),
+        a.contains(r#"{ name = "BUCKET_RECEIPTS", value = "${var.project}-payments-receipts" }"#),
         "the bucket name did not reach the container on aws"
     );
-    assert!(k.contains("${PROJECT}-payments-recibos"));
+    assert!(k.contains("${PROJECT}-payments-receipts"));
     let (l, _, _) = axon(&["infra", "examples", "--target", "local"]);
-    assert!(l.contains("BUCKET_RECIBOS: local-payments-recibos"));
+    assert!(l.contains("BUCKET_RECEIPTS: local-payments-receipts"));
     assert!(
         l.contains("image: minio/minio:latest"),
         "local with no object storage"
@@ -1753,18 +1753,18 @@ fn otel_on_all_four_targets() {
         let (out, err, ok) = axon(&["infra", &source_for(target), "--target", target]);
         assert!(ok, "{target}: {err}");
         for v in expected {
-            assert!(out.contains(v), "{target} no inyecta {v}");
+            assert!(out.contains(v), "{target} does not inject {v}");
         }
         // the resource attributes come from the manifest, not from a convention
         assert!(
-            out.contains("axon.owner=equipo-pagos") && out.contains("axon.tier=0"),
+            out.contains("axon.owner=payments-team") && out.contains("axon.tier=0"),
             "{target}: the attributes do not come from the manifest"
         );
     }
 
     // the destination is the only thing that changes between targets
     let (l, _, _) = axon(&["infra", "examples", "--target", "local"]);
-    assert!(l.contains("http://traza:4318"));
+    assert!(l.contains("http://trace:4318"));
     assert!(
         l.contains("image: jaegertracing/all-in-one"),
         "local with no trace backend"
@@ -2214,16 +2214,16 @@ fn the_flags_are_verified() {
     let (ts, _, _) = axon(&["build", "examples/payments.toml", "examples"]);
     assert!(
         ts.contains(
-            "export const flagCobroV2 = (flags: Flags, tenant_id: string): Promise<boolean> =>"
+            "export const flagChargeV2 = (flags: Flags, tenant_id: string): Promise<boolean> =>"
         ),
         "{ts}"
     );
     assert!(
-        ts.contains(r#"flags.evaluate("cobro_v2", false, { targetingKey: tenant_id, tenant_id })"#),
+        ts.contains(r#"flags.evaluate("charge_v2", false, { targetingKey: tenant_id, tenant_id })"#),
         "{ts}"
     );
     assert!(
-        ts.contains(r#"export const declaredFlags = ["cobro_v2""#),
+        ts.contains(r#"export const declaredFlags = ["charge_v2""#),
         "{ts}"
     );
 
@@ -2231,16 +2231,16 @@ fn the_flags_are_verified() {
     // rollout —a limit, a provider— needs the others
     assert!(
         ts.contains(
-            "export const flagProveedorDeCobro = (flags: Flags, tenant_id: string): Promise<string> =>"
+            "export const flagChargeProvider = (flags: Flags, tenant_id: string): Promise<string> =>"
         ),
         "no typed accessor for a string flag:\n{ts}"
     );
     assert!(
-        ts.contains(r#"flags.evaluate("proveedor_de_cobro", "stripe", "#),
+        ts.contains(r#"flags.evaluate("charge_provider", "stripe", "#),
         "{ts}"
     );
     assert!(
-        ts.contains("export const flagLimiteDeReintentos = (flags: Flags): Promise<number> =>"),
+        ts.contains("export const flagRetryLimit = (flags: Flags): Promise<number> =>"),
         "no typed accessor for a numeric flag:\n{ts}"
     );
     // the interface covers the standard's four types
@@ -2252,16 +2252,16 @@ fn the_flags_are_verified() {
     // and flagd's config: the rollout is expressed with its `fractional`
     let (cfg, _, _) = axon(&["flags", "examples"]);
     let v: serde_json::Value = serde_json::from_str(&cfg).expect("flagd json");
-    let f = &v["flags"]["cobro_v2"];
+    let f = &v["flags"]["charge_v2"];
     assert_eq!(f["defaultVariant"], "off");
     assert_eq!(f["targeting"]["fractional"][0]["var"], "tenant_id");
     assert_eq!(f["targeting"]["fractional"][1][1], 10);
     assert_eq!(f["targeting"]["fractional"][2][1], 90);
     // a kill switch carries no targeting
-    assert!(v["flags"]["cortar_stripe"]["targeting"].is_null());
+    assert!(v["flags"]["stripe_kill"]["targeting"].is_null());
 
     // and the declared variants reach flagd as-is, not a fixed on/off
-    let p = &v["flags"]["proveedor_de_cobro"];
+    let p = &v["flags"]["charge_provider"];
     assert_eq!(p["variants"]["stripe"], "stripe");
     assert_eq!(p["variants"]["adyen"], "adyen");
     assert_eq!(p["defaultVariant"], "stripe");
@@ -2269,7 +2269,7 @@ fn the_flags_are_verified() {
     assert_eq!(p["targeting"]["fractional"][1][0], "adyen");
     assert_eq!(p["targeting"]["fractional"][1][1], 20);
     assert_eq!(p["targeting"]["fractional"][2][0], "stripe");
-    assert_eq!(v["flags"]["limite_de_reintentos"]["variants"]["normal"], 3);
+    assert_eq!(v["flags"]["retry_limit"]["variants"]["normal"], 3);
 
     // a non-existent default variant makes evaluation always fall back to the
     // code's value, and the flag stops working in silence
@@ -2597,13 +2597,13 @@ fn the_warehouse_schemas_are_valid_sql() {
 
     // the funnel comes from the declared chain, with the business latency
     assert!(
-        ddl.contains("CREATE OR REPLACE VIEW `@dataset.embudo_order_placed_v1`"),
+        ddl.contains("CREATE OR REPLACE VIEW `@dataset.funnel_order_placed_v1`"),
         "{ddl}"
     );
-    assert!(ddl.contains("AS paso_1_order_placed_v1"), "{ddl}");
-    assert!(ddl.contains("AS paso_2_payment_captured_v1"), "{ddl}");
+    assert!(ddl.contains("AS step_1_order_placed_v1"), "{ddl}");
+    assert!(ddl.contains("AS step_2_payment_captured_v1"), "{ddl}");
     assert!(
-        ddl.contains("AS ms_hasta_payment_captured_v1"),
+        ddl.contains("AS ms_to_payment_captured_v1"),
         "no business latency:\n{ddl}"
     );
 
@@ -3663,7 +3663,7 @@ CREATE TABLE view_saldos (
 -- The shadow: the same shape as the view. `verify` checks they MATCH, because a
 -- shadow with one column fewer leaves an incomplete view after the swap, and
 -- that would show up on the day of the rebuild.
-CREATE TABLE view_saldos_sombra (
+CREATE TABLE view_saldos_shadow (
   stream_id  uuid PRIMARY KEY,
   centavos   bigint NOT NULL,
   posicion   bigint NOT NULL
@@ -4006,20 +4006,20 @@ fn the_event_sourcing_rules_block() {
 
     // the shadow that does not match the view
     let short_shadow = DDL_ES.replace(
-        "CREATE TABLE view_saldos_sombra (\n  stream_id  uuid PRIMARY KEY,\n  centavos   bigint NOT NULL,\n  posicion   bigint NOT NULL\n);",
-        "CREATE TABLE view_saldos_sombra (\n  stream_id  uuid PRIMARY KEY,\n  posicion   bigint NOT NULL\n);",
+        "CREATE TABLE view_saldos_shadow (\n  stream_id  uuid PRIMARY KEY,\n  centavos   bigint NOT NULL,\n  posicion   bigint NOT NULL\n);",
+        "CREATE TABLE view_saldos_shadow (\n  stream_id  uuid PRIMARY KEY,\n  posicion   bigint NOT NULL\n);",
     );
     // the guard compares against the original: the same text is also in the
     // live view, so searching for it loose does not say whether the replace applied
     assert_ne!(short_shadow, DDL_ES, "the variant did not apply");
     let err = run(MANIFIESTO_ES, &short_shadow);
-    assert!(err.contains("`view_saldos_sombra` has no `centavos` column"), "{err}");
+    assert!(err.contains("`view_saldos_shadow` has no `centavos` column"), "{err}");
     assert!(err.contains("only then would it show"), "{err}");
 
     // and with no shadow: rebuilding in place serves an incomplete view
-    let without_shadow = DDL_ES.replace("CREATE TABLE view_saldos_sombra", "CREATE TABLE otra_sombra");
+    let without_shadow = DDL_ES.replace("CREATE TABLE view_saldos_shadow", "CREATE TABLE other_shadow");
     let err = run(MANIFIESTO_ES, &without_shadow);
-    assert!(err.contains("`view_saldos_sombra` is missing"), "{err}");
+    assert!(err.contains("`view_saldos_shadow` is missing"), "{err}");
     assert!(err.contains("fewer rows than there are"), "{err}");
 
     // the view's checkpoint, with no stream in the key: one stream overwrites the other

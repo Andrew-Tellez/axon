@@ -1,28 +1,29 @@
 service = "checkout"
-owner = "equipo-comercio"
+owner = "commerce-team"
 tier = "1"
 version = "1.0.0"
 transport = "pubsub"
 
-# El unico metodo: arranca la saga. Todo lo demas lo hace el coordinador
-# generado.
+# The only method: it starts the saga. Everything else is done by the generated
+# coordinator.
 [methods.checkout]
 http = "POST /v1/checkouts"
 auth = "required"
 timeout_ms = 30000
 idempotent = true
 in = { orderId = "uuid", amount = "money" }
-out = { estado = "string" }
+out = { state = "string" }
 
-# Cobrar y despues pagarle al comercio son dos efectos en dos sistemas. No hay
-# transaccion que los cubra: si el segundo falla, el primero hay que deshacerlo.
+# Charging and then paying the merchant are two effects in two systems. There is
+# no transaction that covers both: if the second one fails, the first has to be
+# undone.
 #
-# El presupuesto cubre la suma de los pasos CON sus reintentos: 8000 + 8000x4
-# + 4000x3 = 52000. Son cuatro intentos y no tres, porque `retries = 3` son
-# tres REintentos ademas del primero —`axon verify` hizo la cuenta y corrigio la
-# que estaba escrita aqui—. Rendirse antes dejaria al coordinador compensando
-# algo que despues tiene exito.
-[saga.compra]
+# The budget covers the sum of the steps WITH their retries: 8000 + 8000x4 +
+# 4000x3 = 52000. That is four attempts and not three, because `retries = 3` is
+# three REtries on top of the first one —`axon verify` did the arithmetic and
+# corrected the number that used to be written here. Giving up sooner would
+# leave the coordinator compensating something that later succeeds.
+[saga.checkout]
 on = "checkout"
 timeout_ms = 60000
 steps = [
@@ -30,42 +31,42 @@ steps = [
   { do = "payments.payoutMerchant" },
 ]
 
-# El historial de una compra: el estado ES esta secuencia. La fila de
-# `vista_conversion` es una proyeccion de esto, no la verdad.
-[emits."compra.iniciada@v1"]
+# A checkout's history: the state IS this sequence. The row in `view_conversion`
+# is a projection of this, not the truth.
+[emits."checkout.started@v1"]
 streamId = "uuid"
 orderId = "uuid"
 amount = "money"
 
-[emits."compra.cobrada@v1"]
+[emits."checkout.charged@v1"]
 streamId = "uuid"
 paymentId = "uuid"
 
-[emits."compra.compensada@v1"]
+[emits."checkout.compensated@v1"]
 streamId = "uuid"
-motivo = "string"
+reason = "string"
 
-[aggregate.compra]
-events = ["compra.iniciada@v1", "compra.cobrada@v1", "compra.compensada@v1"]
-# Cada 2 eventos. En un agregado real seria 50 o 100; aca es 2 para que el demo
-# ejercite la foto con una sola compra.
+[aggregate.checkout]
+events = ["checkout.started@v1", "checkout.charged@v1", "checkout.compensated@v1"]
+# Every 2 events. In a real aggregate this would be 50 or 100; here it is 2 so
+# the demo exercises the snapshot with a single checkout.
 snapshot_every = 2
-# La version de las REGLAS. Subirla invalida las fotos existentes: una foto
-# calculada con reglas viejas da un estado que ya no coincide con reproducir el
-# flujo, y eso no da error, da un numero equivocado.
+# The version of the RULES. Bumping it invalidates the existing snapshots: a
+# snapshot computed with old rules gives a state that no longer matches replaying
+# the stream, and that raises no error, it gives a wrong number.
 snapshot_version = 1
 
-# El traspaso al bus, en la misma transaccion que el append. `verify` lo exige
-# para un agregado cuyos eventos se publican: el flujo ya es durable, asi que
-# publicar en linea deja una ventana en la que el evento esta anotado y nadie lo
-# recibio.
+# The handover to the bus, in the same transaction as the append. `verify`
+# requires it for an aggregate whose events get published: the stream is already
+# durable, so publishing inline leaves a window where the event is recorded and
+# nobody received it.
 [patterns]
 outbox = true
 
-# El modelo de lectura. Se llena DESPUES de que el evento ocurrio, asi que su
-# atraso tiene que caber en el presupuesto que el servicio ya declaro (5000ms).
+# The read model. It is filled AFTER the event happened, so its lag has to fit
+# inside the budget the service already declared (5000ms).
 [view.conversion]
-on = ["compra.iniciada@v1", "compra.cobrada@v1", "compra.compensada@v1"]
+on = ["checkout.started@v1", "checkout.charged@v1", "checkout.compensated@v1"]
 max_staleness_ms = 3000
 
 [[depends]]
@@ -77,8 +78,8 @@ breaker = true
 [[depends]]
 service = "payments"
 method = "refundPayment"
-# La compensacion se reintenta mas que el paso: es el ultimo recurso, no hay
-# nada detras de ella.
+# The compensation is retried more than the step: it is the last resort, there
+# is nothing behind it.
 timeout_ms = 8000
 retries = 3
 breaker = true
@@ -87,22 +88,22 @@ breaker = true
 service = "payments"
 method = "payoutMerchant"
 timeout_ms = 4000
-# Idempotente, asi que reintentar es legal: `axon verify` bloquea los
-# reintentos sobre lo que no lo es. El demo mide que sean exactamente estos.
+# Idempotent, so retrying is legal: `axon verify` blocks retries over what is
+# not. The demo measures that they are exactly these.
 retries = 2
 breaker = true
 
-# La bodega es una decision de plataforma: `verify` exige que los tres
-# servicios declaren la misma, porque un embudo repartido entre dos bodegas no
-# se puede armar con una consulta.
+# The warehouse is a platform decision: `verify` requires all three services to
+# declare the same one, because a funnel split across two warehouses cannot be
+# assembled with one query.
 [analytics]
 warehouse = "clickhouse"
 
 [infra]
 state = "postgres"
-# El diario del coordinador NO se reparte por inquilino: el barrido tiene que
-# poder mirar todas las sagas colgadas de una vez, y una consulta sin la clave
-# de reparto no se puede rutear. El inquilino viaja dentro de `datos`.
+# The coordinator's journal is NOT sharded by tenant: the sweep has to be able
+# to look at every stranded saga at once, and a query without the shard key
+# cannot be routed. The tenant travels inside `data`.
 migrations = "sql/checkout/"
 runtime = "container"
 backup_retention_days = 7
@@ -111,8 +112,8 @@ max_connections = 100
 min_instances = 1
 port = 8080
 
-# Una saga es consistencia eventual por construccion: entre cobrar y pagarle al
-# comercio el sistema esta en un estado que ningun invariante describe.
+# A saga is eventual consistency by construction: between charging and paying the
+# merchant the system is in a state no invariant describes.
 [cap]
 consistency = "eventual"
 on_partition = "reject"

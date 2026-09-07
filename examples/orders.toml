@@ -1,5 +1,5 @@
 service = "orders"
-owner = "equipo-comercio"
+owner = "commerce-team"
 tier = "1"
 pii = ["customer_email"]
 version = "2.0.0"
@@ -11,13 +11,14 @@ customerId = "uuid"
 customerEmail = "string"
 total = "money"
 
-# El inquilino va en la ruta, no implicito. Con la base repartida por
-# `tenant_id`, una consulta que no lo lleva no se puede rutear a un nodo ni
-# aislar del resto: el pooler la rechaza y `axon verify` no la deja llegar ahi.
+# The tenant goes in the route, not implicitly. With the database sharded by
+# `tenant_id`, a query that does not carry it can neither be routed to a node nor
+# isolated from the rest: the pooler rejects it and `axon verify` does not let it
+# get that far.
 [methods.placeOrder]
 http = "POST /v1/tenants/{tenantId}/orders"
-auth = "public"          # la puerta de entrada del sistema
-rate_limit = 60          # por minuto: publica sin freno es una invitacion
+auth = "public"          # the system's front door
+rate_limit = 60          # per minute: public with no brake is an invitation
 timeout_ms = 5000
 idempotent = true
 in = { tenantId = "uuid", customerId = "uuid", customerEmail = "string", total = "money" }
@@ -37,12 +38,12 @@ timeout_ms = 3000
 retries = 2
 breaker = true
 
-# Una bodega es donde un dato personal vive mas tiempo y lo lee mas gente, asi
-# que el default es no exportarlo. Aca se elige hashearlo para poder contar
-# clientes unicos sin guardar el correo.
+# A warehouse is where personal data lives longest and is read by the most
+# people, so the default is not to export it. Here the choice is to hash it, so
+# unique customers can be counted without storing the address.
 [analytics]
-# ClickHouse: es la unica bodega con camino de ingesta en el target local, y
-# `axon infra` rechaza la combinacion que no lo tiene.
+# ClickHouse: the only warehouse with an ingest path on the local target, and
+# `axon infra` refuses the combination that has none.
 warehouse = "clickhouse"
 pii = "hash"
 
@@ -52,8 +53,8 @@ tenant_column = "tenant_id"
 backup_retention_days = 14
 pool_size = 4
 max_connections = 100
-# Se lee de las replicas, van con retraso, y por eso este servicio se declara
-# `eventual`: la garantia y la topologia dicen lo mismo.
+# The replicas are read from, they lag, and that is why this service declares
+# itself `eventual`: the guarantee and the topology say the same thing.
 read_replicas = 2
 shard_key = "tenant_id"
 migrations = "sql/orders/"
@@ -65,20 +66,20 @@ min_instances = 0
 [env.prod]
 min_instances = 2
 
-# Un catalogo de ordenes aguanta unos segundos de retraso; caerse, no.
+# An order catalogue can take a few seconds of lag; going down, it cannot.
 [cap]
 consistency = "eventual"
 on_partition = "degrade"
 max_staleness_ms = 3000
 
-# El sharder va aca y no en payments: repartir con confirmacion en dos fases da
-# consistencia eventual, y payments declara `strong`, tier 0 y PITR —tres
-# razones por las que `verify` lo rechaza ahi. El dinero no se reparte; el
-# catalogo si.
+# The sharder goes here and not in payments: sharding with two-phase commit
+# gives eventual consistency, and payments declares `strong`, tier 0 and PITR
+# —three reasons `verify` rejects it there. Money is not sharded; a catalogue is.
 #
-# `mode = "transaction"` obliga a declarar como se fija el inquilino: en ese
-# modo la conexion vuelve al pool en cada COMMIT y se le entrega a otro, y una
-# GUC de sesion que sobreviva devuelve las filas del anterior sin dar error.
+# `mode = "transaction"` forces declaring how the tenant is pinned: in that mode
+# the connection goes back to the pool at every COMMIT and is handed to another
+# one, and a session GUC that survives returns the previous tenant's rows without
+# raising an error.
 [pooler]
 engine = "pgdog"
 mode = "transaction"

@@ -1,44 +1,45 @@
-// Los adaptadores que axon NO genera, a proposito: el framework se queda con
-// lo que cruza procesos, y el pegamento con la infra lo pone quien despliega.
-// Esto es todo lo que hace falta. ~120 lineas para los dos servicios.
+// The adapters axon does NOT generate, on purpose: the framework keeps what
+// crosses processes, and the glue to the infrastructure belongs to whoever
+// deploys. This is all it takes. ~120 lines for the three services.
 import { connect, type NatsConnection, StringCodec } from "nats";
 import pg from "pg";
 import { appendFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-// telemetria.ts importa el tipo Envelope de aqui; ese import es solo de tipos,
-// asi que se borra al compilar y no hay ciclo en tiempo de ejecucion.
-import { anotar, enBorde, enProductor, enSpan } from "./telemetria.ts";
-// El contrato de axon. El codigo generado emite estas mismas cuatro formas en
-// cada servicio; el tipado estructural hace que encajen sin importarse entre si.
-// (Cuando exista un paquete @axon/runtime, viviran aqui y el generado importara.)
+// telemetry.ts imports the Envelope type from here; that import is types only,
+// so it is erased at compile time and there is no cycle at runtime.
+import { annotate, atEdge, inProducer, inSpan } from "./telemetry.ts";
+// axon's contract. The generated code emits these same four shapes in every
+// service; structural typing makes them fit without importing each other.
+// (Once an @axon/runtime package exists, they will live there and the generated
+// code will import them.)
 export interface Envelope<T> {
   id: string; type: string; source: string; time: string;
   traceparent: string; correlationId: string; causationId: string | null; data: T;
 }
 export interface Bus { publish(e: Envelope<unknown>): Promise<void>; }
-// `tx` obligatorio: es lo que hace imposible escribir el evento fuera de la
-// transaccion que cambia el estado. Ver `outbox()` mas abajo.
+// `tx` mandatory: it is what makes it impossible to write the event outside the
+// transaction that changes the state. See `outbox()` below.
 export interface Outbox<Tx = unknown> { stage(e: Envelope<unknown>, tx: Tx): Promise<void>; }
 export interface Inbox { once(id: string, fn: () => Promise<void>): Promise<void>; }
 
 const sc = StringCodec();
 const TRACE = process.env.AXON_TRACE_LOG;
 
-/** Un log NDJSON de envelopes es todo lo que `axon trace` necesita. */
-async function traza(e: Envelope<unknown>) {
+/** An NDJSON log of envelopes is all `axon trace` needs. */
+async function trace(e: Envelope<unknown>) {
   if (!TRACE) return;
   await appendFile(TRACE, JSON.stringify(e) + "\n").catch(() => {});
 }
 
-// Un rechazo sin manejar mata el proceso en silencio. Que al menos deje rastro.
+// An unhandled rejection kills the process in silence. Let it leave a trace.
 process.on("unhandledRejection", (r) =>
-  console.error(`[${process.env.AXON_SERVICE}] rechazo sin manejar:`, r),
+  console.error(`[${process.env.AXON_SERVICE}] unhandled rejection:`, r),
 );
 process.on("uncaughtException", (e) =>
-  console.error(`[${process.env.AXON_SERVICE}] excepcion sin capturar:`, e),
+  console.error(`[${process.env.AXON_SERVICE}] uncaught exception:`, e),
 );
 
-export async function conectar(): Promise<NatsConnection> {
+export async function connectBroker(): Promise<NatsConnection> {
   const servers = process.env.AXON_BROKER_URL ?? "nats://localhost:4222";
   for (let i = 0; ; i++) {
     try {
@@ -50,78 +51,78 @@ export async function conectar(): Promise<NatsConnection> {
   }
 }
 
-/** El nombre del evento lleva `@`, que NATS no admite como subject. */
-export const subject = (tipo: string) => tipo.replace("@", ".");
+/** The event's name carries `@`, which NATS does not allow in a subject. */
+export const subject = (type: string) => type.replace("@", ".");
 
 export function bus(nc: NatsConnection): Bus {
   return {
     async publish(e) {
-      // el span va primero: reescribe el traceparent, y recien despues se
-      // serializa el mensaje y se anota en el log
-      await enProductor(`publish ${e.type}`, e, { "messaging.operation": "publish" }, async () => {
-        await traza(e);
+      // the span goes first: it rewrites the traceparent, and only then is the
+      // message serialised and written to the log
+      await inProducer(`publish ${e.type}`, e, { "messaging.operation": "publish" }, async () => {
+        await trace(e);
         nc.publish(subject(e.type), sc.encode(JSON.stringify(e)));
       });
     },
   };
 }
 
-export async function suscribir(
+export async function subscribe(
   nc: NatsConnection,
-  tipos: string[],
+  types: string[],
   handler: (e: Envelope<unknown>) => Promise<void>,
 ) {
-  for (const tipo of tipos) {
-    const sub = nc.subscribe(subject(tipo), { queue: process.env.AXON_SERVICE });
+  for (const t of types) {
+    const sub = nc.subscribe(subject(t), { queue: process.env.AXON_SERVICE });
     (async () => {
       for await (const msg of sub) {
         const e = JSON.parse(sc.decode(msg.data)) as Envelope<unknown>;
         try {
-          await enSpan(
+          await inSpan(
             `process ${e.type}`,
             e,
             { "messaging.operation": "process", "messaging.source.name": subject(e.type) },
             () => handler(e),
           );
         } catch (err) {
-          // En produccion esto lo hace la DLQ del broker; en local, ruido visible.
-          console.error(`[${process.env.AXON_SERVICE}] ${e.type} fallo:`, err);
+          // In production the broker's DLQ does this; locally, visible noise.
+          console.error(`[${process.env.AXON_SERVICE}] ${e.type} failed:`, err);
         }
       }
     })();
   }
 }
 
-/** Inbox idempotente: la unicidad del PK es la deduplicacion. */
+/** Idempotent inbox: the PK's uniqueness is the deduplication. */
 export function inbox(db: pg.Pool): Inbox {
   return {
     async once(id, fn) {
       const r = await db.query("INSERT INTO inbox_seen (id) VALUES ($1) ON CONFLICT DO NOTHING", [id]);
-      if (r.rowCount === 0) return; // ya procesado
+      if (r.rowCount === 0) return; // already processed
       await fn();
     },
   };
 }
 
-/** El outbox escribe en la transaccion de quien llama, no en una propia.
+/** The outbox writes into the caller's transaction, not into one of its own.
  *
- *  Antes recibia el pool y `stage` abria su propia conexion: el evento se
- *  confirmaba solo, asi que una transaccion revertida dejaba el evento sin su
- *  fila y el relay publicaba algo que nunca paso. Medido, no supuesto: 0 pagos
- *  y 1 evento en el outbox. */
+ *  It used to take the pool and `stage` opened its own connection: the event
+ *  committed by itself, so a rolled-back transaction left the event with no row
+ *  and the relay published something that never happened. Measured, not assumed:
+ *  0 payments and 1 event in the outbox. */
 export function outbox(): Outbox<pg.PoolClient> {
   return {
     async stage(e, tx) {
-      // el outbox guarda el traceparent del productor, para que lo que publique
-      // el relay siga colgando de quien lo genero
-      await enProductor(`stage ${e.type}`, e, { "messaging.operation": "create" }, () =>
-        guardar(tx, e),
+      // the outbox stores the producer's traceparent, so what the relay
+      // publishes still hangs off whoever generated it
+      await inProducer(`stage ${e.type}`, e, { "messaging.operation": "create" }, () =>
+        save(tx, e),
       );
     },
   };
 }
 
-async function guardar(db: pg.Pool | pg.PoolClient, e: Envelope<unknown>) {
+async function save(db: pg.Pool | pg.PoolClient, e: Envelope<unknown>) {
   {
       await db.query(
         `INSERT INTO outbox (id, type, source, time, traceparent, correlation_id, causation_id, data)
@@ -131,7 +132,7 @@ async function guardar(db: pg.Pool | pg.PoolClient, e: Envelope<unknown>) {
   }
 }
 
-/** El relay: lo unico que publica de verdad cuando hay outbox. */
+/** The relay: the only thing that really publishes when there is an outbox. */
 export function relay(db: pg.Pool, b: Bus, ms = 200) {
   const tick = async () => {
     const { rows } = await db.query(
@@ -149,7 +150,7 @@ export function relay(db: pg.Pool, b: Bus, ms = 200) {
   setInterval(() => void tick().catch((e) => console.error("relay:", e)), ms);
 }
 
-export async function esperarDb(): Promise<pg.Pool> {
+export async function waitForDb(): Promise<pg.Pool> {
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
   for (let i = 0; ; i++) {
     try {
@@ -162,79 +163,79 @@ export async function esperarDb(): Promise<pg.Pool> {
   }
 }
 
-type Ruta = (body: any, e: Envelope<unknown>, params: Record<string, string>) => Promise<unknown>;
+type Route = (body: any, e: Envelope<unknown>, params: Record<string, string>) => Promise<unknown>;
 
-/** Un recurso que no existe es un error del cliente, no del servidor. */
-export class NoEncontrado extends Error {}
+/** A resource that does not exist is the client's error, not the server's. */
+export class NotFound extends Error {}
 
-/** `POST /v1/orders/{orderId}` -> matcher con captura de `orderId`. */
-function compilar(clave: string) {
-  const [metodo, patron] = clave.split(" ");
-  const nombres: string[] = [];
+/** `POST /v1/orders/{orderId}` -> a matcher that captures `orderId`. */
+function compile(key: string) {
+  const [method, pattern] = key.split(" ");
+  const names: string[] = [];
   const regex = new RegExp(
     "^" +
-      patron
+      pattern
         .split("/")
         .map((seg) => {
           if (!seg.startsWith("{")) return seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          nombres.push(seg.slice(1, -1));
+          names.push(seg.slice(1, -1));
           return "([^/]+)";
         })
         .join("/") +
       "$",
   );
-  return { metodo, regex, nombres };
+  return { method, regex, names };
 }
 
-/** Servidor minimo. El framework real de HTTP lo elige cada equipo.
+/** A minimal server. The real HTTP framework is each team's choice.
  *
- *  `declaradas` son las rutas del manifiesto: si falta el handler de alguna,
- *  el proceso no arranca. Sin esto, una ruta declarada y no servida devuelve
- *  404 en produccion y no aparece en ninguna prueba. */
-export function servir(
+ *  `declared` are the manifest's routes: if any of them has no handler, the
+ *  process does not start. Without this, a route declared and not served returns
+ *  a 404 in production and shows up in no test. */
+export function serve(
   port: number,
-  rutas: Record<string, Ruta>,
-  declaradas: readonly string[] = [],
+  routes: Record<string, Route>,
+  declared: readonly string[] = [],
 ) {
-  const faltan = declaradas.filter((d) => !(d in rutas));
-  if (faltan.length) {
+  const missing = declared.filter((d) => !(d in routes));
+  if (missing.length) {
     throw new Error(
-      `${process.env.AXON_SERVICE}: el manifiesto declara rutas sin handler: ${faltan.join(", ")}`,
+      `${process.env.AXON_SERVICE}: the manifest declares routes with no handler: ${missing.join(", ")}`,
     );
   }
-  const tabla = Object.entries(rutas).map(([clave, fn]) => ({ ...compilar(clave), clave, fn }));
+  const table = Object.entries(routes).map(([key, fn]) => ({ ...compile(key), key, fn }));
 
   createServer(async (req: IncomingMessage, res: ServerResponse) => {
     if (req.url === "/healthz") return res.writeHead(200).end("ok");
-    const camino = (req.url ?? "/").split("?")[0];
-    const hallado = tabla
-      .filter((r) => r.metodo === req.method)
-      .map((r) => ({ r, m: r.regex.exec(camino) }))
+    const path = (req.url ?? "/").split("?")[0];
+    const hit = table
+      .filter((r) => r.method === req.method)
+      .map((r) => ({ r, m: r.regex.exec(path) }))
       .find(({ m }) => m);
-    if (!hallado) {
-      // RFC 7807, el mismo formato que declara el OpenAPI generado
+    if (!hit) {
+      // RFC 7807, the same format the generated OpenAPI declares
       res.writeHead(404, { "content-type": "application/problem+json" });
-      return res.end(JSON.stringify({ type: "about:blank", title: "no encontrado", status: 404 }));
+      return res.end(JSON.stringify({ type: "about:blank", title: "not found", status: 404 }));
     }
-    const { r, m } = hallado;
-    const params = Object.fromEntries(r.nombres.map((n, i) => [n, decodeURIComponent(m![i + 1])]));
+    const { r, m } = hit;
+    const params = Object.fromEntries(r.names.map((n, i) => [n, decodeURIComponent(m![i + 1])]));
 
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
 
-    // La traza la abre OTel y el envelope la hereda, no al reves: si el
-    // envelope inventara el traceparent, el span raiz quedaria colgando de un
-    // padre que nunca existio. Si el llamador ya manda uno, se continua.
-    const entrante = req.headers["traceparent"];
-    await enBorde(
-      r.clave,
-      typeof entrante === "string" ? entrante : undefined,
-      { "http.request.method": req.method ?? "", "http.route": r.clave },
+    // OTel opens the trace and the envelope inherits it, not the other way
+    // round: if the envelope invented the traceparent, the root span would hang
+    // off a parent that never existed. If the caller already sends one, it continues.
+    const incoming = req.headers["traceparent"];
+    await atEdge(
+      r.key,
+      typeof incoming === "string" ? incoming : undefined,
+      { "http.request.method": req.method ?? "", "http.route": r.key },
       async (traceparent: string) => {
-        const raiz: Envelope<unknown> = {
+        const root: Envelope<unknown> = {
           id: crypto.randomUUID(),
-          type: r.clave,
+          type: r.key,
           source: "http",
           time: new Date().toISOString(),
           traceparent,
@@ -245,32 +246,32 @@ export function servir(
           causationId: null,
           data: body,
         };
-        anotar({ "messaging.message.id": raiz.id, "axon.correlation_id": raiz.correlationId });
-        await traza(raiz);
+        annotate({ "messaging.message.id": root.id, "axon.correlation_id": root.correlationId });
+        await trace(root);
         try {
-          const out = await r.fn(body, raiz, params);
+          const out = await r.fn(body, root, params);
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify(out));
         } catch (err) {
-          // No se re-lanza: el handler de createServer es async, asi que un
-          // throw aca sale como rechazo no manejado y Node mata el proceso
-          // en medio de la respuesta.
-          const estado = err instanceof NoEncontrado ? 404 : 500;
-          if (estado === 500) {
-            console.error(`[${process.env.AXON_SERVICE}] ${r.clave} fallo:`, err);
-            anotar({ "error.type": String(err) });
+          // It is not rethrown: createServer's handler is async, so a throw here
+          // comes out as an unhandled rejection and Node kills the process in the
+          // middle of the response.
+          const status = err instanceof NotFound ? 404 : 500;
+          if (status === 500) {
+            console.error(`[${process.env.AXON_SERVICE}] ${r.key} failed:`, err);
+            annotate({ "error.type": String(err) });
           }
-          res.writeHead(estado, { "content-type": "application/problem+json" });
+          res.writeHead(status, { "content-type": "application/problem+json" });
           res.end(
             JSON.stringify({
               type: "about:blank",
               title: String(err),
-              status: estado,
+              status,
               traceId: traceparent.split("-")[1],
             }),
           );
         }
       },
     );
-  }).listen(port, () => console.log(`[${process.env.AXON_SERVICE}] escuchando en :${port}`));
+  }).listen(port, () => console.log(`[${process.env.AXON_SERVICE}] listening on :${port}`));
 }

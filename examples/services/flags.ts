@@ -1,57 +1,56 @@
-// OpenFeature de verdad, con el proveedor de flagd.
+// Real OpenFeature, with the flagd provider.
 //
-// La interfaz `Flags` que genera axon tiene la forma de OpenFeature a
-// proposito: eso es todo lo que hace falta para que el SDK real encaje sin una
-// capa de traduccion. axon no trae un SDK de flags igual que no trae uno de
-// trazas — pone el nombre, el valor seguro y el campo por el que se fija, y el
-// SDK lo elige cada equipo.
+// The `Flags` interface axon generates has OpenFeature's shape on purpose: that
+// is all it takes for the real SDK to fit with no translation layer. axon ships
+// no flag SDK just as it ships none for traces — it provides the name, the safe
+// value and the field it is pinned by, and the SDK is each team's choice.
 import { OpenFeature, type Client } from "@openfeature/server-sdk";
 import { OFREPProvider } from "@openfeature/ofrep-provider";
 
-// La misma forma que emite axon en cada servicio. Igual que en runtime.ts, se
-// declara aca porque un modulo compartido no puede importar un contrato que es
-// por servicio; el tipado estructural hace que encajen.
+// The same shape axon emits in every service. As in runtime.ts, it is declared
+// here because a shared module cannot import a contract that is per service;
+// structural typing makes them fit.
 export interface Flags {
   evaluate<T extends boolean | string | number | object>(
-    nombre: string,
+    name: string,
     fallback: T,
     context: Record<string, string>,
   ): Promise<T>;
 }
 
-let cliente: Client | undefined;
+let client: Client | undefined;
 
-export async function arrancarFlags() {
+export async function startFlags() {
   const url = process.env.AXON_FLAGS_URL;
   if (!url) return;
-  // OFREP y no el proveedor de flagd a proposito: OFREP es el protocolo REST
-  // estandar de OpenFeature, asi que esto habla con flagd hoy y con cualquier
-  // otro backend que lo implemente sin cambiar una linea. El proveedor gRPC de
-  // flagd, ademas, pide la ruta vieja del servicio de evaluacion, y flagd v0.12
-  // ya sirve solo la nueva: la prueba real lo encontro.
+  // OFREP and not flagd's own provider, on purpose: OFREP is OpenFeature's
+  // standard REST protocol, so this talks to flagd today and to any other
+  // backend that implements it without changing a line. flagd's gRPC provider,
+  // on top of that, asks for the old evaluation-service path, and flagd v0.12
+  // already serves only the new one: the real test found that out.
   await OpenFeature.setProviderAndWait(new OFREPProvider({ baseUrl: url }));
-  cliente = OpenFeature.getClient(process.env.AXON_SERVICE ?? "axon");
+  client = OpenFeature.getClient(process.env.AXON_SERVICE ?? "axon");
 }
 
-/** Implementacion de la interfaz que genera axon.
+/** An implementation of the interface axon generates.
  *
- *  Sin proveedor devuelve el valor por defecto que declaro el manifiesto: un
- *  flagd caido no debe cambiar el comportamiento, y el valor seguro ya esta
- *  elegido en la declaracion. */
+ *  With no provider it returns the default value the manifest declared: a flagd
+ *  that is down must not change the behaviour, and the safe value has already
+ *  been chosen in the declaration. */
 export const flags: Flags = {
-  async evaluate(nombre, fallback, context) {
-    if (!cliente) return fallback;
-    // OpenFeature resuelve un tipo por flag, asi que el accesor correcto sale
-    // del tipo del valor por defecto —que el manifiesto ya declaro.
+  async evaluate(name, fallback, context) {
+    if (!client) return fallback;
+    // OpenFeature resolves one type per flag, so the right accessor comes from
+    // the type of the default value —which the manifest already declared.
     switch (typeof fallback) {
       case "boolean":
-        return (await cliente.getBooleanValue(nombre, fallback, context)) as typeof fallback;
+        return (await client.getBooleanValue(name, fallback, context)) as typeof fallback;
       case "string":
-        return (await cliente.getStringValue(nombre, fallback, context)) as typeof fallback;
+        return (await client.getStringValue(name, fallback, context)) as typeof fallback;
       case "number":
-        return (await cliente.getNumberValue(nombre, fallback, context)) as typeof fallback;
+        return (await client.getNumberValue(name, fallback, context)) as typeof fallback;
       default:
-        return (await cliente.getObjectValue(nombre, fallback as never, context)) as typeof fallback;
+        return (await client.getObjectValue(name, fallback as never, context)) as typeof fallback;
     }
   },
 };

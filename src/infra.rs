@@ -1517,10 +1517,10 @@ services:
         );
     }
     o.push_str(
-        "  traza:
+        "  trace:
     image: jaegertracing/all-in-one:1.76.0
     environment: { COLLECTOR_OTLP_ENABLED: \"true\" }
-    ports: [\"${AXON_OTLP_PORT:-4318}:4318\", \"${AXON_TRAZA_UI_PORT:-16686}:16686\"]
+    ports: [\"${AXON_OTLP_PORT:-4318}:4318\", \"${AXON_TRACE_UI_PORT:-16686}:16686\"]
     healthcheck:
       test: [\"CMD\", \"wget\", \"-qO-\", \"http://localhost:14269/\"]
       interval: 2s
@@ -1566,7 +1566,7 @@ services:
         let svc = &w.service;
         let mut deps = vec![
             "broker: { condition: service_healthy }".to_string(),
-            "traza: { condition: service_healthy }".to_string(),
+            "trace: { condition: service_healthy }".to_string(),
         ];
         // Do not start the app before its buckets exist. And without this,
         // `up --wait` counts the creation job as a container that died.
@@ -1609,7 +1609,7 @@ services:
         if p.flags {
             secrets.push_str("      AXON_FLAGS_URL: http://flags:8016\n");
         }
-        for (k, v) in env_otel_with(w, "http://traza:4318", true) {
+        for (k, v) in env_otel_with(w, "http://trace:4318", true) {
             secrets.push_str(&format!("      {k}: \"{v}\"\n"));
         }
         o.push_str(&format!(

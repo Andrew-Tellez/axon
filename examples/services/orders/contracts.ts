@@ -84,7 +84,7 @@ export interface GetOrderOut {
 export const manifest = {
   "service": "orders",
   "version": "2.0.0",
-  "owner": "equipo-comercio",
+  "owner": "commerce-team",
   "tier": "1",
   "pii": [
     "customer_email"

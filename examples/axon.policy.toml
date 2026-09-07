@@ -1,13 +1,13 @@
-# Gobernanza del equipo, versionada. `axon verify` la aplica.
+# The team's governance, versioned. `axon verify` applies it.
 require_owner = true
 require_tier = true
-# El catalogo de dominios. Agregar uno es una decision que se revisa en un PR,
-# que es justo el punto: sin la lista, cada servicio inventa su prefijo y en un
-# ano nadie sabe que dominios existen.
-allowed_event_prefixes = ["order", "payment", "billing", "compra"]
+# The domain catalogue. Adding one is a decision reviewed in a PR, which is
+# exactly the point: without the list, every service invents its own prefix and
+# in a year nobody knows which domains exist.
+allowed_event_prefixes = ["order", "payment", "billing", "checkout"]
 max_deps_per_service = 7
 
-# El layout del repo es del equipo, no de axon. `{service}` se sustituye.
+# The repo layout belongs to the team, not to axon. `{service}` is substituted.
 [ci]
 manifests_dir  = "."
 service_dir    = "services/{service}"

@@ -3,9 +3,9 @@ on:
   push:
     branches: [main]
     paths: ["docs/**", ".github/workflows/pages.yml", "CHANGELOG.md"]
-  # Un tag no puede desplegar: el entorno `github-pages` solo admite la rama
-  # por defecto. `workflow_run` corre en el contexto de main, asi que la
-  # version nueva se publica en cuanto termina el release.
+  # A tag cannot deploy: the `github-pages` environment only allows the default
+  # branch. `workflow_run` runs in main's context, so the new version gets
+  # published as soon as the release finishes.
   workflow_run:
     workflows: [release]
     types: [completed]
@@ -25,16 +25,16 @@ jobs:
       url: ${{ steps.pages.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }   # los tags son la fuente de las versiones
+        with: { fetch-depth: 0 }   # the tags are the source of the versions
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with: { tool: mdbook }
       - uses: actions/configure-pages@v5
 
-      # El sitio se reconstruye entero desde git en cada deploy: la raiz es
-      # `main` y cada tag queda bajo su propio prefijo. Sin estado externo, sin
-      # rama gh-pages que se desincronice.
-      - name: armar el sitio con todas las versiones
+      # The site is rebuilt whole from git on every deploy: the root is `main`
+      # and each tag lives under its own prefix. No external state, no gh-pages
+      # branch to drift.
+      - name: assemble the site with every version
         run: |
           set -eu
           mdbook build docs
@@ -43,8 +43,8 @@ jobs:
           versiones=""
           trabajo=$(mktemp -d)
           for tag in $(git tag -l 'v*' --sort=-v:refname); do
-            # una version anterior a mdBook servia un index.html suelto: se
-            # copia tal cual en vez de intentar construirla
+            # a version from before mdBook served a loose index.html: it gets
+            # copied as-is instead of trying to build it
             if git cat-file -e "$tag:docs/book.toml" 2>/dev/null; then
               rm -rf "$trabajo/docs"
               git archive "$tag" docs | tar -x -C "$trabajo"

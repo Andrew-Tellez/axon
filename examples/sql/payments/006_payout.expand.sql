@@ -1,5 +1,5 @@
--- expand: el pago al comercio. Se registra para poder ser idempotente: un
--- reintento con el mismo pago no paga dos veces.
+-- expand: the payout to the merchant. It is recorded so it can be idempotent: a
+-- retry with the same payment does not pay twice.
 CREATE TABLE payout (
   id          uuid PRIMARY KEY,
   payment_id  uuid NOT NULL UNIQUE,

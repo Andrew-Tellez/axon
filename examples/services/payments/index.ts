@@ -1,12 +1,12 @@
-// La logica de negocio. La maquina de estados la impone el codigo generado.
-import { PaymentsService, httpRoutes, paymentNext, paymentCan, flagCobroV2, flagCortarStripe,
+// The business logic. The state machine is enforced by the generated code.
+import { PaymentsService, httpRoutes, paymentNext, paymentCan, flagChargeV2, flagStripeKill,
          type CapturePaymentIn, type CapturePaymentOut,
          type RefundPaymentIn, type RefundPaymentOut,
          type PayoutMerchantIn, type PayoutMerchantOut,
          type OrderPlacedV1, type Envelope, type PaymentState } from "./contracts.ts";
-import { arrancarTelemetria } from "../telemetria.ts";
-import { arrancarFlags, flags } from "../flags.ts";
-import { bus, conectar, esperarDb, inbox, outbox, relay, servir, suscribir } from "../runtime.ts";
+import { startTelemetry } from "../telemetry.ts";
+import { startFlags, flags } from "../flags.ts";
+import { bus, connectBroker, inbox, outbox, relay, serve, subscribe, waitForDb } from "../runtime.ts";
 import type pg from "pg";
 
 export class Payments extends PaymentsService {
@@ -16,89 +16,89 @@ export class Payments extends PaymentsService {
     this.#db = db;
   }
 
-  /** Consume order.placed@v1. La deduplicacion ya la hizo dispatch(). */
+  /** Consumes order.placed@v1. dispatch() already did the deduplication. */
   async onOrderPlaced(e: Envelope<OrderPlacedV1>): Promise<void> {
     await this.capturePayment({ orderId: e.data.orderId, amount: e.data.total }, e);
   }
 
   async capturePayment(input: CapturePaymentIn, e: Envelope<unknown>): Promise<CapturePaymentOut> {
-    // El accesor generado exige el campo por el que se fija: no se puede
-    // evaluar este flag por peticion aunque uno quiera.
-    const inquilino = process.env.AXON_TENANT ?? "inquilino-demo";
-    const cobroNuevo = await flagCobroV2(flags, inquilino);
-    if (await flagCortarStripe(flags)) {
-      throw new Error("cobro cortado por el interruptor de emergencia");
+    // The generated accessor requires the field it is pinned by: this flag
+    // cannot be evaluated per request even if somebody wanted to.
+    const tenant = process.env.AXON_TENANT ?? "demo-tenant";
+    const newCharge = await flagChargeV2(flags, tenant);
+    if (await flagStripeKill(flags)) {
+      throw new Error("charging cut off by the emergency switch");
     }
     const paymentId = crypto.randomUUID();
-    const cliente = await this.#db.connect();
+    const client = await this.#db.connect();
     try {
-      await cliente.query("BEGIN");
-      // paymentNext revienta si la transicion no esta declarada en el manifiesto
-      // Las dos ramas del rollout terminan en el mismo estado declarado: el
-      // flag cambia el camino, no la maquina de estados.
-      const estado: PaymentState = paymentNext("pending", "capture");
-      if (cobroNuevo) {
-        // camino nuevo, detras del rollout del 10%
+      await client.query("BEGIN");
+      // paymentNext blows up if the transition is not declared in the manifest.
+      // Both branches of the rollout end in the same declared state: the flag
+      // changes the path, not the state machine.
+      const state: PaymentState = paymentNext("pending", "capture");
+      if (newCharge) {
+        // the new path, behind the 10% rollout
       }
-      await cliente.query(
+      await client.query(
         `INSERT INTO payment (id, order_id, amount_cents, status) VALUES ($1,$2,$3,$4)`,
-        [paymentId, input.orderId, input.amount.amount, estado],
+        [paymentId, input.orderId, input.amount.amount, state],
       );
-      // Misma transaccion que el cambio de estado: eso es el outbox.
-      // `cliente` es la MISMA transaccion que el INSERT de arriba: el
-      // parametro es obligatorio justamente para que no se pueda escribir el
-      // evento fuera de ella
+      // The same transaction as the state change: that is the outbox.
+      // `client` is the SAME transaction as the INSERT above: the parameter is
+      // mandatory precisely so the event cannot be written outside it.
       await this.emitPaymentCapturedV1(
         { paymentId, orderId: input.orderId, amount: input.amount },
-        cliente,
+        client,
         e,
       );
-      // Interruptor del demo: revienta DESPUES de dejar el evento y ANTES del
-      // COMMIT. Sirve para medir si el outbox es de verdad transaccional: si no
-      // lo fuera, el pago no existiria y el evento si.
-      if (process.env.AXON_DEMO_ROMPER_TRAS_STAGE === "1") {
-        throw new Error("roto a proposito despues del stage");
+      // A demo switch: it blows up AFTER staging the event and BEFORE the
+      // COMMIT. It is there to measure whether the outbox is really
+      // transactional: if it were not, the payment would not exist and the
+      // event would.
+      if (process.env.AXON_DEMO_BREAK_AFTER_STAGE === "1") {
+        throw new Error("broken on purpose after the stage");
       }
-      await cliente.query("COMMIT");
+      await client.query("COMMIT");
     } catch (err) {
-      await cliente.query("ROLLBACK");
+      await client.query("ROLLBACK");
       throw err;
     } finally {
-      cliente.release();
+      client.release();
     }
     return { paymentId };
   }
 
-  /** El tope del comercio. Arriba de esto el pago se rechaza, y ese rechazo
-   *  llega DESPUES de haber cobrado: es el fallo que la saga tiene que
-   *  compensar. */
-  static readonly TOPE_COMERCIO = 100_000;
+  /** The merchant's ceiling. Above this the payout is rejected, and that
+   *  rejection arrives AFTER the charge already went through: it is the failure
+   *  the saga has to compensate. */
+  static readonly MERCHANT_CEILING = 100_000;
 
-  /** Registra el intento. Sin esto, la politica de reintentos que declara el
-   *  manifiesto no se puede comprobar: no hay forma de saber cuantas veces
-   *  llego la llamada. */
-  async #intento(metodo: string, paymentId: string): Promise<number> {
+  /** Records the attempt. Without this, the retry policy the manifest declares
+   *  cannot be checked: there is no way to know how many times the call
+   *  arrived. */
+  async #attempt(method: string, paymentId: string): Promise<number> {
     const { rows } = await this.#db.query(
-      `INSERT INTO intento (id, metodo, payment_id) VALUES (gen_random_uuid(), $1, $2)
-       RETURNING (SELECT count(*) FROM intento WHERE metodo = $1 AND payment_id = $2) AS n`,
-      [metodo, paymentId],
+      `INSERT INTO attempt (id, method, payment_id) VALUES (gen_random_uuid(), $1, $2)
+       RETURNING (SELECT count(*) FROM attempt WHERE method = $1 AND payment_id = $2) AS n`,
+      [method, paymentId],
     );
     return Number(rows[0].n) + 1;
   }
 
   async payoutMerchant(input: PayoutMerchantIn): Promise<PayoutMerchantOut> {
-    await this.#intento("payout", input.paymentId);
-    // Interruptor del demo, no del negocio: hace que la llamada exceda su
-    // propio timeout para poder MEDIR los reintentos declarados. Sin esto no
-    // hay fallo transitorio que contar.
-    const lento = Number(process.env.AXON_DEMO_PAYOUT_LENTO_MS ?? 0);
-    if (lento > 0) await new Promise((r) => setTimeout(r, lento));
-    if (input.amount.amount > Payments.TOPE_COMERCIO) {
-      throw new Error(`monto ${input.amount.amount} supera el tope del comercio`);
+    await this.#attempt("payout", input.paymentId);
+    // A demo switch, not a business one: it makes the call exceed its own
+    // timeout so the declared retries can be MEASURED. Without it there is no
+    // transient failure to count.
+    const slow = Number(process.env.AXON_DEMO_PAYOUT_SLOW_MS ?? 0);
+    if (slow > 0) await new Promise((r) => setTimeout(r, slow));
+    if (input.amount.amount > Payments.MERCHANT_CEILING) {
+      throw new Error(`amount ${input.amount.amount} is over the merchant's ceiling`);
     }
     const payoutId = crypto.randomUUID();
-    // `idempotent = true` en el manifiesto no es una etiqueta: reintentar tiene
-    // que no pagar dos veces, y eso lo sostiene el UNIQUE sobre payment_id
+    // `idempotent = true` in the manifest is not a label: retrying has to not
+    // pay twice, and what holds that up is the UNIQUE on payment_id
     const { rows } = await this.#db.query(
       `INSERT INTO payout (id, payment_id, cents) VALUES ($1,$2,$3)
        ON CONFLICT (payment_id) DO UPDATE SET cents = payout.cents
@@ -108,46 +108,46 @@ export class Payments extends PaymentsService {
     return { payoutId: rows[0].id };
   }
 
-  /** Compensacion del cobro. Tiene que tolerar que no haya nada que deshacer:
-   *  el coordinador la llama tambien cuando el cobro quedo en duda —un timeout
-   *  no dice que del otro lado no paso nada— y cuando ya se reembolso, porque
-   *  se reintenta hasta que entra. */
+  /** The charge's compensation. It has to tolerate there being nothing to undo:
+   *  the coordinator also calls it when the charge was left in doubt —a timeout
+   *  does not say nothing happened on the other side— and when it was already
+   *  refunded, because it is retried until it gets through. */
   async refundPayment(input: RefundPaymentIn): Promise<RefundPaymentOut> {
-    const n = await this.#intento("refund", input.paymentId);
-    // El otro interruptor del demo: falla las primeras N veces y despues
-    // entra. Es lo que permite medir que los reintentos de la COMPENSACION son
-    // lo que salva a la saga de quedarse atascada.
-    const fallar = Number(process.env.AXON_DEMO_REFUND_FALLAR_VECES ?? 0);
-    if (n <= fallar) throw new Error(`reembolso rechazado (intento ${n} de ${fallar})`);
+    const n = await this.#attempt("refund", input.paymentId);
+    // The other demo switch: it fails the first N times and then gets through.
+    // It is what makes it possible to measure that the COMPENSATION's retries
+    // are what saves the saga from ending up stuck.
+    const fail = Number(process.env.AXON_DEMO_REFUND_FAIL_TIMES ?? 0);
+    if (n <= fail) throw new Error(`refund rejected (attempt ${n} of ${fail})`);
     const { rows } = await this.#db.query(`SELECT status FROM payment WHERE id = $1`, [input.paymentId]);
-    const actual = rows[0]?.status as PaymentState | undefined;
-    if (!actual) return { paymentId: input.paymentId, status: "sin_cobro" };
-    if (actual === "refunded") return { paymentId: input.paymentId, status: actual };
-    if (!paymentCan(actual, "refund")) throw new Error(`no se puede reembolsar desde ${actual}`);
-    const estado = paymentNext(actual, "refund");
-    await this.#db.query(`UPDATE payment SET status = $2 WHERE id = $1`, [input.paymentId, estado]);
-    return { paymentId: input.paymentId, status: estado };
+    const current = rows[0]?.status as PaymentState | undefined;
+    if (!current) return { paymentId: input.paymentId, status: "no_charge" };
+    if (current === "refunded") return { paymentId: input.paymentId, status: current };
+    if (!paymentCan(current, "refund")) throw new Error(`cannot refund from ${current}`);
+    const state = paymentNext(current, "refund");
+    await this.#db.query(`UPDATE payment SET status = $2 WHERE id = $1`, [input.paymentId, state]);
+    return { paymentId: input.paymentId, status: state };
   }
 }
 
-// Arranque solo cuando se ejecuta como programa, no al importarlo desde un test.
+// Startup only when run as a program, not when imported from a test.
 if (process.env.NODE_TEST_CONTEXT === undefined) await main();
 
 async function main() {
-arrancarTelemetria();
-await arrancarFlags();
-const db = await esperarDb();
-const nc = await conectar();
+startTelemetry();
+await startFlags();
+const db = await waitForDb();
+const nc = await connectBroker();
 const b = bus(nc);
 const svc = new Payments(b, inbox(db), outbox(), db);
 
-// El outbox no publica: publica el relay.
+// The outbox does not publish: the relay does.
 relay(db, b);
 
-// dispatch() es el punto de entrada unico que genero axon: rutea y deduplica.
-await suscribir(nc, ["order.placed@v1"], (e) => svc.dispatch(e));
+// dispatch() is the single entry point axon generated: it routes and deduplicates.
+await subscribe(nc, ["order.placed@v1"], (e) => svc.dispatch(e));
 
-servir(
+serve(
   Number(process.env.PORT ?? 8080),
   {
     "POST /v1/payments": (body, e) => svc.capturePayment(body, e),

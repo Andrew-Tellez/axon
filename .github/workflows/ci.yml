@@ -27,12 +27,12 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: npm ci --prefix examples/services || npm i --prefix examples/services
       - run: cargo test --release
-      # axon se verifica a si mismo: sus propios ejemplos pasan sus propias reglas
+      # axon verifies itself: its own examples pass its own rules
       - run: cargo run --release -- verify examples
 
   e2e:
-    # La prueba que ninguna de las otras puede dar: el sistema levanta de verdad
-    # y su cadena causal real coincide con la que declara el manifiesto.
+    # The proof none of the others can give: the system really comes up and its
+    # real causal chain matches the one the manifest declares.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,16 +43,16 @@ jobs:
         working-directory: examples
 
   commits:
-    # La convencion se verifica solo en el rango que trae este push o este PR:
-    # la historia anterior a adoptarla no es convencional, y reescribirla en un
-    # repo publico para satisfacer un linter es peor que la inconsistencia.
+    # The convention is checked only over the range this push or this PR brings:
+    # the history from before adopting it is not conventional, and rewriting it in
+    # a public repo to satisfy a linter is worse than the inconsistency.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
       - uses: taiki-e/install-action@v2
         with: { tool: cocogitto }
-      - name: verificar los mensajes de este cambio
+      - name: check this change's messages
         run: |
           set -eu
           if [ "${{ github.event_name }}" = "pull_request" ]; then
@@ -60,9 +60,9 @@ jobs:
           else
             desde="${{ github.event.before }}"
           fi
-          # el primer push a una rama trae ceros como `before`
+          # the first push to a branch brings zeros as `before`
           case "$desde" in
             ""|0000000000000000000000000000000000000000)
-              echo "sin rango previo: no hay nada que verificar"; exit 0 ;;
+              echo "no previous range: there is nothing to check"; exit 0 ;;
           esac
           cog check "$desde..${{ github.sha }}"

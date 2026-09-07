@@ -1,31 +1,31 @@
-// La logica de negocio. Lo unico que escribe una persona.
+// The business logic. The only thing a person writes.
 import { OrdersService, httpRoutes, type PlaceOrderIn, type PlaceOrderOut,
          type GetOrderIn, type GetOrderOut, type Envelope } from "./contracts.ts";
-import { arrancarTelemetria } from "../telemetria.ts";
-import { NoEncontrado, bus, conectar, esperarDb, servir } from "../runtime.ts";
+import { startTelemetry } from "../telemetry.ts";
+import { NotFound, bus, connectBroker, serve, waitForDb } from "../runtime.ts";
 import type pg from "pg";
 
 class Orders extends OrdersService {
   #db: pg.Pool;
   constructor(b: any, db: pg.Pool) {
-    // sin inbox: `orders` emite y no consume nada, y el generado solo pide lo
-    // que el manifiesto declara
+    // no inbox: `orders` emits and consumes nothing, and the generated code
+    // only asks for what the manifest declares
     super(b);
     this.#db = db;
   }
 
-  /** Una transaccion con el rol y el inquilino puestos, y los dos mueren en el
-   *  COMMIT. Los dos hacen falta: sin `ROLE` la politica no aplica —el dueno
-   *  de la tabla es superusuario y se la salta— y sin el inquilino no hay
-   *  politica que aplicar. Y tiene que ser el MISMO cliente del pool: con
-   *  `pool.query` cada sentencia puede salir por otra conexion. */
-  async #comoInquilino<T>(tenantId: string, fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
+  /** One transaction with the role and the tenant set, and both die at the
+   *  COMMIT. Both are needed: without `ROLE` the policy does not apply —the
+   *  table's owner is a superuser and skips it— and without the tenant there is
+   *  no policy to apply. And it has to be the SAME pool client: with
+   *  `pool.query` each statement can go out over a different connection. */
+  async #asTenant<T>(tenantId: string, fn: (c: pg.PoolClient) => Promise<T>): Promise<T> {
     const c = await this.#db.connect();
     try {
       await c.query("BEGIN");
       await c.query("SET LOCAL ROLE axon_app");
-      // literal, no `set_config($1)`: un pooler intercepta el SET y puede no
-      // interceptar la funcion con parametro bindeado
+      // literal, not `set_config($1)`: a pooler intercepts the SET and may not
+      // intercept the function with a bound parameter
       await c.query(`SET LOCAL axon.tenant = '${tenantId}'`);
       const r = await fn(c);
       await c.query("COMMIT");
@@ -40,20 +40,20 @@ class Orders extends OrdersService {
 
   async placeOrder(input: PlaceOrderIn, e: Envelope<unknown>): Promise<PlaceOrderOut> {
     const orderId = crypto.randomUUID();
-    await this.#comoInquilino(input.tenantId, (c) =>
+    await this.#asTenant(input.tenantId, (c) =>
       c.query(
         `INSERT INTO "order" (id, tenant_id, customer_id, customer_email, total_cents, status)
          VALUES ($1,$2,$3,$4,$5,'placed')`,
         [orderId, input.tenantId, input.customerId, input.customerEmail, input.total.amount],
       ),
     );
-    // `e` es la causa: el emisor generado propaga traceparent y correlationId.
+    // `e` is the cause: the generated emitter propagates traceparent and correlationId.
     await this.emitOrderPlacedV1(
       {
         orderId,
         customerId: input.customerId,
-        // declarado `pii`: se redacta en logs con `redact()`, se excluye o
-        // hashea en la bodega, y se enmascara en la vista de analitica
+        // declared `pii`: redacted in logs with `redact()`, excluded or hashed
+        // in the warehouse, and masked in the analytics view
         customerEmail: input.customerEmail,
         total: input.total,
       },
@@ -63,16 +63,16 @@ class Orders extends OrdersService {
   }
 
   async getOrder(input: GetOrderIn): Promise<GetOrderOut> {
-    // `tenant_id` en el WHERE no es redundante con la RLS: es lo que le dice
-    // al sharder a que nodo ir. Sin el, la consulta no se responde mal, se
-    // rechaza.
-    const { rows } = await this.#comoInquilino(input.tenantId, (c) =>
+    // `tenant_id` in the WHERE is not redundant with the RLS: it is what tells
+    // the sharder which node to go to. Without it, the query is not answered
+    // wrong, it is rejected.
+    const { rows } = await this.#asTenant(input.tenantId, (c) =>
       c.query(`SELECT * FROM "order" WHERE tenant_id = $1 AND id = $2`, [
         input.tenantId,
         input.orderId,
       ]),
     );
-    if (!rows[0]) throw new NoEncontrado(`orden ${input.orderId} no existe`);
+    if (!rows[0]) throw new NotFound(`order ${input.orderId} does not exist`);
     return {
       orderId: rows[0].id,
       status: rows[0].status,
@@ -81,10 +81,10 @@ class Orders extends OrdersService {
   }
 }
 
-arrancarTelemetria();
-const db = await esperarDb();
-const svc = new Orders(bus(await conectar()), db);
-servir(
+startTelemetry();
+const db = await waitForDb();
+const svc = new Orders(bus(await connectBroker()), db);
+serve(
   Number(process.env.PORT ?? 8080),
   {
     "POST /v1/tenants/{tenantId}/orders": (body, e, params) =>
@@ -92,6 +92,6 @@ servir(
     "GET /v1/tenants/{tenantId}/orders/{orderId}": (_body, _e, params) =>
       svc.getOrder({ tenantId: params.tenantId, orderId: params.orderId }),
   },
-  // el arranque falla si el manifiesto declara una ruta sin handler
+  // startup fails if the manifest declares a route with no handler
   httpRoutes,
 );

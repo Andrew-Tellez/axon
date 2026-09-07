@@ -1,6 +1,6 @@
 CREATE TABLE payment (
   id            uuid PRIMARY KEY,
-  -- sin FK: `order` pertenece a otro servicio; se guarda el id, nada mas
+  -- no FK: `order` belongs to another service; the id is stored, nothing else
   order_id      uuid NOT NULL,
   amount_cents  bigint NOT NULL,
   currency      text NOT NULL,

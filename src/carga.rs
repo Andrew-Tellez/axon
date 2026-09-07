@@ -58,7 +58,7 @@ pub fn build_k6(m: &Manifest) -> Result<String, String> {
                exec: \"{tag}\",\n      \
                rate: {rate},              // declared in rate_limit\n      \
                timeUnit: \"1m\",\n      \
-               duration: __ENV.AXON_CARGA_DURACION || \"30s\",\n      \
+               duration: __ENV.AXON_LOAD_DURATION || \"30s\",\n      \
                preAllocatedVUs: {vus},\n      maxVUs: {max},\n    }},",
             vus = (rate / 6).max(2),
             max = (rate / 2).max(10),
