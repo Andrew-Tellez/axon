@@ -1,94 +1,94 @@
-# Contribuir
+# Contributing
 
 ## Commits
 
-[Conventional Commits](https://www.conventionalcommits.org/es/), verificados por
-[cocogitto](https://github.com/cocogitto/cocogitto). El hook los rechaza antes de
-crearlos:
+[Conventional Commits](https://www.conventionalcommits.org/), verified by
+[cocogitto](https://github.com/cocogitto/cocogitto). The hook rejects them before they
+are created:
 
 ```sh
-cargo install cocogitto   # o brew install cocogitto
+cargo install cocogitto   # or brew install cocogitto
 cog install-hook --all
 ```
 
-Tipos: los del estándar (`feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`,
-`ci`, `chore`, `style`, `revert`) más tres propios de este repo:
+Types: the standard ones (`feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`,
+`ci`, `chore`, `style`, `revert`) plus three of this repo's own:
 
 | | |
 | --- | --- |
-| `gen` | Cambios en lo que emite un generador |
-| `infra` | Cambios en un target de `axon infra` |
-| `sec` | Reglas de seguridad, RLS, enmascarado |
+| `gen` | Changes in what a generator emits |
+| `infra` | Changes in an `axon infra` target |
+| `sec` | Security rules, RLS, masking |
 
-`feat` y `fix` mueven la versión; el resto solo aparece en el changelog. Cambiar la
-documentación no es una versión nueva del binario.
+`feat` and `fix` move the version; everything else only shows up in the changelog.
+Changing the documentation is not a new version of the binary.
 
-El **scope** es la parte que toca: `feat(infra)`, `gen(go)`, `sec(rls)`, `fix(verify)`.
+The **scope** is the part it touches: `feat(infra)`, `gen(go)`, `sec(rls)`,
+`fix(verify)`.
 
-Un `!` o un `BREAKING CHANGE:` en el cuerpo fuerza un salto mayor. **Un cambio
-incompatible del formato del manifiesto es breaking**, aunque el código compile: alguien
-tiene un `.toml` escrito contra el formato viejo.
+A `!` or a `BREAKING CHANGE:` in the body forces a major bump. **An incompatible change
+to the manifest format is breaking**, even if the code compiles: somebody out there has
+a `.toml` written against the old format.
 
-### El cuerpo importa más que el título
+### The body matters more than the subject
 
-Este repo tiene una convención propia sobre el cuerpo del mensaje: **explicar por qué,
-no qué**. El diff ya dice qué cambió. Lo que se pierde es el razonamiento — y sobre
-todo, cuando un cambio corrige un error de diseño, el mensaje dice cuál era el error y
-por qué no se veía antes.
+This repo has a convention of its own about the message body: **explain why, not what**.
+The diff already says what changed. What gets lost is the reasoning — and above all,
+when a change fixes a design mistake, the message says what the mistake was and why it
+was not visible before.
 
-## Versionar y liberar
+## Versioning and releasing
 
-No se escribe el changelog a mano ni se tagea a mano:
+The changelog is not written by hand and the tags are not created by hand:
 
 ```sh
 cog bump --auto
 ```
 
-Lee los commits desde el último tag, decide si el salto es patch, minor o major, escribe
-la sección nueva en `CHANGELOG.md`, commitea y tagea. El tag dispara `release.yml`, que
-compila los cuatro binarios y publica el release; al terminar, `pages.yml` publica la
-documentación de esa versión bajo su propio prefijo.
+It reads the commits since the last tag, decides whether the bump is patch, minor or
+major, writes the new section into `CHANGELOG.md`, commits and tags. The tag triggers
+`release.yml`, which builds the four binaries and publishes the release; when that
+finishes, `pages.yml` publishes that version's documentation under its own prefix.
 
-## Antes de mandar un cambio
+## Before sending a change
 
 ```sh
 cargo fmt
 cargo clippy --all-targets -- -D warnings
-cargo test --release              # incluye tsc, go vet, terraform validate y node --test
+cargo test --release              # includes tsc, go vet, terraform validate and node --test
 cargo run --release -- verify examples
-cd examples && ./demo.sh          # necesita Docker
-mdbook serve docs --open          # la documentacion
+cd examples && ./demo.sh          # needs Docker
+mdbook serve docs --open          # the documentation
 ```
 
-Encadenalos con `&&`, no con `;`. Con `;` el commit corre igual aunque los tests
-fallen — lo hice, y empuje nueve pruebas rojas.
+Chain them with `&&`, not with `;`. With `;` the commit goes through even if the tests
+fail — I did that, and pushed nine red tests.
 
-### La regla que rige el suite
+### The rule that governs the suite
 
-**Un generador no se valida con asserts propios: se valida con la herramienta real de
-su ecosistema.** El TypeScript pasa por `tsc --strict`, el Go por `go vet`, el Terraform
-por `terraform validate` con los providers de verdad, el testkit por `node --test`
-contra el servicio de ejemplo, y la RLS se aplica a un Postgres real para comprobar que
-aísla.
+**A generator is not validated with its own asserts: it is validated with the real tool
+of its ecosystem.** The TypeScript goes through `tsc --strict`, the Go through `go vet`,
+the Terraform through `terraform validate` with the real providers, the testkit through
+`node --test` against the example service, and the RLS is applied to a real Postgres to
+check that it isolates.
 
-Esto no es celo: los tres primeros generadores producían salida inválida y el suite no
-lo veía, porque axon se verificaba únicamente contra sí mismo.
+This is not zeal: the first three generators produced invalid output and the suite did
+not see it, because axon was only ever verified against itself.
 
-Si agregás un generador, agregá su verificación externa en el mismo cambio. Si la
-herramienta no está instalada, el test se **saltea** — nunca miente diciendo que pasó.
+If you add a generator, add its external verification in the same change. If the tool is
+not installed, the test **skips** — it never lies by saying it passed.
 
-## Qué entra y qué no
+## What gets in and what does not
 
-axon genera lo que se **declara**; la implementación es de quien escribe el servicio.
-La línea no es de gusto:
+axon generates what is **declared**; the implementation belongs to whoever writes the
+service. The line is not a matter of taste:
 
-- **Entra** lo que cruza procesos o es una *política*: contratos, topología, límites,
-  timeouts, transiciones de estado, recursos de infraestructura, reglas de acceso.
-  Todo eso es declarable y, sobre todo, **verificable**.
-- **No entra** el cuerpo de un handler, ni los algoritmos, ni la descomposición interna
-  del dominio. Ahí murieron MDA, Rational Rose y el low-code: expresar todo el
-  comportamiento en un manifiesto termina siendo un lenguaje de programación nuevo y
-  peor que los seis a los que compila.
+- **In**: whatever crosses processes or is a *policy*: contracts, topology, limits,
+  timeouts, state transitions, infrastructure resources, access rules. All of that is
+  declarable and, above all, **verifiable**.
+- **Out**: a handler's body, the algorithms, the domain's internal decomposition. That
+  is where MDA, Rational Rose and low-code died: expressing all behaviour in a manifest
+  ends up being a new programming language, and a worse one than the six it compiles to.
 
-Un patrón nuevo entra si el compilador puede **imponerlo o refutarlo**. Si lo único que
-puede hacer es documentarlo, va en la documentación.
+A new pattern gets in if the compiler can **enforce it or refute it**. If all it can do
+is document it, it belongs in the documentation.

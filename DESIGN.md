@@ -1,84 +1,87 @@
 # axon
 
-Framework de backend para microservicios y arquitecturas event-driven,
-**independiente del lenguaje**. Un manifiesto por servicio es la fuente de
-verdad; el código, la infraestructura, los contratos y la topología son
-proyecciones de él.
+A **language-agnostic** backend framework for microservices and event-driven
+architectures. One manifest per service is the source of truth; the code, the
+infrastructure, the contracts and the topology are projections of it.
 
 ```
-manifiesto.toml ─┬─ axon build --lang ts   → contratos + clase base (envelope, handlers, emisores)
-                 ├─ axon infra             → terraform (topics, subs, DLQ, DB, secretos)
-                 ├─ axon graph             → mermaid: topología de eventos
-                 ├─ axon classes           → mermaid: diagrama de clases
-                 ├─ axon er                → mermaid: entidad-relación (desde las migraciones)
-                 ├─ axon seq <evento>      → mermaid: flujo causal esperado
-                 ├─ axon discover          → registro de servicios y sus métodos (local o en vivo)
-                 └─ axon verify            → drift: falla en CI cuando dejan de coincidir
+manifest.toml ─┬─ axon build --lang ts   → contracts + base class (envelope, handlers, emitters)
+               ├─ axon infra             → IaC: local · gcp · aws · k8s (topics, subs, DLQ, DB, secrets)
+               ├─ axon graph             → mermaid: event topology
+               ├─ axon classes           → mermaid: class diagram
+               ├─ axon er                → mermaid: entity-relationship (from the migrations)
+               ├─ axon seq <event>       → mermaid: the expected causal flow
+               ├─ axon discover          → registry of services and their methods (local or live)
+               └─ axon verify            → drift: fails in CI when they stop agreeing
 ```
 
-## Diagramas
+## Diagrams
 
-Ninguno se dibuja a mano y ninguno introduce una fuente de verdad nueva:
+None of them is drawn by hand and none of them introduces a new source of truth:
 
-- **Clases** (`axon classes`) — proyección directa del manifiesto: servicios, eventos como
-  clases, handlers, emisores, dependencias síncronas, y qué patrones implementa cada uno.
-- **ER** (`axon er`) — se **introspecta** de las migraciones, no se declara. Meter columnas
-  en el manifiesto sería el problema del dual-write disfrazado de documentación. El
-  manifiesto solo aporta lo que las migraciones no saben: de qué servicio es cada tabla.
-- **Secuencia** (`axon seq order.placed@v1`) — recorre la cadena causal declarada: quién
-  consume, a quién llama, qué emite después. Es el flujo *esperado*; el `causationId` de
-  los envelopes reales dice el que ocurrió. Diferenciarlos es el siguiente chequeo de drift.
+- **Classes** (`axon classes`) — a direct projection of the manifest: services, events as
+  classes, handlers, emitters, synchronous dependencies, and which patterns each one
+  implements.
+- **ER** (`axon er`) — **introspected** from the migrations, not declared. Putting columns
+  in the manifest would be the dual-write problem dressed up as documentation. The
+  manifest only adds what the migrations do not know: which service each table belongs to.
+- **Sequence** (`axon seq order.placed@v1`) — walks the declared causal chain: who
+  consumes, who they call, what they emit afterwards. It is the *expected* flow; the
+  `causationId` of the real envelopes says the one that occurred. `axon trace --seq`
+  prints that one, and diffing the two is a drift check you can run against a live system.
 
-## Por qué existe
+## Why it exists
 
-Los frameworks existentes son librerías dentro de un lenguaje (NestJS, Spring,
-Micronaut) o un runtime que hay que desplegar (Dapr). Ninguno responde
-"¿quién consume este evento y qué pasa si le cambio un campo?" sin leer código
-de cinco repos. axon lo responde porque esa relación está declarada, no inferida.
+The existing frameworks are libraries inside one language (NestJS, Spring, Micronaut) or
+a runtime you have to deploy (Dapr). None of them answers "who consumes this event and
+what happens if I change a field on it?" without reading code from five repos. axon
+answers it because that relationship is declared, not inferred.
 
-Tres cosas no son opcionales, y por eso las genera el compilador en vez de
-dejarlas a la disciplina del equipo:
+Three things are not optional, and that is why the compiler generates them instead of
+leaving them to the team's discipline:
 
-1. **Trazabilidad desde el día uno.** Todo mensaje viaja en un envelope
-   CloudEvents extendido con `traceparent` (W3C), `correlationId` (estable en
-   todo el flujo de negocio) y `causationId` (el mensaje que lo provocó). El
-   emisor generado recibe el mensaje causante y propaga la cadena: no hay forma
-   de publicar un evento huérfano sin salirse del framework.
-2. **Descubrimiento.** Cada servicio sirve su propio manifiesto en
-   `/.well-known/axon.json`. `axon discover <dir|url>` fusiona manifiestos de
-   disco y de servicios vivos en un registro con métodos, entradas, salidas y
-   eventos. Los servicios externos (Stripe, un ERP) se congelan en un
-   `*.external.toml` — se descubren una vez, quedan versionados como contrato.
-3. **Infraestructura como código.** El bloque `[infra]` y los eventos declarados
-   producen el terraform: un topic por evento, una suscripción por consumidor,
-   DLQ siempre, la base de datos del servicio y sus contenedores de secretos.
-   No hay topic sin dueño ni consumidor sin DLQ porque no hay forma de escribirlo.
+1. **Traceability from day one.** Every message travels in a CloudEvents envelope
+   extended with `traceparent` (W3C), `correlationId` (stable across the whole business
+   flow) and `causationId` (the message that caused it). The generated emitter receives
+   the causing message and propagates the chain: there is no way to publish an orphan
+   event without stepping outside the framework.
+2. **Discovery.** Each service serves its own manifest at `/.well-known/axon.json`.
+   `axon discover <dir|url>` merges manifests from disk and from live services into a
+   registry with methods, inputs, outputs and events. External services (Stripe, an ERP)
+   are frozen into a `*.external.toml` — discovered once, then versioned as a contract.
+3. **Infrastructure as code.** The `[infra]` block and the declared events produce the
+   IaC: one topic per event, one subscription per consumer, a DLQ always, the service's
+   database and its secret containers. There is no topic without an owner and no consumer
+   without a DLQ, because there is no way to write one.
 
-## Patrones: declarados, no recordados
+## Patterns: declared, not remembered
 
-Un patrón que hay que acordarse de aplicar no es un patrón, es una convención que
-alguien va a romper a las 3am. En axon el patrón se declara y el compilador lo emite;
-si no está en el código generado, no está.
+A pattern you have to remember to apply is not a pattern, it is a convention somebody
+will break at 3am. In axon the pattern is declared and the compiler emits it; if it is
+not in the generated code, it does not exist.
 
-| Patrón | Se declara | Qué genera |
+| Pattern | Declared with | What it generates |
 | --- | --- | --- |
-| **Transactional outbox** | `[patterns] outbox = true` | Los emisores escriben en el outbox, no en el bus — el `publish` directo deja de existir. Terraform crea la tabla y el usuario del relay. Adiós dual-write. |
-| **Consumidor idempotente (inbox)** | siempre | `dispatch()` deduplica por `id` de envelope antes de rutear. El broker entrega al menos una vez; el efecto ocurre una sola. |
-| **Envelope / cadena causal** | siempre | `traceparent`, `correlationId`, `causationId` propagados por el emisor generado. |
-| **Dead letter** | siempre | Suscripción con `dead_letter_policy` y su topic. No hay forma de declarar un consumidor sin DLQ. |
-| **Database per service** | `[infra] state` | Una base por servicio, nunca compartida. |
-| **Contratos versionados** | `evento@vN` | `verify` bloquea el cambio de esquema de una versión publicada. |
+| **Transactional outbox** | `[patterns] outbox = true` | The emitters write into the outbox, not into the bus — the direct `publish` stops existing, and the caller's transaction is a mandatory parameter. The IaC creates the table and the relay's user. Goodbye dual-write. |
+| **Idempotent consumer (inbox)** | always | `dispatch()` deduplicates by envelope `id` before routing. The broker delivers at least once; the effect happens exactly once. |
+| **Envelope / causal chain** | always | `traceparent`, `correlationId`, `causationId` propagated by the generated emitter. |
+| **Dead letter** | always | A subscription with a `dead_letter_policy` and its topic. There is no way to declare a consumer without a DLQ. |
+| **Database per service** | `[infra] state` | One database per service, never shared. |
+| **Versioned contracts** | `event@vN` | `verify` blocks a schema change on a published version. |
+| **Saga** | `[saga.<name>]` | A coordinator that calls in order and, on a failure, undoes everything ATTEMPTED in reverse order; a journal, a resume sweep, and a time budget that has to cover the sum of the steps. |
+| **Event sourcing** | `[aggregate.<name>]` | An append-only stream with a mandatory `UNIQUE (stream_id, version)`, a `fold` with one case per declared event, and snapshots as a cache carrying the rules version they were computed with. |
+| **CQRS** | `[view.<name>]` | A projection with a per-stream checkpoint, a shadow-table rebuild, and a staleness budget that has to fit inside the service's. |
 
-Los patrones GoF viven un nivel abajo, en el código que escribe el equipo — para eso
-está [`gof-patterns`](https://github.com/Andrew-Tellez/patterns), en los seis lenguajes.
-axon no los reimplementa: se ocupa de los patrones *arquitectónicos*, los que cruzan
-procesos y que ninguna librería dentro de un lenguaje puede garantizar sola.
+The GoF patterns live one level down, in the code the team writes — that is what
+[`gof-patterns`](https://github.com/Andrew-Tellez/patterns) is for, in six languages.
+axon does not reimplement them: it deals with the *architectural* patterns, the ones that
+cross processes and that no library inside a single language can guarantee on its own.
 
-## Migraciones
+## Migrations
 
-axon **no** es una herramienta de migraciones — Flyway, Alembic y golang-migrate ya
-existen y son mejores en eso. Lo que axon hace es tratarlas como la fuente de verdad
-del esquema y verificar lo que ellas no pueden ver:
+axon is **not** a migration tool — Flyway, Alembic and golang-migrate already exist and
+are better at it. What axon does is treat them as the schema's source of truth and verify
+what they cannot see:
 
 ```toml
 [infra]
@@ -87,44 +90,50 @@ migrations = "sql/payments/"
 
 ```
 sql/payments/
-  001_payment.expand.sql       expand:   aditivo, compatible hacia atrás
-  002_provider_ref.expand.sql  expand:   columna nueva nullable
-  003_drop_legacy.contract.sql contract: destructivo, y lo dice en el nombre
+  001_payment.expand.sql       expand:   additive, backwards compatible
+  002_provider_ref.expand.sql  expand:   a new nullable column
+  003_drop_legacy.contract.sql contract: destructive, and it says so in the name
 ```
 
-- El esquema es la suma de las migraciones plegadas en orden. No hay un `schema.sql`
-  duplicado que se desincronice; el ER sale de aquí.
-- **Expand → migrate → contract** es obligatorio, no una recomendación: una migración
-  con `DROP` que no se llame `.contract.sql` es un error de `verify`. Desplegar un
-  destructivo junto al código que deja de usar la columna rompe el rollback.
-- **Ninguna FK cruza el límite de un servicio.** `verify` lo bloquea: se guarda el id,
-  y la consistencia entre servicios se resuelve con eventos, no con el motor de la base.
-- Prefijo numérico obligatorio, o el orden no es determinista.
+- The schema is the sum of the migrations folded in order. There is no duplicated
+  `schema.sql` to drift; the ER diagram comes from here.
+- **Expand → migrate → contract** is mandatory, not a recommendation: a migration with a
+  `DROP` that is not called `.contract.sql` is a `verify` error. Deploying a destructive
+  one alongside the code that stops using the column breaks the rollback.
+- **No FK crosses a service boundary.** `verify` blocks it: you store the id, and
+  consistency between services is resolved with events, not with the database engine.
+- A numeric prefix is mandatory, or the order is not deterministic. Two migrations
+  sharing a version is an error too: Flyway applies NEITHER.
 
-## Verificación de drift
+## Drift verification
 
-`axon verify` es lo que convierte el manifiesto en algo más que documentación:
+`axon verify` is what turns the manifest into something more than documentation:
 
-| Chequeo | Resultado |
+| Check | Result |
 | --- | --- |
-| Se consume un evento que nadie emite | error |
-| Dos servicios emiten el mismo evento con esquemas distintos | error |
-| Se depende de un método que el otro servicio no expone | error |
-| Se emite un evento sin consumidores | aviso |
-| FK que cruza el límite de un servicio | error |
-| Migración destructiva sin marcar `.contract.sql` | error |
-| Migración sin prefijo numérico | aviso |
+| An event is consumed that nobody emits | error |
+| Two services emit the same event with different schemas | error |
+| A method is depended on that the other service does not expose | error |
+| An event is emitted with no consumers | warning |
+| An FK crossing a service boundary | error |
+| A destructive migration not marked `.contract.sql` | error |
+| A migration with no numeric prefix | warning |
+| A field changed on an already published version | error |
 
-En CI, contra los manifiestos vivos (`axon verify https://orders/... https://payments/...`),
-compara lo declarado con lo desplegado.
+That table is the shape of it, not the whole of it: there are over a hundred rules, and
+[the documentation](https://andrew-tellez.github.io/axon/verificacion.html) lists them.
 
-## Manifiesto
+In CI, run against the live manifests
+(`axon verify https://orders/... https://payments/...`), it compares what is declared
+with what is deployed.
+
+## The manifest
 
 ```toml
 service = "payments"
 version = "1.2.0"
 
-[emits."payment.captured@v1"]      # nombre@versión, siempre
+[emits."payment.captured@v1"]      # name@version, always
 paymentId = "uuid"
 amount    = "money"
 
@@ -141,34 +150,39 @@ method  = "getOrder"
 
 [infra]
 state   = "postgres"
-runtime = "cloudrun"
+runtime = "container"
 secrets = ["STRIPE_API_KEY"]
 ```
 
-Tipos: `string int float bool timestamp uuid json money`. `money` es un tipo
-propio a propósito: un float para dinero es un bug esperando su turno.
+Types: `string int float bool timestamp uuid json money`. `money` is a dedicated type on
+purpose: a float for money is a bug waiting its turn.
 
-## Convenciones
+## Conventions
 
-- Eventos en pasado y versionados: `dominio.hecho@vN`. Cambio incompatible = `@vN+1`,
-  nunca editar el esquema de una versión publicada.
-- Un servicio es dueño de los eventos que emite. Nadie más los emite.
-- La comunicación síncrona (`methods`) se declara igual que la asíncrona; si no
-  está en `depends`, la llamada no debería existir.
-- El código generado no se edita. Se hereda de la clase base y se implementan
-  los abstractos.
+- Events in the past tense and versioned: `domain.happened@vN`. An incompatible change
+  is `@vN+1`, never an edit to a published version's schema.
+- A service owns the events it emits. Nobody else emits them.
+- Synchronous communication (`methods`) is declared the same way as asynchronous; if it
+  is not in `depends`, the call should not exist.
+- Generated code is not edited. You inherit from the base class and implement the
+  abstract members.
 
-## Estado
+## Status
 
-Slice ejecutable, sin dependencias (`tomllib`, py3.11+). `python3 test_axon.py`.
+Preview. One Rust binary with no runtime dependencies, four IaC targets (`local`, `gcp`,
+`aws`, `k8s`), and a conformance suite that validates every generator with the real tool
+of its ecosystem.
 
-Saltado a propósito, y cuándo agregarlo:
-- **Un solo target de código (TS)** — otro lenguaje es otra función `build_X`, no un
-  motor de plantillas. Agregar cuando exista el segundo servicio real en otro lenguaje.
-- **Un solo target de IaC (Pub/Sub + Cloud SQL)** — Kafka/SNS/Rabbit cuando haya un
-  despliegue que lo pida.
-- **Sin runtime propio** — el `Bus` es una interfaz de tres líneas; el adaptador lo
-  pone quien despliega. Agregar un paquete runtime cuando se repita el mismo adaptador
-  en tres servicios.
-- **`verify` compara manifiestos entre sí, no contra la nube** — el drift contra
-  terraform state o contra los topics reales llega cuando haya algo desplegado.
+Deliberately skipped, and when to add it:
+
+- **One code target (TypeScript)** — another language is another `*_ts`-shaped generator
+  or an `axon-gen-<lang>` plugin, not a template engine. `axon-gen-go` exists as the
+  reference plugin. Add a native one when there is a second real service in another
+  language.
+- **No runtime of its own** — the `Bus` is a three-line interface; the adapter belongs to
+  whoever deploys. Add a runtime package when the same adapter shows up in three services.
+- **`verify` compares manifests with each other and with the migrations, not with the
+  cloud** — drift against terraform state or against the real topics arrives when there
+  is something deployed to compare with. `axon analytics --check` already does this shape
+  of thing for the warehouse: axon emits the introspection query, somebody runs it, and
+  the compiler diffs the dump against the manifest.

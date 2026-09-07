@@ -1,17 +1,17 @@
 <h1 align="center">axon</h1>
 
 <p align="center">
-  <em>El manifiesto es la fuente de verdad. El código, la infraestructura y los
-  diagramas son proyecciones. <code>axon verify</code> falla cuando dejan de coincidir.</em>
+  <em>The manifest is the source of truth. The code, the infrastructure and the
+  diagrams are projections. <code>axon verify</code> fails when they stop agreeing.</em>
 </p>
 
 <p align="center">
-  <a href="https://andrew-tellez.github.io/axon/"><strong>Documentación</strong></a>
+  <a href="https://andrew-tellez.github.io/axon/"><strong>Documentation</strong></a>
 </p>
 
 <p align="center">
   <a href="https://github.com/Andrew-Tellez/axon/actions/workflows/ci.yml"><img src="https://github.com/Andrew-Tellez/axon/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
-  <img src="https://img.shields.io/badge/dependencias%20en%20runtime-0-brightgreen" alt="cero dependencias">
+  <img src="https://img.shields.io/badge/runtime%20dependencies-0-brightgreen" alt="zero dependencies">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
 </p>
 
@@ -19,179 +19,180 @@
 curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
 ```
 
-Un binario. Sin runtime, sin Node, sin Python, sin JVM. Corre igual en tu laptop y en un contenedor de CI vacío.
+One binary. No runtime, no Node, no Python, no JVM. It runs the same on your laptop and
+in an empty CI container.
 
 ---
 
-## El problema
+## The problem
 
-Preguntá en cualquier equipo con veinte microservicios: *¿quién consume este evento y
-qué se rompe si le cambio un campo?* La respuesta honesta es «hay que leer cinco repos».
+Ask any team with twenty microservices: *who consumes this event, and what breaks if I
+change a field on it?* The honest answer is "you have to read five repos".
 
-Los frameworks actuales no ayudan porque viven dentro de un lenguaje (NestJS, Spring,
-Micronaut) o son un runtime que hay que desplegar y operar (Dapr). Ninguno sabe que el
-`order.placed@v1` que emite un servicio en Go es el mismo que consume un servicio en
-Kotlin. Esa relación existe solo en la cabeza del equipo, hasta que alguien renuncia.
+Today's frameworks do not help, because they live inside one language (NestJS, Spring,
+Micronaut) or they are a runtime you have to deploy and operate (Dapr). None of them
+knows that the `order.placed@v1` a Go service emits is the same one a Kotlin service
+consumes. That relationship exists only in the team's head, until somebody leaves.
 
-## La idea
+## The idea
 
-Declarás el servicio una vez, y todo lo demás se deriva:
+You declare the service once, and everything else is derived from it:
 
 ```
-                     ┌─ axon build      contratos, clase base, clientes resilientes
+                     ┌─ axon build      contracts, base class, resilient clients
   asyncapi.yaml ─────┤                     (axon import)
-                     ├─ axon test       testkit: contrato, idempotencia, máquinas
-                     ├─ axon openapi    OpenAPI 3.1 de toda la plataforma
+                     ├─ axon test       testkit: contract, idempotency, machines
+                     ├─ axon openapi    OpenAPI 3.1 for the whole platform
                      ├─ axon infra      IaC: local · gcp · aws · k8s
-manifiesto.toml ─────┼─ axon rls        RLS por fila y vistas enmascaradas
-                     ├─ axon flags      configuración de flagd (OpenFeature)
-   fuente de verdad  ├─ axon ci         pipeline: gates de axon, deploy del target
-                     ├─ axon load       carga con umbrales del manifiesto
-                     ├─ axon graph · classes · er · states · seq   diagramas
-                     ├─ axon trace      la cadena causal REAL, para debug local
-                     ├─ axon cap        qué implica el lado CAP que elegiste
-                     └─ axon verify     drift: falla en CI
+ manifest.toml ──────┼─ axon rls        per-row RLS and masked views
+                     ├─ axon flags      flagd configuration (OpenFeature)
+  source of truth    ├─ axon ci         pipeline: axon's gates, the target's deploy
+                     ├─ axon load       load test with the manifest's thresholds
+                     ├─ axon graph · classes · er · states · seq   diagrams
+                     ├─ axon trace      the REAL causal chain, for local debugging
+                     ├─ axon cap        what the CAP side you picked implies
+                     └─ axon verify     drift: fails in CI
 ```
 
-Nada de eso se edita a mano. Si el diagrama no coincide con el código, no es que el
-diagrama esté viejo: es que alguien rompió el manifiesto, y CI lo dice antes del merge.
+None of that is edited by hand. If the diagram does not match the code, it is not that
+the diagram is stale: somebody broke the manifest, and CI says so before the merge.
 
-> **El manifiesto es diseño de alto nivel** —límites de servicio, topología, qué
-> garantiza cada uno— **y el compilador lo baja a diseño de bajo nivel**: nivel de
-> aislamiento, política de reintentos, firmas de método, recursos de infraestructura. Y
-> verifica que sigan de acuerdo.
+> **The manifest is high-level design** —service boundaries, topology, what each one
+> guarantees— **and the compiler lowers it into low-level design**: isolation level,
+> retry policy, method signatures, infrastructure resources. And it verifies that they
+> stay in agreement.
 
-## La demo, en dos comandos
+## The demo, in two commands
 
-`examples/` trae tres servicios que corren de verdad —uno sobre cuatro nodos de Postgres
-con [pgdog](https://pgdog.dev) delante, y otro coordinando una saga. `./demo.sh` levanta
-el sistema completo y comprueba **nueve** cosas contra la realidad:
+`examples/` ships three services that really run —one over four Postgres nodes with
+[pgdog](https://pgdog.dev) in front, and another coordinating a saga. `./demo.sh` brings
+the whole system up and makes **31 checks against reality**:
 
 ```console
 $ cd examples && ./demo.sh
-==> cadena causal real
-└─ POST /v1/orders <- http
+==> the real causal chain
+└─ POST /v1/tenants/{tenantId}/orders <- http
    └─ order.placed@v1 <- orders
       └─ payment.captured@v1 <- payments
 
-==> la traza en OpenTelemetry
-  OK: 5 spans, un raiz, sin huerfanos, cruzando ['orders', 'payments']
+==> the trace in OpenTelemetry
+  OK: 5 spans, one root, no orphans, crossing ['orders', 'payments']
 
-==> esperado (manifiesto) vs real (log de envelopes)
-  OK: el sistema hace exactamente lo que declara
+==> expected (manifest) vs real (envelope log)
+  OK: the system does exactly what it declares
 
-==> aislamiento por inquilino a traves del pooler
-  OK: pgdog rechaza en el router la consulta sin inquilino
-  OK: 20 de 20 conexiones vieron 1 fila propia y 0 del inquilino ajeno
+==> tenant isolation through the pooler
+  OK: pgdog rejects the query with no tenant at the router
+  OK: 20 of 20 connections saw 1 row of their own and 0 of the other tenant's
 
-==> la saga: compensacion y retome, medidos
-  OK: el cobro se deshizo y al comercio no se le pago
-  OK: retomada desde el diario, compensada, y el reembolso alcanzo al cobro
+==> the saga: compensation and resume, measured
+  OK: the charge was undone and the merchant was not paid
+  OK: resumed from the journal, compensated, and the refund reached the charge
 
-==> event sourcing y CQRS, medidos
-  OK: dos escrituras a la misma version: una entro, el UNIQUE rechazo la otra
-  OK: 0ms de atraso de la vista, dentro del presupuesto declarado
-  OK: el relay volvio y publico lo pendiente; nadie lo reintento a mano
-  OK: la foto dice lo mismo que la proyeccion, que se construyo sin usarla
-  OK: una transaccion revertida no deja el evento suelto: 0 pagos, 0 eventos
-  OK: sin ninguna foto el sistema sigue correcto, solo reconstruye mas
-  OK: la vista ensuciada se reconstruye del flujo, con las fechas del flujo
-  OK: 24 lecturas durante la reconstruccion y nadie vio la vista a medias
+==> event sourcing and CQRS, measured
+  OK: two writes at the same version: one got in, the UNIQUE rejected the other
+  OK: the view's lag is within the declared budget
+  OK: the relay came back and published what was pending; nobody retried by hand
+  OK: the snapshot says the same as the projection, which was built without it
+  OK: a rolled-back transaction leaves no loose event: 0 payments, 0 events
+  OK: with no snapshot at all the system stays correct, it just rebuilds more
+  OK: the dirtied view is rebuilt from the stream, with the stream's dates
+  OK: 24 reads during the rebuild and nobody saw a half-built view
 
-==> reintentos declarados vs ocurridos
-  OK: 3 llamadas = 1 + 2 reintentos, exactamente lo declarado
-  OK: 14000ms dentro del presupuesto de 60000ms
+==> declared vs occurred retries
+  OK: 3 calls = 1 + 2 retries, exactly what was declared
+  OK: 14000ms inside the 60000ms budget
 
-==> rollout declarado vs aplicado
-  declarado 10%  medido 10.7%  (32 de 300)
-  OK: estable por inquilino, y el porcentaje aplica
+==> declared vs applied rollout
+  declared 10%  measured 10.7%  (32 of 300)
+  OK: stable per tenant, and the percentage applies
 
-==> la bodega: esquema, embudo y PII
-  OK: 12 flujos, 12 llegaron al cobro (conversion 100%)
-  OK: 12 hasheados, 0 correos en claro
+==> the warehouse: schema, funnel and PII
+  OK: 12 flows, 12 reached the charge (100% conversion)
+  OK: 12 hashed, 0 addresses in plaintext
 
-==> capacidad declarada vs medida
-  axon: 0 umbrales incumplidos
+==> declared vs measured capacity
+  axon: 0 thresholds breached
 ```
 
-Corre en CI en cada push.
+It runs in CI on every push.
 
-## Con qué está hecho, y con qué se verifica
+## What it is built with, and what verifies it
 
-**axon no necesita nada para correr**: un binario en Rust, sin runtime. Las herramientas
-de abajo son las que usa lo que *genera*, y cada una solo para su parte — si falta, se
-salta esa parte y no el resto.
+**axon needs nothing to run**: one Rust binary, no runtime. The tools below are the ones
+used by what it *generates*, and each one only for its own part — if one is missing,
+that part is skipped and not the rest.
 
-La lista importa por una razón: **un generador no se valida con asserts propios, se
-valida con la herramienta real de su ecosistema.** Los tres primeros generadores de este
-proyecto producían salida inválida y el suite no lo veía, porque axon se verificaba
-únicamente contra sí mismo.
+The list matters for one reason: **a generator is not validated with its own asserts, it
+is validated with the real tool of its ecosystem.** The first three generators in this
+project produced invalid output and the suite did not see it, because axon was only ever
+verified against itself.
 
-| Herramienta | Para qué | Cómo se verifica lo generado |
+| Tool | What for | How the generated output is verified |
 | --- | --- | --- |
-| **Docker** | `--target local`: broker, Postgres por servicio, MinIO, Jaeger, flagd, el edge y tus servicios | `./demo.sh` levanta el sistema y comprueba cuatro cosas contra la realidad |
-| **Terraform** | `--target gcp` y `--target aws` | `terraform validate` con los **providers reales**, y sin advertencias |
-| **`tsc`** | el TypeScript de `axon build` y `axon test` | `tsc --strict --noEmit`, más el typecheck del servicio de ejemplo |
-| **Node 24+** | corre el testkit sin paso de build, con type-stripping | `node --test` contra el servicio de ejemplo real |
-| **Go** | `axon-gen-go`, el generador de referencia de plugins | `go vet` sobre lo emitido, y `go/format` antes de emitirlo |
-| **Postgres** | migraciones, RLS, vistas enmascaradas | la RLS se **aplica a un Postgres real** y se comprueba que aísla |
-| **`kubectl`** | `--target k8s` | parseo de los 16 objetos que emite |
-| **k6** | `axon load`: carga con umbrales del manifiesto | corre en el demo y `--check` diffea lo medido contra lo declarado |
-| **OpenTelemetry** | trazas; el envelope ya propaga `traceparent` | el demo verifica el árbol de spans: un raíz, cero huérfanos, dos servicios |
-| **OpenFeature / flagd** | `axon flags`: evaluación por OFREP | el demo mide el rollout declarado contra el aplicado |
-| **Flyway** | aplica las migraciones; axon las lee, no las ejecuta | `validateMigrationNaming` obligatorio: ignoraba archivos en silencio |
-| **BigQuery / Snowflake / ClickHouse** | `axon analytics`, y la ingesta que la lleva | el DDL se parsea con **el dialecto de cada uno**, y el demo carga eventos reales en ClickHouse y comprueba el embudo |
-| **pgdog** | `axon pooler`: pooler y sharder, levantado por el target local | el `pgdog.toml` se valida contra su **JSON Schema oficial**, y el demo mide el aislamiento por inquilino a través del pooler |
-| **cocogitto** | Conventional Commits y el changelog | el hook rechaza el mensaje antes de crear el commit |
-| **mdBook** | esta documentación | cada bloque `toml` de las páginas pasa por `axon verify` |
+| **Docker** | `--target local`: broker, Postgres per service, MinIO, Jaeger, flagd, the edge and your services | `./demo.sh` brings the system up and makes 31 checks against reality |
+| **Terraform** | `--target gcp` and `--target aws` | `terraform validate` with the **real providers**, and with no warnings |
+| **`tsc`** | the TypeScript from `axon build` and `axon test` | `tsc --strict --noEmit`, plus the example service's typecheck |
+| **Node 24+** | runs the testkit with no build step, using type stripping | `node --test` against the real example service |
+| **Go** | `axon-gen-go`, the reference plugin generator | `go vet` over what it emits, and `go/format` before emitting |
+| **Postgres** | migrations, RLS, masked views | the RLS is **applied to a real Postgres** and checked to see that it isolates |
+| **`kubectl`** | `--target k8s` | a parse of the 16 objects it emits |
+| **k6** | `axon load`: load with the manifest's thresholds | it runs in the demo, and `--check` diffs the measured against the declared |
+| **OpenTelemetry** | traces; the envelope already propagates `traceparent` | the demo verifies the span tree: one root, zero orphans, two services |
+| **OpenFeature / flagd** | `axon flags`: evaluation over OFREP | the demo measures the declared rollout against the applied one |
+| **Flyway** | applies the migrations; axon reads them, it does not run them | `validateMigrationNaming` mandatory: it used to skip files in silence |
+| **BigQuery / Snowflake / ClickHouse** | `axon analytics`, and the ingest that feeds it | the DDL is parsed with **each one's dialect**, and the demo loads real events into ClickHouse and checks the funnel |
+| **pgdog** | `axon pooler`: pooler and sharder, brought up by the local target | the `pgdog.toml` is validated against its **official JSON Schema**, and the demo measures tenant isolation through the pooler |
+| **cocogitto** | Conventional Commits and the changelog | the hook rejects the message before the commit is created |
+| **mdBook** | this documentation | every `toml` block in the pages goes through `axon verify` |
 
-### Dentro del binario
+### Inside the binary
 
-Seis dependencias, ninguna accidental:
-
-| | |
-| --- | --- |
-| `clap` | la CLI |
-| `serde` + `toml` + `serde_json` + `serde_yaml_ng` | el manifiesto, y AsyncAPI en JSON o YAML |
-| `indexmap` | orden de inserción: sin él la salida generada cambia entre corridas y `git diff --exit-code` deja de significar algo |
-| `sqlparser` | el esquema sale de las migraciones con un parser SQL de verdad. Una regex se rompe con `PARTITION BY` — y lo peor es que se rompe **en silencio** |
-| `ureq` | `axon discover` contra servicios vivos |
-
-`regex` estuvo y se fue: quedaba para comprobar tres dígitos y un guion bajo en el
-nombre de un archivo.
-
-## Documentación
-
-**[andrew-tellez.github.io/axon](https://andrew-tellez.github.io/axon/)** — construida
-con [mdBook](https://rust-lang.github.io/mdBook/), con búsqueda y una versión archivada
-por cada release.
+Six dependencies, none of them accidental:
 
 | | |
 | --- | --- |
-| [Tu primer manifiesto](https://andrew-tellez.github.io/axon/primeros-pasos.html) | Diez minutos, de cero a verificado |
-| [Referencia del manifiesto](https://andrew-tellez.github.io/axon/manifiesto.html) | Cada campo y por qué existe |
-| [Patrones](https://andrew-tellez.github.io/axon/patrones.html) | Declarados, no recordados: outbox, inbox idempotente, **saga**, **event sourcing**, **CQRS** |
-| [CAP y resiliencia](https://andrew-tellez.github.io/axon/cap.html) | El lado que sí se elige |
-| [Reglas y drift](https://andrew-tellez.github.io/axon/verificacion.html) | Todo lo que `verify` bloquea |
-| [Seguridad](https://andrew-tellez.github.io/axon/seguridad.html) | OWASP, RLS, enmascarado |
-| [Plugins](https://andrew-tellez.github.io/axon/plugins.html) | Cualquier ejecutable `axon-*` |
+| `clap` | the CLI |
+| `serde` + `toml` + `serde_json` + `serde_yaml_ng` | the manifest, and AsyncAPI in JSON or YAML |
+| `indexmap` | insertion order: without it the generated output changes between runs and `git diff --exit-code` stops meaning anything |
+| `sqlparser` | the schema comes out of the migrations with a real SQL parser. A regex breaks on `PARTITION BY` — and the worst part is that it breaks **in silence** |
+| `ureq` | `axon discover` against live services |
 
-Los ejemplos de manifiesto de esa documentación **no son texto**: el suite extrae cada
-bloque y le corre `axon verify`, así que no pueden quedar viejos en silencio.
+`regex` was here and left: it was down to checking three digits and an underscore in a
+file name.
 
-## Estado
+## Documentation
 
-Preview. La superficie de comandos es estable; el formato del manifiesto todavía puede
-cambiar antes de `v1`. Ver el
-[changelog](CHANGELOG.md) y [qué se comprueba](https://andrew-tellez.github.io/axon/garantias.html).
+**[andrew-tellez.github.io/axon](https://andrew-tellez.github.io/axon/)** — built with
+[mdBook](https://rust-lang.github.io/mdBook/), with search and an archived version for
+every release. It is written in Spanish for now.
 
-## Desarrollo
+| | |
+| --- | --- |
+| [Your first manifest](https://andrew-tellez.github.io/axon/primeros-pasos.html) | Ten minutes, from zero to verified |
+| [Manifest reference](https://andrew-tellez.github.io/axon/manifiesto.html) | Every field and why it exists |
+| [Patterns](https://andrew-tellez.github.io/axon/patrones.html) | Declared, not remembered: outbox, idempotent inbox, **saga**, **event sourcing**, **CQRS** |
+| [CAP and resilience](https://andrew-tellez.github.io/axon/cap.html) | The side you do get to choose |
+| [Rules and drift](https://andrew-tellez.github.io/axon/verificacion.html) | Everything `verify` blocks |
+| [Security](https://andrew-tellez.github.io/axon/seguridad.html) | OWASP, RLS, masking |
+| [Plugins](https://andrew-tellez.github.io/axon/plugins.html) | Any `axon-*` executable |
+
+The manifest examples in that documentation **are not text**: the suite extracts every
+block and runs `axon verify` over it, so they cannot go stale in silence.
+
+## Status
+
+Preview. The command surface is stable; the manifest format can still change before
+`v1`. See the [changelog](CHANGELOG.md) and
+[what gets checked](https://andrew-tellez.github.io/axon/garantias.html).
+
+## Development
 
 ```sh
-cargo test --release            # el suite completo
+cargo test --release            # the whole suite
 cargo run --release -- verify examples
-cd examples && ./demo.sh        # necesita Docker
-mdbook serve docs --open        # la documentación
+cd examples && ./demo.sh        # needs Docker
+mdbook serve docs --open        # the documentation
 ```
 
-[Contribuir](CONTRIBUTING.md) · [Diseño y decisiones](DESIGN.md) · [gof-patterns](https://github.com/Andrew-Tellez/patterns) · MIT
+[Contributing](CONTRIBUTING.md) · [Design and decisions](DESIGN.md) · [gof-patterns](https://github.com/Andrew-Tellez/patterns) · MIT
