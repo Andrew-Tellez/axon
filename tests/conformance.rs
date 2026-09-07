@@ -287,6 +287,43 @@ fn una_clave_anadida_despues_cuenta() {
     assert!(er.contains("PK"), "la PK anadida despues no se marco:\n{er}");
 }
 
+/// A rename in a LATER migration has to count. It was invisible, and with that
+/// every rule about the renamed table went on checking a table that no longer
+/// exists —and passed, because the old one still had everything it asked for.
+#[test]
+fn un_rename_posterior_cuenta() {
+    let dir = std::env::temp_dir().join("axon-alter-rename");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(
+        dir.join("sql/001_init.expand.sql"),
+        "CREATE TABLE punto (vista text NOT NULL, stream_id uuid NOT NULL, \
+         posicion bigint NOT NULL, PRIMARY KEY (vista, stream_id));\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sql/002_rename.expand.sql"),
+        "ALTER TABLE punto RENAME TO point;\n\
+         ALTER TABLE point RENAME COLUMN vista TO view_name;\n\
+         ALTER TABLE point RENAME COLUMN posicion TO position;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("s.toml"),
+        "service = \"s\"\nversion = \"1.0.0\"\nowner = \"e\"\ntier = \"1\"\n\n\
+         [analytics]\nexport = false\n\n[infra]\nstate = \"postgres\"\nmigrations = \"sql/\"\n",
+    )
+    .unwrap();
+    let (er, err, ok) = axon(&["er", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    assert!(er.contains("POINT {"), "la tabla renombrada no aparece:\n{er}");
+    assert!(!er.to_lowercase().contains("punto"), "la tabla vieja sigue en el esquema:\n{er}");
+    assert!(er.contains("view_name"), "la columna renombrada no aparece:\n{er}");
+    assert!(!er.contains("vista"), "la columna vieja sigue:\n{er}");
+    // la PK sobrevive al rename, con el nombre nuevo
+    assert!(er.contains("PK"), "la PK se perdio en el rename:\n{er}");
+}
+
 #[test]
 fn el_mismo_plan_en_cuatro_targets() {
     for (target, marca) in [
@@ -1708,7 +1745,7 @@ fn otel_en_los_cuatro_targets() {
     // los flags del traceparent se heredan, no se inventan: declarar
     // "muestreado" sobre una traza que no lo esta parte el arbol en fragmentos
     let (ts, _, _) = axon(&["build", "examples/payments.toml", "examples"]);
-    assert!(ts.contains(r#"const flags = partes?.[3] ?? "01""#), "{ts}");
+    assert!(ts.contains(r#"const flags = parts?.[3] ?? "01""#), "{ts}");
     assert!(!ts.contains("${hex(8)}-01`"), "el envelope fija los flags");
 }
 
@@ -3448,7 +3485,7 @@ CREATE TABLE cuenta_snapshot (
   PRIMARY KEY (stream_id, version, reglas)
 );
 
-CREATE TABLE vista_saldos (
+CREATE TABLE view_saldos (
   stream_id  uuid PRIMARY KEY,
   centavos   bigint NOT NULL,
   posicion   bigint NOT NULL
@@ -3457,20 +3494,20 @@ CREATE TABLE vista_saldos (
 -- La sombra: misma forma que la vista. `verify` comprueba que COINCIDAN, porque
 -- una sombra con una columna de menos deja una vista incompleta al intercambiar
 -- y eso se veria el dia de la reconstruccion.
-CREATE TABLE vista_saldos_sombra (
+CREATE TABLE view_saldos_sombra (
   stream_id  uuid PRIMARY KEY,
   centavos   bigint NOT NULL,
   posicion   bigint NOT NULL
 );
 
-CREATE TABLE vista_saldos_checkpoint (
-  vista      text NOT NULL,
+CREATE TABLE view_saldos_checkpoint (
+  view_name  text NOT NULL,
   -- por FLUJO: la version de un evento es su posicion dentro de su flujo, asi
   -- que un solo numero para toda la vista no identifica nada en cuanto hay mas
   -- de un flujo
   stream_id  uuid NOT NULL,
-  posicion   bigint NOT NULL,
-  PRIMARY KEY (vista, stream_id)
+  position   bigint NOT NULL,
+  PRIMARY KEY (view_name, stream_id)
 );
 ";
 
@@ -3715,7 +3752,7 @@ test("la vista solo acepta los eventos que declara, y le llega la posicion", asy
     () => saldosApply(projection, newEnvelope("cuenta.cerrada@v1", "p", {}), 13),
     /is not a declared event of the view/,
   );
-  assert.equal(saldosTable, "vista_saldos");
+  assert.equal(saldosTable, "view_saldos");
   assert.equal(saldosMaxStalenessMs, 3000);
 });
 "#,
@@ -3778,9 +3815,9 @@ fn las_reglas_de_event_sourcing_bloquean() {
     assert!(err.contains("this is a view, not an aggregate"), "{err}");
 
     // la vista sin donde anotar hasta donde llego
-    let sin_cp = DDL_ES.replace("CREATE TABLE vista_saldos_checkpoint", "CREATE TABLE otra_tabla");
+    let sin_cp = DDL_ES.replace("CREATE TABLE view_saldos_checkpoint", "CREATE TABLE otra_tabla");
     let err = correr(MANIFIESTO_ES, &sin_cp);
-    assert!(err.contains("vista_saldos_checkpoint"), "{err}");
+    assert!(err.contains("view_saldos_checkpoint"), "{err}");
     assert!(err.contains("reprocesses from the beginning"), "{err}");
 
     // una vista mas vieja que el presupuesto del servicio
@@ -3798,30 +3835,30 @@ fn las_reglas_de_event_sourcing_bloquean() {
 
     // la sombra que no coincide con la vista
     let sombra_corta = DDL_ES.replace(
-        "CREATE TABLE vista_saldos_sombra (\n  stream_id  uuid PRIMARY KEY,\n  centavos   bigint NOT NULL,\n  posicion   bigint NOT NULL\n);",
-        "CREATE TABLE vista_saldos_sombra (\n  stream_id  uuid PRIMARY KEY,\n  posicion   bigint NOT NULL\n);",
+        "CREATE TABLE view_saldos_sombra (\n  stream_id  uuid PRIMARY KEY,\n  centavos   bigint NOT NULL,\n  posicion   bigint NOT NULL\n);",
+        "CREATE TABLE view_saldos_sombra (\n  stream_id  uuid PRIMARY KEY,\n  posicion   bigint NOT NULL\n);",
     );
     // la guarda compara contra el original: el mismo texto tambien esta en la
     // vista viva, asi que buscarlo suelto no dice si el reemplazo aplico
     assert_ne!(sombra_corta, DDL_ES, "la variante no aplico");
     let err = correr(MANIFIESTO_ES, &sombra_corta);
-    assert!(err.contains("`vista_saldos_sombra` has no `centavos` column"), "{err}");
+    assert!(err.contains("`view_saldos_sombra` has no `centavos` column"), "{err}");
     assert!(err.contains("only then would it show"), "{err}");
 
     // y sin sombra: reconstruir en el sitio sirve una vista incompleta
-    let sin_sombra = DDL_ES.replace("CREATE TABLE vista_saldos_sombra", "CREATE TABLE otra_sombra");
+    let sin_sombra = DDL_ES.replace("CREATE TABLE view_saldos_sombra", "CREATE TABLE otra_sombra");
     let err = correr(MANIFIESTO_ES, &sin_sombra);
-    assert!(err.contains("`vista_saldos_sombra` is missing"), "{err}");
+    assert!(err.contains("`view_saldos_sombra` is missing"), "{err}");
     assert!(err.contains("fewer rows than there are"), "{err}");
 
     // el punto de la vista, sin flujo en la clave: un flujo pisa al otro
     let cp_global = DDL_ES.replace(
-        "  vista      text NOT NULL,\n  -- por FLUJO: la version de un evento es su posicion dentro de su flujo, asi\n  -- que un solo numero para toda la vista no identifica nada en cuanto hay mas\n  -- de un flujo\n  stream_id  uuid NOT NULL,\n  posicion   bigint NOT NULL,\n  PRIMARY KEY (vista, stream_id)\n",
-        "  vista      text PRIMARY KEY,\n  stream_id  uuid NOT NULL,\n  posicion   bigint NOT NULL\n",
+        "  view_name  text NOT NULL,\n  -- por FLUJO: la version de un evento es su posicion dentro de su flujo, asi\n  -- que un solo numero para toda la vista no identifica nada en cuanto hay mas\n  -- de un flujo\n  stream_id  uuid NOT NULL,\n  position   bigint NOT NULL,\n  PRIMARY KEY (view_name, stream_id)\n",
+        "  view_name  text PRIMARY KEY,\n  stream_id  uuid NOT NULL,\n  position   bigint NOT NULL\n",
     );
-    assert!(!cp_global.contains("PRIMARY KEY (vista, stream_id)"), "la variante no aplico");
+    assert!(!cp_global.contains("PRIMARY KEY (view_name, stream_id)"), "la variante no aplico");
     let err = correr(MANIFIESTO_ES, &cp_global);
-    assert!(err.contains("has no key on (vista, stream_id)"), "{err}");
+    assert!(err.contains("has no key on (view_name, stream_id)"), "{err}");
     assert!(err.contains("One stream would overwrite another"), "{err}");
 
     // fotos declaradas sin tabla, y sin la columna que las hace seguras

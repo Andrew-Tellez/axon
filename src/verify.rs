@@ -185,7 +185,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // route ends up in a log, a cache and a CDN.
             if public {
                 for field in meth.output.keys() {
-                    if es_pii(pii, field) {
+                    if is_pii(pii, field) {
                         errors.push(format!(
                             "[A09] {svc}.{name}: returns `{field}`, declared PII, through a \
                              public route"
@@ -232,7 +232,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if ["outbox", "inbox_seen"].contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
                 continue;
             }
-            if !cols.tiene(tenant) {
+            if !cols.has(tenant) {
                 errors.push(format!(
                     "[A01] {}.{t}: no `{tenant}` column; it ends up with no RLS policy and \
                      returns rows from every tenant. Add it, or list the table in \
@@ -245,12 +245,12 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
 
     // ---- export to the warehouse ----
     for m in ms.iter().filter(|m| !m.external) {
-        if !BODEGAS.contains(&m.analytics.warehouse.as_str()) {
+        if !WAREHOUSES.contains(&m.analytics.warehouse.as_str()) {
             errors.push(format!(
                 "{}: `[analytics] warehouse = \"{}\"` has no dialect. Available: {}",
                 m.service,
                 m.analytics.warehouse,
-                BODEGAS.join(", ")
+                WAREHOUSES.join(", ")
             ));
         }
         match m.analytics.pii.as_str() {
@@ -274,7 +274,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     }
 
     // ---- feature flags: what nobody enforces ----
-    let ahora = hoy();
+    let ahora = today();
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         for (nombre, f) in &m.flags {
@@ -294,7 +294,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     "{svc}.{nombre}: `kill_switch` with `expires`; an emergency switch lives as long as \
                      the thing it turns off does"
                 )),
-                (Some(e), false) => match fecha(e) {
+                (Some(e), false) => match date(e) {
                     None => errors.push(format!(
                         "{svc}.{nombre}: `expires = \"{e}\"` is not in YYYY-MM-DD form"
                     )),
@@ -330,8 +330,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // A default variant that does not exist makes evaluation always
             // fall back to the value in the code, and the flag quietly stops
             // doing anything: it looks like "the rollout does nothing".
-            let variantes = f.variantes();
-            let defecto = f.variante_defecto();
+            let variantes = f.all_variants();
+            let defecto = f.default_variant();
             if !variantes.contains_key(&defecto) {
                 errors.push(format!(
                     "{svc}.{nombre}: `default_variant = \"{defecto}\"` is not in `variants` ({}). \
@@ -389,7 +389,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let pl = &m.pooler;
-        if !pl.activo() {
+        if !pl.active() {
             // declaring pooler fields with no pooler is configuration that
             // lands nowhere
             if pl.shards > 1 || pl.max_client_conn.is_some() || pl.tenant_binding.is_some() {
@@ -467,7 +467,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         // the first request against a real pooler, not in the manifest.
         if let (true, Some(col)) = (pl.shards > 1, m.infra.tenant_column.as_ref()) {
             for (nombre, me) in m.methods.iter() {
-                if me.input.keys().any(|k| normalizar(k) == normalizar(col)) {
+                if me.input.keys().any(|k| normalize(k) == normalize(col)) {
                     continue;
                 }
                 errors.push(format!(
@@ -536,14 +536,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         let Some(motor) = &m.infra.state else {
             continue;
         };
-        if !MOTORES.contains(&motor.as_str()) {
+        if !ENGINES.contains(&motor.as_str()) {
             errors.push(format!(
                 "{}: `state = \"{motor}\"` no esta soportado. Motores nativos: {}. Un motor \
                  distinto se resuelve con un plugin `axon-infra-{motor}`, que recibe el plan \
                  neutral por stdin; sin eso, axon generaria infraestructura de Postgres para \
                  algo que no lo es",
                 m.service,
-                MOTORES.join(", ")
+                ENGINES.join(", ")
             ));
         }
     }
@@ -571,7 +571,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         // this exception the two rules contradict each other, and one of them
         // advises adding a pooler that is already there.
         if let (Some(pool), Some(tope), false) =
-            (inf.pool_size, inf.max_connections, m.pooler.activo())
+            (inf.pool_size, inf.max_connections, m.pooler.active())
         {
             let techo = inf.max_instances.unwrap_or(10);
             let pico = pool * techo;
@@ -686,7 +686,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
 
         let repartidas: Vec<&String> = tablas
             .iter()
-            .filter(|(_, t)| t.tiene(clave))
+            .filter(|(_, t)| t.has(clave))
             .map(|(t, _)| t)
             .collect();
 
@@ -782,7 +782,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
         // you cannot be CP and serve something stale: that is the theorem's own
         // contradiction
-        if !cap.eventual() && cap.degrada() {
+        if !cap.eventual() && cap.degrades() {
             errors.push(format!(
                 "{svc}: `strong` with `on_partition = \"degrade\"` contradicts itself; \
                  serving stale data IS choosing availability over consistency"
@@ -930,7 +930,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // The progress has to be on disk. A coordinator that loses a saga
             // halfway neither finishes nor compensates it: the steps already
             // taken stay applied forever and nobody knows which ones they were.
-            let tabla = Saga::tabla(nombre);
+            let tabla = Saga::table(nombre);
             match esquemas.get(svc) {
                 None => errors.push(format!(
                     "{svc}.{nombre}: no migrations, and the saga needs the `{tabla}` table to \
@@ -989,7 +989,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 // good faith: a misspelled `undo` is a compensation that does
                 // not exist, and it gets discovered the day it is needed.
                 let mut resolver = |campo: &str, r: &str| -> Option<(u32, &Method)> {
-                    let Some((s, met)) = Paso::partes(r) else {
+                    let Some((s, met)) = Step::parts(r) else {
                         errors.push(format!(
                             "{svc}.{nombre}.{campo}: `{r}` is not in `service.method` form"
                         ));
@@ -1027,7 +1027,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     Some((unitario * intentos, me))
                 };
 
-                if let Some((ms, _)) = resolver("do", &paso.hacer) {
+                if let Some((ms, _)) = resolver("do", &paso.call) {
                     presupuesto += ms;
                 }
 
@@ -1042,7 +1042,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                          last one. If a later step fails, this one stays applied forever: that \
                          is not a saga, it is a dual-write with more steps",
                         i + 1,
-                        paso.hacer
+                        paso.call
                     )),
                     Some(u) => {
                         if let Some((ms, me)) = resolver("undo", u) {
@@ -1060,7 +1060,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             }
                             presupuesto += ms;
                         }
-                        if *u == paso.hacer {
+                        if *u == paso.call {
                             errors.push(format!(
                                 "{svc}.{nombre}: step {} compensates itself",
                                 i + 1
@@ -1159,7 +1159,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 ));
             }
 
-            let tabla = Aggregate::tabla(nombre);
+            let tabla = Aggregate::table(nombre);
             match esquemas.get(svc).and_then(|t| t.get(&tabla)) {
                 None => errors.push(format!(
                     "{svc}.{nombre}: the `{tabla}` table is missing. The state IS the stream, and \
@@ -1172,7 +1172,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         ("type", "cual de los eventos declarados es"),
                         ("data", "su contenido"),
                     ] {
-                        if !t.tiene(col) {
+                        if !t.has(col) {
                             errors.push(format!(
                                 "{svc}.{nombre}: `{tabla}` has no `{col}` column: that is where {para} goes"
                             ));
@@ -1226,7 +1226,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 }
             }
             if ag.snapshot_every > 0 {
-                let fotos = Aggregate::fotos(nombre);
+                let fotos = Aggregate::snapshots(nombre);
                 match esquemas.get(svc).and_then(|t| t.get(&fotos)) {
                     None => errors.push(format!(
                         "{svc}.{nombre}: `snapshot_every = {}` with no `{fotos}` table",
@@ -1301,7 +1301,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 }
             }
             let tablas = esquemas.get(svc);
-            let tabla = vi.tabla(nombre);
+            let tabla = vi.table(nombre);
             if tablas.and_then(|t| t.get(&tabla)).is_none() {
                 errors.push(format!(
                     "{svc}.{nombre}: the `{tabla}` table, where the view lives, is missing"
@@ -1316,11 +1316,11 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 )),
                 Some(t) => {
                     for (col, para) in [
-                        ("vista", "cual de las vistas es"),
-                        ("stream_id", "de que flujo"),
-                        ("posicion", "hasta que version de ESE flujo llego"),
+                        ("view_name", "which of the views this is"),
+                        ("stream_id", "which stream"),
+                        ("position", "how far into THAT stream it got"),
                     ] {
-                        if !t.tiene(col) {
+                        if !t.has(col) {
                             errors.push(format!(
                                 "{svc}.{nombre}: `{cp}` has no `{col}` column: that is where {para} goes"
                             ));
@@ -1332,11 +1332,11 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     // seems to work while there is one stream, and stops
                     // identifying anything as soon as there are two.
                     let por_flujo = t.uniques.iter().any(|u| {
-                        u.iter().any(|c| c == "stream_id") && u.iter().any(|c| c == "vista")
+                        u.iter().any(|c| c == "stream_id") && u.iter().any(|c| c == "view_name")
                     });
-                    if !por_flujo && t.tiene("stream_id") {
+                    if !por_flujo && t.has("stream_id") {
                         errors.push(format!(
-                            "{svc}.{nombre}: `{cp}` has no key on (vista, stream_id). One stream would \
+                            "{svc}.{nombre}: `{cp}` has no key on (view_name, stream_id). One stream would \
                              overwrite another's position, and the view would skip events or \
                              reprocess them without anything warning about it"
                         ));
@@ -1381,7 +1381,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             }
                         }
                         for c in &som.cols {
-                            if !viva.tiene(&c.name) {
+                            if !viva.has(&c.name) {
                                 warnings.push(format!(
                                     "{svc}.{nombre}: `{sombra}.{}` is not in `{tabla}`. It is \
                                      spare until the next swap, and after that the view is the \

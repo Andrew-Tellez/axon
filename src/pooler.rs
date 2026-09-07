@@ -1,28 +1,29 @@
-//! `pgdog.toml` derivado del manifiesto.
+//! `pgdog.toml` derived from the manifest.
 //!
-//! Lo que hace verificable a este generador es que pgdog publica el JSON Schema
-//! de su configuracion, generado desde sus propios tipos de Rust y comprobado
-//! por su CI. Asi que la salida no se compara contra un texto esperado: se
-//! valida contra el esquema real del parser que la va a leer.
+//! What makes this generator verifiable is that pgdog publishes the JSON Schema
+//! of its configuration, generated from its own Rust types and checked by its
+//! CI. So the output is not compared against expected text: it is validated
+//! against the real schema of the parser that will read it.
 //!
-//! Un archivo POR SERVICIO, no uno para todos. `[general]`, `[multi_tenant]` y
-//! `[admin]` son tablas unicas: emitirlas dos veces no es una configuracion
-//! discutible, es un TOML que no parsea. Y coincide con base-por-servicio: si
-//! dos servicios comparten un pooler, comparten su cola de conexiones.
+//! One file PER SERVICE, not one for all of them. `[general]`, `[multi_tenant]`
+//! and `[admin]` are singleton tables: emitting them twice is not a debatable
+//! configuration, it is TOML that does not parse. And it matches
+//! database-per-service: if two services share a pooler, they share its
+//! connection queue.
 use crate::manifest::*;
 
-/// Nombre logico de la base para el sharder: el mismo para todos los nodos,
-/// porque el cliente se conecta a UNO y pgdog decide el nodo.
+/// The database's logical name for the sharder: the same for every node,
+/// because the client connects to ONE and pgdog picks the node.
 fn base(svc: &str) -> String {
     svc.to_string()
 }
 
-/// El tipo de la clave de reparto, en el vocabulario de pgdog.
+/// The shard key's type, in pgdog's vocabulary.
 ///
-/// Su enum admite `bigint`, `uuid`, `vector` y `varchar`: si la columna es de
-/// otro tipo, el sharder no sabe hashearla.
-fn tipo_clave(t: &Tabla, clave: &str) -> Option<&'static str> {
-    let c = t.col(clave)?;
+/// Its enum accepts `bigint`, `uuid`, `vector` and `varchar`: if the column is
+/// of another type, the sharder does not know how to hash it.
+fn key_type(t: &Table, key: &str) -> Option<&'static str> {
+    let c = t.col(key)?;
     let ty = c.ty.as_str();
     Some(if ty.starts_with("uuid") {
         "uuid"
@@ -35,27 +36,27 @@ fn tipo_clave(t: &Tabla, clave: &str) -> Option<&'static str> {
     })
 }
 
-/// El servicio cuyo pooler se va a emitir.
+/// The service whose pooler is about to be emitted.
 ///
-/// Si hay uno solo, no hay nada que elegir. Si hay varios, elegir por el
-/// usuario seria elegir mal en silencio: cada uno tiene su archivo.
-fn elegir<'a>(ms: &'a [Manifest], solo: Option<&str>) -> Result<&'a Manifest, String> {
-    let activos: Vec<&Manifest> = ms
+/// With only one there is nothing to choose. With several, choosing on the
+/// user's behalf would be choosing wrong in silence: each one has its own file.
+fn pick<'a>(ms: &'a [Manifest], only: Option<&str>) -> Result<&'a Manifest, String> {
+    let active_ones: Vec<&Manifest> = ms
         .iter()
-        .filter(|m| !m.external && m.pooler.activo())
+        .filter(|m| !m.external && m.pooler.active())
         .collect();
-    match (activos.len(), solo) {
-        (0, _) => Err("ningun servicio declara `[pooler] engine`".into()),
-        (_, Some(s)) => activos
+    match (active_ones.len(), only) {
+        (0, _) => Err("no service declares `[pooler] engine`".into()),
+        (_, Some(s)) => active_ones
             .into_iter()
             .find(|m| m.service == s)
-            .ok_or_else(|| format!("`{s}` no declara `[pooler] engine`")),
-        (1, None) => Ok(activos[0]),
+            .ok_or_else(|| format!("`{s}` does not declare `[pooler] engine`")),
+        (1, None) => Ok(active_ones[0]),
         (_, None) => Err(format!(
-            "{} servicios declaran un pooler ({}), y cada uno lleva su propio \
-             pgdog.toml: `[general]` es una tabla unica. Eleg con `--service`.",
-            activos.len(),
-            activos
+            "{} services declare a pooler ({}), and each one carries its own \
+             pgdog.toml: `[general]` is a singleton table. Pick one with `--service`.",
+            active_ones.len(),
+            active_ones
                 .iter()
                 .map(|m| m.service.as_str())
                 .collect::<Vec<_>>()
@@ -64,7 +65,7 @@ fn elegir<'a>(ms: &'a [Manifest], solo: Option<&str>) -> Result<&'a Manifest, St
     }
 }
 
-/// El host de un nodo: el contenedor que levanta el compose, o una variable.
+/// A node's host: the container the compose brings up, or a variable.
 fn host(m: &Manifest, target: &str, shard: u32) -> (String, String) {
     match target {
         "local" => (
@@ -81,16 +82,16 @@ fn host(m: &Manifest, target: &str, shard: u32) -> (String, String) {
     }
 }
 
-/// `users.toml`: pgdog no deja entrar a nadie que no este declarado aca.
+/// `users.toml`: pgdog lets nobody in who is not declared here.
 ///
-/// La contrasena sale por variable salvo en local, donde el motor que levanta
-/// el compose tiene una fija y conocida. Un secreto que no protege nada no
-/// gana nada por estar en una variable, y perderia que el archivo generado
-/// arranque solo.
-pub fn users(ms: &[Manifest], target: &str, solo: Option<&str>) -> Result<String, String> {
-    let m = elegir(ms, solo)?;
+/// The password comes from a variable except in local, where the engine the
+/// compose brings up has a fixed, known one. A secret that protects nothing
+/// gains nothing from living in a variable, and would lose the generated file's
+/// ability to start on its own.
+pub fn users(ms: &[Manifest], target: &str, only: Option<&str>) -> Result<String, String> {
+    let m = pick(ms, only)?;
     let svc = &m.service;
-    let clave = match target {
+    let key = match target {
         "local" => "password = \"local\"".to_string(),
         _ => format!(
             "password = \"${{AXON_DB_PASSWORD_{}}}\"",
@@ -98,15 +99,15 @@ pub fn users(ms: &[Manifest], target: &str, solo: Option<&str>) -> Result<String
         ),
     };
     Ok(format!(
-        "# generado por axon — no editar.\n\
+        "# generated by axon — do not edit.\n\
          #   axon pooler manifests/ --service {svc} --users --target {target} > users.toml\n\
          \n\
          [[users]]\n\
          name = \"postgres\"\n\
          database = \"{base}\"\n\
-         {clave}\n\
+         {key}\n\
          # La misma regla que en pgdog.toml, otra vez aca: el ajuste por usuario\n\
-         # gana sobre el general, asi que declararlo de un solo lado deja la\n\
+         # gana sobre el general, asi que declararlo de un only lado deja la\n\
          # puerta abierta por el otro.\n\
          cross_shard_disabled = {cross}\n",
         base = base(svc),
@@ -114,13 +115,13 @@ pub fn users(ms: &[Manifest], target: &str, solo: Option<&str>) -> Result<String
     ))
 }
 
-pub fn build(ms: &[Manifest], target: &str, solo: Option<&str>) -> Result<String, String> {
-    let m = elegir(ms, solo)?;
+pub fn build(ms: &[Manifest], target: &str, only: Option<&str>) -> Result<String, String> {
+    let m = pick(ms, only)?;
     let esquemas = schemas(ms);
     let pl = &m.pooler;
     let svc = &m.service;
     let mut o = vec![
-        "# generado por axon — no editar.".to_string(),
+        "# generated by axon — do not edit.".to_string(),
         format!("#   axon pooler manifests/ --service {svc} --target {target} > pgdog.toml"),
         "#".to_string(),
         match target {
@@ -145,15 +146,15 @@ pub fn build(ms: &[Manifest], target: &str, solo: Option<&str>) -> Result<String
     ));
     if pl.shards > 1 {
         // El parser tiene que estar SIEMPRE encendido: en `auto` no se activa
-        // con un solo nodo primario, y ahi es justo donde una GUC de sesion se
+        // con un only nodo primario, y ahi es justo donde una GUC de sesion se
         // cuela sin ser interceptada.
         o.push(
-            "# `on` y no `auto`: en `auto` el parser no se activa con un solo nodo\n\
+            "# `on` y no `auto`: en `auto` el parser no se activa con un only nodo\n\
              # primario, que es exactamente el caso donde una GUC de sesion se cuela\nquery_parser = \"on\""
                 .into(),
         );
         o.push(format!(
-            "# el reparto se declara en el manifiesto; aca solo se refleja\n# shards = {}",
+            "# el reparto se declara en el manifiesto; aca only se refleja\n# shards = {}",
             pl.shards
         ));
     }
@@ -193,40 +194,40 @@ pub fn build(ms: &[Manifest], target: &str, solo: Option<&str>) -> Result<String
     }
 
     if pl.shards > 1 {
-        let clave = m
+        let key = m
             .infra
             .shard_key
             .as_ref()
             .ok_or_else(|| format!("{svc}: `shards > 1` sin `shard_key`"))?;
-        let tablas = esquemas
+        let tables = esquemas
             .get(svc)
             .ok_or_else(|| format!("{svc}: sin migraciones, no se puede declarar el reparto"))?;
-        let mut declaradas = 0;
-        for (t, tb) in tablas {
-            if ["outbox", "inbox_seen"].contains(&t.as_str()) || !tb.tiene(clave) {
+        let mut declared = 0;
+        for (t, tb) in tables {
+            if ["outbox", "inbox_seen"].contains(&t.as_str()) || !tb.has(key) {
                 continue;
             }
-            let tipo = tipo_clave(tb, clave).ok_or_else(|| {
+            let kind = key_type(tb, key).ok_or_else(|| {
                 format!(
-                    "{svc}.{t}.{clave}: tipo `{}` que el sharder no sabe hashear; admite \
+                    "{svc}.{t}.{key}: kind `{}` que el sharder no sabe hashear; admite \
                      uuid, bigint y varchar",
-                    tb.col(clave).map(|c| c.ty.as_str()).unwrap_or("?")
+                    tb.col(key).map(|c| c.ty.as_str()).unwrap_or("?")
                 )
             })?;
             o.push("[[sharded_tables]]".into());
             o.push(format!("database = \"{}\"", base(svc)));
             o.push(format!("name = \"{t}\""));
-            o.push(format!("column = \"{clave}\""));
-            o.push(format!("data_type = \"{tipo}\""));
+            o.push(format!("column = \"{key}\""));
+            o.push(format!("data_type = \"{kind}\""));
             // el mismo hash que `PARTITION BY HASH` de Postgres, para que el
             // reparto coincida si algun dia se mueve dentro del motor
             o.push("hasher = \"postgres\"".into());
             o.push(String::new());
-            declaradas += 1;
+            declared += 1;
         }
-        if declaradas == 0 {
+        if declared == 0 {
             return Err(format!(
-                "{svc}: ninguna tabla lleva `{clave}`, asi que no hay nada que repartir"
+                "{svc}: ninguna tabla lleva `{key}`, asi que no hay nada que repartir"
             ));
         }
         // pgdog rutea por la columna de inquilino cuando la reconoce en la

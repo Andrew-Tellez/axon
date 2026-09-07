@@ -1,4 +1,4 @@
-//! Carga, descubrimiento y esquema derivado de migraciones.
+//! Loading, discovery, and the schema derived from the migrations.
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -16,19 +16,19 @@ pub struct Method {
     pub input: Fields,
     #[serde(rename = "out", default)]
     pub output: Fields,
-    /// Exposicion HTTP: "POST /payments". Sin esto el metodo es solo RPC interno.
+    /// HTTP exposure: "POST /payments". Without it the method is internal RPC only.
     pub http: Option<String>,
-    /// Reintentable sin efectos duplicados. Obligatorio en metodos mutantes.
+    /// Retryable with no duplicated effects. Mandatory on mutating methods.
     #[serde(default)]
     pub idempotent: bool,
-    /// Quien puede llamarla desde el edge: "public" o "required". No tiene
-    /// default a proposito: una ruta expuesta sin decidir esto es un incidente.
+    /// Who may call it from the edge: "public" or "required". Deliberately
+    /// without a default: an exposed route with this undecided is an incident.
     pub auth: Option<String>,
-    /// Peticiones por minuto en el gateway.
+    /// Requests per minute at the gateway.
     pub rate_limit: Option<u32>,
-    /// Presupuesto de tiempo en el edge.
+    /// Time budget at the edge.
     pub timeout_ms: Option<u32>,
-    /// Devuelve coleccion: obliga paginacion por cursor.
+    /// Returns a collection: forces cursor pagination.
     #[serde(default)]
     pub paginated: bool,
 }
@@ -43,7 +43,7 @@ impl Method {
     pub fn mutating(&self) -> bool {
         matches!(self.verb(), Some("POST" | "PUT" | "PATCH" | "DELETE"))
     }
-    /// GET/HEAD lo son por definicion; lo demas hay que declararlo.
+    /// GET/HEAD are by definition; everything else has to be declared.
     pub fn is_idempotent(&self) -> bool {
         self.idempotent || !self.mutating()
     }
@@ -54,13 +54,13 @@ pub struct Depend {
     pub service: Option<String>,
     pub external: Option<String>,
     pub method: String,
-    /// Handler concreto que hace la llamada; afina el diagrama de secuencia.
+    /// The concrete handler making the call; sharpens the sequence diagram.
     pub via: Option<String>,
-    /// Toda llamada de red tiene presupuesto de tiempo. Obligatorio.
+    /// Every network call has a time budget. Mandatory.
     pub timeout_ms: Option<u32>,
     #[serde(default)]
     pub retries: u32,
-    /// Corta la cascada cuando el otro lado se cae.
+    /// Cuts the cascade when the other side goes down.
     #[serde(default)]
     pub breaker: bool,
 }
@@ -74,31 +74,32 @@ impl Depend {
     }
 }
 
-/// El lado del teorema CAP que elige este servicio.
+/// The side of the CAP theorem this service picks.
 ///
-/// La tolerancia a particiones no se elige: en un sistema distribuido la red
-/// se parte y punto. Lo que se elige es que hacer mientras esta partida, y esa
-/// decision cambia el nivel de aislamiento, la topologia de lectura y si el
-/// codigo generado te obliga a escribir un camino degradado.
+/// Partition tolerance is not a choice: in a distributed system the network
+/// partitions, full stop. What you choose is what to do while it is
+/// partitioned, and that decision changes the isolation level, the read
+/// topology, and whether the generated code forces you to write a degraded
+/// path.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Cap {
-    /// "strong" (CP): antes de servir un dato viejo, no sirve nada.
-    /// "eventual" (AP): sirve algo viejo antes que no servir nada.
+    /// "strong" (CP): rather than serve stale data, serve nothing.
+    /// "eventual" (AP): serve something stale rather than nothing.
     pub consistency: String,
-    /// "reject" falla cerrado; "degrade" obliga a declarar que se sirve.
+    /// "reject" fails closed; "degrade" forces declaring what gets served.
     pub on_partition: String,
-    /// Presupuesto de obsolescencia. Sin un numero, "eventual" no significa nada.
+    /// Staleness budget. Without a number, "eventual" means nothing.
     pub max_staleness_ms: Option<u32>,
-    /// `true` cuando la eleccion la hizo alguien; `false` cuando es el default.
+    /// `true` when somebody made the choice; `false` when it is the default.
     #[serde(skip)]
     pub declarado: bool,
 }
 
 impl Default for Cap {
     fn default() -> Self {
-        // El par seguro: falla cerrado. Es un default, no una decision, y
-        // `verify` avisa de que nadie la tomo.
+        // The safe pair: fails closed. It is a default, not a decision, and
+        // `verify` says so when nobody made it.
         Self {
             consistency: "strong".into(),
             on_partition: "reject".into(),
@@ -112,11 +113,11 @@ impl Cap {
     pub fn eventual(&self) -> bool {
         self.consistency == "eventual"
     }
-    pub fn degrada(&self) -> bool {
+    pub fn degrades(&self) -> bool {
         self.on_partition == "degrade"
     }
-    /// Aislamiento acorde: pagar dos veces sale mas caro que reintentar.
-    pub fn aislamiento(&self) -> &str {
+    /// Isolation to match: paying twice costs more than retrying.
+    pub fn isolation(&self) -> &str {
         if self.eventual() {
             "READ COMMITTED"
         } else {
@@ -125,48 +126,47 @@ impl Cap {
     }
 }
 
-/// Que pasa con los eventos de este servicio cuando llegan a la bodega.
+/// What happens to this service's events once they reach the warehouse.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Analytics {
-    /// `false` deja el servicio fuera de la exportacion.
+    /// `false` leaves the service out of the export.
     pub export: bool,
-    /// Que hacer con los campos declarados `pii` al exportarlos:
-    /// `"exclude"` no los manda, `"hash"` manda un SHA-256 con salt.
+    /// What to do with fields declared `pii` when exporting them:
+    /// `"exclude"` does not send them, `"hash"` sends a salted SHA-256.
     ///
-    /// El default es excluir. Una bodega es el lugar donde un dato personal
-    /// vive mas tiempo, se copia mas veces y lo lee mas gente, asi que el
-    /// valor seguro tiene que ser el que no lo manda.
+    /// The default is to exclude. A warehouse is where personal data lives
+    /// longest, gets copied most, and is read by the most people, so the safe
+    /// value has to be the one that does not send it.
     pub pii: String,
-    /// A que bodega. Estaba como bandera de la CLI, y eso permitia generar el
-    /// esquema de Snowflake y desplegar una infraestructura que no lleva nada
-    /// ahi: el esquema se aplicaba y las tablas se quedaban vacias sin que nada
-    /// avisara. Declarado, `axon infra` puede cablear la ingesta —o negarse.
+    /// Which warehouse. This used to be a CLI flag, which allowed generating
+    /// the Snowflake schema and deploying infrastructure that carries nothing
+    /// there: the schema applied and the tables stayed empty with nothing
+    /// saying so. Declared, `axon infra` can wire the ingest —or refuse.
     pub warehouse: String,
 }
 
-/// Las bodegas para las que hay dialecto. Que exista el dialecto no quiere
-/// decir que exista el camino de ingesta en todos los targets: eso lo dice
-/// `INGESTA`.
-pub const BODEGAS: [&str; 3] = ["bigquery", "snowflake", "clickhouse"];
+/// The warehouses a dialect exists for. That the dialect exists does not mean
+/// the ingest path exists on every target: that is what `INGEST` says.
+pub const WAREHOUSES: [&str; 3] = ["bigquery", "snowflake", "clickhouse"];
 
-/// Combinaciones (target, bodega) con camino de ingesta cableado. Lo que no
-/// esta aqui `axon infra` lo RECHAZA: generar el esquema y no llevar nada a la
-/// bodega es el peor resultado, porque se aplica sin error.
-pub const INGESTA: [(&str, &str); 5] = [
-    // suscripcion de Pub/Sub directa a BigQuery
+/// (target, warehouse) combinations with a wired ingest path. What is not
+/// here `axon infra` REFUSES: generating the schema and carrying nothing to
+/// the warehouse is the worst outcome, because it applies with no error.
+pub const INGEST: [(&str, &str); 5] = [
+    // a Pub/Sub subscription straight into BigQuery
     ("gcp", "bigquery"),
-    // Firehose a S3, y de ahi la bodega carga con lo suyo
+    // Firehose to S3, and from there the warehouse loads with its own tooling
     ("aws", "snowflake"),
     ("aws", "clickhouse"),
-    // un contenedor de ClickHouse y un cargador del log de envelopes
+    // a ClickHouse container and a loader for the envelope log
     ("local", "clickhouse"),
-    // un consumidor del broker, con config generada y validada con `vector validate`
+    // a broker consumer, with config generated and checked by `vector validate`
     ("k8s", "clickhouse"),
 ];
 
-pub fn hay_ingesta(target: &str, bodega: &str) -> bool {
-    INGESTA.contains(&(target, bodega))
+pub fn has_ingest(target: &str, warehouse: &str) -> bool {
+    INGEST.contains(&(target, warehouse))
 }
 
 impl Default for Analytics {
@@ -179,38 +179,38 @@ impl Default for Analytics {
     }
 }
 
-/// El pooler o sharder delante de la base.
+/// The pooler or sharder in front of the database.
 ///
-/// Poner un proxy en el camino de datos cambia el sujeto de casi todas las
-/// reglas de conexiones, y —lo mas importante— **rompe el aislamiento por
-/// inquilino si nadie lo declara**: en modo transaccion la misma conexion
-/// fisica se le entrega a otro inquilino, y una GUC de sesion que sobrevive
-/// devuelve las filas del anterior sin un error.
+/// Putting a proxy in the data path changes the subject of almost every
+/// connection rule and —most importantly— **breaks tenant isolation if
+/// nobody declares it**: in transaction mode the same physical connection is
+/// handed to another tenant, and a session GUC that survives returns the
+/// previous one's rows with no error.
 ///
-/// De ahi que casi todo lo de aca sea obligatorio en vez de tener un default
-/// comodo: la eleccion tiene que ser de alguien.
+/// Hence almost everything here being mandatory instead of having a
+/// comfortable default: the choice has to be somebody's.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Pooler {
-    /// `"none"` (sin pooler), o `"pgdog"`.
+    /// `"none"` (no pooler), or `"pgdog"`.
     pub engine: String,
-    /// `transaction`, `session` o `statement`. En `transaction` la conexion se
-    /// devuelve al pool en cada COMMIT, que es lo que rompe el aislamiento por
-    /// sesion.
+    /// `transaction`, `session` or `statement`. In `transaction` the connection
+    /// goes back to the pool on every COMMIT, which is what breaks per-session
+    /// isolation.
     pub mode: String,
-    /// Nodos de reparto. `1` es solo pooler, sin sharding.
+    /// Shard nodes. `1` is pooler only, no sharding.
     pub shards: u32,
-    /// Tope de conexiones de CLIENTE que acepta el pooler. Con un pooler en
-    /// medio, la aritmetica de las instancias se compara contra esto y no
-    /// contra el tope del motor.
+    /// Ceiling on CLIENT connections the pooler accepts. With a pooler in the
+    /// middle, the instance arithmetic is compared against this and not
+    /// against the engine's ceiling.
     pub max_client_conn: Option<u32>,
-    /// Conexiones que el pooler abre a CADA motor.
+    /// Connections the pooler opens to EACH engine.
     pub pool_size: Option<u32>,
-    /// Rechazar toda consulta que toque mas de un nodo, en vez de ejecutarla.
-    /// Convierte cada limitacion del sharder en un error ruidoso.
+    /// Reject every query touching more than one node instead of running it.
+    /// Turns each of the sharder's limitations into a loud error.
     pub cross_shard_disabled: bool,
-    /// Como se fija el inquilino: `"set_local"` es lo unico seguro en modo
-    /// transaccion. Ver el encabezado que genera `axon rls`.
+    /// How the tenant is pinned: `"set_local"` is the only thing that is safe
+    /// in transaction mode. See the header `axon rls` generates.
     pub tenant_binding: Option<String>,
 }
 
@@ -218,13 +218,13 @@ impl Default for Pooler {
     fn default() -> Self {
         Self {
             engine: "none".into(),
-            // el mas seguro de los tres, no el mas rapido
+            // the safest of the three, not the fastest
             mode: "session".into(),
             shards: 1,
             max_client_conn: None,
             pool_size: None,
-            // fallar ruidosamente antes que ejecutar algo que el sharder no
-            // sabe resolver bien
+            // fail loudly rather than run something the sharder cannot
+            // resolve correctly
             cross_shard_disabled: true,
             tenant_binding: None,
         }
@@ -232,50 +232,50 @@ impl Default for Pooler {
 }
 
 impl Pooler {
-    pub fn activo(&self) -> bool {
+    pub fn active(&self) -> bool {
         self.engine != "none"
     }
 }
 
-/// Un feature flag.
+/// A feature flag.
 ///
-/// Lo que aporta declararlos no es el SDK —OpenFeature y flagd ya existen—
-/// sino que el compilador pueda imponer lo que nadie impone: que cada flag
-/// tenga dueno y fecha de muerte. Un codigo con doscientos flags viejos no
-/// tiene doscientas features: tiene doscientas ramas que nadie prueba.
+/// What declaring them adds is not the SDK —OpenFeature and flagd already
+/// exist— but that the compiler can enforce what nobody enforces: that every
+/// flag has an owner and a death date. Code with two hundred stale flags does
+/// not have two hundred features: it has two hundred branches nobody tests.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Flag {
     pub owner: Option<String>,
-    /// Variantes, como en OpenFeature: un flag no es solo un booleano. El
-    /// valor puede ser bool, string, numero u objeto, y la evaluacion devuelve
-    /// el valor de una variante con nombre.
+    /// Variants, as in OpenFeature: a flag is not just a boolean. The value
+    /// can be a bool, string, number or object, and evaluation returns the
+    /// value of a named variant.
     ///
-    /// Sin `variants`, el flag es el caso booleano y las variantes son `on` y
-    /// `off` — que es lo que necesita la mayoria y no vale la pena escribir.
+    /// Without `variants`, the flag is the boolean case and the variants are
+    /// `on` and `off` —which is what most need and is not worth writing.
     #[serde(default)]
     pub variants: IndexMap<String, serde_json::Value>,
-    /// Nombre de la variante por defecto. Con variantes propias es obligatorio.
+    /// Name of the default variant. With custom variants it is mandatory.
     pub default_variant: Option<String>,
-    /// `YYYY-MM-DD`. Pasada esa fecha, `verify` falla: el flag se limpia o se
-    /// renueva con una decision explicita.
+    /// `YYYY-MM-DD`. Past that date, `verify` fails: the flag gets cleaned up
+    /// or renewed with an explicit decision.
     pub expires: Option<String>,
-    /// El valor seguro. Un flag nuevo prendido por defecto no es un rollout.
+    /// The safe value. A new flag on by default is not a rollout.
     #[serde(default)]
     pub default: bool,
-    /// Porcentaje del rollout gradual, 0..=100.
+    /// Percentage of the gradual rollout, 0..=100.
     pub rollout: Option<u32>,
-    /// Campo por el que se fija la decision. Sin esto la evaluacion es por
-    /// peticion, y la MISMA entidad cambia de camino a mitad de un flujo.
+    /// Field the decision is pinned by. Without it evaluation is per request,
+    /// and the SAME entity changes path halfway through a flow.
     pub sticky_by: Option<String>,
-    /// Interruptor de emergencia: vive indefinidamente y no tiene rollout
-    /// gradual, porque se apaga entero o no sirve.
+    /// Emergency switch: lives indefinitely and has no gradual rollout,
+    /// because it goes off whole or it is useless.
     #[serde(default)]
     pub kill_switch: bool,
 }
 
 impl Flag {
-    /// Las variantes efectivas. Un flag sin `variants` es el caso booleano.
-    pub fn variantes(&self) -> IndexMap<String, serde_json::Value> {
+    /// The effective variants. A flag without `variants` is the boolean case.
+    pub fn all_variants(&self) -> IndexMap<String, serde_json::Value> {
         if self.variants.is_empty() {
             let mut v = IndexMap::new();
             v.insert("on".into(), serde_json::Value::Bool(true));
@@ -286,8 +286,8 @@ impl Flag {
         }
     }
 
-    /// La variante por defecto, o la que corresponda al booleano `default`.
-    pub fn variante_defecto(&self) -> String {
+    /// The default variant, or the one matching the `default` boolean.
+    pub fn default_variant(&self) -> String {
         self.default_variant.clone().unwrap_or_else(|| {
             if self.default {
                 "on".into()
@@ -297,11 +297,11 @@ impl Flag {
         })
     }
 
-    /// El tipo de OpenFeature que corresponde a los valores declarados.
-    /// Determina el accesor que se genera: `getBooleanValue`, `getStringValue`,
-    /// `getNumberValue` o `getObjectValue`.
-    pub fn tipo(&self) -> &'static str {
-        match self.variantes().values().next() {
+    /// The OpenFeature type matching the declared values. Determines the
+    /// generated accessor: `getBooleanValue`, `getStringValue`,
+    /// `getNumberValue` or `getObjectValue`.
+    pub fn kind(&self) -> &'static str {
+        match self.all_variants().values().next() {
             Some(serde_json::Value::Bool(_)) | None => "boolean",
             Some(serde_json::Value::String(_)) => "string",
             Some(serde_json::Value::Number(_)) => "number",
@@ -316,92 +316,92 @@ pub struct Patterns {
     pub outbox: bool,
 }
 
-/// Un bucket del servicio. `public = true` lo pone detras de un CDN: nada
-/// se sirve publico sin cache, y nada privado la lleva.
+/// A bucket of the service. `public = true` puts it behind a CDN: nothing is
+/// served publicly without cache, and nothing private carries one.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Bucket {
     #[serde(default)]
     pub public: bool,
-    /// Dias tras los que el objeto se borra. Sin esto un bucket crece para siempre.
+    /// Days after which the object is deleted. Without it a bucket grows forever.
     pub retention_days: Option<u32>,
-    /// TTL del CDN en segundos; solo aplica a buckets publicos.
+    /// CDN TTL in seconds; only applies to public buckets.
     pub cache_ttl: Option<u32>,
 }
 
-/// Motores de almacen que axon soporta HOY.
+/// Store engines axon supports TODAY.
 ///
-/// Es una lista cerrada a proposito. Antes `state` era una cadena libre, asi
-/// que `state = "neo4j"` pasaba `verify` sin un error y generaba una instancia
-/// de Cloud SQL Postgres: salida incorrecta, en silencio, que es el peor modo
-/// de fallo que existe.
+/// It is a closed list on purpose. `state` used to be a free string, so
+/// `state = "neo4j"` passed `verify` with no error and generated a Cloud SQL
+/// Postgres instance: wrong output, silently, which is the worst failure mode
+/// there is.
 ///
-/// El plan es soportar mas familias —series temporales, grafos, columnares,
-/// documentales—, y el orden natural son las extensiones de Postgres
-/// (TimescaleDB, Apache AGE, pgvector), porque reusan el parser SQL, las
-/// migraciones, la RLS y los cuatro targets que ya existen. Hasta entonces,
-/// declarar un motor que no esta aca tiene que fallar y decir como seguir.
-pub const MOTORES: [&str; 1] = ["postgres"];
+/// The plan is to support more families —time series, graph, columnar,
+/// document— and the natural order is the Postgres extensions (TimescaleDB,
+/// Apache AGE, pgvector), because they reuse the SQL parser, the migrations,
+/// the RLS and the four targets that already exist. Until then, declaring an
+/// engine that is not here has to fail and say how to proceed.
+pub const ENGINES: [&str; 1] = ["postgres"];
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Infra {
     pub state: Option<String>,
     pub runtime: Option<String>,
-    /// Directorio de migraciones: la fuente de verdad del esquema.
+    /// Migrations directory: the schema's source of truth.
     pub migrations: Option<String>,
     #[serde(default)]
     pub secrets: Vec<String>,
     pub min_instances: Option<u32>,
     pub max_instances: Option<u32>,
-    /// Puerto HTTP del contenedor.
+    /// The container's HTTP port.
     pub port: Option<u16>,
-    /// Almacenamiento de objetos del servicio, por nombre logico.
+    /// The service's object storage, by logical name.
     #[serde(default)]
     pub buckets: IndexMap<String, Bucket>,
-    /// Conexiones que abre CADA instancia. Multiplicado por el techo de
-    /// instancias es lo que le llega al motor.
+    /// Connections EACH instance opens. Multiplied by the instance ceiling
+    /// is what reaches the engine.
     pub pool_size: Option<u32>,
-    /// Tope de conexiones del motor. Si el producto lo pasa, el servicio se
-    /// cae por agotamiento cuando escala, no cuando lo pruebas.
+    /// The engine's connection ceiling. If the product goes past it, the
+    /// service falls over from exhaustion when it scales, not when you test it.
     pub max_connections: Option<u32>,
-    /// Alta disponibilidad: un standby con failover automatico.
+    /// High availability: a standby with automatic failover.
     ///
-    /// NO es lo mismo que una replica de lectura, y confundirlos es el error
-    /// mas comun del tema. Del standby no se lee: existe para que el servicio
-    /// siga en pie cuando el primario se cae, y por eso NO rompe la
-    /// consistencia. De una replica de lectura si se lee, va con retraso, y
-    /// por eso si la rompe.
+    /// It is NOT the same as a read replica, and confusing the two is the
+    /// most common mistake on the subject. Nobody reads from the standby: it
+    /// exists so the service stays up when the primary goes down, and that is
+    /// why it does NOT break consistency. A read replica IS read from, it
+    /// lags, and that is why it does.
     pub ha: Option<bool>,
-    /// Dias de retencion de respaldos. Alta disponibilidad no es respaldo: un
-    /// standby replica el `DROP TABLE` en segundos.
+    /// Days of backup retention. High availability is not a backup: a standby
+    /// replicates the `DROP TABLE` in seconds.
     pub backup_retention_days: Option<u32>,
-    /// Recuperacion a un punto en el tiempo. Lo unico que salva de un borrado
-    /// logico, que es de lo que un standby no salva.
+    /// Point-in-time recovery. The only thing that saves you from a logical
+    /// delete, which is what a standby does not save you from.
     pub pitr: Option<bool>,
-    /// Replicas de LECTURA: se lee de ellas, y van con retraso. Declararlas es
-    /// elegir disponibilidad sobre consistencia para esas lecturas.
+    /// READ replicas: they are read from, and they lag. Declaring them is
+    /// choosing availability over consistency for those reads.
     pub read_replicas: Option<u32>,
-    /// Columna por la que se reparte la tabla entre nodos. Toda tabla la
-    /// necesita, y ninguna FK puede cruzar de una repartida a una que no.
+    /// Column the table is sharded by across nodes. Every table needs one,
+    /// and no FK can cross from a sharded table to one that is not.
     pub shard_key: Option<String>,
-    /// Columna que identifica al inquilino. Si esta, toda tabla la necesita y
-    /// `axon rls` genera la politica que la aplica.
+    /// Column identifying the tenant. If present, every table needs it and
+    /// `axon rls` generates the policy enforcing it.
     pub tenant_column: Option<String>,
-    /// Tablas que no son de negocio y no llevan inquilino.
+    /// Tables that are not business data and carry no tenant.
     #[serde(default)]
     pub tenant_exempt: Vec<String>,
 }
 
-/// Una transicion. El QUE es portable a cualquier lenguaje; el COMO
-/// (el cuerpo del handler) lo escribe la persona, siempre.
+/// A transition. The WHAT is portable to any language; the HOW
+/// (the handler's body) is always written by a person.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Transition {
     pub from: Vec<String>,
     pub to: String,
-    /// Metodo o evento que la dispara.
+    /// Method or event that fires it.
     pub on: String,
-    /// Evento que se emite al completarla.
+    /// Event emitted on completing it.
     pub emits: Option<String>,
-    /// Transicion inversa, para sagas: que deshace este paso.
+    /// The inverse transition, for sagas: what undoes this step.
     pub compensates: Option<String>,
 }
 
@@ -436,136 +436,137 @@ impl Machine {
     }
 }
 
-/// Un paso de una saga: la accion y lo que la deshace.
+/// A saga step: the action and what undoes it.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Paso {
-    /// `servicio.metodo` a invocar. Tiene que ser una dependencia declarada.
+pub struct Step {
+    /// `service.method` to invoke. Has to be a declared dependency.
     #[serde(rename = "do")]
-    pub hacer: String,
-    /// `servicio.metodo` que revierte el paso. Solo el ULTIMO puede omitirlo:
-    /// si el ultimo falla, no hay nada suyo que deshacer.
+    pub call: String,
+    /// `service.method` that reverts the step. Only the LAST one may omit it:
+    /// if the last one fails, there is nothing of its own to undo.
     pub undo: Option<String>,
 }
 
-impl Paso {
-    /// `("payments", "capturePayment")`. `None` si no tiene la forma
-    /// `servicio.metodo`.
-    pub fn partes(r: &str) -> Option<(&str, &str)> {
+impl Step {
+    /// `("payments", "capturePayment")`. `None` if it does not have the
+    /// `service.method` shape.
+    pub fn parts(r: &str) -> Option<(&str, &str)> {
         let (svc, met) = r.split_once('.')?;
         (!svc.is_empty() && !met.is_empty() && !met.contains('.')).then_some((svc, met))
     }
 }
 
-/// Saga: una secuencia de pasos en servicios distintos, cada uno con su
-/// compensacion, coordinada por este servicio.
+/// Saga: a sequence of steps across different services, each with its
+/// compensation, coordinated by this service.
 ///
-/// Lo que la hace declarable es que el coordinador no tiene logica de negocio:
-/// llama en orden, y si algo falla deshace en orden inverso lo que ya hizo. Eso
-/// se genera. Lo que no se puede generar —que exista la compensacion, que sea
-/// idempotente, que el presupuesto de tiempo cierre— se puede REFUTAR, y es
-/// donde estan los errores que cuestan dinero.
+/// What makes it declarable is that the coordinator has no business logic:
+/// it calls in order, and if something fails it undoes what it already did in
+/// reverse order. That gets generated. What cannot be generated —that the
+/// compensation exists, that it is idempotent, that the time budget closes—
+/// can be REFUTED, and that is where the errors that cost money live.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Saga {
-    /// Metodo propio o evento consumido que la arranca.
+    /// Own method or consumed event that starts it.
     pub on: Option<String>,
     #[serde(default)]
-    pub steps: Vec<Paso>,
-    /// Presupuesto del flujo completo. Tiene que cubrir la suma de los pasos:
-    /// rendirse mientras un paso sigue en vuelo deja al coordinador
-    /// compensando algo que despues tiene exito.
+    pub steps: Vec<Step>,
+    /// Budget for the whole flow. It has to cover the sum of the steps:
+    /// giving up while a step is still in flight leaves the coordinator
+    /// compensating something that later succeeds.
     pub timeout_ms: Option<u32>,
 }
 
 impl Saga {
-    /// La tabla donde vive el avance. Sin ella un reinicio del coordinador
-    /// pierde la saga a medias: ni termina ni compensa.
-    pub fn tabla(nombre: &str) -> String {
-        format!("saga_{}", nombre.to_lowercase())
+    /// The table where progress lives. Without it a coordinator restart
+    /// loses the half-finished saga: it neither finishes nor compensates.
+    pub fn table(name: &str) -> String {
+        format!("saga_{}", name.to_lowercase())
     }
 }
 
-/// Event sourcing: el estado ES el flujo de eventos, y lo que hoy se guarda en
-/// una fila es una proyeccion de ese flujo.
+/// Event sourcing: the state IS the event stream, and what today lives in a
+/// row is a projection of that stream.
 ///
-/// Lo que se puede generar de esto es todo lo mecanico: la tabla append-only, el
-/// `fold` con un caso por evento declarado —asi que agregar un evento rompe la
-/// compilacion— y el append con version optimista. Lo que se puede REFUTAR es lo
-/// que cuesta caro: un evento que el servicio no emite, un `UPDATE` sobre el
-/// flujo, o la falta del UNIQUE que evita que dos escrituras concurrentes se
-/// pisen sin un solo error.
+/// What can be generated of this is everything mechanical: the append-only
+/// table, the `fold` with one case per declared event —so adding an event
+/// breaks the build— and the append with optimistic versioning. What can be
+/// REFUTED is what costs dearly: an event the service does not emit, an
+/// `UPDATE` on the stream, or the missing UNIQUE that keeps two concurrent
+/// writes from overwriting each other without a single error.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Aggregate {
-    /// Los eventos que componen el estado. Todos tienen que estar declarados en
-    /// `[emits]`: un agregado no puede fundarse en un contrato que no existe.
+    /// The events making up the state. All of them have to be declared in
+    /// `[emits]`: an aggregate cannot be founded on a contract that does not exist.
     #[serde(default)]
     pub events: Vec<String>,
-    /// La maquina de estados que gobierna las transiciones, si la hay. Con
-    /// ella, el `fold` generado rechaza el evento que llega fuera de orden en
-    /// vez de aplicarlo.
+    /// The state machine governing the transitions, if there is one. With it,
+    /// the generated `fold` rejects an event arriving out of order instead of
+    /// applying it.
     pub machine: Option<String>,
-    /// Cada cuantos eventos se guarda una foto. 0 es sin fotos: reconstruir
-    /// desde el principio siempre.
+    /// How many events between snapshots. 0 is no snapshots: always rebuild
+    /// from the beginning.
     #[serde(default)]
     pub snapshot_every: u32,
-    /// Version de las REGLAS con las que se calculo la foto.
+    /// Version of the RULES the snapshot was computed with.
     ///
-    /// Una foto es una cache del `fold`, y si el `fold` cambia —una regla nueva,
-    /// un campo que ahora se acumula distinto— las fotos viejas codifican la
-    /// version anterior. Rehidratar de ahi da un estado que ya no coincide con
-    /// reproducir el flujo, y eso no da ningun error: da un numero equivocado.
+    /// A snapshot is a cache of the `fold`, and if the `fold` changes —a new
+    /// rule, a field now accumulated differently— the old snapshots encode the
+    /// previous version. Rehydrating from there gives a state that no longer
+    /// matches replaying the stream, and that raises no error: it gives a
+    /// wrong number.
     ///
-    /// Subir este numero invalida las fotos existentes y las hace reconstruir.
-    /// Es lo unico que convierte ese fallo silencioso en uno que se corrige
-    /// solo.
-    #[serde(default = "una")]
+    /// Bumping this number invalidates the existing snapshots and makes them
+    /// rebuild. It is the only thing turning that silent failure into one
+    /// that fixes itself.
+    #[serde(default = "one")]
     pub snapshot_version: u32,
 }
 
-fn una() -> u32 {
+fn one() -> u32 {
     1
 }
 
 impl Aggregate {
-    /// La tabla del flujo. Append-only: `verify` bloquea cualquier migracion
-    /// que la actualice o borre de ella.
-    pub fn tabla(nombre: &str) -> String {
-        format!("{}_event", nombre.to_lowercase())
+    /// The stream's table. Append-only: `verify` blocks any migration that
+    /// updates it or deletes from it.
+    pub fn table(name: &str) -> String {
+        format!("{}_event", name.to_lowercase())
     }
-    /// La tabla de fotos, si se declararon.
-    pub fn fotos(nombre: &str) -> String {
-        format!("{}_snapshot", nombre.to_lowercase())
+    /// The snapshot table, if snapshots were declared.
+    pub fn snapshots(name: &str) -> String {
+        format!("{}_snapshot", name.to_lowercase())
     }
 }
 
-/// CQRS: un modelo de lectura construido aplicando eventos ya declarados.
+/// CQRS: a read model built by applying already declared events.
 ///
-/// Lo que aporta declararlo no es el codigo —una proyeccion es un `switch`—
-/// sino que el compilador imponga lo que nadie impone: que la vista solo
-/// consuma eventos que alguien emite, que tenga donde anotar hasta donde llego,
-/// y que su obsolescencia quepa en la que el servicio ya prometio.
+/// What declaring it adds is not the code —a projection is a `switch`— but
+/// that the compiler enforces what nobody enforces: that the view only
+/// consumes events somebody emits, that it has somewhere to record how far
+/// it got, and that its staleness fits the one the service already promised.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct View {
-    /// Los eventos que la construyen.
+    /// The events that build it.
     #[serde(default)]
     pub on: Vec<String>,
-    /// La tabla donde vive. Por defecto `vista_<nombre>`.
+    /// The table it lives in. `view_<name>` by default.
     pub table: Option<String>,
-    /// Cuanto puede atrasarse. Tiene que caber en el `max_staleness_ms` del
-    /// servicio: una vista mas vieja que eso hace mentir a la declaracion.
+    /// How far it may lag. It has to fit in the service's `max_staleness_ms`:
+    /// a view staler than that makes the declaration a lie.
     pub max_staleness_ms: Option<u32>,
 }
 
 impl View {
-    pub fn tabla(&self, nombre: &str) -> String {
+    pub fn table(&self, name: &str) -> String {
         self.table
             .clone()
-            .unwrap_or_else(|| format!("vista_{}", nombre.to_lowercase()))
+            .unwrap_or_else(|| format!("view_{}", name.to_lowercase()))
     }
-    /// Donde anota hasta donde llego. Sin esto, un reinicio reprocesa desde el
-    /// principio o se salta lo que no alcanzo a aplicar, y las dos cosas dan
-    /// una vista incorrecta sin un error.
-    pub fn checkpoint(nombre: &str) -> String {
-        format!("vista_{}_checkpoint", nombre.to_lowercase())
+    /// Where it records how far it got. Without this, a restart reprocesses
+    /// from the beginning or skips what it did not manage to apply, and both
+    /// give a wrong view with no error.
+    pub fn checkpoint(name: &str) -> String {
+        format!("view_{}_checkpoint", name.to_lowercase())
     }
 }
 
@@ -573,12 +574,12 @@ impl View {
 pub struct Manifest {
     pub service: String,
     pub version: Option<String>,
-    /// Gobernanza: todo servicio tiene dueno humano y criticidad declarada.
+    /// Governance: every service has a human owner and declared criticality.
     pub owner: Option<String>,
     pub tier: Option<String>,
-    /// Nombres de campo que llevan datos personales, en cualquier evento o
-    /// metodo de este servicio. Lo usa el generador para redactar logs y
-    /// `verify` para bloquear que salgan por una ruta publica.
+    /// Field names carrying personal data, in any event or method of this
+    /// service. The generator uses it to redact logs and `verify` to block
+    /// them from leaving through a public route.
     #[serde(default)]
     pub pii: Vec<String>,
     #[serde(default)]
@@ -593,42 +594,42 @@ pub struct Manifest {
     pub depends: Vec<Depend>,
     #[serde(default)]
     pub patterns: Patterns,
-    /// Lado del teorema CAP. Ver `Cap`.
+    /// Side of the CAP theorem. See `Cap`.
     #[serde(default)]
     pub cap: Cap,
-    /// Feature flags del servicio.
+    /// The service's feature flags.
     #[serde(default)]
     pub flags: IndexMap<String, Flag>,
-    /// Exportacion a la bodega de datos.
+    /// Export to the data warehouse.
     #[serde(default)]
     pub analytics: Analytics,
-    /// Pooler o sharder delante de la base. Ver `Pooler`.
+    /// Pooler or sharder in front of the database. See `Pooler`.
     #[serde(default)]
     pub pooler: Pooler,
-    /// Maquinas de estado del dominio: la unica logica de negocio que vale
-    /// la pena declarar, porque es la misma en todos los lenguajes.
+    /// The domain's state machines: the only business logic worth declaring,
+    /// because it is the same in every language.
     #[serde(default)]
     pub machine: IndexMap<String, Machine>,
-    /// Sagas que coordina este servicio. Ver `Saga`.
+    /// Sagas this service coordinates. See `Saga`.
     #[serde(default)]
     pub saga: IndexMap<String, Saga>,
-    /// Agregados con event sourcing. Ver `Aggregate`.
+    /// Aggregates with event sourcing. See `Aggregate`.
     #[serde(default)]
     pub aggregate: IndexMap<String, Aggregate>,
-    /// Modelos de lectura. Ver `View`.
+    /// Read models. See `View`.
     #[serde(default)]
     pub view: IndexMap<String, View>,
     #[serde(default)]
     pub infra: Infra,
-    /// Overrides por entorno: `[env.prod] min_instances = 3`.
+    /// Per-environment overrides: `[env.prod] min_instances = 3`.
     #[serde(default)]
     pub env: IndexMap<String, Infra>,
     #[serde(skip)]
     pub origin: PathBuf,
 }
 
-/// Aplica los overrides de un entorno sobre la infra base. El manifiesto
-/// sigue siendo uno solo: los entornos son deltas, no copias.
+/// Applies an environment's overrides on top of the base infra. The manifest
+/// stays a single one: environments are deltas, not copies.
 pub fn for_env(m: &Manifest, env: &str) -> Manifest {
     let mut out = m.clone();
     if let Some(o) = m.env.get(env) {
@@ -687,14 +688,14 @@ pub fn for_env(m: &Manifest, env: &str) -> Manifest {
 pub fn load(path: &Path) -> Result<Manifest, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut m: Manifest = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    // serde no distingue "ausente" de "igual al default"; el texto si
+    // serde cannot tell "absent" from "equal to the default"; the text can
     m.cap.declarado = text.contains("[cap]");
     m.origin = path.to_path_buf();
     Ok(m)
 }
 
-/// Fusiona manifiestos de disco y de servicios vivos. Un servicio publica el
-/// suyo en /.well-known/axon.json; uno externo se congela en un *.external.toml.
+/// Merges manifests from disk and from live services. A service publishes its
+/// own at /.well-known/axon.json; an external one is frozen into a *.external.toml.
 pub fn discover(sources: &[String]) -> Result<Vec<Manifest>, String> {
     let mut out = Vec::new();
     for s in sources {
@@ -713,7 +714,7 @@ pub fn discover(sources: &[String]) -> Result<Vec<Manifest>, String> {
                     m.origin = PathBuf::from(&url);
                     out.push(m);
                 }
-                // un servicio caido no rompe el descubrimiento
+                // a service that is down does not break discovery
                 Err(e) => eprintln!("axon: {url}: {e}"),
             }
         } else {
@@ -723,7 +724,7 @@ pub fn discover(sources: &[String]) -> Result<Vec<Manifest>, String> {
                     .map_err(|e| format!("{s}: {e}"))?
                     .filter_map(|e| e.ok().map(|e| e.path()))
                     .filter(|p| p.extension().is_some_and(|e| e == "toml"))
-                    // axon.*.toml es configuracion del propio axon, no un servicio
+                    // axon.*.toml is axon's own config, not a service
                     .filter(|p| {
                         !p.file_name()
                             .is_some_and(|n| n.to_string_lossy().starts_with("axon."))
@@ -741,7 +742,7 @@ pub fn discover(sources: &[String]) -> Result<Vec<Manifest>, String> {
     Ok(out)
 }
 
-// ---------- esquema derivado de las migraciones ----------
+// ---------- schema derived from the migrations ----------
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Column {
@@ -749,62 +750,61 @@ pub struct Column {
     pub ty: String,
     pub pk: bool,
     pub fk: Option<String>,
-    /// Genera su valor de una secuencia: `serial`, `bigserial`,
-    /// `GENERATED ... AS IDENTITY`. Al repartir, cada nodo tiene su propia
-    /// secuencia y los valores colisionan.
+    /// Generates its value from a sequence: `serial`, `bigserial`,
+    /// `GENERATED ... AS IDENTITY`. When sharding, each node has its own
+    /// sequence and the values collide.
     pub serial: bool,
 }
 
-/// Una tabla: sus columnas y sus restricciones de unicidad.
+/// A table: its columns and its uniqueness constraints.
 ///
-/// Las unicidades van como conjuntos de columnas y no como una marca por
-/// columna, porque eso es lo que decide si son seguras al repartir: una
-/// `UNIQUE (tenant_id, handle)` la puede garantizar cada nodo por separado;
-/// una `UNIQUE (handle)` no, y el conjunto de nodos tampoco.
+/// Uniqueness is kept as sets of columns and not as a per-column mark,
+/// because that is what decides whether they are safe when sharding: a
+/// `UNIQUE (tenant_id, handle)` can be guaranteed by each node on its own;
+/// a `UNIQUE (handle)` cannot, and neither can the set of nodes.
 #[derive(Debug, Clone, Default, Serialize)]
-pub struct Tabla {
+pub struct Table {
     pub cols: Vec<Column>,
-    /// Cada entrada es el conjunto de columnas de una restriccion UNIQUE o
-    /// PRIMARY KEY.
+    /// Each entry is the column set of a UNIQUE or PRIMARY KEY constraint.
     pub uniques: Vec<Vec<String>>,
 }
 
-impl Tabla {
-    pub fn col(&self, nombre: &str) -> Option<&Column> {
-        self.cols.iter().find(|c| c.name == nombre)
+impl Table {
+    pub fn col(&self, name: &str) -> Option<&Column> {
+        self.cols.iter().find(|c| c.name == name)
     }
-    pub fn tiene(&self, nombre: &str) -> bool {
-        self.col(nombre).is_some()
+    pub fn has(&self, name: &str) -> bool {
+        self.col(name).is_some()
     }
 }
 
-pub type Tables = IndexMap<String, Tabla>;
+pub type Tables = IndexMap<String, Table>;
 
-use sqlparser::ast::{AlterTableOperation, ColumnOption, ObjectType, Statement, TableConstraint};
+use sqlparser::ast::{AlterTableOperation, ColumnOption, ObjectType, RenameTableNameKind, Statement, TableConstraint};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
-/// El esquema se lee con un parser SQL de verdad. Una regex se rompe con
-/// `PARTITION BY`, tipos compuestos o lo que genere cualquier ORM, y lo peor
-/// es que se rompe en silencio: devuelve columnas mal y nadie se entera.
-/// Esto falla ruidosamente, que es lo unico aceptable para el ER y para el
-/// chequeo de FK entre servicios.
-fn statements(text: &str, origen: &str) -> Vec<Statement> {
+/// The schema is read with a real SQL parser. A regex breaks on
+/// `PARTITION BY`, composite types, or whatever any ORM generates, and the
+/// worst part is that it breaks silently: it returns the wrong columns and
+/// nobody notices. This fails loudly, which is the only acceptable thing for
+/// the ER diagram and for the cross-service FK check.
+fn statements(text: &str, origin: &str) -> Vec<Statement> {
     match Parser::parse_sql(&PostgreSqlDialect {}, text) {
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "axon: {origen}: no se pudo parsear el SQL: {e}\n      \
+                "axon: {origin}: no se pudo parsear el SQL: {e}\n      \
                  axon lee las migraciones para el ER y para bloquear FK entre \
-                 servicios; preferir fallar a adivinar columnas"
+                 servicios; preferir fallar a adivinar columns"
             );
             std::process::exit(1);
         }
     }
 }
 
-/// Postgres pliega a minusculas todo identificador sin comillas. Guardar el
-/// casing del archivo y despues citarlo produce una columna que no existe.
+/// Postgres folds every unquoted identifier to lowercase. Keeping the file's
+/// casing and quoting it later produces a column that does not exist.
 fn ident(i: &sqlparser::ast::Ident) -> String {
     match i.quote_style {
         Some(_) => i.value.clone(),
@@ -812,7 +812,7 @@ fn ident(i: &sqlparser::ast::Ident) -> String {
     }
 }
 
-fn nombre_tabla(o: &sqlparser::ast::ObjectName) -> String {
+fn table_name(o: &sqlparser::ast::ObjectName) -> String {
     o.0.last()
         .map(|p| {
             let t = p.to_string();
@@ -824,26 +824,26 @@ fn nombre_tabla(o: &sqlparser::ast::ObjectName) -> String {
         .unwrap_or_default()
 }
 
-/// Un tipo tiene que caber en un token: el ER de mermaid es `<tipo> <columna>`.
-fn tipo_sql(t: &sqlparser::ast::DataType) -> String {
+/// A type has to fit in one token: mermaid's ER is `<type> <column>`.
+fn sql_type(t: &sqlparser::ast::DataType) -> String {
     t.to_string().to_lowercase().replace(' ', "_")
 }
 
-pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
-    for st in statements(text, origen) {
+pub fn parse_ddl(text: &str, origin: &str, into: &mut Tables) {
+    for st in statements(text, origin) {
         match st {
             Statement::CreateTable(ct) => {
                 let mut uniques: Vec<Vec<String>> = Vec::new();
                 let mut cols: Vec<Column> = Vec::new();
                 for c in &ct.columns {
                     let n = ident(&c.name);
-                    let t = tipo_sql(&c.data_type);
+                    let t = sql_type(&c.data_type);
                     let pk = c
                         .options
                         .iter()
                         .any(|o| matches!(o.option, ColumnOption::PrimaryKey(_)));
-                    // UNIQUE y PRIMARY KEY a nivel de columna son unicidades
-                    // de una sola columna
+                    // column-level UNIQUE and PRIMARY KEY are single-column
+                    // uniqueness constraints
                     let uniq = c
                         .options
                         .iter()
@@ -852,8 +852,8 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                         uniques.push(vec![n.clone()]);
                     }
                     cols.push(Column {
-                        // `serial` y `bigserial` son azucar de Postgres para una
-                        // secuencia, y `GENERATED AS IDENTITY` tambien
+                        // `serial` and `bigserial` are Postgres sugar for a
+                        // sequence, and so is `GENERATED AS IDENTITY`
                         serial: t.contains("serial")
                             || c.options
                                 .iter()
@@ -862,12 +862,12 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                         ty: t,
                         pk,
                         fk: c.options.iter().find_map(|o| match &o.option {
-                            ColumnOption::ForeignKey(f) => Some(nombre_tabla(&f.foreign_table)),
+                            ColumnOption::ForeignKey(f) => Some(table_name(&f.foreign_table)),
                             _ => None,
                         }),
                     });
                 }
-                // las mismas restricciones, declaradas a nivel de tabla
+                // the same constraints, declared at table level
                 for c in &ct.constraints {
                     match c {
                         TableConstraint::PrimaryKey(pk) => {
@@ -877,15 +877,15 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                                 .map(|k| k.to_string().trim_matches('"').to_lowercase())
                                 .collect();
                             for k in &cs {
-                                marcar(&mut cols, k, |c| c.pk = true);
+                                mark(&mut cols, k, |c| c.pk = true);
                             }
                             uniques.push(cs);
                         }
                         TableConstraint::ForeignKey(fk) => {
-                            let t = nombre_tabla(&fk.foreign_table);
+                            let t = table_name(&fk.foreign_table);
                             for k in &fk.columns {
                                 let t = t.clone();
-                                marcar(&mut cols, &k.to_string().to_lowercase(), move |c| {
+                                mark(&mut cols, &k.to_string().to_lowercase(), move |c| {
                                     c.fk = Some(t.clone())
                                 });
                             }
@@ -901,24 +901,24 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                         _ => {}
                     }
                 }
-                into.insert(nombre_tabla(&ct.name), Tabla { cols, uniques });
+                into.insert(table_name(&ct.name), Table { cols, uniques });
             }
             Statement::AlterTable(at) => {
-                let tabla = nombre_tabla(&at.name);
+                let table = table_name(&at.name);
                 for op in at.operations {
                     match op {
                         AlterTableOperation::AddColumn { column_def, .. } => {
                             let n = ident(&column_def.name);
-                            let t = tipo_sql(&column_def.data_type);
+                            let t = sql_type(&column_def.data_type);
                             let uniq = column_def
                                 .options
                                 .iter()
                                 .any(|o| matches!(o.option, ColumnOption::Unique { .. }));
-                            let entrada = into.entry(tabla.clone()).or_default();
+                            let entry = into.entry(table.clone()).or_default();
                             if uniq {
-                                entrada.uniques.push(vec![n.clone()]);
+                                entry.uniques.push(vec![n.clone()]);
                             }
-                            entrada.cols.push(Column {
+                            entry.cols.push(Column {
                                 serial: t.contains("serial")
                                     || column_def.options.iter().any(|o| {
                                         matches!(o.option, ColumnOption::Generated { .. })
@@ -928,43 +928,77 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                                 pk: false,
                                 fk: column_def.options.iter().find_map(|o| match &o.option {
                                     ColumnOption::ForeignKey(f) => {
-                                        Some(nombre_tabla(&f.foreign_table))
+                                        Some(table_name(&f.foreign_table))
                                     }
                                     _ => None,
                                 }),
                             });
                         }
-                        // Una clave anadida en una migracion POSTERIOR era
-                        // invisible: toda regla sobre unicidad —la del flujo de
-                        // eventos, las de reparto, el punto de una vista— la
-                        // daba por ausente y pasaba en silencio.
+                        // A key added in a LATER migration used to be
+                        // invisible: every uniqueness rule —the event
+                        // stream's, the sharding ones, a view's checkpoint—
+                        // took it as absent and passed in silence.
                         AlterTableOperation::AddConstraint { constraint, .. } => {
-                            let entrada = into.entry(tabla.clone()).or_default();
-                            let claves = |cs: &[sqlparser::ast::IndexColumn]| -> Vec<String> {
+                            let entry = into.entry(table.clone()).or_default();
+                            let key_cols = |cs: &[sqlparser::ast::IndexColumn]| -> Vec<String> {
                                 cs.iter()
                                     .map(|k| k.to_string().trim_matches('"').to_lowercase())
                                     .collect()
                             };
                             match constraint {
                                 TableConstraint::PrimaryKey(pk) => {
-                                    let cols = claves(&pk.columns);
+                                    let cols = key_cols(&pk.columns);
                                     for c in &cols {
-                                        marcar(&mut entrada.cols, c, |x| x.pk = true);
+                                        mark(&mut entry.cols, c, |x| x.pk = true);
                                     }
-                                    entrada.uniques.push(cols);
+                                    entry.uniques.push(cols);
                                 }
                                 TableConstraint::Unique(u) => {
-                                    entrada.uniques.push(claves(&u.columns));
+                                    entry.uniques.push(key_cols(&u.columns));
                                 }
                                 _ => {}
                             }
                         }
+                        // A rename in a LATER migration used to be invisible
+                        // too: the schema kept the old name, so every rule
+                        // about the renamed table went on checking a table
+                        // that no longer exists —and passed, because the old
+                        // one still had everything it asked for.
+                        AlterTableOperation::RenameTable { table_name: to } => {
+                            let to = match &to {
+                                RenameTableNameKind::As(n) | RenameTableNameKind::To(n) => {
+                                    table_name(n)
+                                }
+                            };
+                            if let Some(i) = into.get_index_of(&table) {
+                                let (_, t) = into.swap_remove_index(i).unwrap();
+                                into.insert(to, t);
+                            }
+                        }
+                        AlterTableOperation::RenameColumn {
+                            old_column_name,
+                            new_column_name,
+                        } => {
+                            let (old, new) = (ident(&old_column_name), ident(&new_column_name));
+                            if let Some(tb) = into.get_mut(&table) {
+                                if let Some(c) = tb.cols.iter_mut().find(|c| c.name == old) {
+                                    c.name = new.clone();
+                                }
+                                for u in &mut tb.uniques {
+                                    for c in u.iter_mut() {
+                                        if *c == old {
+                                            *c = new.clone();
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         AlterTableOperation::DropColumn { column_names, .. } => {
-                            if let Some(tb) = into.get_mut(&tabla) {
-                                let fuera: Vec<String> = column_names.iter().map(ident).collect();
-                                tb.cols.retain(|c| !fuera.contains(&c.name));
-                                // una unicidad sobre una columna borrada ya no existe
-                                tb.uniques.retain(|u| !u.iter().any(|c| fuera.contains(c)));
+                            if let Some(tb) = into.get_mut(&table) {
+                                let dropped: Vec<String> = column_names.iter().map(ident).collect();
+                                tb.cols.retain(|c| !dropped.contains(&c.name));
+                                // uniqueness over a dropped column no longer exists
+                                tb.uniques.retain(|u| !u.iter().any(|c| dropped.contains(c)));
                             }
                         }
                         _ => {}
@@ -977,7 +1011,7 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
                 ..
             } => {
                 for n in names {
-                    into.shift_remove(&nombre_tabla(&n));
+                    into.shift_remove(&table_name(&n));
                 }
             }
             _ => {}
@@ -985,16 +1019,16 @@ pub fn parse_ddl(text: &str, origen: &str, into: &mut Tables) {
     }
 }
 
-fn marcar(cols: &mut [Column], nombre: &str, f: impl Fn(&mut Column)) {
-    let nombre = nombre.trim_matches('"');
-    if let Some(c) = cols.iter_mut().find(|c| c.name == nombre) {
+fn mark(cols: &mut [Column], name: &str, f: impl Fn(&mut Column)) {
+    let name = name.trim_matches('"');
+    if let Some(c) = cols.iter_mut().find(|c| c.name == name) {
         f(c);
     }
 }
 
-/// Destructivo de verdad, no "contiene la palabra DROP en un comentario".
-pub fn destructive(text: &str, origen: &str) -> bool {
-    statements(text, origen).iter().any(|st| match st {
+/// Truly destructive, not "contains the word DROP in a comment".
+pub fn destructive(text: &str, origin: &str) -> bool {
+    statements(text, origin).iter().any(|st| match st {
         Statement::Drop {
             object_type: ObjectType::Table,
             ..
@@ -1033,8 +1067,8 @@ pub fn migrations_of(m: &Manifest) -> Vec<PathBuf> {
     }
 }
 
-/// El esquema ES la suma de las migraciones plegadas en orden. No hay un
-/// schema.sql duplicado que se desincronice.
+/// The schema IS the sum of the migrations folded in order. There is no
+/// duplicated schema.sql to drift.
 pub fn schemas(manifests: &[Manifest]) -> IndexMap<String, Tables> {
     let mut out = IndexMap::new();
     for m in manifests {
@@ -1053,7 +1087,7 @@ pub fn schemas(manifests: &[Manifest]) -> IndexMap<String, Tables> {
     out
 }
 
-// ---------- helpers de nombres ----------
+// ---------- name helpers ----------
 
 fn words(s: &str) -> Vec<&str> {
     s.split(['.', '@', '_', '-'])
@@ -1095,7 +1129,7 @@ pub fn tfname(s: &str) -> String {
         .join("_")
 }
 
-/// Pub/Sub no admite '@' en nombres de topic.
+/// Pub/Sub does not allow '@' in topic names.
 pub fn topic(ev: &str) -> String {
     ev.replace('@', ".")
 }
@@ -1110,23 +1144,23 @@ pub fn ts_type(t: &str) -> &str {
     }
 }
 
-/// Normaliza un nombre de campo para comparar: minusculas y sin separadores.
+/// Normalizes a field name for comparison: lowercase and no separators.
 ///
-/// El mismo concepto se escribe distinto en cada capa —`customerEmail` en el
-/// contrato, `customer_email` en la base, `customer-email` en una cabecera— y
-/// declararlo tres veces en `pii` seria absurdo. Se declara una y se compara
-/// normalizado.
-pub fn normalizar(s: &str) -> String {
+/// The same concept is spelled differently in each layer —`customerEmail` in
+/// the contract, `customer_email` in the database, `customer-email` in a
+/// header— and declaring it three times in `pii` would be absurd. It is
+/// declared once and compared normalized.
+pub fn normalize(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(|c| c.to_lowercase())
         .collect()
 }
 
-/// Si un campo esta declarado como personal, comparando normalizado.
-pub fn es_pii(declarados: &[String], campo: &str) -> bool {
-    let c = normalizar(campo);
-    declarados.iter().any(|d| normalizar(d) == c)
+/// Whether a field is declared as personal, compared normalized.
+pub fn is_pii(declared: &[String], field: &str) -> bool {
+    let c = normalize(field);
+    declared.iter().any(|d| normalize(d) == c)
 }
 
 #[cfg(test)]
@@ -1134,37 +1168,37 @@ mod pii {
     use super::*;
 
     #[test]
-    fn el_mismo_concepto_se_declara_una_vez() {
+    fn the_same_concept_is_declared_once() {
         let d = vec!["customer_email".to_string()];
-        for campo in [
+        for field in [
             "customerEmail",
             "customer_email",
             "CustomerEmail",
             "customer-email",
         ] {
-            assert!(es_pii(&d, campo), "{campo} deberia coincidir");
+            assert!(is_pii(&d, field), "{field} should match");
         }
-        for campo in ["customer_id", "email_template", "customer"] {
-            assert!(!es_pii(&d, campo), "{campo} no deberia coincidir");
+        for field in ["customer_id", "email_template", "customer"] {
+            assert!(!is_pii(&d, field), "{field} should not match");
         }
     }
 }
 
-/// Fecha de hoy como (ano, mes, dia), sin dependencias.
+/// Today's date as (year, month, day), with no dependencies.
 ///
-/// Es el algoritmo civil_from_days de Howard Hinnant: los dias desde la epoca
-/// se corren a una era que empieza en marzo, y ahi el patron de meses es
-/// regular. Una dependencia entera para comparar dos fechas seria mucho.
-pub fn hoy() -> (i64, i64, i64) {
-    let dias = std::time::SystemTime::now()
+/// It is Howard Hinnant's civil_from_days: the days since the epoch are
+/// shifted to an era starting in March, and there the month pattern is
+/// regular. A whole dependency to compare two dates would be too much.
+pub fn today() -> (i64, i64, i64) {
+    let days = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64 / 86_400)
         .unwrap_or(0);
-    civil(dias)
+    civil(days)
 }
 
-fn civil(dias_epoca: i64) -> (i64, i64, i64) {
-    let z = dias_epoca + 719_468;
+fn civil(epoch_days: i64) -> (i64, i64, i64) {
+    let z = epoch_days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -1176,8 +1210,8 @@ fn civil(dias_epoca: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// `YYYY-MM-DD` a una tupla comparable. `None` si no tiene esa forma.
-pub fn fecha(s: &str) -> Option<(i64, i64, i64)> {
+/// `YYYY-MM-DD` to a comparable tuple. `None` if it does not have that shape.
+pub fn date(s: &str) -> Option<(i64, i64, i64)> {
     let mut p = s.trim().split('-');
     let a = p.next()?.parse().ok()?;
     let m = p.next()?.parse().ok()?;
@@ -1193,8 +1227,8 @@ mod fechas {
     use super::*;
 
     #[test]
-    fn el_calendario_civil_es_correcto() {
-        // dias conocidos desde la epoca, incluidos bisiestos y siglos
+    fn the_civil_calendar_is_correct() {
+        // known days since the epoch, leap years and centuries included
         assert_eq!(civil(0), (1970, 1, 1));
         assert_eq!(civil(1), (1970, 1, 2));
         assert_eq!(civil(-1), (1969, 12, 31));
@@ -1204,19 +1238,19 @@ mod fechas {
     }
 
     #[test]
-    fn hoy_es_una_fecha_razonable() {
-        let (a, m, d) = hoy();
+    fn today_is_a_reasonable_date() {
+        let (a, m, d) = today();
         assert!((2025..2100).contains(&a), "ano fuera de rango: {a}");
         assert!((1..=12).contains(&m));
         assert!((1..=31).contains(&d));
     }
 
     #[test]
-    fn parsear_fechas() {
-        assert_eq!(fecha("2026-12-31"), Some((2026, 12, 31)));
-        assert_eq!(fecha(" 2026-01-02 "), Some((2026, 1, 2)));
-        assert_eq!(fecha("2026-13-01"), None);
-        assert_eq!(fecha("2026-12"), None);
-        assert_eq!(fecha("manana"), None);
+    fn parses_dates() {
+        assert_eq!(date("2026-12-31"), Some((2026, 12, 31)));
+        assert_eq!(date(" 2026-01-02 "), Some((2026, 1, 2)));
+        assert_eq!(date("2026-13-01"), None);
+        assert_eq!(date("2026-12"), None);
+        assert_eq!(date("manana"), None);
     }
 }

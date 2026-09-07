@@ -245,7 +245,7 @@ class Conversion implements ConversionProjection, Checkpoint, Shadow {
   #vista: string;
   constructor(db: pg.Pool, sombra = false) {
     this.#db = db;
-    this.#tabla = sombra ? "vista_conversion_sombra" : "vista_conversion";
+    this.#tabla = sombra ? "view_conversion_sombra" : "view_conversion";
     this.#vista = sombra ? "conversion_sombra" : "conversion";
   }
 
@@ -255,7 +255,7 @@ class Conversion implements ConversionProjection, Checkpoint, Shadow {
     try {
       await c.query("BEGIN");
       await c.query(`DELETE FROM ${this.#tabla}`);
-      await c.query(`DELETE FROM vista_conversion_checkpoint WHERE vista = $1`, [this.#vista]);
+      await c.query(`DELETE FROM view_conversion_checkpoint WHERE view_name = $1`, [this.#vista]);
       await c.query("COMMIT");
     } catch (err) {
       await c.query("ROLLBACK").catch(() => {});
@@ -276,13 +276,13 @@ class Conversion implements ConversionProjection, Checkpoint, Shadow {
     const c = await this.#db.connect();
     try {
       await c.query("BEGIN");
-      await c.query("ALTER TABLE vista_conversion RENAME TO vista_conversion_tmp");
-      await c.query("ALTER TABLE vista_conversion_sombra RENAME TO vista_conversion");
-      await c.query("ALTER TABLE vista_conversion_tmp RENAME TO vista_conversion_sombra");
-      await c.query("DELETE FROM vista_conversion_checkpoint WHERE vista = 'conversion'");
+      await c.query("ALTER TABLE view_conversion RENAME TO view_conversion_tmp");
+      await c.query("ALTER TABLE view_conversion_sombra RENAME TO view_conversion");
+      await c.query("ALTER TABLE view_conversion_tmp RENAME TO view_conversion_sombra");
+      await c.query("DELETE FROM view_conversion_checkpoint WHERE view_name = 'conversion'");
       await c.query(
-        `UPDATE vista_conversion_checkpoint SET vista = 'conversion'
-          WHERE vista = 'conversion_sombra'`,
+        `UPDATE view_conversion_checkpoint SET view_name = 'conversion'
+          WHERE view_name = 'conversion_sombra'`,
       );
       await c.query("COMMIT");
     } catch (err) {
@@ -295,11 +295,11 @@ class Conversion implements ConversionProjection, Checkpoint, Shadow {
 
   async read(view: string, streamId: string) {
     const { rows } = await this.#db.query(
-      `SELECT posicion FROM vista_conversion_checkpoint
-        WHERE vista = $1 AND stream_id = $2`,
+      `SELECT position FROM view_conversion_checkpoint
+        WHERE view_name = $1 AND stream_id = $2`,
       [view, streamId],
     );
-    return rows[0] ? Number(rows[0].posicion) : 0;
+    return rows[0] ? Number(rows[0].position) : 0;
   }
 
   /** El efecto de la vista y su punto, en la MISMA transaccion. En dos, un
@@ -311,10 +311,10 @@ class Conversion implements ConversionProjection, Checkpoint, Shadow {
       await c.query("BEGIN");
       await c.query(sql, args);
       await c.query(
-        `INSERT INTO vista_conversion_checkpoint (vista, stream_id, posicion)
+        `INSERT INTO view_conversion_checkpoint (view_name, stream_id, position)
          VALUES ('${this.#vista}', $1, $2)
-         ON CONFLICT (vista, stream_id)
-         DO UPDATE SET posicion = GREATEST(vista_conversion_checkpoint.posicion, $2)`,
+         ON CONFLICT (view_name, stream_id)
+         DO UPDATE SET position = GREATEST(view_conversion_checkpoint.position, $2)`,
         [streamId, posicion],
       );
       await c.query("COMMIT");

@@ -66,10 +66,10 @@ echo "  la vista contra el estado reconstruido del flujo"
 esperado=$(sql -c "SELECT replace(split_part(type, '.', 2), '@v1', '')
                      FROM compra_event WHERE stream_id = '$STREAM'
                     ORDER BY version DESC LIMIT 1" | tr -d ' \r\n')
-en_vista=$(sql -c "SELECT estado FROM vista_conversion WHERE stream_id = '$STREAM'" | tr -d ' \r\n')
+en_vista=$(sql -c "SELECT estado FROM view_conversion WHERE stream_id = '$STREAM'" | tr -d ' \r\n')
 # la carrera anterior anoto un evento que la vista no vio: se reproyecta
-posicion=$(sql -c "SELECT coalesce(posicion, 0) FROM vista_conversion_checkpoint
-                    WHERE vista = 'conversion' AND stream_id = '$STREAM'" | tr -d ' \r\n')
+posicion=$(sql -c "SELECT coalesce(position, 0) FROM view_conversion_checkpoint
+                    WHERE view_name = 'conversion' AND stream_id = '$STREAM'" | tr -d ' \r\n')
 echo "    flujo dice '$esperado', vista dice '$en_vista', checkpoint en $posicion"
 if [ "$esperado" = "$en_vista" ]; then
   echo "  OK: la vista concuerda con el flujo"
@@ -100,9 +100,9 @@ tope=$(sed -n 's/.*conversionMaxStalenessMs = \([0-9]*\).*/\1/p' services/checko
 atraso() {
   sql -c "SELECT coalesce(max(extract(epoch from (now() - e.en)) * 1000)::bigint, 0)
             FROM compra_event e
-            LEFT JOIN vista_conversion_checkpoint c
-              ON c.vista = 'conversion' AND c.stream_id = e.stream_id
-           WHERE e.stream_id = '$1' AND e.version > coalesce(c.posicion, 0)" | tr -d ' \r\n'
+            LEFT JOIN view_conversion_checkpoint c
+              ON c.view_name = 'conversion' AND c.stream_id = e.stream_id
+           WHERE e.stream_id = '$1' AND e.version > coalesce(c.position, 0)" | tr -d ' \r\n'
 }
 
 # En el flujo de arriba quedo un evento SIN proyectar —lo escribio la carrera,
@@ -189,7 +189,7 @@ fi
 # sale de la vista, que se construyo evento por evento sin usar fotos.
 echo "  la foto contra la vista, que se construyo sin fotos"
 en_foto=$(sql -c "SELECT estado->>'estado' FROM compra_snapshot WHERE stream_id = '$FOTO' ORDER BY version DESC LIMIT 1" | tr -d ' \r\n')
-en_vista=$(sql -c "SELECT estado FROM vista_conversion WHERE stream_id = '$FOTO'" | tr -d ' \r\n')
+en_vista=$(sql -c "SELECT estado FROM view_conversion WHERE stream_id = '$FOTO'" | tr -d ' \r\n')
 if [ "$en_foto" = "$en_vista" ]; then
   echo "  OK: la foto dice '$en_foto' y la proyeccion, que no la uso, dice lo mismo"
 else
@@ -232,15 +232,15 @@ fi
 # Se mide ensuciando la vista a proposito: si la reconstruccion no arreglara la
 # basura, no estaria reconstruyendo nada.
 echo "  la vista, ensuciada a proposito y reconstruida"
-sql -v ON_ERROR_STOP=1 -c "UPDATE vista_conversion SET estado = 'basura', centavos = -1" > /dev/null
-sucias=$(sql -c "SELECT count(*) FROM vista_conversion WHERE estado = 'basura'" | tr -d ' \r\n')
+sql -v ON_ERROR_STOP=1 -c "UPDATE view_conversion SET estado = 'basura', centavos = -1" > /dev/null
+sucias=$(sql -c "SELECT count(*) FROM view_conversion WHERE estado = 'basura'" | tr -d ' \r\n')
 [ "$sucias" -ge 1 ] || { echo "  FALLO: no habia nada que ensuciar"; exit 1; }
 echo "    $sucias filas con basura"
 
 aplicados=$(curl -sS --fail-with-body -m 120 -X POST "$CHECKOUT/internal/view/conversion/rebuild" \
   | sed 's/.*"aplicados":\([0-9]*\).*/\1/')
 en_flujo=$(sql -c "SELECT count(*) FROM compra_event" | tr -d ' \r\n')
-quedan=$(sql -c "SELECT count(*) FROM vista_conversion WHERE estado = 'basura' OR centavos < 0" | tr -d ' \r\n')
+quedan=$(sql -c "SELECT count(*) FROM view_conversion WHERE estado = 'basura' OR centavos < 0" | tr -d ' \r\n')
 if [ "$quedan" -eq 0 ] && [ "$aplicados" -ge 1 ]; then
   echo "  OK: aplico $aplicados eventos de los $en_flujo del flujo, y no quedo basura"
 else
@@ -257,7 +257,7 @@ distintas=$(sql -c "
       FROM compra_event
   )
   SELECT count(*) FROM ultimo u
-    JOIN vista_conversion v ON v.stream_id = u.stream_id
+    JOIN view_conversion v ON v.stream_id = u.stream_id
    WHERE u.r = 1 AND v.estado <> u.estado" | tr -d ' \r\n')
 if [ "$distintas" -eq 0 ]; then
   echo "  OK: cada fila reconstruida coincide con el ultimo evento de su flujo"
@@ -268,7 +268,7 @@ fi
 
 # Las fechas son las del FLUJO, no las de la reconstruccion. Rellenarlas con
 # `now()` reescribiria el historial y el atraso medido despues seria falso.
-futuras=$(sql -c "SELECT count(*) FROM vista_conversion v
+futuras=$(sql -c "SELECT count(*) FROM view_conversion v
                    WHERE v.evento_en > (SELECT max(en) FROM compra_event
                                          WHERE stream_id = v.stream_id)" | tr -d ' \r\n')
 if [ "$futuras" -eq 0 ]; then
@@ -288,7 +288,7 @@ fi
 # corre: sin el interruptor termina en milisegundos y "nadie vio nada" no se
 # distingue de "nadie miro".
 echo "  las lecturas mientras la vista se reconstruye"
-filas_antes=$(sql -c "SELECT count(*) FROM vista_conversion" | tr -d ' \r\n')
+filas_antes=$(sql -c "SELECT count(*) FROM view_conversion" | tr -d ' \r\n')
 [ "$filas_antes" -ge 3 ] || { echo "  FALLO: hacen falta filas para poder medir la ventana"; exit 1; }
 cp "$ENVQ" "$ENVQ.es"
 printf 'AXON_DEMO_RECONSTRUIR_LENTO_MS=150\n' >> "$ENVQ"
@@ -302,13 +302,13 @@ i=0
 while kill -0 "$recon" 2>/dev/null; do
   i=$((i + 1))
   [ "$i" -gt 200 ] && break
-  n=$(sql -c "SELECT count(*) FROM vista_conversion" 2>/dev/null | tr -d ' \r\n')
+  n=$(sql -c "SELECT count(*) FROM view_conversion" 2>/dev/null | tr -d ' \r\n')
   case "$n" in ''|*[!0-9]*) continue ;; esac
   [ "$n" -lt "$minimo" ] && minimo=$n
 done
 wait "$recon" || true
 aplicados=$(sed 's/.*"aplicados":\([0-9]*\).*/\1/' /tmp/axon-recon.json)
-filas_despues=$(sql -c "SELECT count(*) FROM vista_conversion" | tr -d ' \r\n')
+filas_despues=$(sql -c "SELECT count(*) FROM view_conversion" | tr -d ' \r\n')
 echo "    $i lecturas durante la reconstruccion; minimo visto: $minimo de $filas_antes"
 if [ "$i" -ge 3 ] && [ "$minimo" -ge "$filas_antes" ] && [ "$filas_despues" -ge "$filas_antes" ]; then
   echo "  OK: nadie vio la vista a medias; $aplicados eventos aplicados en la sombra"

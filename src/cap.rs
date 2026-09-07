@@ -200,7 +200,7 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
         }
 
         // --- escalar a cero con una promesa de rechazar ---
-        if !cap.eventual() && !cap.degrada() && m.infra.min_instances == Some(0) {
+        if !cap.eventual() && !cap.degrades() && m.infra.min_instances == Some(0) {
             hs.push(Hallazgo {
                 nivel: Nivel::Cuesta,
                 patron: "min_instances = 0".into(),
@@ -212,7 +212,7 @@ pub fn informe(ms: &[Manifest], solo: &[String]) -> String {
         }
 
         // --- degradar sin respaldo declarado ---
-        if cap.degrada() && m.depends.is_empty() {
+        if cap.degrades() && m.depends.is_empty() {
             hs.push(Hallazgo {
                 nivel: Nivel::Implica,
                 patron: "degrade".into(),
