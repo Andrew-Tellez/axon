@@ -272,9 +272,18 @@ column on purpose** and runs it again, which is the only thing that proves it wo
 axon: the warehouse has 0 differences against the manifest
   the same check, with the warehouse broken on purpose
   OK: the missing column is detected, and without it that field would be stored nowhere
+  OK: restored whole after breaking it: 12 rows, all with their amount
 ```
 
 A check that has only been seen passing has not been seen working.
+
+That last line was earned. Re-adding a dropped column brings it back EMPTY and at the
+END of the table, and the loader is idempotent by event id: the rows loaded earlier keep
+a NULL forever. Reloading from the envelope log does not fix it either, because the log
+holds one run's flow while the table accumulates every run — running the demo twice is
+what showed it, with the warehouse reporting 2 events and the idempotency check counting
+1 row right afterwards. The check now copies the table before breaking it and restores it
+by NAMED columns, and asserts the row count came back.
 
 ## The cluster: consume, do not subscribe
 

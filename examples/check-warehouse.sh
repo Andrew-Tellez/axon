@@ -113,6 +113,19 @@ ch --multiquery < .axon/schema.sql > .axon/schema.tsv
 # and that the check WORKS: the warehouse gets broken on purpose and it has to
 # see it. A check that has only been seen passing has not been seen working.
 echo "  the same check, with the warehouse broken on purpose"
+# The table gets copied first. Re-adding a dropped column brings it back EMPTY,
+# and the loader is idempotent by event id, so the rows loaded earlier would keep
+# a NULL forever. Reloading from the log does not fix it either: the log holds
+# THIS run's flow, and the table accumulates every run —running the demo twice is
+# what showed it, with the warehouse reporting 2 events and the idempotency check
+# counting 1 row afterwards.
+before_break=$(ch -q "SELECT count(*) FROM axon.order_placed_v1")
+cols=$(ch -q "SELECT arrayStringConcat(groupArray(name), ', ') FROM system.columns
+               WHERE database = 'axon' AND table = 'order_placed_v1'")
+ch -q "DROP TABLE IF EXISTS axon.order_placed_v1_bak"
+ch -q "CREATE TABLE axon.order_placed_v1_bak AS axon.order_placed_v1"
+ch -q "INSERT INTO axon.order_placed_v1_bak ($cols) SELECT $cols FROM axon.order_placed_v1"
+
 ch -q "ALTER TABLE axon.order_placed_v1 DROP COLUMN total_amount"
 ch --multiquery < .axon/schema.sql > .axon/broken.tsv
 if "$AXON" analytics . --target clickhouse --check .axon/broken.tsv > /dev/null 2>&1; then
@@ -121,17 +134,22 @@ if "$AXON" analytics . --target clickhouse --check .axon/broken.tsv > /dev/null 
   exit 1
 fi
 echo "  OK: the missing column is detected, and without it that field would be stored nowhere"
+
+# Restored from the copy, naming the columns: the re-added one comes back at the
+# END of the table, so an `INSERT ... SELECT *` would load the amount into the
+# currency. That is the same bug the loader had, and it is why both name them.
 ch -q "ALTER TABLE axon.order_placed_v1 ADD COLUMN total_amount Nullable(Int64)"
-# Re-adding the column brings it back EMPTY, and the loader is idempotent by event
-# id, so every row loaded before would keep a NULL forever —and the metric over
-# it would answer nothing on the next run. The table gets rebuilt from the log,
-# which is the warehouse's source of truth: that the amounts come back is what
-# proves it.
 ch -q "TRUNCATE TABLE axon.order_placed_v1"
-ch --param_salt=demo-salt --multiquery < .axon/load.sql
-restored=$(ch -q "SELECT count(*) FROM axon.order_placed_v1 WHERE total_amount > 0")
-[ "$restored" -ge 1 ] || { echo "  FAILED: the table was not rebuilt from the log"; exit 1; }
-echo "  OK: rebuilt from the log after breaking it; $restored rows with their amount back"
+ch -q "INSERT INTO axon.order_placed_v1 ($cols) SELECT $cols FROM axon.order_placed_v1_bak"
+ch -q "DROP TABLE axon.order_placed_v1_bak"
+after_break=$(ch -q "SELECT count(*) FROM axon.order_placed_v1")
+amounts=$(ch -q "SELECT count(*) FROM axon.order_placed_v1 WHERE total_amount > 0")
+if [ "$after_break" = "$before_break" ] && [ "$amounts" = "$before_break" ]; then
+  echo "  OK: restored whole after breaking it: $after_break rows, all with their amount"
+else
+  echo "  FAILED: $before_break rows before, $after_break after, $amounts with an amount"
+  exit 1
+fi
 
 # --- loading twice does not duplicate ------------------------------------
 # A periodic loader runs many times over the same log. If it does not filter by
