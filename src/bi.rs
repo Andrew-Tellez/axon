@@ -34,8 +34,14 @@ pub struct Dialect {
     pub quote: fn(&str) -> String,
     /// Column type for one of axon's types.
     pub kind: fn(&str) -> String,
-    /// What goes after the column parenthesis.
-    pub tail: fn() -> String,
+    /// What goes after the column parenthesis, given how long the table keeps
+    /// its rows. It is per dialect because the three say it in three places and
+    /// one of them does not say it at all: ClickHouse has a `TTL` in the table,
+    /// BigQuery an option on the partition, and Snowflake's
+    /// `DATA_RETENTION_TIME_IN_DAYS` is Time Travel —how far back you can
+    /// query, capped at 90 days— which is a different thing entirely. Using it
+    /// as retention would delete nothing and read as if it did.
+    pub tail: fn(Option<i64>) -> String,
     /// Diferencia en milisegundos entre dos expresiones.
     pub diff_ms: fn(&str, &str) -> String,
     /// The time bucket of a metric: `("1d", "event_time")`. It is per dialect
@@ -110,12 +116,22 @@ pub fn dialect(name: &str) -> Option<Dialect> {
             name: "bigquery",
             quote: quote_backtick,
             kind: type_bigquery,
-            tail: || {
-                "-- partitioning is not optional: without it every query scans the\n\
-                 -- whole table and the bill grows with the history\n\
-                 PARTITION BY DATE(event_time)\n\
-                 CLUSTER BY correlation_id, source"
-                    .into()
+            tail: |keeps| {
+                // The expiry is per PARTITION, which is why partitioning is not
+                // optional here for two reasons and not one.
+                let mut t = String::from(
+                    "-- partitioning is not optional: without it every query scans the\n\
+                     -- whole table and the bill grows with the history\n\
+                     PARTITION BY DATE(event_time)\n\
+                     CLUSTER BY correlation_id, source",
+                );
+                if let Some(d) = keeps {
+                    t.push_str(&format!(
+                        "\nOPTIONS (\n  partition_expiration_days = {d},\n  \
+                         description = \"kept {d} days, declared in the manifest\"\n)"
+                    ));
+                }
+                t
             },
             diff_ms: |a, b| format!("TIMESTAMP_DIFF(\n{a},\n{b},\n    MILLISECOND\n  )"),
             // TIMESTAMP_TRUNC does not take WEEK or MONTH, and DATE_TRUNC over a
@@ -135,7 +151,24 @@ pub fn dialect(name: &str) -> Option<Dialect> {
             kind: type_snowflake,
             // Snowflake partitions on its own with micro-partitions: declaring
             // PARTITION BY would be an error, not an optimisation.
-            tail: || "CLUSTER BY (TO_DATE(event_time), correlation_id)".into(),
+            // Snowflake has no expiry in the table: `DATA_RETENTION_TIME_IN_DAYS`
+            // is Time Travel —how far back you can query— and caps at 90 days.
+            // Using it as retention would delete nothing and read as if it did,
+            // so what comes out is a comment here and a real TASK below.
+            // The comment goes BEFORE and not after: what closes the statement
+            // is the `;` that comes right behind this, and a trailing comment
+            // swallows it. The DDL then reads as one statement that never ends,
+            // which is the same trap this file already documents for a comment
+            // at the end of a column.
+            tail: |keeps| match keeps {
+                Some(d) => format!(
+                    "-- kept {d} days by the task below. NOT with\n\
+                     -- DATA_RETENTION_TIME_IN_DAYS: that is Time Travel, it caps at 90\n\
+                     -- days and it deletes nothing\n\
+                     CLUSTER BY (TO_DATE(event_time), correlation_id)"
+                ),
+                None => "CLUSTER BY (TO_DATE(event_time), correlation_id)".into(),
+            },
             diff_ms: |a, b| format!("TIMESTAMPDIFF(\n    MILLISECOND,\n{b},\n{a}\n  )"),
             bucket: |w, c| {
                 let unit = match w {
@@ -152,14 +185,24 @@ pub fn dialect(name: &str) -> Option<Dialect> {
             name: "clickhouse",
             quote: quote_double,
             kind: type_clickhouse,
-            tail: || {
+            tail: |keeps| {
                 // Clause order matters: ClickHouse expects ORDER BY right after
-                // the engine. And the ordering key decides which queries are
-                // fast: the flow first, because a funnel groups by it.
-                "ENGINE = MergeTree\n\
-                 ORDER BY (correlation_id, event_time)\n\
-                 PARTITION BY toYYYYMM(event_time)"
-                    .into()
+                // the engine, and the TTL after the partition. And the ordering
+                // key decides which queries are fast: the flow first, because a
+                // funnel groups by it.
+                let mut t = String::from(
+                    "ENGINE = MergeTree\n\
+                     ORDER BY (correlation_id, event_time)\n\
+                     PARTITION BY toYYYYMM(event_time)",
+                );
+                if let Some(d) = keeps {
+                    // `toDateTime` and not the column as it is: the column is a
+                    // DateTime64(3) —milliseconds, because two events in the same
+                    // second have an order— and ClickHouse's TTL only takes Date
+                    // or DateTime. It refuses with BAD_TTL_EXPRESSION.
+                    t.push_str(&format!("\nTTL toDateTime(event_time) + INTERVAL {d} DAY"));
+                }
+                t
             },
             diff_ms: |a, b| format!("dateDiff(\n    'millisecond',\n{b},\n{a}\n  )"),
             bucket: |w, c| {
@@ -615,6 +658,9 @@ struct Event<'a> {
     fields: &'a Fields,
     pii: Vec<String>,
     modo_pii: &'a str,
+    /// How many days it is kept, if anybody said. `None` is forever, and
+    /// forever is a decision nobody took.
+    keeps: Option<i64>,
 }
 
 fn eventos<'a>(ms: &'a [Manifest]) -> Vec<Event<'a>> {
@@ -628,6 +674,7 @@ fn eventos<'a>(ms: &'a [Manifest]) -> Vec<Event<'a>> {
                 fields,
                 pii: pii.clone(),
                 modo_pii: &m.analytics.pii,
+                keeps: m.analytics.keeps(ev),
             });
         }
     }
@@ -710,8 +757,48 @@ pub fn build(ms: &[Manifest], d: &Dialect) -> String {
             "CREATE TABLE IF NOT EXISTS {} (\n{}\n)\n{};",
             (d.quote)(&format!("@dataset.{}", table(e.name))),
             cols.join(",\n"),
-            (d.tail)()
+            (d.tail)(e.keeps)
         ));
+        // `IF NOT EXISTS` ignores everything when the table is already there,
+        // and retention is precisely what gets decided later: without this, the
+        // day somebody declares it the schema applies with no error and the
+        // table keeps growing forever. Found by applying it twice.
+        if let Some(days) = e.keeps {
+            let name = (d.quote)(&format!("@dataset.{}", table(e.name)));
+            match d.name {
+                "clickhouse" => o.push(format!(
+                    "ALTER TABLE {name} MODIFY TTL toDateTime(event_time) + INTERVAL {days} DAY;"
+                )),
+                "bigquery" => o.push(format!(
+                    "ALTER TABLE {name} SET OPTIONS (partition_expiration_days = {days});"
+                )),
+                // Snowflake's is the task below, and it is CREATE OR REPLACE
+                _ => {}
+            }
+        }
+    }
+
+    // Snowflake deletes nothing on its own: what the table says up there is a
+    // comment, and this is where the rows actually go. One task per table
+    // because a task is suspended, resumed and audited on its own, and a single
+    // one deleting from six tables is six decisions with one switch.
+    if d.name == "snowflake" {
+        for e in evs.iter().filter(|e| e.keeps.is_some()) {
+            let days = e.keeps.unwrap_or_default();
+            o.push(format!(
+                "\n-- {} is kept {days} days. It is a TASK and not\n\
+                 -- DATA_RETENTION_TIME_IN_DAYS, which is Time Travel: it caps at 90 days\n\
+                 -- and does not delete a single row.\n\
+                 CREATE OR REPLACE TASK {task}\n  \
+                   SCHEDULE = 'USING CRON 0 4 * * * UTC'\n  \
+                   -- suspended on creation: a task that starts deleting the moment it is\n  \
+                   -- applied is a decision taken by whoever ran the DDL\nAS\n  \
+                   DELETE FROM {tabla}\n  WHERE event_time < DATEADD(day, -{days}, CURRENT_TIMESTAMP());",
+                e.name,
+                task = (d.quote)(&format!("@dataset.retain_{}", table(e.name))),
+                tabla = (d.quote)(&format!("@dataset.{}", table(e.name))),
+            ));
+        }
     }
 
     o.extend(funnels(ms, &evs, d));
@@ -1328,7 +1415,7 @@ pub fn build_plan(ms: &[Manifest]) -> serde_json::Value {
         name: "plan",
         quote: |s| s.to_string(),
         kind: |t| t.to_string(),
-        tail: String::new,
+        tail: |_| String::new(),
         diff_ms: |a, b| format!("{a} - {b}"),
         bucket: |w, c| format!("bucket({w}, {c})"),
         lag: |c, n| format!("lag({c}, {n})"),

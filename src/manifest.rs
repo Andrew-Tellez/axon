@@ -498,6 +498,18 @@ pub struct Analytics {
     /// longest, gets copied most, and is read by the most people, so the safe
     /// value has to be the one that does not send it.
     pub pii: String,
+    /// How long the events of this service are kept, in days.
+    ///
+    /// A table of events grows forever, and the first symptom is the bill while
+    /// the second is a query that times out. It goes here and not in each
+    /// event because it is a decision about the SERVICE's data —how long the
+    /// business needs to look back— with an exception per event for the ones
+    /// somebody has to answer for by law.
+    pub retention_days: Option<i64>,
+    /// The exceptions, by event: `"order.placed@v1" = 2555`, seven years,
+    /// because a tax authority says so and not because a dashboard wants it.
+    #[serde(default)]
+    pub retention: IndexMap<String, i64>,
     /// Which warehouse. This used to be a CLI flag, which allowed generating
     /// the Snowflake schema and deploying infrastructure that carries nothing
     /// there: the schema applied and the tables stayed empty with nothing
@@ -533,8 +545,17 @@ impl Default for Analytics {
         Self {
             export: true,
             pii: "exclude".into(),
+            retention_days: None,
+            retention: IndexMap::new(),
             warehouse: "bigquery".into(),
         }
+    }
+}
+
+impl Analytics {
+    /// How long one event is kept: its own exception, or the service's.
+    pub fn keeps(&self, event: &str) -> Option<i64> {
+        self.retention.get(event).copied().or(self.retention_days)
     }
 }
 

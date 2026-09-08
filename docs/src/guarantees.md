@@ -14,6 +14,7 @@ their own — a compiler that only verifies itself produces invalid output:
 | The generated RLS | it is applied to a real Postgres and checked to see that it isolates |
 | The generated pgdog config | validated against pgdog's official JSON Schema |
 | The generated Vector config | `vector validate` in its own container |
+| The retention | the demo reads it back out of ClickHouse's `system.tables`: it is not enough for the DDL to say it, it has to be in the table |
 | The warehouse schemas | parsed with each dialect's own parser |
 | The declared metrics | their SQL parses in the three dialects, and the demo compares each one against counting the table by hand |
 | The declared failures | the retriable codes land in the caller's client and the final ones do not, and the demo counts the calls each one really costs |
@@ -38,7 +39,7 @@ their own — a compiler that only verifies itself produces invalid output:
 
 ```sh
 cargo test --release      # 62 conformance checks
-cd examples && ./demo.sh  # 53 checks against real containers
+cd examples && ./demo.sh  # 54 checks against real containers
 ```
 
 Preview. The command surface is stable; the manifest format can still change before

@@ -179,6 +179,15 @@ has to be fixed cannot end up underneath.
 | A `kill_switch` with a `rollout` | error |
 | `sticky_by` on a field that appears in no contract | error |
 
+## Retention
+
+| | |
+| --- | --- |
+| Retention on a service that does not export | error |
+| An exception naming an event the service does not emit | error |
+| A metric asking for more history than the table keeps | error |
+| Exporting with no `retention_days` | warning |
+
 ## Metrics
 
 | | |

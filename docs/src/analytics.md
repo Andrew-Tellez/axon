@@ -442,9 +442,44 @@ Metabase against a table axon owns. That is a parallel metric being born, and to
 nobody sees it. It needs reading Metabase's API, which is one more credential, and the
 same debate as the warehouse's.
 
-## What is missing
+## How long it is kept
 
-Declarable retention for the warehouse's tables.
+```toml
+[analytics]
+warehouse      = "clickhouse"
+retention_days = 730          # two years for this service's events
+
+[analytics.retention]
+"order.placed@v1" = 2555      # seven years, because a tax authority says so
+```
+
+A table of events grows forever, and the first symptom is the bill while the second is a
+query that times out. It is declared per service —how far back the business needs to
+look— with an exception per event for the ones somebody answers for by law.
+
+Each warehouse says it somewhere else, and one of them does not say it at all:
+
+| | |
+| --- | --- |
+| ClickHouse | `TTL toDateTime(event_time) + INTERVAL n DAY` in the table. Over `toDateTime` and not the column as it is: it is a `DateTime64(3)` and ClickHouse refuses that with `BAD_TTL_EXPRESSION` |
+| BigQuery | `partition_expiration_days` — which is one more reason partitioning is not optional |
+| Snowflake | a real `TASK` that deletes. **`DATA_RETENTION_TIME_IN_DAYS` is Time Travel**, caps at 90 days and deletes nothing: using it as retention would read as if it worked |
+
+And an `ALTER` after every `CREATE`, because `CREATE TABLE IF NOT EXISTS` ignores
+everything when the table is already there — and retention is exactly the kind of thing
+that gets declared later. Without it, the day somebody adds it the schema applies with no
+error and the table keeps growing. That one was found by applying it twice.
+
+What `verify` refuses: retention on a service that does not export, an exception naming
+an event it does not emit —retention is decided by whoever owns the event—, and **a
+metric asking for more history than the table keeps**: the window that falls outside
+answers zero, and zero reads exactly like nothing having happened. With nothing declared
+it is a warning and not an error, so a repo that already exists is not blocked over it.
+
+The demo reads it back out of `system.tables` and compares it against the manifest: it is
+not enough for the DDL to say it, it has to be **in** the table.
+
+## What is missing
 
 And `k8s`'s ingest is validated but not measured against containers: the local target is
 filled from the envelope log, so Vector's path does not go through the demo. Bringing it up

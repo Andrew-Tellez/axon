@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **53 checks against reality**: not against a mock,
+brings the whole system up and makes **54 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -148,6 +148,9 @@ OK: the system does exactly what it declares
   i the funnel's business latency: 37ms from the order to the charge
   OK: 1 orders and 25000 cents, the same as counting the table by hand
   OK: 1 bucket(s) and 1 currency; the metric groups by what it declares
+  la retencion declarada, aplicada en la tabla
+    order.placed@v1 2555 dias  ·  payment.captured@v1 730 dias
+  OK: la excepcion por evento manda sobre la del servicio, y esta EN la tabla
   OK: 1 hashed, 0 addresses in plaintext
 axon: the warehouse has 0 differences against the manifest
   OK: the missing column is detected, and without it that field would be stored nowhere

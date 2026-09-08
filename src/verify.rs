@@ -1819,6 +1819,75 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // How long the events are kept. A table of events grows forever, and the
+    // first symptom is the bill while the second is a query that times out.
+    for m in ms.iter().filter(|m| !m.external) {
+        let a = &m.analytics;
+        if !a.export {
+            if a.retention_days.is_some() || !a.retention.is_empty() {
+                errors.push(format!(
+                    "{}: it declares retention and does not export. There is no table to keep \
+                     anything in",
+                    m.service
+                ));
+            }
+            continue;
+        }
+        if a.retention_days.is_none() && a.retention.is_empty() && !m.emits.is_empty() {
+            warnings.push(format!(
+                "{}: exports {} events with no `retention_days`. A table of events grows \
+                 forever, and the first symptom is the bill while the second is a query that \
+                 times out",
+                m.service,
+                m.emits.len()
+            ));
+        }
+        for (ev, days) in &a.retention {
+            if !m.emits.contains_key(ev) {
+                errors.push(format!(
+                    "{}: `[analytics.retention]` names `{ev}`, which this service does not \
+                     emit. Retention is decided by whoever owns the event",
+                    m.service
+                ));
+            }
+            if *days <= 0 {
+                errors.push(format!(
+                    "{}: `retention.\"{ev}\"` is {days} days",
+                    m.service
+                ));
+            }
+        }
+        if a.retention_days.is_some_and(|d| d <= 0) {
+            errors.push(format!(
+                "{}: `retention_days` is not a number of days",
+                m.service
+            ));
+        }
+        // And the one that matters: a metric that asks for more history than
+        // the table keeps answers zero for the part that was deleted, and zero
+        // reads exactly like nothing having happened.
+        for (name, mt) in &m.metrics {
+            let needs = match mt.window.as_str() {
+                "1h" => 1,
+                "1d" => 1,
+                "1w" => 7,
+                "1mo" => 31,
+                _ => 1,
+            };
+            for ev in &mt.on {
+                let Some(keeps) = a.keeps(ev) else { continue };
+                if keeps < needs {
+                    errors.push(format!(
+                        "{}.{name}: the metric groups by {} and `{ev}` is kept {keeps} days. \
+                         The window that falls outside answers zero, and zero reads exactly \
+                         like nothing having happened",
+                        m.service, mt.window
+                    ));
+                }
+            }
+        }
+    }
+
     // One warehouse per platform. The events of one flow have to land in the
     // same place: split across two warehouses, the funnel —which is what makes
     // exporting worth anything— cannot be built with a single query, and nobody

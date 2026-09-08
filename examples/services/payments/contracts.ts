@@ -309,6 +309,8 @@ export const manifest = {
   "analytics": {
     "export": true,
     "pii": "exclude",
+    "retention_days": 730,
+    "retention": {},
     "warehouse": "clickhouse"
   },
   "api": {

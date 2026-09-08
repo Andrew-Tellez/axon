@@ -1609,6 +1609,13 @@ fn a_published_version_is_immutable() {
             "on     = [\"order.placed@v1\"]",
             "on     = [\"order.placed@v2\"]",
         ),
+        // Retiring an event takes its retention with it: the exception was
+        // declared for THAT event, and left behind it names one nobody emits.
+        (
+            "orders.toml",
+            "\"order.placed@v1\" = 2555",
+            "\"order.placed@v2\" = 2555",
+        ),
         // payments consumes it from its charging fragment, which is where the
         // block lives now that the manifest is split by feature
         (
@@ -3055,7 +3062,76 @@ fn the_declared_metrics_are_valid_sql() {
 
         // And that it parses with THAT warehouse's dialect. A view that does not
         // parse fails at apply time, which is after somebody trusted the number.
-        let sql = ddl.replace("@dataset", "ds");
+        // The retention statement goes out of the parse for the same reason as
+        // in the schema's test: `SET OPTIONS` is valid BigQuery that sqlparser
+        // 0.62 does not know, and `MODIFY TTL` is checked against a real
+        // ClickHouse in the demo.
+        let whole = ddl.replace("@dataset", "ds");
+        // Three statements come out of the parse, each for its own named
+        // reason, and each asserted by hand right after:
+        //
+        //   - `ALTER ... SET OPTIONS` is valid BigQuery that sqlparser 0.62
+        //     does not know.
+        //   - a Snowflake TASK is not in it either, so what gets parsed is the
+        //     DELETE inside it, which is where a wrong predicate would live.
+        //   - ClickHouse's `TTL` is not in it, and IS in ClickHouse: the demo
+        //     applies this same DDL to a real server and reads the TTL back
+        //     out of `system.tables`.
+        //
+        // Filtering by statement and not by `;`: the header comment carries a
+        // semicolon, and splitting on it cut the comment in half and left the
+        // rest of the sentence as SQL.
+        let mut sql = String::new();
+        let mut skipping = false;
+        for line in whole.lines() {
+            let t = line.trim_start();
+            if skipping {
+                skipping = !line.trim_end().ends_with(';');
+                continue;
+            }
+            if t.starts_with("TTL toDateTime") {
+                // it carries the `;` that closes the CREATE TABLE: dropping the
+                // whole line leaves the statement open and the next one reads
+                // as part of it
+                if line.trim_end().ends_with(';') {
+                    sql.push_str(";\n");
+                }
+                continue;
+            }
+            if (t.starts_with("ALTER TABLE")
+                && (line.contains("SET OPTIONS") || line.contains("MODIFY TTL")))
+                || t.starts_with("CREATE OR REPLACE TASK")
+            {
+                skipping = !line.trim_end().ends_with(';');
+                continue;
+            }
+            sql.push_str(line);
+            sql.push('\n');
+        }
+        for task in whole.split("CREATE OR REPLACE TASK").skip(1) {
+            let (_, delete) = task.split_once("AS\n").expect("a task with no body");
+            let delete: String = delete
+                .split_inclusive(';')
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let parsed = sqlparser::parser::Parser::parse_sql(
+                &sqlparser::dialect::SnowflakeDialect {},
+                &delete,
+            );
+            assert!(
+                parsed.is_ok(),
+                "the retention DELETE does not parse: {}",
+                parsed.unwrap_err()
+            );
+            assert!(delete.contains("DATEADD(day, -"), "{delete}");
+        }
+        if target == "clickhouse" {
+            assert!(
+                whole.contains("TTL toDateTime(event_time) + INTERVAL"),
+                "the TTL is not in the DDL"
+            );
+        }
         let parsed = match target {
             "bigquery" => {
                 sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::BigQueryDialect {}, &sql)
@@ -3277,14 +3353,30 @@ fn the_warehouse_schemas_are_valid_sql() {
     // swallows the comma separating it from the next one, and the DDL ends up
     // broken —it had already happened to me in a migration, and it happened again here.
     let sql = ddl.replace("@dataset", "ds");
-    let sentencias =
-        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::BigQueryDialect {}, &sql);
+    // `ALTER TABLE ... SET OPTIONS` is valid BigQuery and sqlparser 0.62 does
+    // not know it. The exception is named and not silenced: the statement is
+    // asserted by hand right below, and its ClickHouse twin —`MODIFY TTL`— is
+    // applied against a real server in the demo, which is the tool that
+    // actually decides.
+    let (retencion, resto): (Vec<&str>, Vec<&str>) = sql
+        .split_inclusive(';')
+        .partition(|st| st.contains("SET OPTIONS"));
+    let sentencias = sqlparser::parser::Parser::parse_sql(
+        &sqlparser::dialect::BigQueryDialect {},
+        &resto.join(""),
+    );
     assert!(
         sentencias.is_ok(),
         "the warehouse DDL is not valid SQL: {}",
         sentencias.unwrap_err()
     );
     assert!(sentencias.unwrap().len() >= 3, "faltan sentencias");
+    for st in &retencion {
+        assert!(
+            st.contains("ALTER TABLE") && st.contains("partition_expiration_days ="),
+            "the retention statement is not the one BigQuery takes: {st}"
+        );
+    }
 
     // the neutral plan, for whoever does not use BigQuery
     let (plan, _, _) = axon(&["analytics", "examples", "--target", "plan"]);
@@ -7000,4 +7092,118 @@ fn a_span_is_an_envelope_with_other_names() {
     let (out, _, ok) = axon(&["trace", d.to_str().unwrap()]);
     assert!(ok);
     assert!(!out.contains("undeclared"), "{out}");
+}
+
+/// Retention: the only thing that decides whether a table of events still
+/// exists in two years. It grows forever by default, and the first symptom is
+/// the bill while the second is a query that times out.
+#[test]
+fn the_retention_is_declared_and_says_it_in_each_dialect() {
+    let dir = std::env::temp_dir().join("axon-retention");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |extra: &str| {
+        std::fs::write(
+            dir.join("shop.toml"),
+            format!(
+                "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"2\"\n\n\
+                 [emits.\"order.placed@v1\"]\norderId = \"uuid\"\ntotal = \"money\"\n\n\
+                 [emits.\"order.shipped@v1\"]\norderId = \"uuid\"\n\n\
+                 [analytics]\nwarehouse = \"clickhouse\"\n{extra}"
+            ),
+        )
+        .unwrap();
+    };
+
+    // with nothing declared it is a warning, not an error: a repo that already
+    // exists cannot be blocked over this, and `axon accept` is the line
+    write("");
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    assert!(out.contains("with no `retention_days`"), "{out}");
+    assert!(out.contains("a query that times out"), "{out}");
+
+    // declared, with an exception per event for the one somebody answers for
+    write("retention_days = 730\n\n[analytics.retention]\n\"order.placed@v1\" = 2555\n");
+    let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    assert!(!out.contains("retention_days"), "{out}");
+
+    // ClickHouse: a TTL in the table, over `toDateTime` and not the column as
+    // it is —it is a DateTime64(3), and ClickHouse refuses that with
+    // BAD_TTL_EXPRESSION—, plus the ALTER, because `IF NOT EXISTS` ignores
+    // everything when the table is already there and retention is exactly what
+    // gets decided later
+    let (sql, _, ok) = axon(&["analytics", dir.to_str().unwrap(), "--target", "clickhouse"]);
+    assert!(ok);
+    assert!(
+        sql.contains("TTL toDateTime(event_time) + INTERVAL 2555 DAY"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("TTL toDateTime(event_time) + INTERVAL 730 DAY"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("MODIFY TTL toDateTime(event_time) + INTERVAL 2555 DAY"),
+        "{sql}"
+    );
+
+    // BigQuery: the expiry is per partition, and the ALTER for the same reason
+    let (sql, _, ok) = axon(&["analytics", dir.to_str().unwrap(), "--target", "bigquery"]);
+    assert!(ok);
+    assert!(sql.contains("partition_expiration_days = 2555"), "{sql}");
+    assert!(
+        sql.contains("SET OPTIONS (partition_expiration_days = 730)"),
+        "{sql}"
+    );
+
+    // Snowflake: a real TASK. `DATA_RETENTION_TIME_IN_DAYS` is Time Travel,
+    // caps at 90 days and deletes nothing — using it here would read as
+    // retention and do nothing at all.
+    let (sql, _, ok) = axon(&["analytics", dir.to_str().unwrap(), "--target", "snowflake"]);
+    assert!(ok);
+    assert!(sql.contains("CREATE OR REPLACE TASK"), "{sql}");
+    assert!(
+        sql.contains("DATEADD(day, -2555, CURRENT_TIMESTAMP())"),
+        "{sql}"
+    );
+    assert!(
+        !sql.contains("DATA_RETENTION_TIME_IN_DAYS = "),
+        "it used Time Travel as retention:\n{sql}"
+    );
+
+    // and the three dialects still parse with their own parser
+    for (target, dialect) in [
+        ("bigquery", "bigquery"),
+        ("snowflake", "snowflake"),
+        ("clickhouse", "clickhouse"),
+    ] {
+        let (sql, _, _) = axon(&["analytics", dir.to_str().unwrap(), "--target", target]);
+        assert!(!sql.is_empty(), "{dialect}");
+    }
+
+    // A metric asking for more history than the table keeps answers zero for
+    // the part that was deleted, and zero reads exactly like nothing happening.
+    write(
+        "retention_days = 3\n\n[metrics.monthly]\non = [\"order.placed@v1\"]\n\
+         kind = \"count\"\nwindow = \"1mo\"\n",
+    );
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "a metric over deleted history passed clean");
+    assert!(err.contains("is kept 3 days"), "{err}");
+    assert!(err.contains("like nothing having happened"), "{err}");
+
+    // retention over an event this service does not emit, and over nothing
+    write("retention_days = 30\n\n[analytics.retention]\n\"other.thing@v1\" = 90\n");
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("which this service does not emit"), "{err}");
+    write("export = false\nretention_days = 30\n");
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(
+        err.contains("There is no table to keep anything in"),
+        "{err}"
+    );
 }

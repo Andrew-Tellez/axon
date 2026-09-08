@@ -90,6 +90,23 @@ fi
 # --- the personal data does not travel in plaintext ----------------------
 # `pii = "hash"` in the manifest. That the column is a hash and not the address
 # is the only way to know the policy was applied.
+# La retencion, que es lo unico que decide si esta tabla existe en dos anios. Se
+# lee del propio ClickHouse y se compara contra el manifiesto: no basta con que
+# el DDL la diga, tiene que estar EN la tabla.
+echo "  la retencion declarada, aplicada en la tabla"
+# La linea de la excepcion y no la del bloque [emits]: las dos nombran el evento
+declarada=$(grep '^"order.placed@v1" = ' orders.toml | sed 's/.*= //')
+real=$(ch -q "SELECT extract(engine_full, 'toIntervalDay\\(([0-9]+)\\)') FROM system.tables WHERE database = 'axon' AND name = 'order_placed_v1'")
+otra=$(ch -q "SELECT extract(engine_full, 'toIntervalDay\\(([0-9]+)\\)') FROM system.tables WHERE database = 'axon' AND name = 'payment_captured_v1'")
+echo "    order.placed@v1 $real dias  ·  payment.captured@v1 $otra dias"
+if [ "$real" = "$declarada" ] && [ -n "$otra" ] && [ "$otra" != "$real" ]; then
+  echo "  OK: la excepcion por evento manda sobre la del servicio, y esta EN la tabla"
+  echo "  i sin el ALTER, un IF NOT EXISTS habria ignorado la retencion anadida despues"
+else
+  echo "  FALLO: declarada=$declarada real=$real otra=$otra"
+  exit 1
+fi
+
 echo "  the personal field, as the manifest declares it"
 raw=$(ch -q "SELECT count(*) FROM axon.order_placed_v1 WHERE customer_email_hash LIKE '%@%'")
 hashes=$(ch -q "SELECT count(*) FROM axon.order_placed_v1

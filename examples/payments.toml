@@ -28,6 +28,7 @@ breaker = true
 # assembled with one query.
 [analytics]
 warehouse = "clickhouse"
+retention_days = 730
 
 [infra]
 state = "postgres"

@@ -122,6 +122,20 @@ The demo measures it: the same route and the same policy, and the final failure 
 **once** while the retriable one arrives `1 + retries` times. See
 [The demo, measured](./demo.md).
 
+## `[analytics] retention_days`
+
+```toml
+[analytics]
+retention_days = 730
+
+[analytics.retention]
+"order.placed@v1" = 2555     # the exception, for what somebody answers for
+```
+
+How long the events are kept. A table of events grows forever, and the first symptom is
+the bill while the second is a query that times out. See
+[Warehouse and business metrics](./analytics.md#how-long-it-is-kept).
+
 ## `[rules.<name>]`: a metric, a condition, and what it proposes
 
 ```toml

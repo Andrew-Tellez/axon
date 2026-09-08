@@ -244,6 +244,10 @@ export const manifest = {
   "analytics": {
     "export": true,
     "pii": "hash",
+    "retention_days": 730,
+    "retention": {
+      "order.placed@v1": 2555
+    },
     "warehouse": "clickhouse"
   },
   "api": {

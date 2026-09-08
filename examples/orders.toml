@@ -69,6 +69,15 @@ breaker = true
 # `axon infra` refuses the combination that has none.
 warehouse = "clickhouse"
 pii = "hash"
+# Una tabla de eventos crece para siempre, y el primer sintoma es la factura
+# mientras el segundo es una consulta que se cae. Dos anios cubren la ventana de
+# cualquier metrica declarada y la comparacion contra el anio anterior.
+retention_days = 730
+
+# La excepcion, por evento: siete anios porque lo dice el SAT, no porque lo
+# quiera un tablero.
+[analytics.retention]
+"order.placed@v1" = 2555
 
 [infra]
 state = "postgres"
