@@ -7,6 +7,32 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.10.0] — 2026-09-08
+
+### Añadido
+
+- **`axon ci --forge gitlab`.** El pipeline generado solo sabía de GitHub Actions, así que
+  un equipo en GitLab tenía que reescribir a mano las compuertas —que son de axon, no de
+  la forja— y lo que se reescribe a mano se pierde. Ahora el mismo pipeline sale en el
+  otro dialecto: las mismas tres compuertas (`verify` contra **todos** los manifiestos,
+  código generado al día, migraciones en dry-run), deploy solo desde la rama por defecto,
+  OIDC vía `id_tokens` en vez de una llave larga guardada en una variable, y deploy por
+  digest.
+
+  `[ci] image` es el único campo que no es portable, y por eso **falla en vez de emitir**:
+  el `${{ }}` de GitHub es texto literal para GitLab, así que el deploy subiría una imagen
+  cuyo tag es la expresión misma y nadie se enteraría hasta que alguien leyera el
+  registro. El campo pasa a ser opcional —cada forja tiene su default— y generar GitLab
+  con sintaxis de GitHub aborta diciendo por qué.
+
+  Comprobado con un parser de YAML de verdad, no con búsqueda de subcadenas: que las tres
+  compuertas siguen ahí, que el deploy no se dispara desde un merge request y que el
+  `--target` no filtra otra nube.
+
+### Cambiado
+
+- La suite pasó a **91 pruebas**.
+
 ## [0.9.0] — 2026-09-08
 
 ### Añadido
