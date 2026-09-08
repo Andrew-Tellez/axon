@@ -7,6 +7,30 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.9.0] — 2026-09-08
+
+### Añadido
+
+- **`mode = "apply"`: el lazo cerrado, con dos cerrojos.** La regla mueve la palanca ella
+  misma, y hace falta que el manifiesto diga que **puede** y que quien la corre diga que
+  **ahora** (`axon rules --apply`): ninguno solo hace nada, porque contestan preguntas
+  distintas y un solo interruptor las confundiría. `verify` no lo bloquea y tampoco se
+  calla — lo nombra como lazo de control sobre producción cada vez que alguien lee la
+  salida.
+
+  Solo mueve un **flag**, sobre la configuración de flagd que axon mismo generó: cualquier
+  otro almacén es la API y la credencial de otro. La palanca **vuelve sola** cuando la
+  condición se levanta, o se queda donde la dejó el peor día del trimestre. Y cada cambio,
+  en los dos sentidos, es una línea en la auditoría con lo que la regla leyó y por qué: un
+  cambio automático en producción que no deja rastro es la peor versión de esto.
+
+  Medido contra flagd y no contra el archivo: el demo tira la métrica, aplica, le pregunta
+  a flagd qué sirve, la recupera y comprueba que la palanca volvió.
+
+### Cambiado
+
+- El demo pasó a **24 secciones y 62 comprobaciones**.
+
 ## [0.8.0] — 2026-09-08
 
 ### Añadido
