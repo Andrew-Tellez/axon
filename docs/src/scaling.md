@@ -161,6 +161,45 @@ query's text, so the pooler cannot weaken it; the RLS lives in the connection's 
 which is exactly what the pooler recycles. The first one rejects the query that names no
 tenant; the second, the one that names the wrong one.
 
+## The load test walks into the limit
+
+A flat test at the declared rate answers *does it hold what we said*. That is worth
+knowing and it is not the interesting question: it never sees what happens **one step
+past** the limit, which is the moment that decides whether the thing degrades or falls
+over.
+
+`axon load` emits a ramp out of `rate_limit`: half of it, the declared rate, a stretch
+holding there, and 25% over.
+
+```js
+stages: [
+  { target: 30, duration: `${step}s` },   // half of it
+  { target: 60, duration: `${step}s` },   // the declared rate_limit
+  { target: 60, duration: `${step}s` },   // holding there
+  { target: 75, duration: `${step}s` },   // 25% over: does it degrade or fall over
+]
+```
+
+And the distinction the ramp exists to make: **a 429 is the declared limit working; a
+5xx is the service breaking.** k6 counts both as `http_req_failed`, so the script keeps
+two metrics of its own and the verdict reads them:
+
+```console
+$ axon load manifests/orders.toml --check summary.json
+info: orders: 96 requests measured at 2.4/s
+axon: 0 thresholds breached
+    throttled 51%  ·  5xx 0%  ·  respuestas esperadas 100%
+```
+
+Not one 429 in a whole ramp is reported too: either the declared limit is never reached,
+or **nobody is enforcing it** — and then it is a number in a document.
+
+Which is what it used to be. `rate_limit` travelled to `k8s` as an annotation for
+somebody else's controller and did nothing at all on `local`: the load test walked right
+past it. Now the local edge carries the middleware, with the limit per minute —the unit
+it is declared in— and a burst of a tenth, because traffic that is not perfectly smooth
+would otherwise get throttled below its own declared limit.
+
 ## The engine has to exist
 
 `state` is validated against a closed list. It used to be a free string, so

@@ -1935,11 +1935,34 @@ fn edge_labels(p: &Plan, svc: &str) -> String {
     let mut u: Vec<String> = rules;
     u.sort();
     u.dedup();
+    // The declared `rate_limit`, ENFORCED and not just annotated. Until now it
+    // travelled to k8s as a label for somebody else's controller to read, and
+    // on `local` it did nothing at all: a limit that nobody applies is a number
+    // in a document, and the load test walked right past it without a single
+    // 429 to show for it.
+    //
+    // The strictest of the routes wins: they share a router, and taking the
+    // loosest would leave the tightest one declared and unprotected.
+    let limite = mine.iter().filter_map(|r| r.rate_limit).min();
+    let rl = limite
+        .map(|rpm| {
+            format!(
+                "      - traefik.http.routers.{svc}.middlewares={svc}-rl\n      \
+                 # `average` per minute, which is the unit `rate_limit` is declared in.\n      \
+                 # The burst is a tenth: without one, traffic that is not perfectly\n      \
+                 # smooth gets throttled below its own declared limit.\n      \
+                 - traefik.http.middlewares.{svc}-rl.ratelimit.average={rpm}\n      \
+                 - traefik.http.middlewares.{svc}-rl.ratelimit.period=1m\n      \
+                 - traefik.http.middlewares.{svc}-rl.ratelimit.burst={}\n",
+                (rpm / 10).max(1)
+            )
+        })
+        .unwrap_or_default();
     format!(
         "    labels:\n      \
          - traefik.enable=true\n      \
          - traefik.http.routers.{svc}.rule={}\n      \
-         - traefik.http.services.{svc}.loadbalancer.server.port={}\n",
+         - traefik.http.services.{svc}.loadbalancer.server.port={}\n{rl}",
         u.join(" || "),
         mine[0].port
     )

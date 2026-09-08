@@ -2153,11 +2153,10 @@ fn the_database_scaling_is_verified() {
 fn the_load_test_comes_from_the_manifest() {
     let (js, err, ok) = axon(&["load", "examples/orders.toml"]);
     assert!(ok, "{err}");
-    // the rate is the declared rate_limit, not a number picked by eye
-    assert!(
-        js.contains("rate: 60,              // declared in rate_limit"),
-        "{js}"
-    );
+    // the rate is the declared rate_limit, not a number picked by eye. It is a
+    // ramp now: the stage that holds is the declared one, and the last one goes
+    // past it on purpose — see `the_load_ramp_walks_into_the_declared_limit`
+    assert!(js.contains("{ target: 60, duration: `${step}s` }"), "{js}");
     // the threshold is the declared timeout
     assert!(
         js.contains(r#""http_req_duration{scenario:placeOrder}": ["p(95)<5000"]"#),
@@ -7314,4 +7313,153 @@ fn a_scope_says_who_and_not_just_that_there_is_somebody() {
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
     assert!(err.contains("declare different `[api]`"), "{err}");
+}
+
+/// The ramp, and the limit it walks into.
+///
+/// A flat test answers "does it hold what we said", which is worth knowing and
+/// is not the interesting question: it never sees what happens ONE STEP past
+/// the limit, which is the moment that decides whether the thing degrades or
+/// falls over.
+#[test]
+fn the_load_ramp_walks_into_the_declared_limit() {
+    let (js, err, ok) = axon(&["load", "examples/orders.toml"]);
+    assert!(ok, "{err}");
+    // four stages out of the declared rate_limit: half, the limit, hold, and
+    // 25% over
+    assert!(js.contains("executor: \"ramping-arrival-rate\""), "{js}");
+    assert!(js.contains("{ target: 30, duration: `${step}s` }"), "{js}");
+    assert!(js.contains("{ target: 60, duration: `${step}s` }"), "{js}");
+    assert!(js.contains("{ target: 75, duration: `${step}s` }"), "{js}");
+    // a 429 is the limit working and a 5xx is the service breaking: k6 counts
+    // both as `http_req_failed`, so they get a metric each
+    assert!(
+        js.contains("const serverErrors = new Rate(\"server_errors\")"),
+        "{js}"
+    );
+    assert!(
+        js.contains("const throttled = new Rate(\"throttled\")"),
+        "{js}"
+    );
+    assert!(js.contains("r.status === 429"), "{js}");
+    assert!(
+        js.contains("\"server_errors{scenario:placeOrder}\": [\"rate<0.01\"]"),
+        "{js}"
+    );
+
+    // the verdict reads k6's own key for a Rate —`value`, not `rate`—: looking
+    // in the wrong place gives nothing, and nothing reads as "all fine"
+    let dir = std::env::temp_dir().join("axon-ramp");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let summary = |thr: f64, err: f64| {
+        format!(
+            r#"{{"metrics":{{
+                 "http_reqs":{{"count":100,"rate":2.5}},
+                 "checks":{{"value":1,"thresholds":{{"rate>0.99":false}}}},
+                 "throttled":{{"value":{thr}}},
+                 "server_errors":{{"value":{err}}}
+               }}}}"#
+        )
+    };
+    let check = |body: String| -> (String, String) {
+        let f = dir.join("s.json");
+        std::fs::write(&f, body).unwrap();
+        let (out, err, _) = axon(&[
+            "load",
+            "examples/orders.toml",
+            "--check",
+            f.to_str().unwrap(),
+        ]);
+        (out, err)
+    };
+
+    // it degraded: throttled, and not a single 5xx
+    let (out, err) = check(summary(0.5, 0.0));
+    assert!(!format!("{out}{err}").contains("not one 429"), "{out}{err}");
+    assert!(!format!("{out}{err}").contains("5xx"), "{out}{err}");
+
+    // nothing throttled: the limit was never reached, or nobody enforces it —
+    // and then it is a number in a document
+    let (out, err) = check(summary(0.0, 0.0));
+    assert!(
+        format!("{out}{err}").contains("not one 429 in the whole ramp"),
+        "{out}{err}"
+    );
+    assert!(
+        format!("{out}{err}").contains("a number in a document"),
+        "{out}{err}"
+    );
+
+    // it broke instead of degrading
+    let (out, err) = check(summary(0.2, 0.05));
+    let both = format!("{out}{err}");
+    assert!(both.contains("5.0% of the answers were 5xx"), "{both}");
+    assert!(
+        both.contains("should degrade with 429 and not break"),
+        "{both}"
+    );
+}
+
+/// And the declared limit, enforced instead of annotated. Until now it
+/// travelled to k8s as a label for somebody else's controller and did nothing
+/// at all on `local`: the load test walked right past it without a single 429.
+#[test]
+fn the_declared_rate_limit_is_enforced_at_the_edge() {
+    let (yml, err, ok) = axon(&["infra", "examples", "--target", "local"]);
+    assert!(ok, "{err}");
+    assert!(
+        yml.contains("traefik.http.middlewares.orders-rl.ratelimit.average=60"),
+        "{yml}"
+    );
+    assert!(yml.contains("ratelimit.period=1m"), "{yml}");
+    // a burst, or traffic that is not perfectly smooth gets throttled below its
+    // own declared limit
+    assert!(yml.contains("ratelimit.burst=6"), "{yml}");
+    assert!(
+        yml.contains("traefik.http.routers.orders.middlewares=orders-rl"),
+        "{yml}"
+    );
+    // a service with no declared limit gets no middleware invented for it
+    assert!(
+        !yml.contains("checkout-rl.ratelimit"),
+        "it invented a limit nobody declared:\n{yml}"
+    );
+}
+
+/// The tour page lists one example per command. A command that exists and is
+/// in no example is a capability nobody will find, and an example naming a
+/// command that no longer exists is a page that lies.
+#[test]
+fn the_tour_covers_every_command() {
+    let page = std::fs::read_to_string("docs/src/tour.md").unwrap();
+    let (help, _, ok) = axon(&["--help"]);
+    assert!(ok);
+    let commands: Vec<String> = help
+        .lines()
+        .skip_while(|l| !l.starts_with("Commands:"))
+        .take_while(|l| !l.starts_with("Options:"))
+        .filter_map(|l| {
+            let t = l.trim_start();
+            let indented = l.len() - t.len() >= 2;
+            let name = t.split_whitespace().next()?;
+            (indented && name.chars().all(|c| c.is_ascii_lowercase()) && name != "help")
+                .then(|| name.to_string())
+        })
+        .collect();
+    assert!(commands.len() > 20, "{commands:?}");
+    for c in &commands {
+        assert!(
+            page.contains(&format!("axon {c} ")),
+            "`axon {c}` is in no example of the tour: a capability nobody will find"
+        );
+    }
+    // and the other way: an example of something that does not exist
+    for line in page.lines().filter(|l| l.trim_start().starts_with("axon ")) {
+        let named = line.split_whitespace().nth(1).unwrap_or("");
+        assert!(
+            commands.iter().any(|c| c == named),
+            "the tour names `axon {named}`, which is not a command"
+        );
+    }
 }

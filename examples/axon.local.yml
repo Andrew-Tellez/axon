@@ -335,6 +335,13 @@ services:
       - traefik.enable=true
       - traefik.http.routers.orders.rule=PathPrefix(`/v1/tenants`) || PathPrefix(`/v2/tenants`)
       - traefik.http.services.orders.loadbalancer.server.port=8080
+      - traefik.http.routers.orders.middlewares=orders-rl
+      # `average` per minute, which is the unit `rate_limit` is declared in.
+      # The burst is a tenth: without one, traffic that is not perfectly
+      # smooth gets throttled below its own declared limit.
+      - traefik.http.middlewares.orders-rl.ratelimit.average=60
+      - traefik.http.middlewares.orders-rl.ratelimit.period=1m
+      - traefik.http.middlewares.orders-rl.ratelimit.burst=6
   payments:
     build:
       context: .

@@ -47,37 +47,62 @@ pub fn build_k6(m: &Manifest) -> Result<String, String> {
         // resource simply does not exist. What the test measures is the path
         // —routing, auth, a round trip to the database— not a successful read.
         let con_parametro = route.contains('{');
-        let accepted = if con_parametro {
+        // A 429 in the overload stage is not a failure: it is the declared
+        // `rate_limit` doing the one thing it exists for. Counting it as one
+        // would make the ramp fail for working, and the number that matters
+        // —whether it degrades or falls over— would be buried.
+        let base = if con_parametro {
             "r.status === 404 || (r.status >= 200 && r.status < 300)"
         } else {
             "r.status >= 200 && r.status < 300"
         };
+        let accepted = format!("{base} || r.status === 429");
+        // A ramp and not a flat rate. A test that sits at the declared number
+        // answers "does it hold what we said", which is worth knowing and is
+        // not the interesting question: it never finds where it breaks, and it
+        // never sees what happens ONE STEP past the limit — which is the moment
+        // that decides whether the thing degrades or falls over.
+        //
+        // The stages come from `rate_limit`: half, the limit, hold there, and
+        // 25% over. The last one is where the edge should be throttling with
+        // 429s, because that is what declaring a limit is for.
         scenarios.push(format!(
             "    {tag}: {{\n      \
-               executor: \"constant-arrival-rate\",\n      \
+               executor: \"ramping-arrival-rate\",\n      \
                exec: \"{tag}\",\n      \
-               rate: {rate},              // declared in rate_limit\n      \
                timeUnit: \"1m\",\n      \
-               duration: __ENV.AXON_LOAD_DURATION || \"30s\",\n      \
-               preAllocatedVUs: {vus},\n      maxVUs: {max},\n    }},",
+               startRate: {inicio},\n      \
+               preAllocatedVUs: {vus},\n      maxVUs: {max},\n      \
+               stages: [\n        \
+                 {{ target: {mitad}, duration: `${{step}}s` }},   // half of it\n        \
+                 {{ target: {rate}, duration: `${{step}}s` }},   // the declared rate_limit\n        \
+                 {{ target: {rate}, duration: `${{step}}s` }},   // holding there\n        \
+                 {{ target: {sobre}, duration: `${{step}}s` }},   // 25% over: does it degrade or fall over\n      \
+               ],\n    }},",
+            inicio = (rate / 4).max(1),
+            mitad = (rate / 2).max(1),
+            sobre = (rate * 5 / 4).max(rate + 1),
             vus = (rate / 6).max(2),
-            max = (rate / 2).max(10),
+            // the overload stage needs headroom, or k6 throttles itself and the
+            // test measures its own limit instead of the service's
+            max = (rate).max(20),
         ));
         // The threshold is the declared timeout. Not a round number picked by eye.
         umbrales.push(format!(
             "    \"http_req_duration{{scenario:{tag}}}\": [\"p(95)<{timeout}\"],"
         ));
-        // k6 counts a 404 as a failure, so on a route with a parameter the
-        // threshold goes on the check and not on the HTTP status.
-        if con_parametro {
-            umbrales.push(format!(
-                "    \"checks{{scenario:{tag}}}\": [\"rate>0.99\"],"
-            ));
-        } else {
-            umbrales.push(format!(
-                "    \"http_req_failed{{scenario:{tag}}}\": [\"rate<0.01\"],"
-            ));
-        }
+        // Every answer is either what was asked for or the declared throttle.
+        // The check carries it —and not `http_req_failed`— because k6 counts a
+        // 404 and a 429 as failures, and neither is one here.
+        umbrales.push(format!(
+            "    \"checks{{scenario:{tag}}}\": [\"rate>0.99\"],"
+        ));
+        // And the one that decides whether it degrades or falls over. A 429 is
+        // the limit working; a 500 is the service breaking, and the ramp exists
+        // to tell them apart.
+        umbrales.push(format!(
+            "    \"server_errors{{scenario:{tag}}}\": [\"rate<0.01\"],"
+        ));
         let cuerpo = if me.mutating() {
             format!(
                 "JSON.stringify({{{}}})",
@@ -101,11 +126,13 @@ pub fn build_k6(m: &Manifest) -> Result<String, String> {
                  headers: {cabeceras},\n    \
                  tags: {{ scenario: \"{tag}\" }},\n    \
                  timeout: \"{timeout}ms\",\n  }});\n  \
-               check(r, {{ \"{label}\": (r) => {accepted} }}, {{ scenario: \"{tag}\" }});\n}}",
+               check(r, {{ \"{label}\": (r) => {accepted} }}, {{ scenario: \"{tag}\" }});\n  \
+               serverErrors.add(r.status >= 500, {{ scenario: \"{tag}\" }});\n  \
+               throttled.add(r.status === 429, {{ scenario: \"{tag}\" }});\n}}",
             label = if con_parametro {
-                "2xx or 404: the id is made up"
+                "2xx, 404 —the id is made up— or 429, the declared limit"
             } else {
-                "2xx"
+                "2xx or 429, the declared limit"
             },
             ruta_js = route
                 .split('/')
@@ -142,8 +169,20 @@ pub fn build_k6(m: &Manifest) -> Result<String, String> {
          //   k6 run --env AXON_BASE=http://localhost:8080 carga.js\n\
          //\n\
          {ceiling}import http from \"k6/http\";\n\
-         import {{ check }} from \"k6\";\n\n\
+         import {{ check }} from \"k6\";\n\
+         import {{ Rate }} from \"k6/metrics\";\n\n\
+         // Two of its own: a 429 is the declared limit working and a 5xx is the\n\
+         // service breaking. k6 counts both as `http_req_failed`, and that is\n\
+         // exactly the distinction the ramp exists to make.\n\
+         const serverErrors = new Rate(\"server_errors\");\n\
+         const throttled = new Rate(\"throttled\");\n\n\
          const base = __ENV.AXON_BASE || \"http://localhost:8080\";\n\
+         // The total, split across the four stages of the ramp. It takes `30s`\n\
+         // or `30` the same: a duration written by hand should not be a trap.\n\
+         const step = Math.max(\n  \
+           1,\n  \
+           Math.round(parseInt(String(__ENV.AXON_LOAD_DURATION || \"40s\"), 10) / 4),\n\
+         );\n\
          const uuid = () =>\n  \
            \"xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx\".replace(/x/g, () =>\n    \
              Math.floor(Math.random() * 16).toString(16),\n  );\n\n\
@@ -227,6 +266,48 @@ pub fn review(m: &Manifest, json: &str) -> Result<(Vec<String>, Vec<String>), St
             "the summary carries no thresholds: run k6 with the script `axon load` generates"
                 .into(),
         );
+    }
+
+    // Did the ramp actually reach the limit? A run where nothing was throttled
+    // says the declared `rate_limit` was never touched —the ramp was too short,
+    // or nobody is enforcing it— and a run that only throttles says the limit
+    // is below what the service is being asked for. Neither is a failure, and
+    // both are worth knowing before reading the rest.
+    // k6 calls a Rate's value `value` and not `rate`: reading the wrong key
+    // gives `None`, and `None` here reads as "nothing to say" — a check that
+    // stays quiet because it is looking in the wrong place is worse than no
+    // check at all.
+    let tasa = |name: &str| {
+        r.metrics
+            .get(name)
+            .and_then(|t| t.value("value").or_else(|| t.value("rate")))
+    };
+    match tasa("throttled") {
+        Some(0.0) => warnings.push(format!(
+            "{}: not one 429 in the whole ramp. Either the declared `rate_limit` is never \
+             reached, or nobody is enforcing it: the limit is then a number in a document",
+            m.service
+        )),
+        // The ramp asks for 125% of the limit on purpose, so being throttled is
+        // the expected end of it. Almost everything throttled is another
+        // matter: the lowest stage —half the declared rate— was refused too.
+        Some(rate) if rate > 0.8 => warnings.push(format!(
+            "{}: {:.0}% of the requests were throttled, including the stage at half the \
+             declared rate. The `rate_limit` is well below what is being asked of it",
+            m.service,
+            rate * 100.0
+        )),
+        _ => {}
+    }
+    if let Some(e) = tasa("server_errors") {
+        if e > 0.0 {
+            warnings.push(format!(
+                "{}: {:.1}% of the answers were 5xx. Past its limit a service should degrade \
+                 with 429 and not break: that is what declaring the limit was for",
+                m.service,
+                e * 100.0
+            ));
+        }
     }
 
     if let Some(dur) = r.metrics.get("http_req_duration") {

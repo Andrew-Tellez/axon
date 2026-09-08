@@ -197,11 +197,18 @@ python3 check-metabase.py "${AXON_BI_PORT:-3030}"
 step "declared vs measured capacity"
 if command -v k6 >/dev/null 2>&1; then
   "$AXON" load orders.toml > .axon/load.js
+  # Contra el EDGE y no contra el servicio: el `rate_limit` declarado lo aplica
+  # el edge, y pegarle directo al servicio mediria un limite que nadie impone.
+  # La rampa sube hasta el declarado y un 25% por encima, que es donde se ve si
+  # degrada o se cae.
   k6 run --quiet --summary-export=.axon/load.json \
-    --env AXON_BASE="http://localhost:$PORT" \
-    --env AXON_LOAD_DURATION="${AXON_LOAD_DURATION:-10s}" \
+    --env AXON_BASE="http://localhost:${AXON_EDGE_PORT:-8000}" \
+    --env AXON_LOAD_DURATION="${AXON_LOAD_DURATION:-40}" \
     .axon/load.js > /dev/null 2>&1 || true
   "$AXON" load orders.toml --check .axon/load.json
+  # Y lo que la rampa existe para distinguir: 429 es el limite declarado
+  # funcionando, 5xx es el servicio rompiendose.
+  python3 check-limit.py .axon/load.json
 else
   echo "  skipped: k6 is not installed"
 fi

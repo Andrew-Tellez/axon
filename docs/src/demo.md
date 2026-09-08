@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **57 checks against reality**: not against a mock,
+brings the whole system up and makes **58 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -200,8 +200,10 @@ ok 2 interactions, 0 errors, 0 warnings
   OK: la pregunta contesta lo mismo que la vista; la metrica se define en un solo lugar
 
 ==> declared vs measured capacity
-info: orders: 20 requests measured at 2.0/s
+info: orders: 96 requests measured at 2.4/s
 axon: 0 thresholds breached
+    throttled 51%  ·  5xx 0%  ·  respuestas esperadas 100%
+  OK: pasado su limite degrada con 429 y no se cae con 500, que es para lo que se declara un limite
 ```
 
 Three things about the numbers, because they are not decoration:
