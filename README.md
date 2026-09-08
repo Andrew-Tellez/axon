@@ -53,6 +53,7 @@ You declare the service once, and everything else is derived from it:
                      ├─ axon cap        what the CAP side you picked implies
                      ├─ axon versions   the API's versions and their maintenance cycle
                      ├─ axon rules      the loop: a metric, a condition, what it proposes
+                     ├─ axon tui        the system drawn, and what changed
                      └─ axon verify     drift: fails in CI
 ```
 
@@ -171,7 +172,7 @@ verified against itself.
 
 ### Inside the binary
 
-Six dependencies, none of them accidental:
+Seven dependencies, none of them accidental:
 
 | | |
 | --- | --- |
@@ -180,6 +181,7 @@ Six dependencies, none of them accidental:
 | `indexmap` | insertion order: without it the generated output changes between runs and `git diff --exit-code` stops meaning anything |
 | `sqlparser` | the schema comes out of the migrations with a real SQL parser. A regex breaks on `PARTITION BY` — and the worst part is that it breaks **in silence** |
 | `ureq` | `axon discover` against live services |
+| `ratatui` | `axon tui`: the only one that costs — 86 → 140 crates in the tree and 4.25 → 4.55 MB of binary. It was measured before being accepted, and everything else runs with the terminal untouched |
 
 `regex` was here and left: it was down to checking three digits and an underscore in a
 file name.

@@ -17,6 +17,7 @@ their own — a compiler that only verifies itself produces invalid output:
 | The warehouse schemas | parsed with each dialect's own parser |
 | The declared metrics | their SQL parses in the three dialects, and the demo compares each one against counting the table by hand |
 | The declared failures | the retriable codes land in the caller's client and the final ones do not, and the demo counts the calls each one really costs |
+| The drawing | `axon tui --frames` renders through ratatui's test backend, and a test reads the picture: every service in it, the external one told apart, the CAP side, and the dying dependency marked |
 | The rules over a metric | their SQL parses in the three dialects, and the demo seeds a falling history in ClickHouse to check that it proposes once, does not repeat, and stays quiet when the guard falls |
 | A split manifest | splitting one in two has to produce byte-identical output from `axon build` |
 | Declared consumption | reading a field nobody declared does not compile: `tsc --strict` refuses it against the generated type |

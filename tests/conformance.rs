@@ -6185,3 +6185,47 @@ restore = "off"
     assert!(out.contains("has no data for every window"), "{out}");
     assert!(out.contains("0 of 1 rules propose"), "{out}");
 }
+
+/// The picture is a projection like any other, and a projection nobody
+/// verifies drifts. `--frames` renders through ratatui's own test backend, so
+/// this looks at exactly what a person sees.
+#[test]
+fn the_drawing_shows_the_system_it_describes() {
+    let (out, err, ok) = axon(&["tui", "examples", "--frames", "1"]);
+    assert!(ok, "{err}");
+    // every service of the example is in the picture, external ones marked as
+    // such: a node missing from the drawing is a service nobody would look for
+    for svc in ["orders", "payments", "checkout", "stripe"] {
+        assert!(out.contains(svc), "`{svc}` is not in the drawing:\n{out}");
+    }
+    assert!(
+        out.contains("[ext]"),
+        "an external service is not told apart"
+    );
+    assert!(
+        out.contains("[CP]") && out.contains("[AP]"),
+        "the CAP side each one declares is not in the drawing"
+    );
+    // the verdict, which is the one thing that has to be readable without
+    // knowing where to look
+    assert!(out.contains("errors"), "{out}");
+    // a dying dependency is marked in the drawing, not only in `verify`
+    assert!(
+        out.contains("getOrder") && out.contains('⚠'),
+        "the deprecated call is not marked:\n{out}"
+    );
+    // and the panel of state
+    assert!(out.contains("versions"), "{out}");
+    assert!(out.contains("[q] quit"), "{out}");
+
+    // two frames are two frames: the animation is what makes it a TUI and not
+    // a screenshot
+    let (two, _, ok) = axon(&["tui", "examples", "--frames", "2"]);
+    assert!(ok);
+    assert_eq!(
+        two.lines().count(),
+        out.lines().count() * 2,
+        "the second frame was not rendered"
+    );
+    assert_ne!(two.lines().last(), None, "the frame came out empty");
+}

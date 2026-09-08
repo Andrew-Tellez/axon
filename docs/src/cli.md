@@ -73,6 +73,33 @@ retriable. See [`errors` on a method](./manifest.md#errors-on-a-method).
 
 It runs with `node --test`, with no dependencies.
 
+## `axon tui <sources> [--frames N]`
+The system as it is, drawn and animated: the topology as a force-directed graph —what
+talks together ends up together— with the verdict, the versions, and what changed against
+the baseline in the panels. `tab` cycles the panels, `space` pauses, `r` re-reads and `q`
+quits.
+
+An event and a call are drawn differently on purpose: the first travels on its own and
+carries a pulse, the second is somebody waiting. A dependency on a version that is dying
+is marked in the drawing, not only in `verify`.
+
+With `--frames N` it renders N frames to stdout through ratatui's own test backend and
+exits — which is what makes the picture checkable in CI, and usable in a pipe.
+
+```console
+$ axon tui manifests/ --frames 1
+┌ axon ───────────────────────────────────────────── near · 0 errors 10 warn ┐
+│                    orders [AP]                                             │
+│                 ⢀⡠getOrder ⚠                                               │
+│ payments [CP]⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀ checkout [AP]                            │
+│                     stripe [ext]                                           │
+└────────────────────────────────────────────────────────────────────────────┘
+┌ state ─────────────────────────────────────────────────────────────────────┐
+│versions  path · getOrder deprecated · sunset 2027-12-31                    │
+│changed   nothing new since the last baseline                               │
+└───────────── [tab] panel  [space] pause  [r] re-read  [q] quit  ·  frame 4 ┘
+```
+
 ## `axon rules <sources> [--check <tsv>]`
 Without `--check` it emits the SQL that evaluates every declared `[rules.*]`: one row per
 rule, series —the trigger and each guard— and window, with the value, the reference and

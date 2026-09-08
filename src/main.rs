@@ -13,6 +13,7 @@ mod manifest;
 mod plugin;
 mod pooler;
 mod trace;
+mod tui;
 mod verify;
 mod versions;
 
@@ -117,6 +118,14 @@ enum Cmd {
     },
     /// the API's maintenance cycle: what each version is, and what changed
     Versions { sources: Vec<String> },
+    /// the system as it is, drawn: topology, verdict, versions and changes
+    Tui {
+        sources: Vec<String>,
+        /// renders N frames to stdout and exits instead of taking over the
+        /// terminal; that is what makes the picture checkable in CI
+        #[arg(long)]
+        frames: Option<u64>,
+    },
     /// rules over a metric: the SQL that evaluates them, and what they propose
     Rules {
         sources: Vec<String>,
@@ -430,6 +439,25 @@ fn run() -> Result<ExitCode, String> {
                         bi::dialect(other).ok_or_else(|| format!("unknown warehouse `{other}`"))?;
                     print!("{}", bi::build(&ms, &d));
                 }
+            }
+        }
+        Cmd::Tui { sources, frames } => {
+            let ms = manifest::discover(&sources)?;
+            let first = sources
+                .first()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let root = if first.is_dir() {
+                first
+            } else {
+                first
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf()
+            };
+            match frames {
+                Some(n) => print!("{}", tui::frames(&ms, &root, n)?),
+                None => tui::run(&ms, &root)?,
             }
         }
         Cmd::Rules { sources, check } => {

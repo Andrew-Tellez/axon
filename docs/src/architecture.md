@@ -63,6 +63,7 @@ flowchart TB
   MAN --> POOL["pooler.rs<br/><i>pgdog.toml + users</i>"]
   MAN --> CAP["cap.rs<br/><i>CAP consequences</i>"]
   MAN --> VERS["versions.rs<br/><i>the API's<br/>maintenance cycle</i>"]
+  MAN --> TUI["tui.rs<br/><i>the system drawn:<br/>springs + ratatui</i>"]
   MAN --> LOAD["carga.rs<br/><i>k6 script + verdict</i>"]
   MAN --> API["api.rs<br/><i>OpenAPI + testkit</i>"]
   MAN --> BASE["baseline.rs<br/><i>published contracts</i>"]
@@ -73,14 +74,20 @@ flowchart TB
   EMIT -.-> PLUG
   INF -.-> PLUG
 
-  MAIN["main.rs<br/><i>the CLI: 22 commands</i>"] --> MAN
+  MAIN["main.rs<br/><i>the CLI: 24 commands</i>"] --> MAN
   COL["color.rs · trace.rs"] --> MAIN
 ```
 
-Six dependencies in the binary, none accidental: `clap`, `serde` + `toml` +
+Seven dependencies in the binary, none accidental: `clap`, `serde` + `toml` +
 `serde_json` + `serde_yaml_ng`, `indexmap` (insertion order, so the generated output does
-not change between runs and `git diff --exit-code` keeps meaning something), `sqlparser`
-and `ureq`.
+not change between runs and `git diff --exit-code` keeps meaning something), `sqlparser`,
+`ureq` and `ratatui`.
+
+`ratatui` is the one that costs: it takes the normal dependency tree from 86 crates to
+140 and the binary from 4.25 MB to 4.55 MB. It buys `axon tui` — layout, a braille
+canvas, key events and terminal restore on a panic — and it was measured before being
+accepted, which is the only reason it is here. Everything else still runs with the
+terminal untouched.
 
 ## Infrastructure, high level: one neutral plan
 
