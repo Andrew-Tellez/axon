@@ -42,6 +42,16 @@ has to be fixed cannot end up underneath.
 | A public route with no `rate_limit` or no `timeout_ms` | error |
 | A paginated method that does not return a `cursor` | error |
 
+## A job
+
+| | |
+| --- | --- |
+| A job that declares routes | error |
+| A job with `min_instances` or `max_instances` | error |
+| A `schedule` on something that is not a job | error |
+| A schedule that is not five cron fields | error |
+| A job that consumes events | warning: the lag is the schedule |
+
 ## Consumers that do not use axon
 
 | | |

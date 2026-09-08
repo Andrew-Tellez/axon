@@ -701,6 +701,15 @@ pub struct Bucket {
 /// engine that is not here has to fail and say how to proceed.
 pub const ENGINES: [&str; 1] = ["postgres"];
 
+/// How a service runs. `container` listens on a port; `job` runs and ends.
+///
+/// It is not decoration: a job has no instances to scale, serves no routes and
+/// is not behind the edge. Declaring a CLI or a nightly process as a container
+/// meant the only honest answer was to declare nothing at all, and then the
+/// infrastructure of the thing that actually runs your business lived in
+/// somebody's crontab.
+pub const RUNTIMES: [&str; 2] = ["container", "job"];
+
 // A key nobody reads is the silent failure this project exists to catch, and
 // TOML makes it easy: a top-level key written after a table belongs to that
 // table. `include = [...]` under `[infra]` parsed fine and did nothing.
@@ -709,6 +718,12 @@ pub const ENGINES: [&str; 1] = ["postgres"];
 pub struct Infra {
     pub state: Option<String>,
     pub runtime: Option<String>,
+    /// When it runs, for `runtime = "job"`: a five-field cron expression.
+    ///
+    /// Absent means somebody triggers it —a backfill, a CLI—, and that is a
+    /// legitimate thing to declare: it says the service is NOT a process
+    /// listening on a port, which is what decides everything downstream.
+    pub schedule: Option<String>,
     /// Migrations directory: the schema's source of truth.
     pub migrations: Option<String>,
     #[serde(default)]
@@ -752,6 +767,13 @@ pub struct Infra {
     /// Tables that are not business data and carry no tenant.
     #[serde(default)]
     pub tenant_exempt: Vec<String>,
+}
+
+impl Infra {
+    /// Runs and ends, instead of listening on a port.
+    pub fn is_job(&self) -> bool {
+        self.runtime.as_deref() == Some("job")
+    }
 }
 
 /// A transition. The WHAT is portable to any language; the HOW

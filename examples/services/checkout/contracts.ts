@@ -258,6 +258,7 @@ export const manifest = {
   "infra": {
     "state": "postgres",
     "runtime": "container",
+    "schedule": null,
     "migrations": "sql/checkout/",
     "secrets": [],
     "min_instances": 1,
@@ -278,6 +279,7 @@ export const manifest = {
     "prod": {
       "state": null,
       "runtime": null,
+      "schedule": null,
       "migrations": null,
       "secrets": [],
       "min_instances": 2,

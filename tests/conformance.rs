@@ -463,7 +463,9 @@ fn an_unknown_runtime_is_not_ignored() {
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok);
-    assert!(err.contains("only `container`"), "{err}");
+    assert!(err.contains("today there is container and job"), "{err}");
+    // and the way out is named, not just the refusal
+    assert!(err.contains("axon-infra-"), "{err}");
 }
 
 #[test]
@@ -623,6 +625,17 @@ fn the_generated_hcl_validates() {
         casos[1].2.clone(),
         saga,
     ));
+    // And with a job: a Cloud Run job with its scheduler, and an ECS task with
+    // an EventBridge schedule. Different resources from a service's, and an
+    // invented attribute there goes unseen until the `apply`.
+    let job = fixture_job("tf").to_string_lossy().to_string();
+    casos.push((
+        "gcp-job".into(),
+        casos[0].1,
+        casos[0].2.clone(),
+        job.clone(),
+    ));
+    casos.push(("aws-job".into(), casos[1].1, casos[1].2.clone(), job));
 
     for (etiqueta, provider, vars, fuente_tf) in casos {
         let target = etiqueta.trim_end_matches("-saga");
@@ -6606,4 +6619,169 @@ fn a_foreign_pact_answers_what_the_edge_cannot() {
         check(r#"{"consumer":{"name":"c"},"provider":{"name":"other"},"interactions":[]}"#);
     assert!(!ok);
     assert!(err.contains("there is no manifest for it"), "{err}");
+}
+
+/// A fixture with a job: a service that runs and ends, on a schedule.
+fn fixture_job(suffix: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("axon-job-{suffix}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("nightly.toml"),
+        r#"service = "nightly"
+version = "1.0.0"
+owner = "data-team"
+tier = "2"
+
+[analytics]
+export = false
+
+[cap]
+consistency = "eventual"
+on_partition = "degrade"
+max_staleness_ms = 86400000
+
+[methods.recompute]
+in = { day = "string" }
+out = { rows = "int" }
+
+[infra]
+runtime = "job"
+schedule = "0 3 * * *"
+secrets = ["WAREHOUSE_TOKEN"]
+"#,
+    )
+    .unwrap();
+    dir
+}
+
+/// A job is a service that runs and ends, and every target renders that
+/// differently. Declaring a CLI or a nightly process as a container left the
+/// only honest option being to declare nothing — and then the infrastructure of
+/// the thing that actually runs the business lived in somebody's crontab.
+#[test]
+fn a_job_is_not_a_container_on_any_target() {
+    let dir = fixture_job("targets");
+    let src = dir.to_str().unwrap();
+
+    // local: it runs once, has no port and does not get restarted. A process
+    // that ends, restarted, looks like a crash loop and is the container doing
+    // exactly what it was told.
+    let (yml, err, ok) = axon(&["infra", src, "--target", "local"]);
+    assert!(ok, "{err}");
+    // only the job's own block: the broker and the trace backend do have
+    // healthchecks, and asserting over the whole file would be asserting about
+    // them instead
+    let block: String = yml
+        .lines()
+        .skip_while(|l| *l != "  nightly:")
+        .skip(1)
+        // the next service starts at two spaces; everything of this one is
+        // deeper than that
+        .take_while(|l| l.starts_with("    ") || l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(block.contains("restart: \"no\""), "{block}");
+    assert!(!block.contains("ports:"), "a job got a port:\n{block}");
+    assert!(
+        !block.contains("healthcheck"),
+        "a job got a healthcheck:\n{block}"
+    );
+    assert!(
+        yml.contains("0 3 * * *"),
+        "the schedule is not even mentioned"
+    );
+
+    // k8s: a CronJob, not a Deployment, and it does not restart on success
+    let (k, err, ok) = axon(&["infra", src, "--target", "k8s"]);
+    assert!(ok, "{err}");
+    assert!(k.contains("kind: CronJob"), "{k}");
+    assert!(k.contains("schedule: \"0 3 * * *\""), "{k}");
+    assert!(k.contains("concurrencyPolicy: Forbid"), "{k}");
+    assert!(k.contains("restartPolicy: OnFailure"), "{k}");
+    assert!(!k.contains("kind: Deployment"), "a job became a Deployment");
+    // and no Service in front of something that listens to nothing
+    assert!(
+        !k.contains("kind: Service\nmetadata:\n  name: nightly"),
+        "a job got a Service:\n{k}"
+    );
+
+    // gcp: a Cloud Run JOB. As a service it would be a revision that never
+    // becomes ready, because nothing is listening.
+    let (g, err, ok) = axon(&["infra", src, "--target", "gcp"]);
+    assert!(ok, "{err}");
+    assert!(g.contains("google_cloud_run_v2_job"), "{g}");
+    assert!(!g.contains("google_cloud_run_v2_service"), "{g}");
+    assert!(g.contains("google_cloud_scheduler_job"), "{g}");
+    // the Run API takes OAuth and not OIDC: it is Google's API, not the job's
+    assert!(g.contains("oauth_token"), "{g}");
+
+    // aws: a task definition and no service, plus the schedule. EventBridge
+    // speaks six fields and rejects `*` in both day fields at once.
+    let (a, err, ok) = axon(&["infra", src, "--target", "aws"]);
+    assert!(ok, "{err}");
+    assert!(a.contains("aws_ecs_task_definition"), "{a}");
+    assert!(
+        !a.contains("aws_ecs_service"),
+        "a job became a service:\n{a}"
+    );
+    assert!(a.contains("cron(0 3 * * ? *)"), "{a}");
+    assert!(a.contains("aws_scheduler_schedule"), "{a}");
+
+    // and the k8s YAML parses as YAML, which is the check that catches an
+    // indentation the CronJob's extra nesting could have broken
+    for doc in k.split("\n---\n") {
+        if doc.trim().is_empty() {
+            continue;
+        }
+        let parsed: Result<serde_yaml_ng::Value, _> = serde_yaml_ng::from_str(doc);
+        assert!(parsed.is_ok(), "{}\n{doc}", parsed.unwrap_err());
+    }
+
+    // and the rules that follow from running and ending
+    let bad = |extra: &str| -> String {
+        let d = std::env::temp_dir().join("axon-job-bad");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("j.toml"),
+            format!(
+                "service = \"j\"\nversion = \"1.0.0\"\nowner = \"e\"\ntier = \"2\"\n\n\
+                 [infra]\nruntime = \"job\"\n{extra}"
+            ),
+        )
+        .unwrap();
+        let (_, err, ok) = axon(&["verify", d.to_str().unwrap()]);
+        assert!(!ok, "it passed clean:\n{extra}");
+        err
+    };
+    let err = bad(
+        "\n[methods.read]\nhttp = \"GET /v1/things\"\nauth = \"required\"\n\
+         in = { id = \"uuid\" }\nout = { id = \"uuid\" }\n",
+    );
+    assert!(
+        err.contains("is not a process listening on a port"),
+        "{err}"
+    );
+    let err = bad("min_instances = 2\n");
+    assert!(err.contains("no instances to scale"), "{err}");
+    let err = bad("schedule = \"@daily\"\n");
+    assert!(err.contains("is not five cron fields"), "{err}");
+
+    // and a schedule on something that stays up
+    let d = std::env::temp_dir().join("axon-job-sched");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("j.toml"),
+        "service = \"j\"\nversion = \"1.0.0\"\nowner = \"e\"\ntier = \"2\"\n\n\
+         [infra]\nschedule = \"0 3 * * *\"\n",
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", d.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(
+        err.contains("declares `schedule` and is not a `job`"),
+        "{err}"
+    );
 }

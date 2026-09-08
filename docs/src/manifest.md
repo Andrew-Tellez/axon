@@ -266,6 +266,19 @@ What it buys:
 Same value Pact gets from recording traffic, without recording anything, and it fails in
 the PR instead of after the deploy.
 
+## `runtime = "job"`: something that runs and ends
+
+```toml
+[infra]
+runtime  = "job"
+schedule = "0 3 * * *"
+```
+
+A nightly recalculation, a backfill, a CLI. It has no port, no instances to scale
+and no route, and each target renders it as what it is — a `CronJob`, a Cloud Run
+job, an ECS task with its schedule. See
+[Infrastructure](./infrastructure.md#a-service-that-runs-and-ends).
+
 ## `[api]`: how the API is versioned
 
 Two schemes, and `verify` requires the whole platform to declare the same one — with

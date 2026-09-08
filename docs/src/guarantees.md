@@ -26,6 +26,7 @@ their own — a compiler that only verifies itself produces invalid output:
 | Declared consumption | reading a field nobody declared does not compile: `tsc --strict` refuses it against the generated type |
 | The generated double | `node --test` over `FakeTransport`: a retriable failure arrives 1 + retries times and a final one exactly once, with no network |
 | The version adapters | `tsc --strict` over the chain and `node --test` running it: the oldest shape has to come out of two adapters applied in order |
+| A job on the four targets | its HCL goes through `terraform validate` with the real providers, and its k8s YAML through a parse: a CronJob's extra nesting is exactly where an indentation breaks |
 | The four targets | they deploy the workload and deliver to somebody |
 | The book's manifest examples | every ```toml block goes through `axon verify` |
 | The output the book quotes | four consecutive words of it have to appear in `src/` |

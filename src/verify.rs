@@ -112,12 +112,75 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             ));
         }
         match m.infra.runtime.as_deref() {
-            None | Some("container") => {}
+            None => {}
+            Some(r) if RUNTIMES.contains(&r) => {}
             Some(other) => errors.push(format!(
-                "{}: `runtime = \"{other}\"` does not exist; today there is only `container`. \
-                 Another execution model gets added with an `axon-infra-*` plugin",
-                m.service
+                "{}: `runtime = \"{other}\"` does not exist; today there is {}. Another \
+                 execution model gets added with an `axon-infra-*` plugin",
+                m.service,
+                RUNTIMES.join(" and ")
             )),
+        }
+        // A job runs and ends. Everything that follows is a consequence of
+        // that, and each one of these was something that used to apply with no
+        // error and leave infrastructure nobody would ever reach.
+        if m.infra.is_job() {
+            let served: Vec<&String> = m
+                .methods
+                .iter()
+                .filter(|(_, me)| me.http.is_some())
+                .map(|(n, _)| n)
+                .collect();
+            if !served.is_empty() {
+                errors.push(format!(
+                    "{}: `runtime = \"job\"` and it declares routes ({}). A job is not a \
+                     process listening on a port: the routes would be behind an edge that \
+                     reaches nothing",
+                    m.service,
+                    served
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if m.infra.min_instances.is_some() || m.infra.max_instances.is_some() {
+                errors.push(format!(
+                    "{}: a job has no instances to scale; how many run at a time is the \
+                     scheduler's, and `min_instances` here would be an autoscaler over \
+                     something that is not up",
+                    m.service
+                ));
+            }
+            // Consuming events from something that only runs at nine in the
+            // morning is not wrong, but it is a decision: the lag between the
+            // event and the reaction is the schedule.
+            if !m.consumes.is_empty() {
+                warnings.push(format!(
+                    "{}: a job that consumes {} events. Between the event and the reaction \
+                     there is a whole schedule, and the broker has to retain them meanwhile",
+                    m.service,
+                    m.consumes.len()
+                ));
+            }
+        } else if m.infra.schedule.is_some() {
+            errors.push(format!(
+                "{}: it declares `schedule` and is not a `job`. A container that is up does \
+                 not get scheduled: what runs on a schedule is something that ends",
+                m.service
+            ));
+        }
+        if let Some(sched) = &m.infra.schedule {
+            // Five fields, which is what every scheduler of the three providers
+            // speaks. Validating more than that would be reimplementing cron;
+            // validating less lets `@daily` through, which two of them reject.
+            if sched.split_whitespace().count() != 5 {
+                errors.push(format!(
+                    "{}: `schedule = \"{sched}\"` is not five cron fields. The three \
+                     providers speak that and not `@daily`",
+                    m.service
+                ));
+            }
         }
         if m.depends.len() > pol.max_deps_per_service {
             warnings.push(format!(

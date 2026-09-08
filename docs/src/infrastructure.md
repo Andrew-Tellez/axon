@@ -24,6 +24,38 @@ warehouse ingest path, the OpenTelemetry variables, flagd with its configuration
 there are flags, and —on `local`, when something exports— a Metabase to read the
 warehouse with.
 
+## A service that runs and ends
+
+```toml
+[infra]
+runtime  = "job"          # container · job
+schedule = "0 3 * * *"    # five cron fields; absent means somebody triggers it
+```
+
+Not everything that runs your business listens on a port. A nightly
+recalculation, a backfill, a CLI: declaring them as a container left the only
+honest option being to declare nothing, and then their infrastructure lived in
+somebody's crontab.
+
+A job is not a container with a different label — every target renders something
+else, and each of these was a way of applying with no error and leaving
+infrastructure nobody would ever reach:
+
+| | |
+| --- | --- |
+| `local` | it runs **once** at startup, with `restart: "no"`. There is no scheduler here, and faking one with a `sleep` loop would be inventing an interval the manifest does not have: a cron expression is not a period |
+| `k8s` | a `CronJob` with `concurrencyPolicy: Forbid`, or a `Job` with no schedule. Never a Deployment: a pod whose process ends would be restarted forever, looking like a crash loop while doing exactly what it was told |
+| `gcp` | a `google_cloud_run_v2_job` plus a scheduler that calls the Run API with **OAuth** — it is Google's API and not the job's, so OIDC would not do. As a service it would be a revision that never becomes ready |
+| `aws` | a task definition with no ECS **service**, plus an EventBridge schedule. Its cron is six fields and rejects `*` in both day fields at once, so the day of the week becomes `?` |
+
+And what `verify` refuses, all of it following from "it runs and ends": routes on
+a job (they would sit behind an edge that reaches nothing), `min_instances` (an
+autoscaler over something that is not up), a `schedule` on something that stays
+up, and a schedule that is not five fields — `@daily` is rejected by two of the
+three providers. A job that **consumes** events is a warning and not an error:
+it is legitimate, and the lag between the event and the reaction is the whole
+schedule.
+
 **Local is one more target, not a separate subsystem.** That is why local and production
 cannot diverge: they come out of the same declaration.
 

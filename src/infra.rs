@@ -77,6 +77,37 @@ pub struct Workload {
     pub owner: String,
     pub tier: String,
     pub version: String,
+    /// `container` listens on a port; `job` runs and ends. Everything each
+    /// target does differently for one hangs off this.
+    pub kind: String,
+    /// When the job runs, if anybody schedules it. Absent means somebody
+    /// triggers it, which is also a thing to declare.
+    pub schedule: Option<String>,
+}
+
+impl Workload {
+    pub fn is_job(&self) -> bool {
+        self.kind == "job"
+    }
+}
+
+/// Five-field cron to what EventBridge speaks: six fields, a year at the end,
+/// and never `*` in both day fields at once — it rejects that, because a day of
+/// the month and a day of the week together are contradictory. The one that
+/// gives way is the day of the week, as `?`.
+pub fn aws_cron(five: &str) -> String {
+    let f: Vec<&str> = five.split_whitespace().collect();
+    if f.len() != 5 {
+        return five.to_string();
+    }
+    let (min, hour, dom, mon, dow) = (f[0], f[1], f[2], f[3], f[4]);
+    let (dom, dow) = match (dom, dow) {
+        ("*", "*") => ("*", "?"),
+        (d, "*") => (d, "?"),
+        ("*", w) => ("?", w),
+        (d, w) => (d, w),
+    };
+    format!("{min} {hour} {dom} {mon} {dow} *")
 }
 
 /// An edge route. The gateway is not a new source of truth: it comes from the
@@ -278,6 +309,8 @@ pub fn plan(ms: &[Manifest]) -> Plan {
             owner: m.owner.clone().unwrap_or_default(),
             tier: m.tier.clone().unwrap_or_default(),
             version: m.version.clone().unwrap_or_default(),
+            kind: if m.infra.is_job() { "job" } else { "container" }.to_string(),
+            schedule: m.infra.schedule.clone(),
         });
     }
     routes.sort_by(|a, b| (&a.path, &a.method).cmp(&(&b.path, &b.method)));
@@ -426,6 +459,41 @@ fn gcp(p: &Plan) -> String {
                  secret_key_ref {{\n              secret  = google_secret_manager_secret.{s}_{}.secret_id\n              version = \"latest\"\n            }}\n          }}\n        }}\n",
                 tfname(sec)
             ));
+        }
+        // A job is a Cloud Run JOB, not a service: no port, no ingress, no
+        // scaling. Rendering it as a service would leave a revision that never
+        // becomes ready, because nothing is listening.
+        if w.is_job() {
+            o.push(format!(
+                "resource \"google_cloud_run_v2_job\" \"{s}\" {{\n  name     = \"{svc}\"\n  \
+                 location = var.region\n  template {{\n    template {{\n      \
+                 service_account = google_service_account.{s}.email\n      \
+                 containers {{\n        image = var.{img}\n{env}      }}\n    }}\n  }}\n}}\n",
+                svc = w.service,
+                img = w.image_var,
+                env = env
+                    .lines()
+                    .map(|l| format!("  {l}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+            if let Some(cron) = &w.schedule {
+                // The scheduler calls the Run Admin API with the job's own
+                // account. An OIDC token would not do: this is Google's API and
+                // not the job's, so it takes OAuth.
+                o.push(format!(
+                    "resource \"google_cloud_scheduler_job\" \"{s}_run\" {{\n  \
+                     name     = \"{svc}-run\"\n  schedule = \"{cron}\"\n  \
+                     # a run that overruns its window does not get a second one on top\n  \
+                     attempt_deadline = \"320s\"\n  \
+                     retry_config {{\n    retry_count = 1\n  }}\n  \
+                     http_target {{\n    http_method = \"POST\"\n    \
+                     uri = \"https://${{var.region}}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${{var.project}}/jobs/{svc}:run\"\n    \
+                     oauth_token {{\n      service_account_email = google_service_account.{s}.email\n    }}\n  }}\n}}\n",
+                    svc = w.service
+                ));
+            }
+            continue;
         }
         o.push(format!(
             "resource \"google_cloud_run_v2_service\" \"{s}\" {{\n  name     = \"{svc}\"\n  \
@@ -680,7 +748,11 @@ fn aws(p: &Plan) -> String {
                 .to_string(),
         );
     }
-    if !p.crons.is_empty() {
+    if !p.crons.is_empty()
+        || p.workloads
+            .iter()
+            .any(|w| w.is_job() && w.schedule.is_some())
+    {
         o.push(
             "variable \"scheduler_role_arn\" {\n  type        = string\n  \
              description = \"Role EventBridge Scheduler assumes to launch the sweep task\"\n}\n\
@@ -753,6 +825,34 @@ fn aws(p: &Plan) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+        // A job has a task definition and no SERVICE: an ECS service keeps N
+        // copies alive, and a process that ends would be restarted forever.
+        // What launches it is the scheduler, or a person.
+        if w.is_job() {
+            if let Some(cron) = &w.schedule {
+                o.push(format!(
+                    "resource \"aws_scheduler_schedule\" \"{s}_run\" {{\n  \
+                     name                = \"{svc}-run\"\n  \
+                     schedule_expression = \"cron({cron_aws})\"\n  \
+                     # a missed window is not recovered by firing several at once over the\n  \
+                     # same data\n  \
+                     flexible_time_window {{\n    mode = \"OFF\"\n  }}\n  \
+                     target {{\n    arn      = var.ecs_cluster_arn\n    \
+                     role_arn = var.scheduler_role_arn\n    \
+                     ecs_parameters {{\n      \
+                     task_definition_arn = aws_ecs_task_definition.{s}.arn\n      \
+                     launch_type         = \"FARGATE\"\n      \
+                     network_configuration {{\n        subnets = var.subnets\n      }}\n    }}\n    \
+                     retry_policy {{\n      maximum_retry_attempts = 1\n    }}\n  }}\n}}\n",
+                    svc = w.service,
+                    // EventBridge speaks six fields and does not accept `*` in
+                    // both day fields: the day of the week becomes `?`, which
+                    // is what it means by "whichever".
+                    cron_aws = aws_cron(cron),
+                ));
+            }
+            continue;
+        }
         o.push(format!(
             "resource \"aws_ecs_service\" \"{s}\" {{\n  name            = \"{svc}\"\n  \
              cluster         = var.ecs_cluster\n  task_definition = aws_ecs_task_definition.{s}.arn\n  \
@@ -1013,6 +1113,62 @@ fn k8s(p: &Plan) -> String {
                 "            - name: {sec}\n              valueFrom:\n                \
                  secretKeyRef: {{ name: {svc}, key: {sec} }}\n"
             ));
+        }
+        // A job is not a Deployment: there is nothing to keep up, nothing to
+        // probe and no Service in front. Rendering it as one would leave a pod
+        // restarting forever because its process ends, which is the pod doing
+        // exactly what it was asked and looking like a crash loop.
+        if w.is_job() {
+            let (kind, spec) = match &w.schedule {
+                // A run that overruns its window does not get a second one on
+                // top: two passes of the same job over the same data is the
+                // kind of thing that only shows up as a duplicate row.
+                Some(cron) => (
+                    "CronJob",
+                    format!(
+                        "  schedule: \"{cron}\"\n  concurrencyPolicy: Forbid\n  jobTemplate:\n    spec:\n      "
+                    ),
+                ),
+                None => ("Job", "  ".to_string()),
+            };
+            o.push(format!(
+                "---
+apiVersion: batch/v1
+kind: {kind}
+metadata:
+  name: {svc}
+  labels: {{ app: {svc} }}
+spec:
+{spec}template:
+{indent}    metadata:
+{indent}      labels: {{ app: {svc} }}
+{indent}    spec:
+{indent}      # it ends: restarting it on success would run it again forever
+{indent}      restartPolicy: OnFailure
+{indent}      securityContext:
+{indent}        runAsNonRoot: true
+{indent}        runAsUser: 10001
+{indent}        fsGroup: 10001
+{indent}        seccompProfile: {{ type: RuntimeDefault }}
+{indent}      automountServiceAccountToken: false
+{indent}      containers:
+{indent}        - name: {svc}
+{indent}          image: IMAGE_{up}
+{indent}          securityContext:
+{indent}            allowPrivilegeEscalation: false
+{indent}            readOnlyRootFilesystem: true
+{indent}            capabilities: {{ drop: [\"ALL\"] }}
+{indent}          env:
+{env_indented}",
+                indent = if w.schedule.is_some() { "    " } else { "" },
+                up = svc.to_uppercase(),
+                env_indented = env
+                    .lines()
+                    .map(|l| format!("{}{l}", if w.schedule.is_some() { "    " } else { "" }))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
+            continue;
         }
         o.push(format!(
             "---
@@ -1624,6 +1780,33 @@ services:
         }
         for (k, v) in env_otel_with(w, "http://trace:4318", true) {
             secrets.push_str(&format!("      {k}: \"{v}\"\n"));
+        }
+        // A job locally: it runs once, at startup, and ends. There is no
+        // scheduler here and simulating one with a `sleep` loop would be
+        // inventing an interval the manifest does not have —a cron expression
+        // is not a period—. Running it once is what lets you see it work, and
+        // `restart: "no"` keeps `up --wait` from counting a container that
+        // ended on purpose as one that died.
+        if w.is_job() {
+            o.push_str(&format!(
+                "  {svc}:
+    build:
+      context: .
+      dockerfile: services/{svc}/Dockerfile
+    depends_on: {{ {deps} }}
+    restart: \"no\"
+    env_file: [.env.local]
+    environment:
+      AXON_BROKER_URL: nats://broker:4222
+      AXON_TRACE_LOG: /out/log/local.ndjson
+{db_env}{secrets}    volumes: [\"./.axon:/out\"]
+    # `{schedule}` on the target that has a scheduler; here it runs once at
+    # startup, which is what makes it visible instead of theoretical.
+",
+                deps = deps.join(", "),
+                schedule = w.schedule.as_deref().unwrap_or("triggered by somebody"),
+            ));
+            continue;
         }
         o.push_str(&format!(
             "  {svc}:
