@@ -2583,13 +2583,24 @@ fn the_documentation_examples_validate() {
         let mut inicio = 0usize;
         let mut bloque = String::new();
         let mut bloques: Vec<(usize, String)> = Vec::new();
+        // `no-verify` is for a block that is NOT a manifest —a proposal for
+        // another file format, say—. It has to be said out loud in the fence:
+        // running a non-manifest through `axon verify` checks nothing, and
+        // letting it be skipped by accident is how the whole check rots.
+        let mut skip = false;
         for (n, l) in text.lines().enumerate() {
             let t = l.trim();
             if !dentro && (t == "```toml" || t.starts_with("```toml,")) {
                 dentro = true;
+                skip = t.contains("no-verify");
                 inicio = n + 1;
                 bloque.clear();
             } else if dentro && t == "```" {
+                if skip {
+                    dentro = false;
+                    bloque.clear();
+                    continue;
+                }
                 dentro = false;
                 bloques.push((inicio, std::mem::take(&mut bloque)));
             } else if dentro {

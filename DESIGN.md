@@ -182,6 +182,12 @@ Deliberately skipped, and when to add it:
   language.
 - **No runtime of its own** — the `Bus` is a three-line interface; the adapter belongs to
   whoever deploys. Add a runtime package when the same adapter shows up in three services.
+- **No declared scenarios** — the fourteen situations the demo measures are hand-written
+  shell, which is the least declarative thing in the repo. A scenario file is worth
+  building only if it refuses to restate what the manifest already derives, and only once
+  fault injection has an answer that does not put a switch in production code. The design
+  note, with what could be refuted without running anything, is in
+  [Declared scenarios](https://andrew-tellez.github.io/axon/scenarios.html).
 - **`verify` compares manifests with each other and with the migrations, not with the
   cloud** — drift against terraform state or against the real topics arrives when there
   is something deployed to compare with. `axon analytics --check` already does this shape

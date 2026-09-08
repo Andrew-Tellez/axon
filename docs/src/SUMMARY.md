@@ -34,5 +34,6 @@
 # Extending
 
 - [Plugins](./plugins.md)
+- [Declared scenarios (proposal)](./scenarios.md)
 - [Command reference](./cli.md)
 - [Contributing](./contributing.md)
