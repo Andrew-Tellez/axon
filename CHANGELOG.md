@@ -7,6 +7,55 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.4.0] — 2026-09-08
+
+### Añadido
+
+- **`axon traffic`: quién llama a qué, leído del edge.** Con un consumidor que no usa
+  axon hay una asimetría que decide qué se puede saber: lo que **pide** es observable y
+  lo que **lee** de la respuesta no. Esto contesta la mitad observable —quién llama a la
+  versión que se está retirando, cuántas veces y desde dónde—, dice qué rutas no reciben
+  tráfico *sin afirmar que nadie las llama*, porque una llamada entre servicios no pasa
+  por el edge, y nombra las rutas que nadie declara. Falla en un solo caso, que es un
+  hecho y no un juicio: tráfico sobre algo que ya pasó su `sunset` declarado. Para que
+  hubiera algo que leer, el edge generado ahora escribe su access log en JSON con el
+  header de versión.
+- **`axon pact`: el pacto de un consumidor que no usa axon.** La otra mitad, cuando ese
+  consumidor ya usa Pact: su archivo *ya dice* qué campos necesita, y axon no necesita un
+  broker para **leerlo**. Contesta si espera un campo que nadie devuelve —renombrado, o
+  el pacto quedó viejo— y cuáles de los declarados **no** lee, que es la pregunta que
+  descongela un contrato. El cuerpo de una falla se compara como RFC 7807 y no contra la
+  salida del método, y un status que el método no declara sale como hallazgo sobre el
+  proveedor: falla así y no lo dice.
+- **`axon accept`: la línea que un repo existente puede trazar.** `verify` era
+  todo-o-nada, y eso lo dejaba fuera de un código que ya existe. Los avisos de hoy se
+  aceptan en `axon.accepted.json`; con el archivo presente, un aviso que no está en la
+  lista falla el build —su presencia *es* el opt-in— y uno que dejó de ocurrir se reporta,
+  así que la lista solo puede encoger.
+- **Metabase en el target local, aprovisionado desde el manifiesto.** Una métrica
+  declarada y reescrita en un dashboard son dos definiciones del mismo número. `axon
+  analytics --metabase` emite la conexión y una pregunta por métrica y por embudo, cada
+  una apuntando a la vista generada. El demo aprovisiona uno desde cero sin tocar la
+  interfaz y compara una pregunta contra la misma vista leída de ClickHouse.
+
+### Cambiado
+
+- El demo pasó a **21 secciones y 51 comprobaciones**.
+- La nota de diseño de los [escenarios declarados](https://andrew-tellez.github.io/axon/scenarios.html):
+  por qué un escenario no puede declarar lo que espera que pase, y qué haría falta para
+  construirlo.
+
+### Corregido
+
+- El mensaje del motor desconocido estaba a medio traducir —«no esta soportado. Motores
+  nativos: postgres. Un motor different one is served by…»—. Salió de usar axon contra un
+  proyecto real. Y `state = "none"` recibe su propio mensaje: es lo que alguien escribe
+  para decir «esto no tiene base de datos», y mandarlo a construir un plugin es mandarlo
+  a construir nada.
+- El test de la política escribía un `.ts` temporal dentro del ejemplo y lo borraba; el
+  typecheck que corre en paralelo lo veía aparecer y desaparecer. Solo caía a veces y
+  solo en un runner.
+
 ## [0.3.0] — 2026-09-08
 
 ### Añadido
