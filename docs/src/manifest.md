@@ -181,10 +181,9 @@ The loop that today lives in a dashboard alert plus a runbook nobody ran. The me
 already declared, the flag is already declared and so is the event catalogue, so what was
 missing was saying out loud **which condition on which metric leads to which of them**.
 
-**It only ever proposes.** `mode = "apply"` is refused with its reason: writing to
-production off a metric is a control loop, and that gets decided on its own, not in a
-field. `axon rules` emits the SQL —axon has no warehouse credentials and does not want
-them— and `axon rules --check <tsv>` takes the decision over the rows that come back:
+**By default it only proposes.** `axon rules` emits the SQL —axon has no warehouse
+credentials and does not want them— and `axon rules --check <tsv>` takes the decision
+over the rows that come back:
 
 ```console
 $ axon rules manifests/ --check windows.tsv
@@ -193,6 +192,36 @@ proposes  orders.gmv_usd_falling
   `gmv` = 64000 for total.currency = USD held the condition for 2 windows, the 3 before were quiet, and 1 guard held
 axon: 1 of 1 rules propose a change; none was applied
 ```
+
+### Closing the loop
+
+`mode = "apply"` lets the rule move the lever itself, and it takes **two locks and not
+one**: the manifest says the rule may act, and whoever runs it says now.
+
+```sh
+axon rules manifests/ --check windows.tsv --apply .axon/flags.json
+```
+
+```console
+applied orders.gmv_usd_falling: `free_shipping` off -> over_500
+      1 change(s) written to .axon/flags.json and to .axon/flags.audit.ndjson
+```
+
+Neither lock on its own does anything, because they answer different questions —is this
+rule allowed to act, and is now the moment— and a single switch would conflate them.
+`verify` does not block `apply`, and it does not stay quiet about it either: it names it
+as a control loop over production every time somebody reads the output.
+
+What it writes is the flagd configuration axon itself generated. Any other flag store is
+somebody else's API and somebody else's credential, which is the line every command here
+draws. It only moves a **flag**: emitting an event or calling a method on its own is a
+different tool, and `verify` says so.
+
+And the lever comes back. When the condition lifts, the flag returns to `restore` — what
+goes up on its own has to be able to come down on its own, or it stays where the worst
+day of the quarter left it. Every change, in both directions, is one line appended to an
+audit trail with what the rule read and why: **an automated change to production that
+leaves no record is the worst possible version of this.**
 
 Three things worth naming, because they are the difference between this and a cron with
 a threshold:

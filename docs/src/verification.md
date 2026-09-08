@@ -82,7 +82,9 @@ has to be fixed cannot end up underneath.
 | A flag or variant that does not exist, or no `restore` | error |
 | A rule that flips a `kill_switch` | error |
 | Two rules proposing over the same flag | error |
-| `mode = "apply"` | error: it is not implemented, and it is a control loop |
+| A `mode` that is neither `propose` nor `apply` | error |
+| `mode = "apply"` on something that is not a flag | error |
+| `mode = "apply"` | warning, every time: it is a control loop over production |
 | A guard that is the trigger written again | error |
 | A lever off one metric with no `guard` | warning: Goodhart's law with a cron |
 

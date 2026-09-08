@@ -66,6 +66,7 @@ axon pact manifests/ --check pacts/mobile.json       # a consumer that never ado
 axon analytics manifests/ --introspect               # the query that dumps the real schema
 axon analytics manifests/ --check dump.tsv           # ...and the diff against the manifest
 axon rules manifests/ --check windows.tsv            # what the declared rules propose
+axon rules manifests/ --check windows.tsv --apply .axon/flags.json   # ...and move the lever
 axon load manifests/orders.toml --check summary.json # declared capacity vs measured
 ```
 

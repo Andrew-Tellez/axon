@@ -179,6 +179,9 @@ python3 check-flags.py "localhost:${AXON_FLAGS_PORT:-8016}" charge_v2 10
 step "las reglas declaradas, evaluadas contra la bodega"
 ./check-rules.sh
 
+step "el lazo cerrado: la regla mueve la palanca"
+python3 check-apply.py "localhost:${AXON_FLAGS_PORT:-8016}"
+
 step "the warehouse: schema, funnel and PII"
 ./check-warehouse.sh
 

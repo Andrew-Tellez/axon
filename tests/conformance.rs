@@ -6138,14 +6138,15 @@ kill_switch = true
     assert!(err.contains("with no `restore`"), "{err}");
     assert!(err.contains("come back down on its own"), "{err}");
 
-    // writing to production off a metric is a control loop, and that is not a
-    // value in a field
+    // an invented mode is refused; `apply` is not —see
+    // `applying_a_rule_takes_two_locks_and_leaves_a_trail`— but it does get
+    // named every time it is read
     let err = run(&format!(
         "[rules.r]\nmetric = \"gmv\"\nwhere = {{ tier = \"a\" }}\nbelow = 0.85\nfor = 2\n\
-         cooldown = 3\nmode = \"apply\"\n{then}{guard}"
+         cooldown = 3\nmode = \"auto\"\n{then}{guard}"
     ));
-    assert!(err.contains("is not implemented"), "{err}");
-    assert!(err.contains("a person applies"), "{err}");
+    assert!(err.contains("does not exist"), "{err}");
+    assert!(err.contains("\"propose\" or \"apply\""), "{err}");
 
     // a guard that is the trigger written again guards nothing
     let err = run(&format!(
@@ -7553,4 +7554,181 @@ fn the_neutral_plan_validates_against_its_published_schema() {
         printed.contains("'kind' is a required property"),
         "{printed}"
     );
+}
+
+/// `mode = "apply"`: the loop closed. Two locks and not one — the manifest says
+/// the rule MAY act and whoever runs it says now — because they answer
+/// different questions and a single switch would conflate them.
+#[test]
+fn applying_a_rule_takes_two_locks_and_leaves_a_trail() {
+    let dir = std::env::temp_dir().join("axon-apply");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = |mode: &str| {
+        format!(
+            r#"service = "shop"
+version = "1.0.0"
+owner = "team"
+tier = "2"
+
+[emits."order.placed@v1"]
+orderId = "uuid"
+total = "money"
+
+[analytics]
+warehouse = "clickhouse"
+retention_days = 365
+
+[metrics.gmv]
+on = ["order.placed@v1"]
+kind = "sum"
+field = "total"
+window = "1d"
+
+[metrics.orders]
+on = ["order.placed@v1"]
+kind = "count"
+window = "1d"
+
+[flags.free_shipping]
+owner = "team"
+expires = "2027-06-30"
+default_variant = "off"
+variants = {{ off = 0, on = 1 }}
+
+[rules.gmv_falling]
+metric = "gmv"
+below = 0.85
+for = 2
+cooldown = 3
+mode = "{mode}"
+
+[[rules.gmv_falling.guard]]
+metric = "orders"
+above = 0.9
+
+[rules.gmv_falling.then]
+flag = "free_shipping"
+variant = "on"
+restore = "off"
+"#
+        )
+    };
+    let write = |mode: &str| std::fs::write(dir.join("shop.toml"), manifest(mode)).unwrap();
+
+    // it is not blocked and it is not quiet: whoever reads the output sees it
+    // named every time, and not only the day somebody wrote it
+    write("apply");
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    assert!(out.contains("moves `free_shipping` on its own"), "{out}");
+    assert!(out.contains("control loop over production"), "{out}");
+
+    // the windows: two falling, quiet before, guard holding
+    let days = ["d1", "d2", "d3", "d4", "d5"];
+    let mut rows: Vec<String> = days
+        .iter()
+        .enumerate()
+        .map(|(i, d)| format!("gmv_falling\ttrigger\t{d}\t100\t0\t{}", u8::from(i >= 3)))
+        .collect();
+    rows.extend(
+        days.iter()
+            .map(|d| format!("gmv_falling\tguard:orders\t{d}\t10\t0\t1")),
+    );
+    let tsv = dir.join("w.tsv");
+    std::fs::write(&tsv, rows.join("\n")).unwrap();
+
+    let flags = dir.join("flags.json");
+    let fresh = || {
+        let (f, _, ok) = axon(&["flags", dir.to_str().unwrap()]);
+        assert!(ok);
+        std::fs::write(&flags, f).unwrap();
+        let _ = std::fs::remove_file(flags.with_extension("audit.ndjson"));
+    };
+    let variant = || -> String {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&flags).unwrap()).unwrap();
+        v["flags"]["free_shipping"]["defaultVariant"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let run = |apply: bool| -> String {
+        let mut args = vec![
+            "rules".to_string(),
+            dir.to_str().unwrap().to_string(),
+            "--check".to_string(),
+            tsv.to_str().unwrap().to_string(),
+        ];
+        if apply {
+            args.push("--apply".into());
+            args.push(flags.to_str().unwrap().to_string());
+        }
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let (out, err, ok) = axon(&refs);
+        assert!(ok, "{err}");
+        out
+    };
+
+    // lock one: with `apply` in the manifest and no flag on the command, it
+    // still only proposes
+    fresh();
+    let out = run(false);
+    assert!(out.contains("none was applied"), "{out}");
+    assert_eq!(variant(), "off", "it moved without being asked");
+
+    // lock two: with `propose` in the manifest and the flag on the command,
+    // nothing moves either
+    write("propose");
+    fresh();
+    let out = run(true);
+    assert_eq!(variant(), "off", "a propose rule was applied:\n{out}");
+    assert!(!out.contains("applied "), "{out}");
+
+    // both open: the lever moves, and it says so
+    write("apply");
+    fresh();
+    let out = run(true);
+    assert!(out.contains("`free_shipping` off -> on"), "{out}");
+    assert_eq!(variant(), "on");
+    // and the trail, which is the only record that it happened
+    let trail = std::fs::read_to_string(flags.with_extension("audit.ndjson")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(trail.lines().next().unwrap()).unwrap();
+    assert_eq!(line["from"], "off");
+    assert_eq!(line["to"], "on");
+    assert_eq!(line["rule"], "gmv_falling");
+    assert!(
+        line["why"].as_str().unwrap().contains("held the condition"),
+        "{trail}"
+    );
+
+    // running it again over the same windows changes nothing: a rule that
+    // rewrites the same value every window fills the trail with nothing
+    let out = run(true);
+    assert!(!out.contains("off -> on"), "{out}");
+    assert_eq!(trail.lines().count(), 1, "{trail}");
+
+    // and when the condition lifts, the lever goes back on its own
+    let lifted: Vec<String> = days
+        .iter()
+        .map(|d| format!("gmv_falling\ttrigger\t{d}\t100\t0\t0"))
+        .chain(
+            days.iter()
+                .map(|d| format!("gmv_falling\tguard:orders\t{d}\t10\t0\t1")),
+        )
+        .collect();
+    std::fs::write(&tsv, lifted.join("\n")).unwrap();
+    let out = run(true);
+    assert!(out.contains("`free_shipping` on -> off"), "{out}");
+    assert_eq!(variant(), "off");
+
+    // applying anything other than a flag is a different tool
+    let man = manifest("apply").replace(
+        "[rules.gmv_falling.then]\nflag = \"free_shipping\"\nvariant = \"on\"\nrestore = \"off\"",
+        "[rules.gmv_falling.then]\nemits = \"order.placed@v1\"",
+    );
+    std::fs::write(dir.join("shop.toml"), man).unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("only moves a flag"), "{err}");
 }

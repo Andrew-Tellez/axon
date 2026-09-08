@@ -339,7 +339,7 @@ export const manifest = {
           "value": null
         }
       ],
-      "mode": "propose",
+      "mode": "apply",
       "then": {
         "flag": "free_shipping",
         "variant": "over_500",

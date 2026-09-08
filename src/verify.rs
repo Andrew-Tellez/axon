@@ -992,17 +992,32 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         for (name, r) in &m.rules {
             match r.mode.as_deref() {
                 None | Some("propose") => {}
-                Some("apply") => errors.push(format!(
-                    "{svc}.{name}: `mode = \"apply\"` is not implemented. Writing to \
-                     production off a metric is a control loop, and that gets decided on \
-                     its own and not in a field; today a rule proposes and a person applies",
-                    svc = m.service
+                // It is not blocked, and it is not quiet either. A rule that
+                // moves a lever on its own is a control loop over production,
+                // and whoever reads this output should see it named every time
+                // and not only the day somebody wrote it.
+                Some("apply") => warnings.push(format!(
+                    "{}.{name}: `mode = \"apply\"` moves `{}` on its own. It is a control \
+                     loop over production: it still takes `axon rules --apply` to happen, \
+                     and the audit trail is the only record that it did",
+                    m.service,
+                    r.then.flag.as_deref().unwrap_or("something")
                 )),
                 Some(other) => errors.push(format!(
-                    "{}.{name}: `mode = \"{other}\"` does not exist; today the only one is \
-                     \"propose\"",
+                    "{}.{name}: `mode = \"{other}\"` does not exist; it is \"propose\" or \
+                     \"apply\"",
                     m.service
                 )),
+            }
+            // Applying anything other than a flag would mean axon emitting an
+            // event or calling a method on its own, which is a different tool.
+            if r.mode.as_deref() == Some("apply") && r.then.flag.is_none() {
+                errors.push(format!(
+                    "{}.{name}: `mode = \"apply\"` only moves a flag. Emitting an event or \
+                     calling a method on its own is not something axon does: those stay in \
+                     `propose`",
+                    m.service
+                ));
             }
             let metric = m.metrics.get(&r.metric);
             match metric {

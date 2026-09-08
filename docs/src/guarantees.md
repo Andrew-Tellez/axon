@@ -25,6 +25,7 @@ their own — a compiler that only verifies itself produces invalid output:
 | Who calls what | the demo generates traffic against the deprecated version and reads it back from the edge's real access log |
 | A foreign pact | crossed against the declared contract: a field nobody returns fails, and the ones the consumer does not read get named |
 | The BI provisioning | the demo provisions a Metabase from zero and compares a question against the same view read from ClickHouse: the dashboard and the manifest have to answer the same number |
+| The closed loop | the demo drops the metric, applies, and asks **flagd** what it serves; then recovers it and checks the lever came back, with both changes in the audit trail |
 | The rules over a metric | their SQL parses in the three dialects, and the demo seeds a falling history in ClickHouse to check that it proposes once, does not repeat, and stays quiet when the guard falls |
 | The OpenAPI import | what it does not invent is asserted too: no timeout and no `idempotent = true`, and `verify` demands each one |
 | A split manifest | splitting one in two has to produce byte-identical output from `axon build` |
@@ -42,7 +43,7 @@ their own — a compiler that only verifies itself produces invalid output:
 
 ```sh
 cargo test --release      # 62 conformance checks
-cd examples && ./demo.sh  # 58 checks against real containers
+cd examples && ./demo.sh  # 62 checks against real containers
 ```
 
 Preview. The command surface is stable; the manifest format can still change before

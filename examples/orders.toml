@@ -181,7 +181,11 @@ compare = "previous"
 below = 0.85              # 15% abajo de la ventana anterior
 for = 2                   # dos dias seguidos: un dia malo no es una tendencia
 cooldown = 3              # y tres dias tranquilos antes, o no propone
-mode = "propose"
+# El lazo cerrado: la regla mueve la palanca por su cuenta. Sigue haciendo falta
+# que alguien corra `axon rules --apply`, y cada cambio queda en la auditoria:
+# un cambio automatico en produccion que no deja rastro es la peor version de
+# esto.
+mode = "apply"
 
 # La guarda: la otra direccion, declarada. Con una sola metrica esto seria la
 # ley de Goodhart con un cron —la palanca mueve el numero por el que se la

@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **58 checks against reality**: not against a mock,
+brings the whole system up and makes **62 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -151,6 +151,18 @@ OK: the system does exactly what it declares
   declared 10%  measured 10.7%  (32 of 300)
   OK: sticky per tenant, and the percentage applies
 
+==> el lazo cerrado: la regla mueve la palanca
+  flagd sirve `free_shipping` = off antes de nada
+  OK: la regla dice `apply` y sin la bandera igual solo propone —dos cerrojos, no uno
+    applied orders.gmv_usd_cayendo: `free_shipping` off -> over_500
+    flagd sirve `free_shipping` = over_500
+  OK: la palanca se movio y flagd sirve la variante nueva a quien pregunte
+    flagd sirve `free_shipping` = off
+  OK: al levantarse la condicion vuelve sola
+    auditoria: 2026-09-08 free_shipping off -> over_500
+    auditoria: 2026-09-08 free_shipping over_500 -> off
+  OK: las dos quedaron escritas con lo que la regla leyo
+
 ==> the warehouse: schema, funnel and PII
   OK: 1 events in the warehouse, with the generated schema untouched
   OK: 1 flows, 1 reached the charge (100% conversion)
@@ -258,6 +270,7 @@ shortest way to show one thing:
 | `./check-scopes.sh` | un token válido que no alcanza: 403 nombrando el permiso que falta |
 | `./check-errors.sh` | a declared failure: the final one arrives once, the retriable one uses the whole budget |
 | `./check-versions.sh` | two versions of the same endpoint, and the headers the retired one really sends |
+| `python3 check-apply.py 8016` | el lazo cerrado: la palanca se mueve, flagd la sirve, y vuelve sola |
 | `./check-rules.sh` | a rule over a metric: it proposes on the way in, does not repeat, and the guard stops it |
 | `./check-spans.sh` | la cadena real leída de Jaeger, y una dependencia que ocurre sin estar declarada |
 | `./check-traffic.sh` | who still calls the version being retired, read from the edge's real log |

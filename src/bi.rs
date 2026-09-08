@@ -1215,8 +1215,16 @@ pub struct Proposal {
     pub rule: String,
     pub service: String,
     pub fires: bool,
+    /// The condition no longer holds. What went up on its own has to be able to
+    /// come back down on its own, and without this the lever stays where the
+    /// worst day of the quarter left it.
+    pub lifted: bool,
     pub why: String,
     pub action: String,
+    /// The flag it moves, and to where. `None` when it proposes something else.
+    pub flag: Option<(String, String, String)>,
+    /// Whether the manifest allows applying it, which is only half of the lock.
+    pub apply: bool,
 }
 
 /// The decision, over the windows that came back.
@@ -1250,12 +1258,17 @@ pub fn decide(ms: &[Manifest], windows: &[Window]) -> Vec<Proposal> {
                     rule: name.clone(),
                     service: m.service.clone(),
                     fires: false,
+                    // With no history there is nothing to lift either: doing
+                    // anything here would be acting on the absence of data.
+                    lifted: false,
                     why: format!(
                         "{} windows of history and it needs {}: not enough to tell",
                         mine.len(),
                         need + quiet
                     ),
                     action,
+                    flag: None,
+                    apply: false,
                 });
                 continue;
             }
@@ -1319,8 +1332,16 @@ pub fn decide(ms: &[Manifest], windows: &[Window]) -> Vec<Proposal> {
                 rule: name.clone(),
                 service: m.service.clone(),
                 fires: holding && was_quiet && blocked.is_none(),
+                // Lifted is not "it never held": it is that the last windows do
+                // not hold it any more, which is when the lever goes back.
+                lifted: !tail.iter().any(|w| w.holds),
                 why,
                 action,
+                flag: match (&r.then.flag, &r.then.variant, &r.then.restore) {
+                    (Some(f), Some(v), Some(back)) => Some((f.clone(), v.clone(), back.clone())),
+                    _ => None,
+                },
+                apply: r.mode.as_deref() == Some("apply"),
             });
         }
     }
@@ -1404,6 +1425,91 @@ pub fn metabase(ms: &[Manifest], dataset: &str) -> serde_json::Value {
         },
         "cards": cards,
     })
+}
+
+/// Moves the levers a rule decided, and writes down that it did.
+///
+/// Two locks and not one: the manifest says the rule MAY be applied
+/// (`mode = "apply"`) and whoever runs it says apply now (`--apply`). Neither
+/// on its own does anything, because the two answer different questions —is
+/// this rule allowed to act, and is now the moment— and a single switch would
+/// conflate them.
+///
+/// What it writes is the flagd configuration axon itself generated. Any other
+/// flag store is somebody else's API and somebody else's credential, which is
+/// the same line every other command here draws.
+///
+/// The audit trail is not a nicety: an automated change to production that
+/// leaves no record is the worst possible version of this, and the one line it
+/// appends is what somebody reads at 3am when the lever is somewhere nobody
+/// remembers putting it.
+pub fn apply(
+    proposals: &[Proposal],
+    flags: &mut serde_json::Value,
+    when: &str,
+) -> (Vec<String>, Vec<String>) {
+    let mut done = Vec::new();
+    let mut audit = Vec::new();
+    for p in proposals.iter().filter(|p| p.apply) {
+        let Some((flag, variant, restore)) = &p.flag else {
+            continue;
+        };
+        // Fires -> the lever goes to the declared variant. Lifted -> it goes
+        // back. In between —holding, or not enough history— nothing moves: a
+        // rule that rewrites the same value every window is a rule that fills
+        // the audit trail with nothing.
+        let target = if p.fires {
+            variant
+        } else if p.lifted {
+            restore
+        } else {
+            continue;
+        };
+        let Some(entry) = flags.pointer_mut(&format!("/flags/{flag}")) else {
+            done.push(format!(
+                "`{flag}` is not in this flagd configuration: nothing was moved"
+            ));
+            continue;
+        };
+        let before = entry
+            .get("defaultVariant")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        if before == *target {
+            continue;
+        }
+        // A variant that does not exist would leave flagd serving nothing.
+        // `verify` refuses it in the manifest; here the file could be older.
+        if entry
+            .get("variants")
+            .and_then(|v| v.as_object())
+            .is_none_or(|v| !v.contains_key(target.as_str()))
+        {
+            done.push(format!(
+                "`{flag}` has no variant `{target}` in this file: nothing was moved"
+            ));
+            continue;
+        }
+        entry["defaultVariant"] = serde_json::json!(target);
+        done.push(format!(
+            "{}.{}: `{flag}` {before} -> {target}",
+            p.service, p.rule
+        ));
+        audit.push(
+            serde_json::json!({
+                "at": when,
+                "rule": p.rule,
+                "service": p.service,
+                "flag": flag,
+                "from": before,
+                "to": target,
+                "why": p.why,
+            })
+            .to_string(),
+        );
+    }
+    (done, audit)
 }
 
 /// The export's neutral plan, for whoever does not use BigQuery.

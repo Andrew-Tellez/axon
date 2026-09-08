@@ -163,6 +163,11 @@ enum Cmd {
         /// happened; without it the query is emitted
         #[arg(long)]
         check: Option<PathBuf>,
+        /// MOVES the levers, on the flagd configuration at this path. Two locks
+        /// and not one: the rule has to say `mode = "apply"` and you have to
+        /// say this. Every change is appended to an audit trail next to it
+        #[arg(long)]
+        apply: Option<PathBuf>,
     },
     /// reconciles the declared CAP side with the patterns in use
     Cap {
@@ -643,7 +648,11 @@ fn run() -> Result<ExitCode, String> {
                 None => tui::run(&ms, &root)?,
             }
         }
-        Cmd::Rules { sources, check } => {
+        Cmd::Rules {
+            sources,
+            check,
+            apply,
+        } => {
             let ms = manifest::discover(&sources)?;
             match check {
                 None => {
@@ -687,11 +696,65 @@ fn run() -> Result<ExitCode, String> {
                             );
                         }
                     }
-                    // It proposes and does not apply: a rule firing is not a
-                    // broken build, it is something for a person to decide.
+                    // Nothing was applied unless BOTH locks are open: the
+                    // rule says it may be, and whoever runs this says now.
+                    let Some(flags_path) = apply else {
+                        println!(
+                            "axon: {firing} of {} rules propose a change; none was applied",
+                            proposals.len()
+                        );
+                        return Ok(ExitCode::SUCCESS);
+                    };
+                    let text = std::fs::read_to_string(&flags_path)
+                        .map_err(|e| format!("{}: {e}", flags_path.display()))?;
+                    let mut flags: serde_json::Value =
+                        serde_json::from_str(&text).map_err(|e| {
+                            format!("{}: not a flagd configuration: {e}", flags_path.display())
+                        })?;
+                    // The clock comes from the system and the format is the one
+                    // an envelope uses, so an audit line and a trace can be put
+                    // side by side without translating anything.
+                    let (y, mo, d) = manifest::today();
+                    let when = format!("{y:04}-{mo:02}-{d:02}");
+                    let (moved, audit) = bi::apply(&proposals, &mut flags, &when);
+                    for line in &moved {
+                        println!("{} {}", color::yellow("applied"), highlight(line));
+                    }
+                    if !audit.is_empty() {
+                        std::fs::write(
+                            &flags_path,
+                            format!(
+                                "{}\n",
+                                serde_json::to_string_pretty(&flags).map_err(|e| e.to_string())?
+                            ),
+                        )
+                        .map_err(|e| format!("{}: {e}", flags_path.display()))?;
+                        // The trail lives next to what it describes, and it is
+                        // appended and never rewritten.
+                        let trail = flags_path.with_extension("audit.ndjson");
+                        let mut f = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&trail)
+                            .map_err(|e| format!("{}: {e}", trail.display()))?;
+                        use std::io::Write;
+                        for line in &audit {
+                            writeln!(f, "{line}").map_err(|e| e.to_string())?;
+                        }
+                        println!(
+                            "{}",
+                            color::grey(&format!(
+                                "      {} change(s) written to {} and to {}",
+                                audit.len(),
+                                flags_path.display(),
+                                trail.display()
+                            ))
+                        );
+                    }
                     println!(
-                        "axon: {firing} of {} rules propose a change; none was applied",
-                        proposals.len()
+                        "axon: {firing} of {} rules propose a change; {} applied",
+                        proposals.len(),
+                        audit.len()
                     );
                 }
             }
