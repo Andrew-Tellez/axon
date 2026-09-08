@@ -7,6 +7,63 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.3.0] — 2026-09-08
+
+### Añadido
+
+- **Fallas declarables.** `errors` en un método, declarado igual que `in` y `out`, porque
+  cómo falla es parte del contrato y hasta ahora vivía en el cuerpo del handler, donde el
+  llamador no lo ve. `retriable` **cambia el cliente generado**: una falla que el otro
+  lado declaró final no se reintenta, porque reintentar una tarjeta rechazada termina en
+  la misma respuesta y de paso gasta el presupuesto de tiempo del llamador —que en una
+  saga es lo que queda para compensar—. De la misma declaración salen la tabla y un
+  `fail()` tipado, el cuerpo `problem+json`, una respuesta por código en `axon openapi` y
+  una suite del testkit que sujeta a las tres.
+- **Versionado de endpoints, con ciclo de mantenimiento.** Dos esquemas, y `verify` exige
+  que toda la plataforma declare el mismo. En `path`, `/v1` y `/v2` conviven y la vieja
+  anuncia `Deprecation`, `Sunset` y el sucesor como `Link`, en los formatos que pide cada
+  RFC. En `header` —el esquema de Stripe— la ruta no cambia, el llamador fija una versión
+  con fecha y el servidor tiene UNA implementación más un adaptador por versión que
+  cambió de forma: eso es lo que permite tener viva una versión de hace años. axon genera
+  los tipos de cada forma vieja y la cadena tipada paso a paso; el mapeo de campos lo
+  escribe una persona. El ciclo se declara en días —ventana mínima de soporte y ventana
+  de LTS— y se puede refutar.
+- **Consumo declarado.** `uses` dice qué campos lee de verdad cada consumidor, y no puede
+  mentir: los campos que nadie declaró **no existen de este lado**, así que leerlos no
+  compila. Con eso, quitar un campo publicado nombra a quién lo lee, y si nadie lo lee
+  deja de ser un cambio incompatible. Es el valor de Pact sin grabar tráfico ni broker.
+- **Reglas sobre una métrica.** `[rules.*]` declara el lazo que hoy vive en una alerta de
+  dashboard más un runbook que nadie corrió: qué condición sobre qué métrica lleva a qué
+  palanca. Solo **propone** —`mode = "apply"` se rechaza con su razón—, propone al entrar
+  y no una vez por ventana, y excluye la ventana en curso. Las guardas son la respuesta a
+  Goodhart: otra métrica que tiene que aguantar en las mismas ventanas, o no propone.
+- **`axon tui`**: el sistema dibujado y animado, con la topología como grafo de resortes,
+  el veredicto, las versiones y lo que cambió contra el baseline. `--frames N` lo
+  renderiza a stdout, que es lo que hace el dibujo comprobable en CI.
+- **`axon versions`** cuenta el ciclo de vida de la API sin bloquear, y **`axon openapi
+  --api-version`** emite el documento como era en esa versión.
+- **`include`**: el manifiesto de un servicio se puede partir por feature. Toda colisión
+  es error nombrando los dos archivos, y la partición es invisible desde afuera.
+- **`axon build` acepta una URL**: se puede generar el cliente contra lo que el otro lado
+  SIRVE ahora y no contra la copia que alguien recordó commitear.
+
+### Cambiado
+
+- El demo pasó a **18 secciones y 46 comprobaciones** contra contenedores reales.
+- Siete dependencias en el binario en vez de seis: entra `ratatui`, y se midió antes de
+  aceptarla —86 → 140 crates en el árbol y 4.25 → 4.55 MB—. Está escrito en el README.
+- `cog bump` mueve también la versión del binario: antes el tag decía una y
+  `axon --version` otra.
+
+### Corregido
+
+- El test de la política escribía un `.ts` temporal dentro del ejemplo y lo borraba; el
+  typecheck que corre en paralelo veía el archivo aparecer y desaparecer. Solo caía a
+  veces y solo en un runner.
+- `[infra]` rechaza claves que no conoce. Una clave de nivel superior escrita después de
+  una tabla pertenece a esa tabla —así es TOML—, así que `include` mal puesto parseaba
+  bien y no hacía nada.
+
 ## [0.2.0] — 2026-09-07
 
 ### Añadido
