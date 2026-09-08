@@ -7,6 +7,43 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.6.0] — 2026-09-08
+
+### Añadido
+
+- **`scopes`: quién puede llamar, y no solo que haya alguien.** `auth = "required"` dice
+  que quien llama está autenticado y nada más: cualquier token válido, incluido uno
+  emitido para leer, puede devolver dinero. El gateway valida el token —firma, expiración,
+  audiencia— y entrega lo concedido; el servicio decide si eso cubre lo que el método
+  declaró, con un `requireScopes` generado que contesta `403 insufficient_scope`
+  nombrando el que falta, porque un 403 sin razón es un ticket. El catálogo
+  `[api] scopes` es de la plataforma y `verify` exige que todos digan lo mismo: un scope
+  con un error de dedo es un 403 en producción que nadie ve en una revisión. También sale
+  en el OpenAPI, por operación.
+- **Retención de la bodega.** Una tabla de eventos crece para siempre, y el primer síntoma
+  es la factura mientras el segundo es una consulta que se cae. `retention_days` por
+  servicio, con una excepción por evento para los que alguien responde por ley. Cada
+  almacén lo dice en otro lado —`TTL` en ClickHouse, `partition_expiration_days` en
+  BigQuery— y **Snowflake no lo dice**: ahí sale un `TASK` que borra, porque
+  `DATA_RETENTION_TIME_IN_DAYS` es Time Travel, tope 90 días, y no borra una sola fila.
+  Con un `ALTER` después de cada `CREATE`, porque `IF NOT EXISTS` ignora todo cuando la
+  tabla ya existe y la retención es justo lo que se declara después.
+
+### Cambiado
+
+- El demo pasó a **23 secciones y 57 comprobaciones**.
+- Dos scripts del demo llamaban a `payments` sin credencial y ahora los rechaza. Se les
+  dio el scope; no se le quitó el candado.
+
+### Corregido
+
+- El comentario final de la cola de Snowflake se tragaba el `;` que cierra la sentencia
+  —el mismo fallo que el suite ya documentaba para un comentario al final de una columna—.
+- Tres formas de SQL válido que `sqlparser 0.62` no conoce (`SET OPTIONS`, un `TASK`, el
+  `TTL` de ClickHouse) salen del parseo con su razón escrita y se afirman aparte; la de
+  ClickHouse se aplica contra un servidor real en el demo, que es la herramienta que
+  decide.
+
 ## [0.5.0] — 2026-09-08
 
 Las tres salieron de la misma pregunta —cómo entraría esto en un repo que ya
