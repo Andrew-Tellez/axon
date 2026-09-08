@@ -386,6 +386,18 @@ services:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping"]
       interval: 2s
       retries: 30
+  bi:
+    image: metabase/metabase:v0.56.11
+    depends_on: { warehouse: { condition: service_healthy } }
+    environment: { MB_ANON_TRACKING_ENABLED: "false" }
+    # 3030 and not Metabase's 3000: that port is taken on any machine
+    # with a dev server running, and a demo that fails to bind reads as
+    # the demo being broken
+    ports: ["${AXON_BI_PORT:-3030}:3000"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 3s
+      retries: 40
 
 # JetStream streams to create at startup:
 #   nats stream add checkout.charged.v1 --subjects checkout.charged.v1

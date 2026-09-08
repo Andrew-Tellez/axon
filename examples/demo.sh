@@ -179,6 +179,9 @@ step "las reglas declaradas, evaluadas contra la bodega"
 step "the warehouse: schema, funnel and PII"
 ./check-warehouse.sh
 
+step "el tablero, aprovisionado desde el manifiesto"
+python3 check-metabase.py "${AXON_BI_PORT:-3030}"
+
 step "declared vs measured capacity"
 if command -v k6 >/dev/null 2>&1; then
   "$AXON" load orders.toml > .axon/load.js

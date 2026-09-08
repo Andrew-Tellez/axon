@@ -397,6 +397,51 @@ columns **by position**, so after the drift check dropped and re-added `total_am
 currency column and the metric answered NULL. Nothing failed. The loader now names its
 columns, so a column that moved is harmless and one that is missing is an error.
 
+## Something to read it with
+
+A metric declared in the manifest and retyped in a dashboard is two definitions of the
+same number, and the day they diverge nobody can say which one is right. That is the
+failure mode a BI tool has by default, and it is the one this closes.
+
+`axon infra --target local` brings up **Metabase** next to the warehouse — the official
+image ships the ClickHouse driver, which was checked and not assumed, and it answers
+`/api/health` in about fifteen seconds. It comes up empty on purpose:
+
+```sh
+axon analytics manifests/ --metabase > bi.json
+```
+
+emits what it needs — the connection, and **one question per declared metric and per
+funnel that really has a view** — for somebody else to apply. axon holds no credentials
+for the warehouse and none for the BI tool either, which is the same rule as
+`--introspect` and `axon rules`.
+
+Every question points at the generated view, never at a raw table. So the definition
+stays in one place: the manifest declares `gmv`, the view computes it, and the dashboard
+reads the view.
+
+The demo measures exactly that agreement — it provisions a Metabase from zero without
+touching the interface, creates the questions, and compares one of them against the same
+view read straight from ClickHouse:
+
+```console
+==> el tablero, aprovisionado desde el manifiesto
+  declarado: 4 pregunta(s) —una por metrica y por embudo— contra las vistas generadas
+  Metabase aprovisionado desde cero, sin tocar la interfaz
+  OK: 4 preguntas creadas, cada una apuntando a la vista que declara el manifiesto
+    metabase 276300  ·  clickhouse 276300
+  OK: la pregunta contesta lo mismo que la vista; la metrica se define en un solo lugar
+```
+
+The port is `AXON_BI_PORT`, and it defaults to **3030** and not Metabase's 3000: that one
+is taken on any machine with a dev server running, and a demo that fails to bind reads as
+the demo being broken.
+
+What is NOT here: detecting the drift the other way — a question written by hand in
+Metabase against a table axon owns. That is a parallel metric being born, and today
+nobody sees it. It needs reading Metabase's API, which is one more credential, and the
+same debate as the warehouse's.
+
 ## What is missing
 
 Declarable retention for the warehouse's tables.

@@ -20,8 +20,9 @@ Beyond that, and derived from the same manifest: one topic per event and one
 subscription per consumer with a DLQ always, one database per service with its standby,
 its backups and its read replicas, the pooler and its shard nodes, the migration jobs
 and the RLS policy jobs, the cron that hits the saga sweep and the snapshot prune, the
-warehouse ingest path, the OpenTelemetry variables, and flagd with its configuration
-when there are flags.
+warehouse ingest path, the OpenTelemetry variables, flagd with its configuration when
+there are flags, and —on `local`, when something exports— a Metabase to read the
+warehouse with.
 
 **Local is one more target, not a separate subsystem.** That is why local and production
 cannot diverge: they come out of the same declaration.

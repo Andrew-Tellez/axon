@@ -103,6 +103,10 @@ enum Cmd {
         /// the warehouse database, for the loader and for the introspection query
         #[arg(long, default_value = "axon")]
         dataset: String,
+        /// emits what a Metabase needs to read what the manifest declares:
+        /// the connection and one question per declared metric and funnel
+        #[arg(long)]
+        metabase: bool,
         /// emits the query that dumps the warehouse's REAL schema. Its output
         /// comes back through `--check`.
         #[arg(long)]
@@ -382,6 +386,7 @@ fn run() -> Result<ExitCode, String> {
         Cmd::Analytics {
             sources,
             target,
+            metabase,
             load,
             dataset,
             introspect,
@@ -395,6 +400,14 @@ fn run() -> Result<ExitCode, String> {
             }
             if vector {
                 print!("{}", bi::vector(&ms, &dataset));
+                return Ok(ExitCode::SUCCESS);
+            }
+            if metabase {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&bi::metabase(&ms, &dataset))
+                        .map_err(|e| e.to_string())?
+                );
                 return Ok(ExitCode::SUCCESS);
             }
             if introspect || check.is_some() {

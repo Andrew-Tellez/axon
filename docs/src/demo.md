@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **46 checks against reality**: not against a mock,
+brings the whole system up and makes **48 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -154,6 +154,14 @@ axon: the warehouse has 0 differences against the manifest
   OK: restored whole after breaking it: 1 rows, all with their amount
   OK: 1 rows before and after; the loader is idempotent
 
+==> el tablero, aprovisionado desde el manifiesto
+  declarado: 4 pregunta(s) —una por metrica y por embudo— contra las vistas generadas
+  Metabase aprovisionado desde cero, sin tocar la interfaz
+  conectado a la bodega con los datos del manifiesto (database 2)
+  OK: 4 preguntas creadas, cada una apuntando a la vista que declara el manifiesto
+    metabase 334700  ·  clickhouse 334700
+  OK: la pregunta contesta lo mismo que la vista; la metrica se define en un solo lugar
+
 ==> declared vs measured capacity
 info: orders: 20 requests measured at 2.0/s
 axon: 0 thresholds breached
@@ -211,6 +219,7 @@ shortest way to show one thing:
 | `./check-errors.sh` | a declared failure: the final one arrives once, the retriable one uses the whole budget |
 | `./check-versions.sh` | two versions of the same endpoint, and the headers the retired one really sends |
 | `./check-rules.sh` | a rule over a metric: it proposes on the way in, does not repeat, and the guard stops it |
+| `python3 check-metabase.py 3030` | a Metabase provisioned from the manifest, and the question answering the same as the view |
 | `./check-pooler.sh` | tenant isolation through pgdog in transaction mode |
 | `./check-warehouse.sh` | schema, funnel, metrics, PII and drift detection |
 | `python3 check-flags.py localhost:8016 charge_v2 10` | the rollout, applied and sticky |

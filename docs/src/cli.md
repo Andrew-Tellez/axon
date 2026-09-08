@@ -100,6 +100,12 @@ $ axon tui manifests/ --frames 1
 └───────────── [tab] panel  [space] pause  [r] re-read  [q] quit  ·  frame 4 ┘
 ```
 
+## `axon analytics <sources> --metabase`
+Emits what a BI tool needs to read what the manifest declares: the connection to the
+warehouse and one question per declared metric and per funnel that has a view. Emitted,
+not applied — axon holds no credentials. See
+[Warehouse and business metrics](./analytics.md#something-to-read-it-with).
+
 ## `axon rules <sources> [--check <tsv>]`
 Without `--check` it emits the SQL that evaluates every declared `[rules.*]`: one row per
 rule, series —the trigger and each guard— and window, with the value, the reference and

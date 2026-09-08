@@ -6252,3 +6252,83 @@ fn the_drawing_shows_the_system_it_describes() {
     );
     assert_ne!(two.lines().last(), None, "the frame came out empty");
 }
+
+/// The BI tool of the local target, and what gets emitted for it.
+///
+/// A metric declared in the manifest and retyped in a dashboard is two
+/// definitions of the same number, and the day they diverge nobody can say
+/// which one is right. The question points at the view the manifest generates.
+#[test]
+fn the_local_target_brings_up_something_to_read_the_warehouse_with() {
+    let (yml, err, ok) = axon(&["infra", "examples", "--target", "local"]);
+    assert!(ok, "{err}");
+    assert!(
+        yml.contains("  bi:\n    image: metabase/metabase:"),
+        "{yml}"
+    );
+    // it waits for the warehouse: connecting to a database that is not up yet
+    // fails at provisioning time and reads as a broken connection
+    assert!(
+        yml.contains("depends_on: { warehouse: { condition: service_healthy } }"),
+        "{yml}"
+    );
+    assert!(yml.contains("/api/health"), "{yml}");
+    // not on 3000: that port is taken on any machine with a dev server
+    assert!(yml.contains("${AXON_BI_PORT:-3030}:3000"), "{yml}");
+
+    // and with no warehouse there is nothing to read, so there is no BI either
+    let dir = std::env::temp_dir().join("axon-nobi");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("s.toml"),
+        "service = \"s\"\nowner = \"e\"\ntier = \"2\"\n\n[analytics]\nexport = false\n\n\
+         [emits.\"a.b@v1\"]\nid = \"uuid\"\n",
+    )
+    .unwrap();
+    let (yml, _, ok) = axon(&["infra", dir.to_str().unwrap(), "--target", "local"]);
+    assert!(ok);
+    assert!(
+        !yml.contains("metabase"),
+        "it brought up a BI tool for a platform that exports nothing"
+    );
+
+    // the provisioning: one question per declared metric, and per funnel that
+    // really has a view
+    let (json, err, ok) = axon(&["analytics", "examples", "--metabase"]);
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["database"]["engine"], "clickhouse");
+    assert_eq!(v["database"]["details"]["host"], "warehouse");
+    let cards = v["cards"].as_array().unwrap();
+    let names: Vec<&str> = cards.iter().filter_map(|c| c["view"].as_str()).collect();
+    for metric in [
+        "metric_gmv",
+        "metric_orders_placed",
+        "metric_orders_by_currency",
+    ] {
+        assert!(
+            names.contains(&metric),
+            "`{metric}` has no question: {names:?}"
+        );
+    }
+    assert!(names.contains(&"funnel_order_placed_v1"), "{names:?}");
+    // a card pointing at a view nobody created answers with an error, which
+    // reads as the data being broken instead of the question being invented
+    let (schema, _, _) = axon(&["analytics", "examples", "--target", "clickhouse"]);
+    for view in &names {
+        assert!(
+            schema.contains(&format!("@dataset.{view}")),
+            "the question points at `{view}`, which the schema does not create"
+        );
+    }
+    // and every question reads a view, never a raw table: that is the whole
+    // point of declaring the metric
+    for c in cards {
+        let sql = c["sql"].as_str().unwrap();
+        assert!(
+            sql.contains("metric_") || sql.contains("funnel_"),
+            "a question goes around the declared view: {sql}"
+        );
+    }
+}

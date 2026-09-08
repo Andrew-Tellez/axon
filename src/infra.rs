@@ -1686,6 +1686,28 @@ services:
              interval: 2s\n      \
              retries: 30\n",
         );
+        // And something to LOOK at it with. The declared metrics are views in
+        // the warehouse; without a place to read them, "declared" ends at the
+        // schema and every dashboard elsewhere rewrites the same query slightly
+        // differently. The image ships the ClickHouse driver —checked, not
+        // assumed— and answers /api/health in about fifteen seconds.
+        //
+        // It comes up empty on purpose: the connection and the questions are a
+        // projection like any other, and `axon analytics --metabase` emits them
+        // for somebody else to apply. axon holds no credentials.
+        o.push_str(
+            "  bi:\n    image: metabase/metabase:v0.56.11\n    \
+             depends_on: { warehouse: { condition: service_healthy } }\n    \
+             environment: { MB_ANON_TRACKING_ENABLED: \"false\" }\n    \
+             # 3030 and not Metabase's 3000: that port is taken on any machine\n    \
+             # with a dev server running, and a demo that fails to bind reads as\n    \
+             # the demo being broken\n    \
+             ports: [\"${AXON_BI_PORT:-3030}:3000\"]\n    \
+             healthcheck:\n      \
+             test: [\"CMD\", \"curl\", \"-fsS\", \"http://127.0.0.1:3000/api/health\"]\n      \
+             interval: 3s\n      \
+             retries: 40\n",
+        );
     }
     o.push_str("\n# JetStream streams to create at startup:\n");
     for t in &p.topics {
