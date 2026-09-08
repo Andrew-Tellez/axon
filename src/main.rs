@@ -82,10 +82,10 @@ enum Cmd {
     Discover { sources: Vec<String> },
     /// drift between manifests, migrations and infrastructure
     Verify { sources: Vec<String> },
-    /// AsyncAPI (2.x or 3.x, JSON or YAML) -> an axon manifest
+    /// AsyncAPI or OpenAPI (JSON or YAML) -> an axon manifest
     Import {
         /// source format
-        #[arg(value_parser = ["asyncapi"])]
+        #[arg(value_parser = ["asyncapi", "openapi"])]
         format: String,
         /// file, or `-` for stdin
         file: String,
@@ -475,7 +475,7 @@ fn run() -> Result<ExitCode, String> {
             r.warnings.clear();
         }
         Cmd::Import {
-            format: _,
+            format,
             file,
             service,
         } => {
@@ -484,7 +484,11 @@ fn run() -> Result<ExitCode, String> {
             } else {
                 std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?
             };
-            print!("{}", import::asyncapi(&text, service.as_deref())?);
+            let manifest = match format.as_str() {
+                "openapi" => import::openapi(&text, service.as_deref())?,
+                _ => import::asyncapi(&text, service.as_deref())?,
+            };
+            print!("{manifest}");
         }
         Cmd::Analytics {
             sources,

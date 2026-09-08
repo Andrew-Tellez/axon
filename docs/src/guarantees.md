@@ -22,6 +22,7 @@ their own — a compiler that only verifies itself produces invalid output:
 | A foreign pact | crossed against the declared contract: a field nobody returns fails, and the ones the consumer does not read get named |
 | The BI provisioning | the demo provisions a Metabase from zero and compares a question against the same view read from ClickHouse: the dashboard and the manifest have to answer the same number |
 | The rules over a metric | their SQL parses in the three dialects, and the demo seeds a falling history in ClickHouse to check that it proposes once, does not repeat, and stays quiet when the guard falls |
+| The OpenAPI import | what it does not invent is asserted too: no timeout and no `idempotent = true`, and `verify` demands each one |
 | A split manifest | splitting one in two has to produce byte-identical output from `axon build` |
 | Declared consumption | reading a field nobody declared does not compile: `tsc --strict` refuses it against the generated type |
 | The generated double | `node --test` over `FakeTransport`: a retriable failure arrives 1 + retries times and a final one exactly once, with no network |

@@ -6785,3 +6785,145 @@ fn a_job_is_not_a_container_on_any_target() {
         "{err}"
     );
 }
+
+/// `axon import openapi`: the format an existing HTTP service already has,
+/// without anybody deciding to. A NestJS repo has one from its decorators.
+///
+/// What matters as much as what it reads is what it REFUSES to invent.
+#[test]
+fn the_openapi_import_does_not_invent_what_the_document_does_not_say() {
+    let dir = std::env::temp_dir().join("axon-openapi");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let doc = r##"{
+      "openapi": "3.0.0",
+      "info": { "title": "Billing Service", "version": "1.4.2" },
+      "security": [{ "bearer": [] }],
+      "paths": {
+        "/invoices/{invoiceId}": {
+          "parameters": [
+            { "name": "invoiceId", "in": "path", "schema": { "type": "string", "format": "uuid" } },
+            { "name": "x-trace", "in": "header", "schema": { "type": "string" } }
+          ],
+          "get": {
+            "operationId": "InvoicesController_findOne",
+            "summary": "Get one invoice",
+            "responses": {
+              "200": { "description": "the invoice",
+                "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Invoice" } } } },
+              "404": { "description": "Invoice not found" }
+            }
+          }
+        },
+        "/invoices": {
+          "post": {
+            "operationId": "InvoicesController_create",
+            "requestBody": { "content": { "application/json": { "schema": {
+              "type": "object", "properties": { "total": { "type": "object",
+                "properties": { "amount": { "type": "integer" }, "currency": { "type": "string" } } } } } } } },
+            "responses": { "201": { "description": "created" }, "422": { "description": "Invalid tax id" } }
+          },
+          "get": {
+            "operationId": "InvoicesController_findAll",
+            "deprecated": true,
+            "security": [],
+            "responses": { "200": { "description": "ok", "content": { "application/json": { "schema": {
+              "type": "object", "properties": { "items": { "type": "array" } } } } } } }
+          }
+        }
+      },
+      "components": { "schemas": { "Invoice": { "type": "object", "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "issuedAt": { "type": "string", "format": "date-time" },
+        "total": { "type": "object", "properties": { "amount": { "type": "integer" }, "currency": { "type": "string" } } }
+      } } } }
+    }"##;
+    let f = dir.join("swagger.json");
+    std::fs::write(&f, doc).unwrap();
+    let (out, err, ok) = axon(&["import", "openapi", f.to_str().unwrap()]);
+    assert!(ok, "{err}");
+
+    // the route, and the name: Nest writes `Controller_method`, and the
+    // controller is already named by the route
+    assert!(out.contains("[methods.findOne]"), "{out}");
+    assert!(
+        out.contains("http = \"GET /invoices/{invoiceId}\""),
+        "{out}"
+    );
+    assert!(
+        !out.contains("InvoicesController"),
+        "the controller leaked into the name"
+    );
+    // the types, including the two the document names differently
+    assert!(out.contains("id = \"uuid\""), "{out}");
+    assert!(out.contains("issuedAt = \"timestamp\""), "{out}");
+    assert!(out.contains("total = \"money\""), "{out}");
+    // a list is not a scalar: as a string it would be a column that truncates
+    assert!(out.contains("items = \"json\""), "{out}");
+    // a header is transport, not contract
+    assert!(!out.contains("x-trace"), "a header became a field:\n{out}");
+    // the statuses become declared failures, with a name somebody wrote
+    assert!(
+        out.contains("code = \"invoice_not_found\", status = 404"),
+        "{out}"
+    );
+    assert!(
+        out.contains("code = \"invalid_tax_id\", status = 422"),
+        "{out}"
+    );
+    // security: global applies, and an explicit `security: []` overrides it
+    assert!(
+        out.contains("http = \"GET /invoices\"\nauth = \"public\""),
+        "{out}"
+    );
+    assert!(
+        out.contains("http = \"POST /invoices\"\nauth = \"required\""),
+        "{out}"
+    );
+
+    // And the part that matters as much: what it does NOT invent. A timeout
+    // nobody decided that looks decided, and `idempotent = true` —a claim about
+    // code this importer has never seen— are commented out, not filled in.
+    assert!(
+        !out.contains("timeout_ms = 3"),
+        "it invented a budget:\n{out}"
+    );
+    assert!(
+        !out.contains("idempotent = true"),
+        "it claimed retrying does not duplicate:\n{out}"
+    );
+    assert!(out.contains("# idempotent = TODO"), "{out}");
+
+    // the import leaves you incomplete but honest, and `verify` names each one
+    std::fs::write(dir.join("billing.toml"), &out).unwrap();
+    std::fs::remove_file(&f).unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "an import with TODOs cannot pass");
+    for demanded in [
+        "no `owner`",
+        "no `tier`",
+        "mutates with no `idempotent = true`",
+        "public route with no `timeout_ms`",
+        "has no version in the path",
+        "`deprecated = \"TODO\"` is not in YYYY-MM-DD form",
+    ] {
+        assert!(
+            err.contains(demanded),
+            "it did not demand `{demanded}`:\n{err}"
+        );
+    }
+
+    // and it refuses what it cannot read, instead of guessing
+    let f2 = dir.join("swagger2.json");
+    std::fs::write(
+        &f2,
+        r#"{"swagger":"2.0","info":{"title":"old"},"paths":{}}"#,
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["import", "openapi", f2.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(
+        err.contains("Swagger 2.0 carries `swagger` instead"),
+        "{err}"
+    );
+}

@@ -913,7 +913,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // every version.
             match meth.path() {
                 Some(p) if !m.api.by_header() && !p.starts_with("/v") => errors.push(format!(
-                    "{}.{name}: `{p}` has no version in the path; use /v1/... or declare                      `[api] versioning = \"header\"`",
+                    "{}.{name}: `{p}` has no version in the path; use /v1/... or declare `[api] versioning = \"header\"`",
                     m.service
                 )),
                 _ => {}

@@ -18,6 +18,39 @@ What the document does not say — owner, criticality, timeouts — comes out as
 `verify` demands it: **a placeholder is not a value**. The import leaves you in an
 incomplete but honest state, never in one that pretends to be ready.
 
+## From OpenAPI: what an HTTP service already has
+
+An event catalogue is a decision somebody made. An OpenAPI document usually is not: a
+NestJS repo has one from its decorators, a FastAPI one from its types. It is there
+whether or not anybody planned it, and it already says the routes, the shapes and the
+statuses.
+
+```console
+$ axon import openapi swagger.json > manifests/billing.toml
+$ axon verify manifests/
+error billing-service: no `owner`; a service with no owner does not get deployed
+error billing-service.create: POST /invoices mutates with no `idempotent = true`
+error billing-service.findAll: public route with no `timeout_ms`
+error billing-service.findOne: `/invoices/{invoiceId}` has no version in the path
+```
+
+What it reads: the routes and their parameters —path and query, because a header is
+transport and not contract—, the request and response bodies as `in` and `out`, `uuid`,
+`date-time` and `{amount, currency}` as their own types, an array as `json` because a
+list is not a scalar, and **the declared statuses as declared failures**, which is the
+one thing an OpenAPI has that an AsyncAPI does not. `security` decides `auth`, and an
+explicit `security: []` overrides the global one — getting that backwards would mark a
+whole private API as public.
+
+Nest writes `InvoicesController_findOne` as the operationId; the controller is already
+named by the route, so the method keeps the half that is the method.
+
+**What it refuses to invent is as important as what it reads.** A timeout is not in the
+document, and writing `timeout_ms = 3000` would be a number nobody decided that looks
+decided. `idempotent = true` is worse: it is a claim about code this importer has never
+seen. Both come out commented, and `verify` demands them where they matter, so a person
+answers.
+
 ## The line: `axon accept`
 
 `verify` is all-or-nothing, and that is what keeps it out of a codebase that already

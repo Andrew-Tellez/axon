@@ -114,6 +114,10 @@ A failure's body is compared as RFC 7807 and not against the method's output, an
 status the method does not declare comes out as a finding about the **provider**: it
 fails that way and does not say so.
 
+## `axon import <asyncapi|openapi> <file>`
+An existing catalogue or an existing HTTP document turned into a manifest. See
+[Getting in without rewriting anything](./importing.md).
+
 ## `axon accept <sources>`
 The warnings the repo lives with for now. Emits the list to stdout; with
 `axon.accepted.json` present, a warning that is not on it fails the build, and one that
