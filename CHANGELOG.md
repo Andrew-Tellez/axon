@@ -7,6 +7,45 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.5.0] — 2026-09-08
+
+Las tres salieron de la misma pregunta —cómo entraría esto en un repo que ya
+existe— y de contestarla usando axon contra uno de verdad.
+
+### Añadido
+
+- **`runtime = "job"`: algo que corre y termina.** No todo lo que hace funcionar un
+  negocio escucha en un puerto. Un recálculo nocturno, un backfill, un CLI: declararlos
+  como contenedor dejaba como única opción honesta no declararlos, y entonces su
+  infraestructura vivía en el crontab de alguien. Cada target renderiza otra cosa —un
+  `CronJob` con `concurrencyPolicy: Forbid`, un Cloud Run job con su scheduler por OAuth,
+  una task de ECS sin servicio con EventBridge, y en `local` una corrida única al
+  arrancar, porque una expresión cron no es un periodo—. `verify` rechaza lo que se sigue
+  de "corre y termina": rutas, `min_instances`, un `schedule` sobre algo que se queda
+  arriba y `@daily`, que dos de los tres proveedores no aceptan.
+- **`axon import openapi`: el documento que un repo ya tiene.** Un catálogo de eventos es
+  una decisión que alguien tomó; un OpenAPI casi nunca —un repo NestJS lo tiene por sus
+  decoradores—. Lee rutas, parámetros, cuerpos, los tipos que se pueden distinguir y **los
+  estados declarados como fallas declaradas**, que es lo que un OpenAPI tiene y un
+  AsyncAPI no. Y lo que se **niega a inventar** importa igual: un `timeout_ms` sería un
+  número que nadie decidió con cara de decidido, e `idempotent = true` una afirmación
+  sobre código que el importador no ha visto. Salen comentados, y `verify` los exige.
+- **La cadena real desde OTLP o Jaeger.** Un span *es* un envelope con otros nombres, así
+  que un repo con OpenTelemetry ya tiene la cadena real sin escribir una línea. `axon
+  trace` lee tres formas y detecta cuál. Con `--manifests` contesta además la mitad que
+  `axon traffic` no puede ver —una llamada entre servicios no pasa por el edge— y falla
+  cuando una dependencia ocurre y nadie la declara: entonces el dibujo está mal, y el
+  dibujo es lo que alguien lee antes de decidir qué se puede desplegar aparte.
+
+### Cambiado
+
+- El demo pasó a **22 secciones y 53 comprobaciones**.
+
+### Corregido
+
+- Un mensaje de `verify` tenía la indentación pegada por una continuación que `cargo fmt`
+  colapsó: «use /v1/... or declare······`[api] versioning`».
+
 ## [0.4.0] — 2026-09-08
 
 ### Añadido
