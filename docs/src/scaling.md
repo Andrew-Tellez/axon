@@ -142,6 +142,31 @@ Rust types and checked by its CI. The suite validates the generated `pgdog.toml`
 that file: that is validating against the real parser that will read it, not against our
 idea of how it should look.
 
+### On k8s the nodes are not axon's; pgdog is
+
+On `--target k8s` the databases are managed instances the team owns, and they arrive as a
+secret. pgdog is the part axon does own: it is the piece that has to be configured
+exactly right, and configuring it by hand is where a shard ends up pointing at the wrong
+host. So the target renders the two generated files in a `ConfigMap`, a pgdog
+`Deployment` pinned by digest, its `Service` on 6432, and a `NetworkPolicy` where only
+its own service gets in.
+
+The generated file is a **template**: `port = ${AXON_DB_PORT_0}` is not even valid TOML.
+The substitution travels with it as an initContainer, generated from the same text as the
+markers, so neither can leave the other behind — and an unset variable stops the pod
+**naming** what is missing instead of leaving a literal `${…}` that pgdog rejects with a
+parse error nobody traces back to a secret.
+
+The service's `DATABASE_URL` points at `pooler-<service>:6432`, never at a node: pointing
+at a node skips the sharding and everything works — against a quarter of the data.
+
+The suite runs that substitution with a real `sh` and validates what comes out against
+pgdog's official schema. Before this, the only thing that filled those markers was the
+test's own regex.
+
+`gcp` and `aws` still refuse: N managed instances there are Cloud SQL or RDS, and
+emitting one where the manifest declares four would apply with no error.
+
 ### And measured through the pooler
 
 The `local` target brings pgdog up in front of the N Postgres nodes, and the demo

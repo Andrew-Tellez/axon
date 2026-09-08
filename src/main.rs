@@ -199,8 +199,10 @@ enum Cmd {
     Pooler {
         sources: Vec<String>,
         /// `local` names the containers `axon infra --target local` brings up;
-        /// the rest leave the hosts as environment variables.
-        #[arg(long, default_value = "plan", value_parser = ["plan", "local"])]
+        /// the rest leave the hosts as environment variables. `k8s` is what
+        /// `axon infra --target k8s` puts in the ConfigMap, and the generated
+        /// file's own header names this command: it has to be runnable.
+        #[arg(long, default_value = "plan", value_parser = ["plan", "local", "k8s"])]
         target: String,
         /// emits the `users.toml` instead of the `pgdog.toml`: pgdog reads them as
         /// dos archivos separados

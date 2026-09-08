@@ -1,4 +1,5 @@
 //! One single file of checks: if any of this breaks, the tool lies.
+use serde::Deserialize;
 use std::process::Command;
 
 fn has(bin: &str) -> bool {
@@ -103,10 +104,10 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 
 /// What this refusal prevents: a `terraform apply` with no error and a single
 /// Postgres where the manifest declares four. The sharding would not exist and
-/// nothing would say so.
+/// nothing would say so. k8s does render it, so it is not in this list.
 #[test]
 fn sharding_is_not_rendered_where_it_does_not_exist() {
-    for t in ["gcp", "aws", "k8s"] {
+    for t in ["gcp", "aws"] {
         let (_, err, ok) = axon(&["infra", "examples", "--target", t]);
         assert!(!ok, "{t} rendered a plan with sharding it cannot shard");
         assert!(err.contains("shards = 4"), "{t}: {err}");
@@ -7823,4 +7824,147 @@ fn the_forge_does_not_silently_swallow_a_foreign_expression() {
     let (yml, err, ok) = axon(&["ci", manifest, "--target", "k8s", "--forge", "github"]);
     assert!(ok, "{err}");
     assert!(yml.contains("steps.imagen.outputs.digest"));
+}
+
+/// The sharder on k8s, checked the only way that means anything: running the
+/// substitution the manifest generated, with a real `sh`, and validating the
+/// result against pgdog's OFFICIAL schema.
+///
+/// Until now the only thing that filled those `${...}` markers was the test's
+/// own regex — a fiction: on a real deploy nobody did it, and the config pgdog
+/// would have read was not even valid TOML.
+#[test]
+fn the_sharder_on_k8s_yields_a_config_pgdog_can_read() {
+    let (yml, err, ok) = axon(&["infra", "examples", "--target", "k8s"]);
+    assert!(ok, "{err}");
+    let docs: Vec<serde_yaml_ng::Value> = serde_yaml_ng::Deserializer::from_str(&yml)
+        .map(|d| serde_yaml_ng::Value::deserialize(d).expect("invalid YAML"))
+        .collect();
+    let by = |kind: &str, name: &str| {
+        docs.iter()
+            .find(|d| d["kind"] == kind && d["metadata"]["name"] == name)
+            .unwrap_or_else(|| panic!("no {kind}/{name} in the k8s output"))
+            .clone()
+    };
+
+    // the app does NOT see the nodes: it sees pgdog. Pointing at a node would
+    // skip the sharding and everything would work —against a quarter of the data
+    let app = by("Deployment", "orders");
+    let env =
+        serde_yaml_ng::to_string(&app["spec"]["template"]["spec"]["containers"][0]["env"]).unwrap();
+    assert!(
+        env.contains("@pooler-orders:6432/orders"),
+        "the app talks straight to a node:\n{env}"
+    );
+
+    let cm = by("ConfigMap", "pooler-orders");
+    let (pgdog, users) = (
+        cm["data"]["pgdog.toml"].as_str().unwrap(),
+        cm["data"]["users.toml"].as_str().unwrap(),
+    );
+    let dep = by("Deployment", "pooler-orders");
+    let init = &dep["spec"]["template"]["spec"]["initContainers"][0];
+    let script = init["args"][0].as_str().expect("no substitution script");
+    // every variable it needs comes from the secret, and none is invented here
+    let init_env = serde_yaml_ng::to_string(&init["env"]).unwrap();
+
+    // nothing is pinned by a moving tag
+    let img = dep["spec"]["template"]["spec"]["containers"][0]["image"]
+        .as_str()
+        .unwrap();
+    assert!(img.contains("@sha256:"), "pgdog by moving tag: {img}");
+
+    let dir = std::env::temp_dir().join("axon-k8s-pooler");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("tpl")).unwrap();
+    std::fs::create_dir_all(dir.join("out")).unwrap();
+    std::fs::write(dir.join("tpl/pgdog.toml"), pgdog).unwrap();
+    std::fs::write(dir.join("tpl/users.toml"), users).unwrap();
+    let script = script
+        .replace("/tpl", dir.join("tpl").to_str().unwrap())
+        .replace("/etc/pgdog", dir.join("out").to_str().unwrap());
+
+    // the values the secret would carry. Every one it asks for, and the value
+    // carries a `/` on purpose: a password with a slash breaks a `sed` whose
+    // delimiter is `/`, and that is a real password on a real day
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(&script).env_clear();
+    let mut asked = 0;
+    for line in init_env.lines() {
+        if let Some(v) = line.strip_prefix("- name: ") {
+            let v = v.trim();
+            let value = match v.contains("PORT") {
+                true => "5432".to_string(),
+                false if v.contains("PASSWORD") => "p/a$$w:rd".to_string(),
+                false => format!("{}.internal", v.to_lowercase()),
+            };
+            cmd.env(v, value);
+            asked += 1;
+        }
+    }
+    assert!(asked >= 4, "the sharder asks for {asked} variables");
+    let out = cmd.output().expect("sh");
+    assert!(
+        out.status.success(),
+        "the generated substitution failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let done = std::fs::read_to_string(dir.join("out/pgdog.toml")).unwrap();
+    assert!(
+        !done.contains("${"),
+        "a marker survived the substitution:\n{done}"
+    );
+    assert!(
+        std::fs::read_to_string(dir.join("out/users.toml"))
+            .unwrap()
+            .contains("p/a$$w:rd"),
+        "the password with a `/` did not survive the substitution"
+    );
+
+    // and an unset variable stops the pod NAMING it, instead of leaving a
+    // literal `${...}` that pgdog rejects with a parse error nobody traces
+    // back to a secret
+    let mut faltante = Command::new("sh");
+    faltante.arg("-c").arg(&script).env_clear();
+    for line in init_env.lines() {
+        if let Some(v) = line.strip_prefix("- name: ") {
+            let v = v.trim();
+            if v.ends_with("HOST_0") {
+                continue;
+            }
+            faltante.env(v, "x");
+        }
+    }
+    let out = faltante.output().expect("sh");
+    let msg = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "an unset variable went unnoticed");
+    assert!(msg.contains("HOST_0"), "it does not say which one: {msg}");
+
+    if !has("python3") {
+        eprintln!("skipping the schema: python3 is not installed");
+        return;
+    }
+    let out = Command::new("python3")
+        .args([
+            "tests/fixtures/validar-pgdog.py",
+            dir.join("out/pgdog.toml").to_str().unwrap(),
+            "tests/fixtures/pgdog.schema.json",
+        ])
+        .output()
+        .expect("python3");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "what the initContainer leaves behind does not validate:\n{printed}"
+    );
+    assert!(
+        printed.contains("OK: valida") || printed.contains("SALTEADO"),
+        "{printed}"
+    );
+    eprintln!("{}", printed.trim());
 }

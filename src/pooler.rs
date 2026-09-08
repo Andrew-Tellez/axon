@@ -243,3 +243,53 @@ pub fn build(ms: &[Manifest], target: &str, only: Option<&str>) -> Result<String
     }
     Ok(o.join("\n"))
 }
+
+/// The variables the generated files leave for the deploy, in the order they
+/// appear. Read from the emitted text and not from a second list: a list that
+/// has to be kept in step with the generator drifts on the first change, and
+/// what drifts here is a host that never gets substituted.
+pub fn vars(texts: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in texts {
+        let mut rest = *t;
+        while let Some(i) = rest.find("${") {
+            rest = &rest[i + 2..];
+            let Some(j) = rest.find('}') else { break };
+            let name = &rest[..j];
+            if !out.iter().any(|v| v == name) {
+                out.push(name.to_string());
+            }
+            rest = &rest[j + 1..];
+        }
+    }
+    out
+}
+
+/// The substitution the deploy has to do, as a `sh` script.
+///
+/// It exists because the generated file is a TEMPLATE: `port = ${AXON_DB_PORT_0}`
+/// is not even valid TOML. Until now the only thing that replaced those markers
+/// was the test's own regex, which is a fiction: nothing did it on a real
+/// deploy. Generating it here means whoever emits the markers also emits how
+/// they get filled in, and both come from the same text.
+///
+/// `:?` and not a default: an unset variable stops the pod with the name of
+/// what is missing, instead of leaving a literal `${...}` that pgdog rejects
+/// with a parse error nobody can trace back to a secret.
+pub fn substitution(texts: &[&str], from: &str, to: &str) -> String {
+    let vars = vars(texts);
+    let mut o = String::from("set -e\n");
+    for v in &vars {
+        o.push_str(&format!(
+            ": \"${{{v}:?the deploy did not provide it; it comes from the secret}}\"\n"
+        ));
+    }
+    o.push_str(&format!("for f in {from}/*.toml; do\n  sed"));
+    for v in &vars {
+        // `|` as the delimiter and not `/`: a host or a password can carry a
+        // slash, and with `/` the substitution would break on a real password.
+        o.push_str(&format!(" -e \"s|\\${{{v}}}|${v}|g\""));
+    }
+    o.push_str(&format!(" \"$f\" > \"{to}/$(basename \"$f\")\"\ndone\n"));
+    o
+}

@@ -163,7 +163,7 @@ And the whole mapping, measured on this repo's own example — the counts are wh
 | `read_replicas = 2` | replica instances | `replicate_source_db` | — | — |
 | `migrations = "sql/…"` | applied by your pipeline | idem | idem | a Flyway job per node |
 | `pii` + `tenant_column` | `axon rls` → `R__rls.sql` | idem | idem | a second Flyway job, own history |
-| `[pooler] shards = 4` | **refused** (see below) | **refused** | **refused** | 4 nodes + pgdog with its config |
+| `[pooler] shards = 4` | **refused** (see below) | **refused** | ConfigMap + pgdog `Deployment` + its `Service` | 4 nodes + pgdog with its config |
 | a `[methods.*]` with `http` | url_map + backend + NEG | `apigatewayv2_route` + `_integration` | `HTTPRoute` + `Gateway` | Traefik labels |
 | the service itself | `google_cloud_run_v2_service` + service account | `aws_ecs_service` + `_task_definition` | `Deployment` + `Service` + `HPA` + `NetworkPolicy` | a container with a healthcheck |
 | `[infra.buckets.*]` | `google_storage_bucket` (+ CDN backend) | `aws_s3_bucket` (+ CloudFront) | — | MinIO + a creation job |
@@ -173,13 +173,14 @@ And the whole mapping, measured on this repo's own example — the counts are wh
 | `[flags.*]` | — (your provider) | — | — | flagd + its config |
 | every service | OTel env vars, sampling from `tier` | idem | idem | Jaeger + full sampling |
 
-Three of those cells say **refused**, and that is the design:
+Two of those cells say **refused**, and that is the design:
 
 ```mermaid
 flowchart LR
   D["[pooler] shards = 4"] --> R{"can the target<br/>render sharding?"}
   R -->|local| Y["4 nodes + pgdog"]
-  R -->|"gcp · aws · k8s"| N["<b>error, not one instance</b><br/><i>emitting one would apply with no<br/>error and leave the sharding<br/>non-existent</i>"]
+  R -->|k8s| K["pgdog + its ConfigMap<br/><i>the nodes are the team's, and<br/>arrive as a secret</i>"]
+  R -->|"gcp · aws"| N["<b>error, not one instance</b><br/><i>emitting one would apply with no<br/>error and leave the sharding<br/>non-existent</i>"]
   N --> ESC["--target plan<br/><i>the nodes are in the plan;<br/>render them yourself</i>"]
 ```
 
