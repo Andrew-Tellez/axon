@@ -879,6 +879,310 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // Rules over a metric. What they propose is a decision that today lives in
+    // an alert plus a runbook, and the point of declaring it is the same as
+    // everywhere else here: it can be refuted.
+    for m in ms.iter().filter(|m| !m.external) {
+        for (name, r) in &m.rules {
+            match r.mode.as_deref() {
+                None | Some("propose") => {}
+                Some("apply") => errors.push(format!(
+                    "{svc}.{name}: `mode = \"apply\"` is not implemented. Writing to \
+                     production off a metric is a control loop, and that gets decided on \
+                     its own and not in a field; today a rule proposes and a person applies",
+                    svc = m.service
+                )),
+                Some(other) => errors.push(format!(
+                    "{}.{name}: `mode = \"{other}\"` does not exist; today the only one is \
+                     \"propose\"",
+                    m.service
+                )),
+            }
+            let metric = m.metrics.get(&r.metric);
+            match metric {
+                None => errors.push(format!(
+                    "{}.{name}: watches `{}`, which is not a metric of the service. A rule \
+                     over a metric nobody declares never fires, and never firing reads \
+                     exactly like everything being fine",
+                    m.service, r.metric
+                )),
+                Some(mt) => {
+                    // A metric grouped by something is one series per group.
+                    // Comparing without saying which group is comparing one
+                    // group's number against another's, and that answer is not
+                    // wrong in a way anybody notices.
+                    let missing: Vec<&String> = mt
+                        .by
+                        .iter()
+                        .filter(|dim| {
+                            !r.segment
+                                .keys()
+                                .any(|k| crate::bi::snake(k) == crate::bi::snake(dim))
+                        })
+                        .collect();
+                    if !missing.is_empty() {
+                        errors.push(format!(
+                            "{}.{name}: `{}` is grouped by {}, and the rule does not pin {}. \
+                             It is one series per group: unpinned, it compares one group's \
+                             number against another's",
+                            m.service,
+                            r.metric,
+                            mt.by.join(", "),
+                            missing
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    for k in r.segment.keys() {
+                        if !mt
+                            .by
+                            .iter()
+                            .any(|dim| crate::bi::snake(dim) == crate::bi::snake(k))
+                        {
+                            errors.push(format!(
+                                "{}.{name}: `where.{k}` is not a dimension of `{}`. The \
+                                 segment has to be something the metric groups by, or there \
+                                 is nothing to filter",
+                                m.service, r.metric
+                            ));
+                        }
+                    }
+                }
+            }
+            if !COMPARISONS.contains(&r.comparison()) {
+                errors.push(format!(
+                    "{}.{name}: `compare = \"{}\"` does not exist; use {}",
+                    m.service,
+                    r.comparison(),
+                    COMPARISONS.join(", ")
+                ));
+            }
+            // Exactly one threshold: with both, whichever fired would depend on
+            // the order they were read in; with none there is no condition.
+            match (r.below, r.above) {
+                (None, None) => errors.push(format!(
+                    "{}.{name}: no `below` nor `above`; there is no condition to hold",
+                    m.service
+                )),
+                (Some(_), Some(_)) => errors.push(format!(
+                    "{}.{name}: `below` and `above` at the same time",
+                    m.service
+                )),
+                _ => {}
+            }
+            if r.comparison() == "absolute" && r.value.is_none() {
+                errors.push(format!(
+                    "{}.{name}: `compare = \"absolute\"` with no `value` to compare against",
+                    m.service
+                ));
+            }
+            if r.comparison() != "absolute" && r.value.is_some() {
+                errors.push(format!(
+                    "{}.{name}: `value` only means something with `compare = \"absolute\"`",
+                    m.service
+                ));
+            }
+            if r.sustained == 0 {
+                errors.push(format!(
+                    "{}.{name}: `for = 0`; a condition that holds for no window is not a \
+                     condition",
+                    m.service
+                ));
+            }
+            // Without a cooldown it proposes every window while the condition
+            // lasts, and a rule that repeats itself gets ignored, which is the
+            // same as not having it.
+            match r.cooldown {
+                None => errors.push(format!(
+                    "{}.{name}: no `cooldown`. It would propose the same thing every window \
+                     while the condition lasts, and what repeats gets ignored",
+                    m.service
+                )),
+                Some(0) => errors.push(format!("{}.{name}: `cooldown = 0`", m.service)),
+                Some(_) => {}
+            }
+            // Guards: the other direction, declared. Same checks as the
+            // trigger, because a guard nobody can read is worse than no guard:
+            // it reads like the rule is being watched.
+            for g in &r.guards {
+                match m.metrics.get(&g.metric) {
+                    None => errors.push(format!(
+                        "{}.{name}: the guard watches `{}`, which is not a metric of the \
+                         service. A guard over a metric nobody declares never holds, and the \
+                         rule would never propose while reading as if it were guarded",
+                        m.service, g.metric
+                    )),
+                    Some(mt) => {
+                        let missing: Vec<&String> = mt
+                            .by
+                            .iter()
+                            .filter(|dim| {
+                                !g.segment
+                                    .keys()
+                                    .any(|k| crate::bi::snake(k) == crate::bi::snake(dim))
+                            })
+                            .collect();
+                        if !missing.is_empty() {
+                            errors.push(format!(
+                                "{}.{name}: the guard over `{}` does not pin {}",
+                                m.service,
+                                g.metric,
+                                missing
+                                    .iter()
+                                    .map(|s| s.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ));
+                        }
+                        for k in g.segment.keys() {
+                            if !mt
+                                .by
+                                .iter()
+                                .any(|dim| crate::bi::snake(dim) == crate::bi::snake(k))
+                            {
+                                errors.push(format!(
+                                    "{}.{name}: `guard.where.{k}` is not a dimension of `{}`",
+                                    m.service, g.metric
+                                ));
+                            }
+                        }
+                    }
+                }
+                if !COMPARISONS.contains(&g.comparison()) {
+                    errors.push(format!(
+                        "{}.{name}: the guard's `compare = \"{}\"` does not exist",
+                        m.service,
+                        g.comparison()
+                    ));
+                }
+                match (g.below, g.above) {
+                    (None, None) => errors.push(format!(
+                        "{}.{name}: a guard with no `below` nor `above` holds always, which is \
+                         the same as not being there",
+                        m.service
+                    )),
+                    (Some(_), Some(_)) => errors.push(format!(
+                        "{}.{name}: the guard has `below` and `above` at the same time",
+                        m.service
+                    )),
+                    _ => {}
+                }
+                // The same condition twice is not a guard: it is the trigger
+                // written again, and it would hold exactly when the trigger does.
+                if g.metric == r.metric
+                    && g.segment == r.segment
+                    && g.below.is_some() == r.below.is_some()
+                {
+                    errors.push(format!(
+                        "{}.{name}: the guard is the trigger written again —same metric, same \
+                         segment, same direction—, so it holds exactly when the trigger does \
+                         and guards nothing",
+                        m.service
+                    ));
+                }
+            }
+            // Goodhart, named: a lever judged by one number, with nothing
+            // watching what it moves the other way.
+            if r.guards.is_empty() && r.actions() == 1 {
+                warnings.push(format!(
+                    "{}.{name}: it moves a lever off one metric and declares no `guard`. That \
+                     is Goodhart's law with a cron: the lever moves the number it is judged \
+                     by, and nobody is watching what it moves in the other direction",
+                    m.service
+                ));
+            }
+            if r.actions() != 1 {
+                errors.push(format!(
+                    "{}.{name}: it proposes {} things; declare exactly one of `flag`, \
+                     `emits` or `calls`",
+                    m.service,
+                    r.actions()
+                ));
+            }
+            if let Some(flag) = &r.then.flag {
+                match m.flags.get(flag) {
+                    None => errors.push(format!(
+                        "{}.{name}: `flag = \"{flag}\"` is not a flag of the service",
+                        m.service
+                    )),
+                    Some(f) => {
+                        // An emergency switch is a person's, and a rule that
+                        // flips it takes away the one thing it is for.
+                        if f.kill_switch {
+                            errors.push(format!(
+                                "{}.{name}: `{flag}` is a `kill_switch`, and that switch is a \
+                                 person's. A rule that flips it takes away the only thing it \
+                                 exists for",
+                                m.service
+                            ));
+                        }
+                        for (which, v) in
+                            [("variant", &r.then.variant), ("restore", &r.then.restore)]
+                        {
+                            match v {
+                                None => errors.push(format!(
+                                    "{}.{name}: it proposes `{flag}` with no `{which}`{}",
+                                    m.service,
+                                    if which == "restore" {
+                                        ". What goes up on its own has to be able to come back down on its own"
+                                    } else {
+                                        ""
+                                    }
+                                )),
+                                Some(v) if !f.variants.contains_key(v) => errors.push(format!(
+                                    "{}.{name}: `{which} = \"{v}\"` is not a variant of `{flag}`",
+                                    m.service
+                                )),
+                                _ => {}
+                            }
+                        }
+                        if r.then.variant.is_some() && r.then.variant == r.then.restore {
+                            errors.push(format!(
+                                "{}.{name}: `variant` and `restore` are the same, so it \
+                                 proposes changing nothing",
+                                m.service
+                            ));
+                        }
+                    }
+                }
+            }
+            if let Some(ev) = &r.then.emits {
+                if !m.emits.contains_key(ev) {
+                    errors.push(format!(
+                        "{}.{name}: it proposes emitting `{ev}`, which the service does not \
+                         declare in `[emits]`",
+                        m.service
+                    ));
+                }
+            }
+            if let Some(met) = &r.then.calls {
+                if !m.methods.contains_key(met) {
+                    errors.push(format!(
+                        "{}.{name}: it proposes calling `{met}`, which is not a method of the \
+                         service",
+                        m.service
+                    ));
+                }
+            }
+        }
+        // Two rules over the same flag fight, and which one won would depend on
+        // the order they were read in.
+        let mut owner: IndexMap<&str, &str> = IndexMap::new();
+        for (name, r) in &m.rules {
+            if let Some(flag) = &r.then.flag {
+                if let Some(prev) = owner.insert(flag.as_str(), name.as_str()) {
+                    errors.push(format!(
+                        "{}: `{prev}` and `{name}` both propose over `{flag}`. One flag has \
+                         one rule, or which one won would depend on the order",
+                        m.service
+                    ));
+                }
+            }
+        }
+    }
+
     // Declared consumption: which fields each consumer really reads.
     //
     // This is what a producer cannot answer on its own, and the reason a

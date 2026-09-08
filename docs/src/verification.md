@@ -42,6 +42,21 @@ has to be fixed cannot end up underneath.
 | A public route with no `rate_limit` or no `timeout_ms` | error |
 | A paginated method that does not return a `cursor` | error |
 
+## Rules over a metric
+
+| | |
+| --- | --- |
+| A rule over a metric that is not declared | error |
+| A grouped metric with a dimension the rule does not pin | error |
+| A `where` that is not a dimension of the metric | error |
+| No `cooldown`, or `for = 0` | error |
+| A flag or variant that does not exist, or no `restore` | error |
+| A rule that flips a `kill_switch` | error |
+| Two rules proposing over the same flag | error |
+| `mode = "apply"` | error: it is not implemented, and it is a control loop |
+| A guard that is the trigger written again | error |
+| A lever off one metric with no `guard` | warning: Goodhart's law with a cron |
+
 ## A split manifest
 
 | | |

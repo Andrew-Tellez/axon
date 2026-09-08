@@ -226,7 +226,21 @@ export const manifest = {
     "on_partition": "degrade",
     "max_staleness_ms": 3000
   },
-  "flags": {},
+  "flags": {
+    "free_shipping": {
+      "owner": "orders-team",
+      "variants": {
+        "off": 0,
+        "over_500": 50000
+      },
+      "default_variant": "off",
+      "expires": "2027-06-30",
+      "default": false,
+      "rollout": null,
+      "sticky_by": null,
+      "kill_switch": false
+    }
+  },
   "analytics": {
     "export": true,
     "pii": "hash",
@@ -263,6 +277,17 @@ export const manifest = {
       "by": [],
       "window": "1d"
     },
+    "orders_by_currency": {
+      "on": [
+        "order.placed@v1"
+      ],
+      "kind": "count",
+      "field": null,
+      "by": [
+        "total.currency"
+      ],
+      "window": "1d"
+    },
     "gmv": {
       "on": [
         "order.placed@v1"
@@ -273,6 +298,40 @@ export const manifest = {
         "total.currency"
       ],
       "window": "1d"
+    }
+  },
+  "rules": {
+    "gmv_usd_cayendo": {
+      "metric": "gmv",
+      "where": {
+        "total.currency": "USD"
+      },
+      "compare": "previous",
+      "below": 0.85,
+      "above": null,
+      "value": null,
+      "for": 2,
+      "cooldown": 3,
+      "guard": [
+        {
+          "metric": "orders_by_currency",
+          "where": {
+            "total.currency": "USD"
+          },
+          "compare": null,
+          "below": null,
+          "above": 0.9,
+          "value": null
+        }
+      ],
+      "mode": "propose",
+      "then": {
+        "flag": "free_shipping",
+        "variant": "over_500",
+        "restore": "off",
+        "emits": null,
+        "calls": null
+      }
     }
   },
   "infra": {
@@ -409,6 +468,26 @@ export function problem(err: unknown, e?: Envelope<unknown>) {
   };
 }
 
+
+/** Flag provider, with OpenFeature's shape: `evaluate` takes the name,
+ *  the default value and the context it is pinned by. The standard's four
+ *  types, so the real SDK fits with no translation. */
+export interface Flags {
+  evaluate<T extends boolean | string | number | object>(
+    name: string,
+    fallback: T,
+    context: Record<string, string>,
+  ): Promise<T>;
+}
+
+/** `free_shipping`: OpenFeature number.
+ *  Variantes: `off` = 0, `over_500` = 50000.
+ */
+export const flagFreeShipping = (flags: Flags): Promise<number> =>
+  flags.evaluate("free_shipping", 0, {});
+
+/** The flags the manifest declares. A flag that is not here does not exist. */
+export const declaredFlags = ["free_shipping"] as const;
 
 
 /** Everything needed to reach another service. Implemented by whoever

@@ -117,6 +117,14 @@ enum Cmd {
     },
     /// the API's maintenance cycle: what each version is, and what changed
     Versions { sources: Vec<String> },
+    /// rules over a metric: the SQL that evaluates them, and what they propose
+    Rules {
+        sources: Vec<String>,
+        /// the warehouse's answer (TSV) to compare the declared against what
+        /// happened; without it the query is emitted
+        #[arg(long)]
+        check: Option<PathBuf>,
+    },
     /// reconciles the declared CAP side with the patterns in use
     Cap {
         sources: Vec<String>,
@@ -421,6 +429,59 @@ fn run() -> Result<ExitCode, String> {
                     let d =
                         bi::dialect(other).ok_or_else(|| format!("unknown warehouse `{other}`"))?;
                     print!("{}", bi::build(&ms, &d));
+                }
+            }
+        }
+        Cmd::Rules { sources, check } => {
+            let ms = manifest::discover(&sources)?;
+            match check {
+                None => {
+                    let warehouse = ms
+                        .iter()
+                        .find(|m| !m.external)
+                        .map(|m| m.analytics.warehouse.clone())
+                        .unwrap_or_else(|| "bigquery".into());
+                    let d = bi::dialect(&warehouse)
+                        .ok_or_else(|| format!("unknown warehouse `{warehouse}`"))?;
+                    print!("{}", bi::rules_sql(&ms, &d));
+                }
+                Some(file) => {
+                    let text = std::fs::read_to_string(&file)
+                        .map_err(|e| format!("{}: {e}", file.display()))?;
+                    let windows = bi::parse_windows(&text);
+                    let proposals = bi::decide(&ms, &windows);
+                    if proposals.is_empty() {
+                        println!("axon: no rules declared");
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                    let mut firing = 0;
+                    for p in &proposals {
+                        if p.fires {
+                            firing += 1;
+                            println!(
+                                "{}  {}.{}",
+                                color::yellow("proposes"),
+                                p.service,
+                                color::bold(&p.rule)
+                            );
+                            println!("  {}", p.action);
+                            println!("  {}", color::grey(&p.why));
+                        } else {
+                            println!(
+                                "{}     {}.{}  {}",
+                                color::grey("quiet"),
+                                p.service,
+                                p.rule,
+                                color::grey(&p.why)
+                            );
+                        }
+                    }
+                    // It proposes and does not apply: a rule firing is not a
+                    // broken build, it is something for a person to decide.
+                    println!(
+                        "axon: {firing} of {} rules propose a change; none was applied",
+                        proposals.len()
+                    );
                 }
             }
         }

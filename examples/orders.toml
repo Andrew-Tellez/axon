@@ -115,6 +115,15 @@ pool_size = 40
 # because both are derivable from the causal chain; these two are not: somebody
 # has to say which field, grouped by what, in which bucket. Declared here they
 # end up as views next to the funnels instead of a query pasted into a dashboard.
+# Una palanca de negocio, no de infraestructura: es lo que una regla puede
+# PROPONER mover cuando el GMV cae. Vive aca y no en el codigo porque la
+# variante que esta puesta la decide alguien, y una regla solo propone.
+[flags.free_shipping]
+owner = "orders-team"
+expires = "2027-06-30"
+default_variant = "off"
+variants = { off = 0, over_500 = 50000 }
+
 [metrics.orders_placed]
 on     = ["order.placed@v1"]
 kind   = "count"
@@ -122,9 +131,53 @@ window = "1d"
 
 # `total` is `money`, so what gets added up is its amount column: the manifest
 # keeps talking about the field the contract declares.
+# El mismo conteo pero por moneda: una guarda tiene que mirar la MISMA serie
+# que el disparador, o compara el numero de un segmento contra el de otro.
+[metrics.orders_by_currency]
+on     = ["order.placed@v1"]
+kind   = "count"
+by     = ["total.currency"]
+window = "1d"
+
 [metrics.gmv]
 on     = ["order.placed@v1"]
 kind   = "sum"
 field  = "total"
 by     = ["total.currency"]
 window = "1d"
+
+# La regla: el lazo que hoy vive en una alerta de dashboard mas un runbook que
+# nadie corrio. La metrica ya esta declarada y el flag tambien, asi que lo que
+# faltaba era decir en voz alta que condicion sobre que metrica lleva a cual.
+#
+# `where` fija el segmento: `gmv` agrupa por moneda, asi que es una serie por
+# moneda y sin fijarla la regla compararia el numero de una contra el de otra.
+# Es tambien como se declara "esta regla solo aplica a este tipo de cliente":
+# la dimension viaja EN el evento.
+#
+# Y solo PROPONE. Nada de esto escribe en produccion: el valor es que la
+# decision deja de ser oral.
+[rules.gmv_usd_cayendo]
+metric = "gmv"
+where = { "total.currency" = "USD" }
+compare = "previous"
+below = 0.85              # 15% abajo de la ventana anterior
+for = 2                   # dos dias seguidos: un dia malo no es una tendencia
+cooldown = 3              # y tres dias tranquilos antes, o no propone
+mode = "propose"
+
+# La guarda: la otra direccion, declarada. Con una sola metrica esto seria la
+# ley de Goodhart con un cron —la palanca mueve el numero por el que se la
+# juzga y nadie mira a costa de que—. Aca dice que el GMV cae PERO el numero de
+# ordenes no: entonces no se fue la demanda, se encogio el ticket, que es
+# exactamente lo que el envio gratis puede mover. Si tambien cayeran las
+# ordenes, el envio gratis no es la palanca y la regla se calla.
+[[rules.gmv_usd_cayendo.guard]]
+metric = "orders_by_currency"
+where = { "total.currency" = "USD" }
+above = 0.9               # el conteo no viene cayendo mas de 10%
+
+[rules.gmv_usd_cayendo.then]
+flag = "free_shipping"
+variant = "over_500"
+restore = "off"           # lo que sube solo tiene que poder bajar solo

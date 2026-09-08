@@ -170,6 +170,12 @@ step "two versions of the same endpoint, and the retirement of the old one"
 step "declared vs applied rollout"
 python3 check-flags.py "localhost:${AXON_FLAGS_PORT:-8016}" charge_v2 10
 
+# Va ANTES del chequeo de bodega: siembra historia y la borra al terminar, y su
+# limpieza inicial tambien arregla lo que dejo una corrida interrumpida. Al
+# reves, el embudo contaria esas filas sembradas como flujos que nunca cobraron.
+step "las reglas declaradas, evaluadas contra la bodega"
+./check-rules.sh
+
 step "the warehouse: schema, funnel and PII"
 ./check-warehouse.sh
 

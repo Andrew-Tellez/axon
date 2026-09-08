@@ -254,6 +254,7 @@ export const manifest = {
     }
   },
   "metrics": {},
+  "rules": {},
   "infra": {
     "state": "postgres",
     "runtime": "container",

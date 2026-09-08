@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **42 checks against reality**: not against a mock,
+brings the whole system up and makes **46 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -122,6 +122,22 @@ OK: the system does exactly what it declares
   OK: the Link points at the v2, so nobody has to guess where to go
   OK: the v2 answers the same plus the customer, and announces nothing: it is the current one
 
+==> las reglas declaradas, evaluadas contra la bodega
+  declarado: 2 serie(s) —el disparador y sus guardas— contra las vistas de las metricas
+  seis dias: el importe en USD estable y luego -20% y -20%, con el conteo intacto
+    proposes  orders.gmv_usd_cayendo
+      set `free_shipping` to `over_500` (back to `off` when it lifts)
+      `gmv` = 64000 for total.currency = USD held the condition for 2 windows, the 3 before were quiet, and 1 guard held
+    axon: 1 of 1 rules propose a change; none was applied
+  OK: propone mover el flag declarado a la variante declarada, y volver a off al levantarse
+  la misma caida pero con un dia que ya la cumplia tres ventanas antes
+    quiet     orders.gmv_usd_cayendo  it already held before: proposed on the way in, not once per window
+  OK: no repite. Sin cooldown propondria lo mismo cada ventana, y lo que se repite se ignora
+  la misma caida del importe, pero ahora el conteo tambien se cae
+    quiet     orders.gmv_usd_cayendo  the guard `orders_by_currency` above 0.9 vs previous does not hold
+  OK: la guarda la frena. Con una sola metrica esto seria la ley de Goodhart con un cron
+  OK: 25 filas antes y despues; la historia sembrada era del demo y se fue
+
 ==> declared vs applied rollout
   declared 10%  measured 10.7%  (32 of 300)
   OK: sticky per tenant, and the percentage applies
@@ -194,6 +210,7 @@ shortest way to show one thing:
 | `./check-retries.sh` | the declared retries, occurring, and what they buy |
 | `./check-errors.sh` | a declared failure: the final one arrives once, the retriable one uses the whole budget |
 | `./check-versions.sh` | two versions of the same endpoint, and the headers the retired one really sends |
+| `./check-rules.sh` | a rule over a metric: it proposes on the way in, does not repeat, and the guard stops it |
 | `./check-pooler.sh` | tenant isolation through pgdog in transaction mode |
 | `./check-warehouse.sh` | schema, funnel, metrics, PII and drift detection |
 | `python3 check-flags.py localhost:8016 charge_v2 10` | the rollout, applied and sticky |

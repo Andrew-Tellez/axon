@@ -73,6 +73,15 @@ retriable. See [`errors` on a method](./manifest.md#errors-on-a-method).
 
 It runs with `node --test`, with no dependencies.
 
+## `axon rules <sources> [--check <tsv>]`
+Without `--check` it emits the SQL that evaluates every declared `[rules.*]`: one row per
+rule, series —the trigger and each guard— and window, with the value, the reference and
+whether the condition holds there. It is emitted and not run, like `axon analytics
+--check`: axon has no warehouse credentials and does not want them.
+
+With `--check` it takes the decision over the rows that came back, and says what each
+rule proposes or why it does not. It never applies anything.
+
 ## `axon versions <sources>`
 The API's maintenance cycle, read out loud: which version is current, which are still
 supported, how many days each has left, and what changed at each step. It does not block

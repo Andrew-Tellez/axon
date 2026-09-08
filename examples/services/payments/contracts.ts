@@ -370,6 +370,7 @@ export const manifest = {
   "aggregate": {},
   "view": {},
   "metrics": {},
+  "rules": {},
   "infra": {
     "state": "postgres",
     "runtime": "container",

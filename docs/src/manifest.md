@@ -122,6 +122,69 @@ The demo measures it: the same route and the same policy, and the final failure 
 **once** while the retriable one arrives `1 + retries` times. See
 [The demo, measured](./demo.md).
 
+## `[rules.<name>]`: a metric, a condition, and what it proposes
+
+```toml
+[rules.gmv_usd_falling]
+metric   = "gmv"                          # a declared metric
+where    = { "total.currency" = "USD" }   # the segment it applies to
+compare  = "previous"                     # previous · same_day_last_week · absolute
+below    = 0.85                           # 15% under the reference
+for      = 2                              # consecutive windows: one bad day is not a trend
+cooldown = 3                              # and three quiet ones before, or it says nothing
+mode     = "propose"                      # the only mode there is
+
+# The other direction, declared. Without it this is Goodhart's law with a cron:
+# the lever moves the number it is judged by and nobody watches what it moves
+# the other way. Here it says GMV is falling but the ORDER COUNT is not — so
+# demand did not leave, the basket shrank, which is what free shipping moves.
+[[rules.gmv_usd_falling.guard]]
+metric = "orders_by_currency"
+where  = { "total.currency" = "USD" }
+above  = 0.9
+
+[rules.gmv_usd_falling.then]
+flag    = "free_shipping"     # a declared flag...
+variant = "over_500"          #   ...on a declared variant
+restore = "off"               # what goes up on its own has to come back down on its own
+```
+
+The loop that today lives in a dashboard alert plus a runbook nobody ran. The metric is
+already declared, the flag is already declared and so is the event catalogue, so what was
+missing was saying out loud **which condition on which metric leads to which of them**.
+
+**It only ever proposes.** `mode = "apply"` is refused with its reason: writing to
+production off a metric is a control loop, and that gets decided on its own, not in a
+field. `axon rules` emits the SQL —axon has no warehouse credentials and does not want
+them— and `axon rules --check <tsv>` takes the decision over the rows that come back:
+
+```console
+$ axon rules manifests/ --check windows.tsv
+proposes  orders.gmv_usd_falling
+  set `free_shipping` to `over_500` (back to `off` when it lifts)
+  `gmv` = 64000 for total.currency = USD held the condition for 2 windows, the 3 before were quiet, and 1 guard held
+axon: 1 of 1 rules propose a change; none was applied
+```
+
+Three things worth naming, because they are the difference between this and a cron with
+a threshold:
+
+- **It proposes on the way IN.** The `cooldown` is not state kept anywhere: it says the
+  condition was NOT holding in that many windows before it started to. Same data, same
+  answer, today and in a re-run — nothing to remember and nothing to get out of sync.
+- **The window still filling is excluded.** Comparing half a day against a whole one
+  makes every rule fire every morning and lift by itself at noon.
+- **A segment is a dimension the event carries**, not a cohort kept elsewhere. That is how
+  "this rule is only for this kind of customer" gets declared: the tier travels in the
+  event, as it was when it happened, so the past does not get recomputed with today's
+  classification.
+
+What `verify` refutes: a metric or flag that does not exist, an unpinned dimension —a
+grouped metric is one series per group, and unpinned it compares one group's number
+against another's—, no `cooldown`, no `restore`, flipping a `kill_switch` (that switch is
+a person's), two rules over the same flag, a guard that is the trigger written again, and
+a rule with a lever and no guard at all, which it names for what it is.
+
 ## `include`: one service, split by feature
 
 A service grows and its manifest with it. The blocks of a feature can live in their own

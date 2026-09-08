@@ -43,6 +43,9 @@ pub struct Dialect {
     /// and a bucket that means "day" in one warehouse and "day in UTC minus the
     /// session's timezone" in another is a metric that does not match itself.
     pub bucket: fn(&str, &str) -> String,
+    /// The value `n` windows back, ordered by bucket. Per dialect because
+    /// ClickHouse has no `LAG`.
+    pub lag: fn(&str, u32) -> String,
 }
 
 fn quote_backtick(s: &str) -> String {
@@ -124,6 +127,7 @@ pub fn dialect(name: &str) -> Option<Dialect> {
                 "1mo" => format!("DATE_TRUNC(DATE({c}), MONTH)"),
                 _ => format!("TIMESTAMP_TRUNC({c}, DAY)"),
             },
+            lag: |c, n| format!("LAG({c}, {n}) OVER (ORDER BY bucket)"),
         },
         "snowflake" => Dialect {
             name: "snowflake",
@@ -142,6 +146,7 @@ pub fn dialect(name: &str) -> Option<Dialect> {
                 };
                 format!("DATE_TRUNC('{unit}', {c})")
             },
+            lag: |c, n| format!("LAG({c}, {n}) OVER (ORDER BY bucket)"),
         },
         "clickhouse" => Dialect {
             name: "clickhouse",
@@ -165,6 +170,14 @@ pub fn dialect(name: &str) -> Option<Dialect> {
                     _ => "toStartOfDay",
                 };
                 format!("{f}({c})")
+            },
+            // The frame written out: with the default one `lagInFrame` answers
+            // the current row, and a rule comparing a number against itself
+            // never fires and reads exactly like everything being fine.
+            lag: |c, n| {
+                format!(
+                    "lagInFrame({c}) OVER (ORDER BY bucket ROWS BETWEEN {n} PRECEDING AND {n} PRECEDING)"
+                )
             },
         },
         _ => return None,
@@ -556,7 +569,7 @@ fn table(ev: &str) -> String {
 /// `customerId` -> `customer_id`. A warehouse is queried by hand and with BI
 /// tools: there the convention is snake_case, same as in the database. The
 /// contracts use the language's; the warehouse, its own.
-fn snake(s: &str) -> String {
+pub fn snake(s: &str) -> String {
     let mut o = String::with_capacity(s.len() + 4);
     for (i, c) in s.chars().enumerate() {
         if c.is_uppercase() {
@@ -916,6 +929,317 @@ fn funnels(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
     o
 }
 
+/// The query that evaluates every declared rule, one row per window.
+///
+/// It is emitted and not run, like `introspect`: axon has no warehouse
+/// credentials and does not want them. What comes back through
+/// `axon rules --check` is a table of numbers, and the DECISION —how many
+/// consecutive windows, and whether it was quiet before— is taken by the
+/// compiler, where it can be tested without a warehouse.
+///
+/// The SQL answers only what SQL is good at: the value of each window and the
+/// value of the reference one.
+/// The SELECT of one condition: the value per window, the reference, and
+/// whether it holds there. The same shape for the trigger and for a guard,
+/// because a guard is the same question about another metric.
+#[allow(clippy::too_many_arguments)]
+fn condition_sql(
+    d: &Dialect,
+    rule: &str,
+    series: &str,
+    view: &str,
+    window: &str,
+    segment: &IndexMap<String, String>,
+    comparison: &str,
+    back: u32,
+    below: Option<f64>,
+    above: Option<f64>,
+    value: Option<f64>,
+    note: &str,
+) -> Option<String> {
+    let filter = if segment.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n    WHERE {}",
+            segment
+                .iter()
+                .map(|(k, v)| format!("{} = '{}'", snake(k), v.replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        )
+    };
+    let reference = match comparison {
+        "absolute" => format!("{}", value.unwrap_or(0.0)),
+        _ => (d.lag)("value", back),
+    };
+    let holds = match (below, above, comparison) {
+        (Some(b), _, "absolute") => format!("value < {}", value.unwrap_or(0.0) * b),
+        (Some(b), _, _) => format!("reference > 0 AND value < reference * {b}"),
+        (_, Some(a), "absolute") => format!("value > {}", value.unwrap_or(0.0) * a),
+        (_, Some(a), _) => format!("reference > 0 AND value > reference * {a}"),
+        // no threshold: `verify` blocks it
+        _ => return None,
+    };
+    Some(format!(
+        "\n-- {note}\n\
+         SELECT\n  \
+           '{rule}' AS rule,\n  \
+           '{series}' AS series,\n  \
+           bucket,\n  \
+           value,\n  \
+           reference,\n  \
+           CASE WHEN {holds} THEN 1 ELSE 0 END AS holds\n\
+         FROM (\n  \
+           SELECT bucket, value, {reference} AS reference\n  \
+           FROM {view}{filter}\n\
+         ) AS windows\n\
+         -- The current window is still filling: comparing it against a whole one\n\
+         -- is comparing half a day against a day, and every rule would fire every\n\
+         -- morning and lift by itself at noon.\n\
+         WHERE bucket < {current}\n\
+         ORDER BY bucket;",
+        current = (d.bucket)(window, "now()"),
+    ))
+}
+
+pub fn rules_sql(ms: &[Manifest], d: &Dialect) -> String {
+    let mut o = vec!["-- Generated by axon from the manifests. Do not edit.\n\
+         --\n\
+         -- One row per rule, SERIES and window: the trigger and each guard, with\n\
+         -- the value, the reference and whether the condition holds there.\n\
+         -- Whether it PROPOSES is decided by `axon rules --check` over these rows,\n\
+         -- because \"two consecutive windows, quiet before, and every guard holding\n\
+         -- at those same windows\" is a decision and not an aggregate."
+        .to_string()];
+    for m in ms.iter().filter(|m| !m.external && m.analytics.export) {
+        for (name, r) in &m.rules {
+            // A metric that is not declared, or one with an unpinned dimension,
+            // is blocked by `verify`; emitting SQL over a view that does not
+            // exist would turn that error into a failure at apply time
+            let pinned = |metric: &str, segment: &IndexMap<String, String>| -> Option<String> {
+                let mt = m.metrics.get(metric)?;
+                if mt
+                    .by
+                    .iter()
+                    .any(|dim| !segment.keys().any(|k| snake(k) == snake(dim)))
+                {
+                    return None;
+                }
+                Some(mt.window.clone())
+            };
+            let Some(window) = pinned(&r.metric, &r.segment) else {
+                continue;
+            };
+            let view = (d.quote)(&format!("@dataset.{}", Metric::view(&r.metric)));
+            if let Some(sql) = condition_sql(
+                d,
+                name,
+                "trigger",
+                &view,
+                &window,
+                &r.segment,
+                r.comparison(),
+                r.back(),
+                r.below,
+                r.above,
+                r.value,
+                &format!(
+                    "Rule `{name}` of {}, trigger: `{}` per {window} against {}. Segment: {}.",
+                    m.service,
+                    r.metric,
+                    r.comparison(),
+                    r.segment_label()
+                ),
+            ) {
+                o.push(sql);
+            }
+            for g in &r.guards {
+                let Some(gwindow) = pinned(&g.metric, &g.segment) else {
+                    continue;
+                };
+                let gview = (d.quote)(&format!("@dataset.{}", Metric::view(&g.metric)));
+                if let Some(sql) = condition_sql(
+                    d,
+                    name,
+                    &g.series(),
+                    &gview,
+                    &gwindow,
+                    &g.segment,
+                    g.comparison(),
+                    g.back(),
+                    g.below,
+                    g.above,
+                    g.value,
+                    &format!(
+                        "Rule `{name}`, guard: {}. It does not propose unless this holds at \
+                         the same windows.",
+                        g.label()
+                    ),
+                ) {
+                    o.push(sql);
+                }
+            }
+        }
+    }
+    format!("{}\n", o.join("\n"))
+}
+
+/// One window of one rule, as it came back from the warehouse.
+pub struct Window {
+    pub rule: String,
+    /// `trigger`, or `guard:<metric>`: a rule reads several metrics, so each
+    /// row has to say which one it is.
+    pub series: String,
+    pub bucket: String,
+    pub value: f64,
+    pub holds: bool,
+}
+
+/// Reads the TSV `rules_sql` produces: rule, bucket, value, reference, holds.
+///
+/// Tolerant on purpose about the header and about a trailing `reference` that
+/// comes back NULL —there is no previous window for the first one— because
+/// whoever pipes this in is a `clickhouse-client` or a `bq`, and each one
+/// decorates its output differently.
+pub fn parse_windows(text: &str) -> Vec<Window> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split('\t').map(|c| c.trim()).collect();
+        if cols.len() < 6 {
+            continue;
+        }
+        let Ok(value) = cols[3].parse::<f64>() else {
+            continue;
+        };
+        out.push(Window {
+            rule: cols[0].to_string(),
+            series: cols[1].to_string(),
+            bucket: cols[2].to_string(),
+            value,
+            holds: cols[5] == "1" || cols[5].eq_ignore_ascii_case("true"),
+        });
+    }
+    out
+}
+
+/// What a rule proposes, or why it does not.
+pub struct Proposal {
+    pub rule: String,
+    pub service: String,
+    pub fires: bool,
+    pub why: String,
+    pub action: String,
+}
+
+/// The decision, over the windows that came back.
+///
+/// A rule proposes on the way IN: the condition holding for `for` consecutive
+/// windows, and NOT holding in the `cooldown` windows before those. Which means
+/// there is no state to keep and nothing to get out of sync — the same data
+/// gives the same answer, today and in a re-run.
+pub fn decide(ms: &[Manifest], windows: &[Window]) -> Vec<Proposal> {
+    let mut out = Vec::new();
+    for m in ms.iter().filter(|m| !m.external) {
+        for (name, r) in &m.rules {
+            let mine: Vec<&Window> = windows
+                .iter()
+                .filter(|w| w.rule == *name && w.series == "trigger")
+                .collect();
+            let action = match (&r.then.flag, &r.then.emits, &r.then.calls) {
+                (Some(f), _, _) => format!(
+                    "set `{f}` to `{}` (back to `{}` when it lifts)",
+                    r.then.variant.as_deref().unwrap_or("?"),
+                    r.then.restore.as_deref().unwrap_or("?")
+                ),
+                (_, Some(e), _) => format!("emit `{e}`"),
+                (_, _, Some(c)) => format!("call `{}.{c}`", m.service),
+                _ => "nothing declared".to_string(),
+            };
+            let need = r.sustained as usize;
+            let quiet = r.cooldown.unwrap_or(1) as usize;
+            if mine.len() < need + quiet {
+                out.push(Proposal {
+                    rule: name.clone(),
+                    service: m.service.clone(),
+                    fires: false,
+                    why: format!(
+                        "{} windows of history and it needs {}: not enough to tell",
+                        mine.len(),
+                        need + quiet
+                    ),
+                    action,
+                });
+                continue;
+            }
+            let tail = &mine[mine.len() - need..];
+            let before = &mine[mine.len() - need - quiet..mine.len() - need];
+            let holding = tail.iter().all(|w| w.holds);
+            let was_quiet = before.iter().all(|w| !w.holds);
+            let last = tail.last().map(|w| w.value).unwrap_or_default();
+            // The guards, at the SAME windows the trigger held. A guard whose
+            // data does not come back is not a guard, so it does not propose
+            // either: that is the difference between watching the other
+            // direction and believing you are watching it.
+            let buckets: Vec<&str> = tail.iter().map(|w| w.bucket.as_str()).collect();
+            let mut blocked: Option<String> = None;
+            for g in &r.guards {
+                let rows: Vec<&Window> = windows
+                    .iter()
+                    .filter(|w| w.rule == *name && w.series == g.series())
+                    .filter(|w| buckets.contains(&w.bucket.as_str()))
+                    .collect();
+                if rows.len() < buckets.len() {
+                    blocked = Some(format!(
+                        "the guard {} has no data for every window, and a guard that cannot be \
+                         read is not a guard",
+                        g.label()
+                    ));
+                    break;
+                }
+                if !rows.iter().all(|w| w.holds) {
+                    blocked = Some(format!("the guard {} does not hold", g.label()));
+                    break;
+                }
+            }
+            let why = if let (true, true, Some(b)) = (holding, was_quiet, &blocked) {
+                b.clone()
+            } else if !holding {
+                let held = tail.iter().filter(|w| w.holds).count();
+                format!("the condition holds in {held} of the last {need} windows")
+            } else if !was_quiet {
+                "it already held before: proposed on the way in, not once per window".to_string()
+            } else {
+                format!(
+                    "`{}` = {last} for {segment} held the condition for {need} windows, the \
+                     {quiet} before were quiet{}",
+                    r.metric,
+                    if r.guards.is_empty() {
+                        ", and it has no guard: nothing is watching what the lever moves in \
+                         the other direction"
+                            .to_string()
+                    } else {
+                        format!(
+                            ", and {} guard{} held",
+                            r.guards.len(),
+                            if r.guards.len() == 1 { "" } else { "s" }
+                        )
+                    },
+                    segment = r.segment_label()
+                )
+            };
+            out.push(Proposal {
+                rule: name.clone(),
+                service: m.service.clone(),
+                fires: holding && was_quiet && blocked.is_none(),
+                why,
+                action,
+            });
+        }
+    }
+    out
+}
+
 /// The export's neutral plan, for whoever does not use BigQuery.
 pub fn build_plan(ms: &[Manifest]) -> serde_json::Value {
     let evs = eventos(ms);
@@ -928,6 +1252,7 @@ pub fn build_plan(ms: &[Manifest]) -> serde_json::Value {
         tail: String::new,
         diff_ms: |a, b| format!("{a} - {b}"),
         bucket: |w, c| format!("bucket({w}, {c})"),
+        lag: |c, n| format!("lag({c}, {n})"),
     };
     serde_json::json!({
         "envelope": ENVELOPE.iter().map(|(n, t)| serde_json::json!({"name": n, "type": t})).collect::<Vec<_>>(),

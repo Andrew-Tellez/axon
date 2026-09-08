@@ -52,6 +52,7 @@ You declare the service once, and everything else is derived from it:
                      ├─ axon trace      the REAL causal chain, for local debugging
                      ├─ axon cap        what the CAP side you picked implies
                      ├─ axon versions   the API's versions and their maintenance cycle
+                     ├─ axon rules      the loop: a metric, a condition, what it proposes
                      └─ axon verify     drift: fails in CI
 ```
 
@@ -67,7 +68,7 @@ the diagram is stale: somebody broke the manifest, and CI says so before the mer
 
 `examples/` ships three services that really run —one over four Postgres nodes with
 [pgdog](https://pgdog.dev) in front, and another coordinating a saga. `./demo.sh` brings
-the whole system up and makes **42 checks against reality**:
+the whole system up and makes **46 checks against reality**:
 
 ```console
 $ cd examples && ./demo.sh
@@ -117,6 +118,11 @@ $ cd examples && ./demo.sh
   OK: the Link points at the v2, so nobody has to guess where to go
   OK: the v2 answers the same plus the customer, and announces nothing: it is the current one
 
+==> las reglas declaradas, evaluadas contra la bodega
+  OK: propone mover el flag declarado a la variante declarada, y volver a off al levantarse
+  OK: no repite. Sin cooldown propondria lo mismo cada ventana, y lo que se repite se ignora
+  OK: la guarda la frena. Con una sola metrica esto seria la ley de Goodhart con un cron
+
 ==> declared vs applied rollout
   declared 10%  measured 10.7%  (32 of 300)
   OK: stable per tenant, and the percentage applies
@@ -130,7 +136,7 @@ $ cd examples && ./demo.sh
   axon: 0 thresholds breached
 ```
 
-It runs in CI on every push. The whole run —17 sections, 42 checks— and what happens when
+It runs in CI on every push. The whole run —18 sections, 46 checks— and what happens when
 you run it **twice in a row** are in
 [The demo, measured](https://andrew-tellez.github.io/axon/demo.html).
 
@@ -147,7 +153,7 @@ verified against itself.
 
 | Tool | What for | How the generated output is verified |
 | --- | --- | --- |
-| **Docker** | `--target local`: broker, Postgres per service, MinIO, Jaeger, flagd, the edge and your services | `./demo.sh` brings the system up and makes 42 checks against reality |
+| **Docker** | `--target local`: broker, Postgres per service, MinIO, Jaeger, flagd, the edge and your services | `./demo.sh` brings the system up and makes 46 checks against reality |
 | **Terraform** | `--target gcp` and `--target aws` | `terraform validate` with the **real providers**, and with no warnings |
 | **`tsc`** | the TypeScript from `axon build` and `axon test` | `tsc --strict --noEmit`, plus the example service's typecheck |
 | **Node 24+** | runs the testkit with no build step, using type stripping | `node --test` against the real example service |
@@ -187,7 +193,7 @@ every release. It is written in Spanish for now.
 | | |
 | --- | --- |
 | [Your first manifest](https://andrew-tellez.github.io/axon/getting-started.html) | Ten minutes, from zero to verified |
-| [The demo, measured](https://andrew-tellez.github.io/axon/demo.html) | The 42 checks against real containers, and what running it twice proves |
+| [The demo, measured](https://andrew-tellez.github.io/axon/demo.html) | The 46 checks against real containers, and what running it twice proves |
 | [Architecture](https://andrew-tellez.github.io/axon/architecture.html) | High and low level design, in diagrams: the modules, and one declaration rendered on four targets |
 | [Manifest reference](https://andrew-tellez.github.io/axon/manifest.html) | Every field and why it exists |
 | [Patterns](https://andrew-tellez.github.io/axon/patterns.html) | Declared, not remembered: outbox, idempotent inbox, **saga**, **event sourcing**, **CQRS** |

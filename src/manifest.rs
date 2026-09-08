@@ -325,6 +325,153 @@ impl Api {
     }
 }
 
+/// A rule over a metric: the condition, and what it proposes.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Rule {
+    /// The declared metric it watches.
+    pub metric: String,
+    /// The segment the rule applies to: one value per dimension of the metric.
+    ///
+    /// A metric grouped by something is not one series, it is one per group.
+    /// Without saying which, a rule would be comparing a number against another
+    /// one from a different group. And it is what makes "this rule is only for
+    /// this kind of customer" declarable: the segment has to be a DIMENSION
+    /// that the event carries, not a list of ids kept somewhere else — a
+    /// contract cannot verify a cohort it does not own.
+    #[serde(rename = "where", default)]
+    pub segment: IndexMap<String, String>,
+    /// What it compares the current window against.
+    ///
+    /// `previous` is the window right before, `same_day_last_week` is seven
+    /// days back —which is what takes the weekly shape out of the comparison—
+    /// and `absolute` compares against `value`.
+    pub compare: Option<String>,
+    /// The ratio it has to fall below, or rise above, against the reference.
+    pub below: Option<f64>,
+    pub above: Option<f64>,
+    /// The number to compare against when `compare = "absolute"`.
+    pub value: Option<f64>,
+    /// Consecutive windows the condition has to hold. One is a bad hour, and
+    /// acting on a bad hour is how a rule earns being turned off.
+    #[serde(rename = "for", default = "one")]
+    pub sustained: u32,
+    /// Windows that must have been quiet before it proposes again.
+    ///
+    /// It is data and not state: what it says is that the condition was NOT
+    /// holding in that many windows before it started to, so a rule proposes on
+    /// the way IN and not once per window while it lasts. That way there is
+    /// nothing to remember and nothing to get out of sync.
+    pub cooldown: Option<u32>,
+    /// Metrics that have to hold for it to propose at all.
+    ///
+    /// A rule with one metric and a lever is Goodhart's law with a cron: the
+    /// lever moves the number it is judged by, and nobody is watching what it
+    /// moves in the other direction. A guard is the other direction, declared.
+    #[serde(default, rename = "guard")]
+    pub guards: Vec<Guard>,
+    /// `propose` is the only mode there is. `apply` gets refused with its
+    /// reason: writing to production off a metric is a control loop, and that
+    /// is a decision to take on its own and not a value in a field.
+    pub mode: Option<String>,
+    /// What it proposes.
+    #[serde(default)]
+    pub then: Then,
+}
+
+/// A metric that has to hold for the rule to propose.
+///
+/// Same shape as the condition of the rule and without its decision: a guard
+/// does not have `for` nor `cooldown`, it is read at the SAME windows the
+/// trigger held. And a guard whose data does not come back is not a guard, so
+/// the rule does not propose either.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Guard {
+    pub metric: String,
+    #[serde(rename = "where", default)]
+    pub segment: IndexMap<String, String>,
+    pub compare: Option<String>,
+    pub below: Option<f64>,
+    pub above: Option<f64>,
+    pub value: Option<f64>,
+}
+
+impl Guard {
+    pub fn comparison(&self) -> &str {
+        self.compare.as_deref().unwrap_or("previous")
+    }
+    pub fn back(&self) -> u32 {
+        match self.comparison() {
+            "same_day_last_week" => 7,
+            _ => 1,
+        }
+    }
+    /// The series' name in the emitted query: the rule reads several metrics,
+    /// so each row has to say which one it is.
+    pub fn series(&self) -> String {
+        format!("guard:{}", self.metric)
+    }
+    pub fn label(&self) -> String {
+        let dir = match (self.below, self.above) {
+            (Some(b), _) => format!("below {b}"),
+            (_, Some(a)) => format!("above {a}"),
+            _ => "no threshold".to_string(),
+        };
+        format!("`{}` {dir} vs {}", self.metric, self.comparison())
+    }
+}
+
+/// What a rule proposes: exactly one of the three.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Then {
+    /// A declared flag, set to one of its declared variants.
+    pub flag: Option<String>,
+    pub variant: Option<String>,
+    /// The variant to go back to when the condition stops holding. What goes up
+    /// on its own has to be able to come back down on its own.
+    pub restore: Option<String>,
+    /// An event of this service, so whoever wants to react can.
+    pub emits: Option<String>,
+    /// A method of this service.
+    pub calls: Option<String>,
+}
+
+pub const COMPARISONS: [&str; 3] = ["previous", "same_day_last_week", "absolute"];
+
+impl Rule {
+    pub fn comparison(&self) -> &str {
+        self.compare.as_deref().unwrap_or("previous")
+    }
+    /// How many windows back the reference is.
+    pub fn back(&self) -> u32 {
+        match self.comparison() {
+            "same_day_last_week" => 7,
+            _ => 1,
+        }
+    }
+    /// The segment, written out, for whoever reads the proposal.
+    pub fn segment_label(&self) -> String {
+        if self.segment.is_empty() {
+            "every row".to_string()
+        } else {
+            self.segment
+                .iter()
+                .map(|(k, v)| format!("{k} = {v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
+    pub fn actions(&self) -> usize {
+        [
+            self.then.flag.is_some(),
+            self.then.emits.is_some(),
+            self.then.calls.is_some(),
+        ]
+        .iter()
+        .filter(|x| **x)
+        .count()
+    }
+}
+
 /// The shape of a method as of an older version, and who adapts it.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Shape {
@@ -953,6 +1100,18 @@ pub struct Manifest {
     /// Business metrics over the declared events. See `Metric`.
     #[serde(default)]
     pub metrics: IndexMap<String, Metric>,
+    /// Rules that watch a declared metric and say what to do when it moves.
+    ///
+    /// The loop that today lives in a dashboard alert plus a runbook nobody
+    /// ran: the metric is already declared, the flag is already declared, and
+    /// the event catalogue too, so what was missing was saying out loud which
+    /// condition on which metric leads to which of them.
+    ///
+    /// It only ever PROPOSES. Nothing here writes to production: the value is
+    /// that the decision stops being oral, and a control loop over production
+    /// is a different decision that has to be taken on its own.
+    #[serde(default)]
+    pub rules: IndexMap<String, Rule>,
     #[serde(default)]
     pub infra: Infra,
     /// Per-environment overrides: `[env.prod] min_instances = 3`.

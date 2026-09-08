@@ -17,6 +17,7 @@ their own — a compiler that only verifies itself produces invalid output:
 | The warehouse schemas | parsed with each dialect's own parser |
 | The declared metrics | their SQL parses in the three dialects, and the demo compares each one against counting the table by hand |
 | The declared failures | the retriable codes land in the caller's client and the final ones do not, and the demo counts the calls each one really costs |
+| The rules over a metric | their SQL parses in the three dialects, and the demo seeds a falling history in ClickHouse to check that it proposes once, does not repeat, and stays quiet when the guard falls |
 | A split manifest | splitting one in two has to produce byte-identical output from `axon build` |
 | Declared consumption | reading a field nobody declared does not compile: `tsc --strict` refuses it against the generated type |
 | The generated double | `node --test` over `FakeTransport`: a retriable failure arrives 1 + retries times and a final one exactly once, with no network |
@@ -30,7 +31,7 @@ their own — a compiler that only verifies itself produces invalid output:
 
 ```sh
 cargo test --release      # 62 conformance checks
-cd examples && ./demo.sh  # 42 checks against real containers
+cd examples && ./demo.sh  # 46 checks against real containers
 ```
 
 Preview. The command surface is stable; the manifest format can still change before

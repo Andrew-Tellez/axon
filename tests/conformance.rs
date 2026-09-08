@@ -5918,3 +5918,270 @@ fn a_split_manifest_is_the_same_manifest() {
     assert!(!ok);
     assert!(err.contains("directory with no *.toml"), "{err}");
 }
+
+/// Rules over a metric, and the guards that keep them from being Goodhart's
+/// law with a cron.
+#[test]
+fn the_rule_and_guard_rules_block() {
+    let dir = std::env::temp_dir().join("axon-rules");
+    let base = r#"service = "shop"
+version = "1.0.0"
+owner = "team"
+tier = "1"
+
+[emits."order.placed@v1"]
+orderId = "uuid"
+tier = "string"
+total = "money"
+
+[analytics]
+warehouse = "clickhouse"
+
+[metrics.gmv]
+on = ["order.placed@v1"]
+kind = "sum"
+field = "total"
+by = ["tier"]
+window = "1d"
+
+[metrics.orders]
+on = ["order.placed@v1"]
+kind = "count"
+window = "1d"
+
+[flags.free_shipping]
+owner = "team"
+expires = "2027-06-30"
+default_variant = "off"
+variants = { off = 0, on = 1 }
+
+[flags.panic]
+owner = "team"
+kill_switch = true
+"#;
+    let run = |extra: &str| -> String {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shop.toml"), format!("{base}{extra}")).unwrap();
+        let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        assert!(!ok, "it passed clean:\n{extra}");
+        err
+    };
+    let rule = |body: &str| {
+        format!(
+            "[rules.r]\nmetric = \"gmv\"\nwhere = {{ tier = \"enterprise\" }}\nbelow = 0.85\n\
+             for = 2\ncooldown = 3\n{body}"
+        )
+    };
+    let then = "[rules.r.then]\nflag = \"free_shipping\"\nvariant = \"on\"\nrestore = \"off\"\n";
+    let guard = "[[rules.r.guard]]\nmetric = \"orders\"\nabove = 0.9\n";
+
+    // a metric grouped by something is one series per group: unpinned, the rule
+    // compares one group's number against another's
+    let err = run(&format!(
+        "[rules.r]\nmetric = \"gmv\"\nbelow = 0.85\nfor = 2\ncooldown = 3\n{then}{guard}"
+    ));
+    assert!(err.contains("does not pin tier"), "{err}");
+    assert!(err.contains("one series per group"), "{err}");
+
+    // a segment that is not a dimension has nothing to filter
+    let err = run(&format!(
+        "[rules.r]\nmetric = \"gmv\"\nwhere = {{ region = \"north\" }}\nbelow = 0.85\n\
+         for = 2\ncooldown = 3\n{then}{guard}"
+    ));
+    assert!(err.contains("`where.region` is not a dimension"), "{err}");
+
+    // without a cooldown it proposes the same thing every window
+    let err = run(&format!(
+        "[rules.r]\nmetric = \"gmv\"\nwhere = {{ tier = \"a\" }}\nbelow = 0.85\nfor = 2\n{then}{guard}"
+    ));
+    assert!(err.contains("no `cooldown`"), "{err}");
+    assert!(err.contains("what repeats gets ignored"), "{err}");
+
+    // an emergency switch is a person's
+    let err = run(&rule(
+        "[rules.r.then]\nflag = \"panic\"\nvariant = \"on\"\nrestore = \"off\"\n",
+    ));
+    assert!(err.contains("is a `kill_switch`"), "{err}");
+
+    // what goes up on its own has to be able to come back down on its own
+    let err = run(&rule(
+        "[rules.r.then]\nflag = \"free_shipping\"\nvariant = \"on\"\n",
+    ));
+    assert!(err.contains("with no `restore`"), "{err}");
+    assert!(err.contains("come back down on its own"), "{err}");
+
+    // writing to production off a metric is a control loop, and that is not a
+    // value in a field
+    let err = run(&format!(
+        "[rules.r]\nmetric = \"gmv\"\nwhere = {{ tier = \"a\" }}\nbelow = 0.85\nfor = 2\n\
+         cooldown = 3\nmode = \"apply\"\n{then}{guard}"
+    ));
+    assert!(err.contains("is not implemented"), "{err}");
+    assert!(err.contains("a person applies"), "{err}");
+
+    // a guard that is the trigger written again guards nothing
+    let err = run(&format!(
+        "{}{then}[[rules.r.guard]]\nmetric = \"gmv\"\nwhere = {{ tier = \"enterprise\" }}\n\
+         below = 0.5\n",
+        "[rules.r]\nmetric = \"gmv\"\nwhere = { tier = \"enterprise\" }\nbelow = 0.85\n\
+         for = 2\ncooldown = 3\n"
+    ));
+    assert!(err.contains("the trigger written again"), "{err}");
+
+    // and the warning that names it: a lever off one metric, with nothing
+    // watching what it moves the other way
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("shop.toml"), format!("{base}{}", rule(then))).unwrap();
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "a rule with no guard should not block:\n{out}");
+    assert!(out.contains("Goodhart's law with a cron"), "{out}");
+
+    // with the guard, no warning
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        format!("{base}{}", rule(&format!("{then}{guard}"))),
+    )
+    .unwrap();
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    assert!(!out.contains("Goodhart"), "{out}");
+}
+
+/// The decision over the windows: it proposes on the way IN, and a guard that
+/// does not hold stops it. Same claim the demo measures against ClickHouse,
+/// here with no warehouse.
+#[test]
+fn the_rule_decides_on_the_way_in() {
+    let dir = std::env::temp_dir().join("axon-decide");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        r#"service = "shop"
+version = "1.0.0"
+owner = "team"
+tier = "1"
+
+[emits."order.placed@v1"]
+orderId = "uuid"
+total = "money"
+
+[analytics]
+warehouse = "clickhouse"
+
+[metrics.gmv]
+on = ["order.placed@v1"]
+kind = "sum"
+field = "total"
+window = "1d"
+
+[metrics.orders]
+on = ["order.placed@v1"]
+kind = "count"
+window = "1d"
+
+[flags.free_shipping]
+owner = "team"
+expires = "2027-06-30"
+default_variant = "off"
+variants = { off = 0, on = 1 }
+
+[rules.gmv_falling]
+metric = "gmv"
+below = 0.85
+for = 2
+cooldown = 3
+
+[[rules.gmv_falling.guard]]
+metric = "orders"
+above = 0.9
+
+[rules.gmv_falling.then]
+flag = "free_shipping"
+variant = "on"
+restore = "off"
+"#,
+    )
+    .unwrap();
+    // the SQL parses in the three dialects: a rule that does not run is a rule
+    // that is not there
+    for w in ["bigquery", "snowflake", "clickhouse"] {
+        let man = std::fs::read_to_string(dir.join("shop.toml")).unwrap();
+        std::fs::write(
+            dir.join("shop.toml"),
+            man.replace(
+                "warehouse = \"clickhouse\"",
+                &format!("warehouse = \"{w}\""),
+            ),
+        )
+        .unwrap();
+        let (sql, err, ok) = axon(&["rules", dir.to_str().unwrap()]);
+        assert!(ok, "{err}");
+        assert!(sql.contains("'trigger' AS series"), "{sql}");
+        assert!(sql.contains("'guard:orders' AS series"), "{sql}");
+        // the window still filling is excluded, or every rule fires every
+        // morning and lifts by itself at noon
+        assert!(sql.contains("WHERE bucket <"), "{w}: {sql}");
+    }
+
+    let tsv = |rows: &[(&str, &str, f64, u8)]| {
+        rows.iter()
+            .map(|(series, bucket, value, holds)| {
+                format!("gmv_falling\t{series}\t{bucket}\t{value}\t0\t{holds}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let check = |body: &str| -> String {
+        let f = dir.join("out.tsv");
+        std::fs::write(&f, body).unwrap();
+        let (out, err, ok) = axon(&[
+            "rules",
+            dir.to_str().unwrap(),
+            "--check",
+            f.to_str().unwrap(),
+        ]);
+        assert!(ok, "{err}");
+        out
+    };
+
+    // stable, stable, stable, then two falling, with the guard holding
+    let days = ["d1", "d2", "d3", "d4", "d5"];
+    let mut rows: Vec<(&str, &str, f64, u8)> = days
+        .iter()
+        .enumerate()
+        .map(|(i, d)| ("trigger", *d, 100.0, u8::from(i >= 3)))
+        .collect();
+    rows.extend(days.iter().map(|d| ("guard:orders", *d, 10.0, 1u8)));
+    let out = check(&tsv(&rows));
+    assert!(out.contains("proposes"), "{out}");
+    assert!(out.contains("1 of 1 rules propose"), "{out}");
+    assert!(out.contains("1 guard held"), "{out}");
+
+    // the same, with the condition already holding before: it proposes on the
+    // way in, not once per window
+    let mut rows2 = rows.clone();
+    rows2[1].3 = 1;
+    let out = check(&tsv(&rows2));
+    assert!(out.contains("already held"), "{out}");
+    assert!(out.contains("0 of 1 rules propose"), "{out}");
+
+    // and the guard: the lever moves the number it is judged by, and this is
+    // what watches the other direction
+    let mut rows3 = rows.clone();
+    for r in rows3.iter_mut().filter(|r| r.0 == "guard:orders") {
+        r.3 = 0;
+    }
+    let out = check(&tsv(&rows3));
+    assert!(out.contains("does not hold"), "{out}");
+    assert!(out.contains("0 of 1 rules propose"), "{out}");
+
+    // a guard whose data does not come back is not a guard
+    let out = check(&tsv(&rows[..5]));
+    assert!(out.contains("has no data for every window"), "{out}");
+    assert!(out.contains("0 of 1 rules propose"), "{out}");
+}
