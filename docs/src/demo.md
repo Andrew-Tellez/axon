@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **54 checks against reality**: not against a mock,
+brings the whole system up and makes **57 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -99,6 +99,15 @@ OK: the system does exactly what it declares
     HTTP 500
   OK: 4 calls, the saga was left STUCK and the response did not hide it
   payments restored with no switches
+
+==> quien puede llamar a que, medido
+  declarado en el codigo generado: payoutMerchant exige "payments:write"
+    sin el scope: HTTP 403  {"title":"insufficient_scope","detail":"missing: payments:write",...}
+  OK: 403 insufficient_scope, y nombra el que falta —un 403 sin razon es un ticket
+    con el scope: HTTP 200
+  OK: el mismo llamado pasa con lo que el manifiesto exige, y nada mas cambio
+    con un scope de lectura: HTTP 403
+  OK: un token de lectura no mueve dinero. Con solo `required`, si podria
 
 ==> the declared failures, measured
   declared in the generated code: payout 2 retries, retriable "rail_busy"
@@ -244,6 +253,7 @@ shortest way to show one thing:
 | `./check-saga.sh` | compensation, resume from the journal, and a closed saga not swept again |
 | `./check-es.sh` | optimistic concurrency, view lag, the relay, snapshots, prune, rebuild with the shadow, and the transactional outbox |
 | `./check-retries.sh` | the declared retries, occurring, and what they buy |
+| `./check-scopes.sh` | un token válido que no alcanza: 403 nombrando el permiso que falta |
 | `./check-errors.sh` | a declared failure: the final one arrives once, the retriable one uses the whole budget |
 | `./check-versions.sh` | two versions of the same endpoint, and the headers the retired one really sends |
 | `./check-rules.sh` | a rule over a metric: it proposes on the way in, does not repeat, and the guard stops it |

@@ -80,6 +80,20 @@ draws it. And `axon verify` **proves properties over it** before the merge:
 Stripe, deciding whether it fails, writing the row — is yours, in your language, in an
 `extends` of the generated class. axon keeps the part that can be verified.
 
+## `scopes` on a method
+
+```toml
+[api]
+scopes = ["orders:read", "payments:write"]
+
+[methods.refundPayment]
+auth   = "required"
+scopes = ["payments:write"]
+```
+
+`required` says the caller is somebody; a scope says the caller is somebody allowed to do
+**this**. See [Security](./security.md#who-may-call-it-and-not-just-that-there-is-somebody).
+
 ## `errors` on a method
 
 ```toml

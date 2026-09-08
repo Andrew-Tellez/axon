@@ -5,6 +5,7 @@
 [methods.payoutMerchant]
 http = "POST /v1/payouts"
 auth = "required"
+scopes = ["payments:write"]
 timeout_ms = 4000
 idempotent = true
 in = { paymentId = "uuid", amount = "money" }

@@ -144,6 +144,7 @@ export const manifest = {
       "http": "POST /v1/tenants/{tenantId}/orders",
       "idempotent": true,
       "auth": "public",
+      "scopes": [],
       "rate_limit": 60,
       "timeout_ms": 5000,
       "paginated": false,
@@ -173,6 +174,9 @@ export const manifest = {
       "http": "GET /v1/tenants/{tenantId}/orders/{orderId}",
       "idempotent": false,
       "auth": "required",
+      "scopes": [
+        "orders:read"
+      ],
       "rate_limit": null,
       "timeout_ms": 2000,
       "paginated": false,
@@ -196,6 +200,9 @@ export const manifest = {
       "http": "GET /v2/tenants/{tenantId}/orders/{orderId}",
       "idempotent": false,
       "auth": "required",
+      "scopes": [
+        "orders:read"
+      ],
       "rate_limit": null,
       "timeout_ms": 2000,
       "paginated": false,
@@ -256,6 +263,10 @@ export const manifest = {
     "default": null,
     "support_window_days": null,
     "lts_window_days": null,
+    "scopes": [
+      "orders:read",
+      "payments:write"
+    ],
     "version": []
   },
   "pooler": {
@@ -440,6 +451,30 @@ export const retiredRoutes: Record<string, Record<string, string>> = {
 export const isolationLevel = "READ COMMITTED" as const;
 /** Staleness budget: data older than this does not get served. */
 export const maxStalenessMs = 3000;
+
+
+/** What each method demands of whoever calls it, from the manifest. */
+export const declaredScopes = {
+  getOrder: ["orders:read"],
+  getOrderV2: ["orders:read"],
+} as const;
+
+/** Refuses when what the gateway granted does not cover what the method
+ *  declared. 403 and `insufficient_scope`, which is what RFC 6750 calls it,
+ *  and it names the missing one: a 403 with no reason is a ticket.
+ *
+ *  The method is checked against the manifest, so a route cannot demand a
+ *  scope nobody declared. */
+export function requireScopes<M extends keyof typeof declaredScopes>(
+  method: M,
+  granted: readonly string[],
+): void {
+  const needed = declaredScopes[method] as readonly string[];
+  const missing = needed.filter((s) => !granted.includes(s));
+  if (missing.length) {
+    throw new AxonProblem(403, "insufficient_scope", `missing: ${missing.join(", ")}`);
+  }
+}
 
 
 /** The failures declared in the manifest, by method. */

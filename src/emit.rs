@@ -326,6 +326,7 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
             ))
             .unwrap_or_default(),
     ));
+    out.push(scopes_ts(m));
     out.push(errors_ts(m));
     out.push(flags_ts(m));
     out.push(clients_ts(m, all)?);
@@ -1949,6 +1950,57 @@ fn retirement_ts(m: &Manifest) -> String {
          *  Deprecated is not gone: the route keeps answering what it always\n \
          *  answered, and it says so on the way out. */\n\
          export const retiredRoutes: Record<string, Record<string, string>> = {{\n{}\n}};\n",
+        rows.join("\n")
+    )
+}
+
+// ---------- who may call it ----------
+
+/// The scopes each method demands, and the check that uses them.
+///
+/// The gateway validates the token —that is its job and not axon's— and hands
+/// over what it granted. What this decides is the other half: whether what was
+/// granted covers what THIS method declared it needs. Retyping that list in the
+/// handler is how a route ends up checking a scope nobody declared, or checking
+/// none at all.
+fn scopes_ts(m: &Manifest) -> String {
+    let rows: Vec<String> = m
+        .methods
+        .iter()
+        .filter(|(_, me)| !me.scopes.is_empty())
+        .map(|(name, me)| {
+            format!(
+                "  {}: [{}],",
+                camel(name),
+                me.scopes
+                    .iter()
+                    .map(|s| format!("\"{s}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect();
+    if rows.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n/** What each method demands of whoever calls it, from the manifest. */\n\
+         export const declaredScopes = {{\n{}\n}} as const;\n\n\
+         /** Refuses when what the gateway granted does not cover what the method\n \
+         *  declared. 403 and `insufficient_scope`, which is what RFC 6750 calls it,\n \
+         *  and it names the missing one: a 403 with no reason is a ticket.\n \
+         *\n \
+         *  The method is checked against the manifest, so a route cannot demand a\n \
+         *  scope nobody declared. */\n\
+         export function requireScopes<M extends keyof typeof declaredScopes>(\n  \
+           method: M,\n  granted: readonly string[],\n\
+         ): void {{\n  \
+           const needed = declaredScopes[method] as readonly string[];\n  \
+           const missing = needed.filter((s) => !granted.includes(s));\n  \
+           if (missing.length) {{\n    \
+             throw new AxonProblem(403, \"insufficient_scope\", `missing: ${{missing.join(\", \")}}`);\n  \
+           }}\n\
+         }}\n",
         rows.join("\n")
     )
 }

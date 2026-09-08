@@ -59,7 +59,10 @@ status=$(sql -c "SELECT status FROM saga_checkout ORDER BY updated DESC LIMIT 1"
 # and the paymentId to compensate with has to come from there.
 echo "  a saga stranded in another process, resumed by the sweep"
 ORDER=$(uuid)
+# `payments:write`, que es lo que el manifiesto exige para cobrar: sin el, el
+# servicio contesta 403 y hace bien.
 charge=$(curl -sS --fail-with-body -m 30 -X POST "$PAYMENTS/v1/payments" \
+  -H 'x-granted-scopes: payments:write' \
   -H 'content-type: application/json' \
   -d "{\"orderId\":\"$ORDER\",\"amount\":{\"amount\":$((CEILING + 1)),\"currency\":\"MXN\"}}")
 payment=$(printf '%s' "$charge" | sed 's/.*"paymentId":"\([^"]*\)".*/\1/')

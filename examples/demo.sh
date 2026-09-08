@@ -161,6 +161,9 @@ step "event sourcing and CQRS, measured"
 step "declared vs occurred retries"
 ./check-retries.sh
 
+step "quien puede llamar a que, medido"
+./check-scopes.sh
+
 step "the declared failures, measured"
 ./check-errors.sh
 

@@ -163,7 +163,23 @@ export async function waitForDb(): Promise<pg.Pool> {
   }
 }
 
-type Route = (body: any, e: Envelope<unknown>, params: Record<string, string>) => Promise<unknown>;
+type Route = (
+  body: any,
+  e: Envelope<unknown>,
+  params: Record<string, string>,
+  granted: readonly string[],
+) => Promise<unknown>;
+
+/** What the gateway granted to whoever is calling.
+ *
+ *  Validating the token is the gateway's job and not the service's: it verifies
+ *  the signature, the expiry and the audience, and hands over what it granted.
+ *  Here that arrives as a header —which is what a real gateway does— and the
+ *  service only decides whether it covers what the manifest declares. */
+export function granted(req: IncomingMessage): readonly string[] {
+  const h = req.headers["x-granted-scopes"];
+  return typeof h === "string" ? h.split(/[ ,]+/).filter(Boolean) : [];
+}
 
 /** A resource that does not exist is the client's error, not the server's. */
 export class NotFound extends Error {}
@@ -257,7 +273,7 @@ export function serve(
         annotate({ "messaging.message.id": root.id, "axon.correlation_id": root.correlationId });
         await trace(root);
         try {
-          const out = await r.fn(body, root, params);
+          const out = await r.fn(body, root, params, granted(req));
           res.writeHead(200, { "content-type": "application/json", ...retired[r.key] });
           res.end(JSON.stringify(out));
         } catch (err) {

@@ -19,6 +19,7 @@ uses = ["orderId", "total"]
 [methods.capturePayment]
 http = "POST /v1/payments"
 auth = "required"
+scopes = ["payments:write"]
 timeout_ms = 8000
 idempotent = true
 in = { orderId = "uuid", amount = "money" }
@@ -34,6 +35,9 @@ errors = [
 [methods.refundPayment]
 http = "POST /v1/payments/{paymentId}/refunds"
 auth = "required"
+# Devolver dinero no es lo mismo que leer: con solo `required`, cualquier token
+# valido —incluido uno emitido para leer— puede hacerlo.
+scopes = ["payments:write"]
 timeout_ms = 8000
 idempotent = true
 in = { paymentId = "uuid" }

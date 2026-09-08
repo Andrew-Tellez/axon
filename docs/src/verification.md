@@ -127,6 +127,16 @@ has to be fixed cannot end up underneath.
 | Somebody calling a method that is deprecated | warning |
 | A `default` that is not the newest version | warning |
 
+## Scopes
+
+| | |
+| --- | --- |
+| A scope that is not in `[api] scopes` | error |
+| A `public` route demanding scopes | error |
+| Two services declaring a different catalogue | error |
+| A mutation behind `required` with no scopes | warning |
+| A scope in the catalogue no method demands | warning |
+
 ## Declared failures
 
 | | |

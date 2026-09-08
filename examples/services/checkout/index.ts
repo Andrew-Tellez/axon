@@ -27,7 +27,15 @@ function transport(): Transport {
       };
       const r = await fetch(`http://${target}:8080${routes[method]}`, {
         method: "POST",
-        headers: { "content-type": "application/json", ...hdrs },
+        headers: {
+          "content-type": "application/json",
+          // La credencial del servicio, no la del usuario: en un despliegue de
+          // verdad sale de su propia identidad de carga de trabajo y el gateway
+          // la valida. El generado propaga la traza y la idempotencia, no la
+          // autorizacion: eso es de quien despliega.
+          "x-granted-scopes": "payments:write",
+          ...hdrs,
+        },
         body: JSON.stringify(body),
       });
       if (!r.ok) {

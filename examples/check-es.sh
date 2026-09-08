@@ -392,6 +392,7 @@ $COMPOSE up -d --wait payments > /dev/null 2>&1
 
 ORDER=$(sq "SELECT gen_random_uuid()" | tr -d ' \r\n')
 code=$(curl -sS -o /dev/null -w '%{http_code}' -m 30 -X POST "localhost:${AXON_PORT_payments:-8082}/v1/payments" \
+  -H 'x-granted-scopes: payments:write' \
   -H 'content-type: application/json' \
   -d "{\"orderId\":\"$ORDER\",\"amount\":{\"amount\":500,\"currency\":\"MXN\"}}")
 payments=$(sq "SELECT count(*) FROM payment WHERE order_id = '$ORDER'" | tr -d ' \r\n')

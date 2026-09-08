@@ -26,6 +26,12 @@ breaker = true
 # The warehouse is a platform decision: `verify` requires all three services to
 # declare the same one, because a funnel split across two warehouses cannot be
 # assembled with one query.
+# El catalogo de la plataforma. Un scope con un error de dedo es un 403 en
+# produccion que nadie ve en una revision, y la unica forma de atraparlo antes
+# es que la lista de lo que existe este en algun lado.
+[api]
+scopes = ["orders:read", "payments:write"]
+
 [analytics]
 warehouse = "clickhouse"
 retention_days = 730

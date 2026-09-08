@@ -69,6 +69,18 @@ pub fn openapi_at(ms: &[Manifest], at: Option<&str>) -> Value {
                         {"schema": {"$ref": "#/components/schemas/Problem"}}}}
                 }
             });
+            // Who may call it, in the document a client generator reads. `auth`
+            // alone says "somebody"; the scopes say who, and OpenAPI has a
+            // place for exactly that.
+            match meth.auth.as_deref() {
+                Some("required") => {
+                    op["security"] = json!([{ "bearer": meth.scopes }]);
+                }
+                // an explicit empty list is how OpenAPI says "this one is open",
+                // and it is not the same as saying nothing
+                Some("public") => op["security"] = json!([]),
+                _ => {}
+            }
             // A retired version says so in the document that gets published,
             // which is the one a client generator reads.
             if meth.deprecated.is_some() {
@@ -145,7 +157,15 @@ pub fn openapi_at(ms: &[Manifest], at: Option<&str>) -> Value {
                      .unwrap_or_else(|| "1.0.0".into()),
                  "description": "Generated from the manifests. Do not edit."},
         "paths": paths,
-        "components": {"schemas": {
+        "components": {
+            // The scheme is named once and every operation points at it. Which
+            // scopes exist comes from `[api] scopes`, so a client generator can
+            // ask for the right one instead of guessing.
+            "securitySchemes": {"bearer": {
+                "type": "http", "scheme": "bearer", "bearerFormat": "JWT",
+                "description": "validated at the gateway; the service checks the scopes it declares"
+            }},
+            "schemas": {
             // RFC 7807: one error format across the whole platform
             "Problem": {"type": "object", "required": ["type", "title", "status"], "properties": {
                 "type": {"type": "string"}, "title": {"type": "string"},

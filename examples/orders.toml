@@ -38,6 +38,7 @@ errors = [
 [methods.getOrder]
 http = "GET /v1/tenants/{tenantId}/orders/{orderId}"
 auth = "required"
+scopes = ["orders:read"]
 timeout_ms = 2000
 in = { tenantId = "uuid", orderId = "uuid" }
 out = { orderId = "uuid", status = "string", total = "money" }
@@ -50,6 +51,7 @@ successor = "getOrderV2"
 [methods.getOrderV2]
 http = "GET /v2/tenants/{tenantId}/orders/{orderId}"
 auth = "required"
+scopes = ["orders:read"]
 timeout_ms = 2000
 in = { tenantId = "uuid", orderId = "uuid" }
 out = { orderId = "uuid", status = "string", total = "money", customerId = "uuid" }
@@ -64,6 +66,12 @@ breaker = true
 # A warehouse is where personal data lives longest and is read by the most
 # people, so the default is not to export it. Here the choice is to hash it, so
 # unique customers can be counted without storing the address.
+# El catalogo de la plataforma. Un scope con un error de dedo es un 403 en
+# produccion que nadie ve en una revision, y la unica forma de atraparlo antes
+# es que la lista de lo que existe este en algun lado.
+[api]
+scopes = ["orders:read", "payments:write"]
+
 [analytics]
 # ClickHouse: the only warehouse with an ingest path on the local target, and
 # `axon infra` refuses the combination that has none.

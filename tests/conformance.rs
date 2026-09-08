@@ -7207,3 +7207,111 @@ fn the_retention_is_declared_and_says_it_in_each_dialect() {
         "{err}"
     );
 }
+
+/// Scopes: the difference between "somebody" and "somebody allowed to do this".
+///
+/// `auth = "required"` says the caller is authenticated and nothing else, so
+/// any valid token —including one issued to read— can issue a refund.
+#[test]
+fn a_scope_says_who_and_not_just_that_there_is_somebody() {
+    let dir = std::env::temp_dir().join("axon-scopes");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |api: &str, method: &str| {
+        std::fs::write(
+            dir.join("shop.toml"),
+            format!(
+                "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"2\"\n\n\
+                 [api]\n{api}\n\
+                 [methods.refund]\nhttp = \"POST /v1/refunds\"\nidempotent = true\n\
+                 in = {{ id = \"uuid\" }}\nout = {{ id = \"uuid\" }}\n{method}"
+            ),
+        )
+        .unwrap();
+    };
+
+    // a typo in a scope is a 403 in production that nobody sees in a review
+    write(
+        "scopes = [\"payments:write\"]\n",
+        "auth = \"required\"\nscopes = [\"payments:wrote\"]\n",
+    );
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(
+        err.contains("`payments:wrote` is not in `[api] scopes`"),
+        "{err}"
+    );
+
+    // nobody presents a token on a public route
+    write(
+        "scopes = [\"payments:write\"]\n",
+        "auth = \"public\"\nrate_limit = 60\ntimeout_ms = 1000\nscopes = [\"payments:write\"]\n",
+    );
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("it is `public` and demands scopes"), "{err}");
+
+    // a mutation behind a token and nothing else
+    write("scopes = [\"payments:write\"]\n", "auth = \"required\"\n");
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    assert!(out.contains("Any valid token can call it"), "{out}");
+    // and the scope that guards nothing
+    assert!(out.contains("declared and no method demands it"), "{out}");
+
+    // declared right: no warning, and the projections
+    write(
+        "scopes = [\"payments:write\"]\n",
+        "auth = \"required\"\nscopes = [\"payments:write\"]\n",
+    );
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    assert!(!out.contains("Any valid token"), "{out}");
+    assert!(!out.contains("guards nothing"), "{out}");
+
+    let (ts, err, ok) = axon(&[
+        "build",
+        dir.join("shop.toml").to_str().unwrap(),
+        dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "{err}");
+    assert!(ts.contains("refund: [\"payments:write\"],"), "{ts}");
+    // 403 and the name RFC 6750 gives it, naming the missing one: a 403 with no
+    // reason is a ticket
+    assert!(
+        ts.contains("new AxonProblem(403, \"insufficient_scope\""),
+        "{ts}"
+    );
+    assert!(ts.contains("missing: ${missing.join"), "{ts}");
+    // and the method is checked against the manifest: a route cannot demand a
+    // scope nobody declared
+    assert!(
+        ts.contains("export function requireScopes<M extends keyof typeof declaredScopes>"),
+        "{ts}"
+    );
+
+    // the published document says it too
+    let (api, _, ok) = axon(&["openapi", dir.to_str().unwrap()]);
+    assert!(ok);
+    let v: serde_json::Value = serde_json::from_str(&api).unwrap();
+    assert_eq!(
+        v["paths"]["/v1/refunds"]["post"]["security"][0]["bearer"][0],
+        "payments:write"
+    );
+    assert!(
+        v["components"]["securitySchemes"]["bearer"].is_object(),
+        "{api}"
+    );
+
+    // and the catalogue is the platform's: two services cannot disagree about
+    // which scopes exist
+    std::fs::write(
+        dir.join("other.toml"),
+        "service = \"other\"\nversion = \"1.0.0\"\nowner = \"t\"\ntier = \"2\"\n\n\
+         [api]\nscopes = [\"something:else\"]\n",
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("declare different `[api]`"), "{err}");
+}

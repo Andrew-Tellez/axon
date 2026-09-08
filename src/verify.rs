@@ -945,6 +945,37 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     m.service
                 ));
             }
+            // Scopes. `auth = "required"` says the caller is somebody; a scope
+            // says the caller is somebody allowed to do THIS, which is a
+            // different question and the one that decides whether any valid
+            // token can issue a refund.
+            let catalogue = &m.api.scopes;
+            if meth.auth.as_deref() == Some("public") && !meth.scopes.is_empty() {
+                errors.push(format!(
+                    "{}.{name}: it is `public` and demands scopes. Nobody presents a token on \
+                     a public route: it is either open or it is not",
+                    m.service
+                ));
+            }
+            for sc in &meth.scopes {
+                if !catalogue.is_empty() && !catalogue.contains(sc) {
+                    errors.push(format!(
+                        "{}.{name}: `{sc}` is not in `[api] scopes`. A scope with a typo is a \
+                         403 in production that nobody sees in a review",
+                        m.service
+                    ));
+                }
+            }
+            // A mutation behind a token and nothing else: whoever can read can
+            // also refund, and that is a decision nobody took on purpose.
+            if meth.mutating() && meth.auth.as_deref() == Some("required") && meth.scopes.is_empty()
+            {
+                warnings.push(format!(
+                    "{}.{name}: {http} mutates behind `auth = \"required\"` and no `scopes`. \
+                     Any valid token can call it, including one issued to read",
+                    m.service
+                ));
+            }
             if meth.paginated && !meth.output.contains_key("cursor") {
                 errors.push(format!(
                     "{}.{name}: paginated but does not return a `cursor`; offset breaks as it grows",
@@ -1382,6 +1413,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if other.api.versioning != first.api.versioning
                 || other.api.dates() != first.api.dates()
                 || other.api.default != first.api.default
+                || other.api.scopes != first.api.scopes
             {
                 errors.push(format!(
                     "{} and {} declare different `[api]`. The versioning is one decision for \
@@ -1729,6 +1761,24 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             .unwrap_or_default()
                     ));
                 }
+            }
+        }
+    }
+
+    // A scope in the catalogue that no method demands: it can be granted to
+    // somebody and it guards nothing, which is the worst kind of permission —
+    // it looks like a control and is a label.
+    if let Some(api) = ms.iter().find(|m| !m.external).map(|m| &m.api) {
+        for sc in &api.scopes {
+            let used = ms
+                .iter()
+                .filter(|m| !m.external)
+                .any(|m| m.methods.values().any(|me| me.scopes.contains(sc)));
+            if !used {
+                warnings.push(format!(
+                    "[api] the scope `{sc}` is declared and no method demands it. It can be \
+                     granted and it guards nothing"
+                ));
             }
         }
     }

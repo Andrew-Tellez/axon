@@ -27,6 +27,50 @@ And what is not warned about is **generated hardened**:
 - **A09** — `axon build` emits `piiFields` and a recursive `redact()`. Personal data
   leaks through a log, not through an exploit.
 
+## Who may call it, and not just that there is somebody
+
+```toml
+[api]
+scopes = ["orders:read", "payments:write"]   # every scope that exists here
+
+[methods.refundPayment]
+http   = "POST /v1/payments/{paymentId}/refunds"
+auth   = "required"
+scopes = ["payments:write"]
+```
+
+`auth = "required"` says the caller is authenticated and **nothing else**: any valid
+token, including one issued to read, can issue a refund. A scope is the difference
+between *somebody* and *somebody allowed to do this*.
+
+The gateway validates the token — signature, expiry, audience — and hands over what it
+granted. That is its job and not the service's. What the service decides is the other
+half: whether what was granted covers what this method declared. The generated
+`requireScopes` does that, and the list is not retyped in the handler:
+
+```ts
+requireScopes("payoutMerchant", granted);   // 403 insufficient_scope, naming the missing one
+```
+
+A `403` with no reason is a ticket, so it names what is missing — `insufficient_scope` is
+what RFC 6750 calls it. The method is checked against the manifest, so a route cannot
+demand a scope nobody declared.
+
+The catalogue in `[api] scopes` is the platform's, and `verify` requires every service to
+agree on it: **a scope with a typo is a 403 in production that nobody sees in a review**.
+It also refuses a `public` route demanding scopes —nobody presents a token there— and
+warns about two things: a mutation behind `required` and nothing else, and a scope in the
+catalogue that no method demands, which can be granted to somebody and guards nothing.
+
+The demo measures it against the running service: without the scope, `403` naming it;
+with it, `200`; and with a read scope over a payment route, `403` again — which is
+exactly the distinction `required` on its own cannot make.
+
+A call between services carries its own credential, not the user's: in the example
+`checkout` presents `payments:write` because that is what it needs, and in a real
+deployment it comes from its own workload identity. The generated headers propagate the
+trace and the idempotency key, never the authorization: that belongs to whoever deploys.
+
 ## RLS and masking
 
 ```toml

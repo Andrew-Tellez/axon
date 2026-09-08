@@ -11,6 +11,7 @@ their own — a compiler that only verifies itself produces invalid output:
 | The generated testkit | `node --test` against the real example service, and its failure suite catches a hand-edit of the generated `problem()` |
 | The generated Go | `go vet` |
 | The DDL | `PARTITION BY`, table-level constraints, and a loud failure on invalid SQL |
+| The declared scopes | the demo calls the running service without the scope, with it, and with a read one: 403 naming the missing permission, 200, and 403 again |
 | The generated RLS | it is applied to a real Postgres and checked to see that it isolates |
 | The generated pgdog config | validated against pgdog's official JSON Schema |
 | The generated Vector config | `vector validate` in its own container |
@@ -39,7 +40,7 @@ their own — a compiler that only verifies itself produces invalid output:
 
 ```sh
 cargo test --release      # 62 conformance checks
-cd examples && ./demo.sh  # 54 checks against real containers
+cd examples && ./demo.sh  # 57 checks against real containers
 ```
 
 Preview. The command surface is stable; the manifest format can still change before

@@ -1,5 +1,5 @@
 // The business logic. The state machine is enforced by the generated code.
-import { PaymentsService, fail, problem, httpRoutes, manifest, paymentNext, paymentCan, flagChargeV2, flagStripeKill,
+import { PaymentsService, fail, problem, requireScopes, httpRoutes, manifest, paymentNext, paymentCan, flagChargeV2, flagStripeKill,
          type CapturePaymentIn, type CapturePaymentOut,
          type RefundPaymentIn, type RefundPaymentOut,
          type PayoutMerchantIn, type PayoutMerchantOut,
@@ -163,10 +163,20 @@ serve(
     // on disk, so a registry can be built from what is RUNNING and not from what
     // somebody remembered to commit.
     "GET /.well-known/axon.json": async () => manifest,
-    "POST /v1/payments": (body, e) => svc.capturePayment(body, e),
-    "POST /v1/payments/{paymentId}/refunds": (_b, _e, params) =>
-      svc.refundPayment({ paymentId: params.paymentId }),
-    "POST /v1/payouts": (body) => svc.payoutMerchant(body),
+    // El gateway valida el token; el servicio decide si lo concedido cubre lo
+    // que el manifiesto exige. La lista no se reescribe aca: viene generada.
+    "POST /v1/payments": (body, e, _p, granted) => {
+      requireScopes("capturePayment", granted);
+      return svc.capturePayment(body, e);
+    },
+    "POST /v1/payments/{paymentId}/refunds": (_b, _e, params, granted) => {
+      requireScopes("refundPayment", granted);
+      return svc.refundPayment({ paymentId: params.paymentId });
+    },
+    "POST /v1/payouts": (body, _e, _p, granted) => {
+      requireScopes("payoutMerchant", granted);
+      return svc.payoutMerchant(body);
+    },
   },
   httpRoutes,
   // the declared failures, projected as problem+json

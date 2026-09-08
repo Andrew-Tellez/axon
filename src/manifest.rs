@@ -36,6 +36,15 @@ pub struct Method {
     /// Who may call it from the edge: "public" or "required". Deliberately
     /// without a default: an exposed route with this undecided is an incident.
     pub auth: Option<String>,
+    /// What the caller has to present to call this, beyond being someone.
+    ///
+    /// `auth = "required"` says the caller is authenticated and nothing else:
+    /// any valid token can refund a payment. A scope is the difference between
+    /// "somebody" and "somebody allowed to do this", and it is declared here
+    /// because the alternative is an `if` in a handler that nobody can audit
+    /// from outside.
+    #[serde(default)]
+    pub scopes: Vec<String>,
     /// Requests per minute at the gateway.
     pub rate_limit: Option<u32>,
     /// Time budget at the edge.
@@ -252,6 +261,12 @@ pub struct Api {
     /// The same, for a version marked `lts`. If an LTS does not live longer
     /// than a normal one, the label says nothing.
     pub lts_window_days: Option<i64>,
+    /// Every scope that exists on this platform.
+    ///
+    /// A catalogue and not free text: a scope with a typo is a 403 in
+    /// production that nobody sees in a review, and the only way to catch it
+    /// beforehand is for the list of what exists to be somewhere.
+    pub scopes: Vec<String>,
     /// The dated versions, oldest first, as `[[api.version]]` entries.
     ///
     /// They are entries and not bare strings because a version carries more
