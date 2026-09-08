@@ -537,14 +537,26 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             continue;
         };
         if !ENGINES.contains(&motor.as_str()) {
-            errors.push(format!(
-                "{}: `state = \"{motor}\"` no esta soportado. Motores nativos: {}. Un motor \
-                 different one is served by an `axon-infra-{motor}` plugin, which receives the \
-                 neutral plan on stdin; without that, axon would generate Postgres \
-                 infrastructure for something that is not Postgres",
-                m.service,
-                ENGINES.join(", ")
-            ));
+            // "none" is the one somebody writes to mean "this service has no
+            // database". Saying it needs a plugin sends them to build one for
+            // nothing: what they want is to not declare the field.
+            if motor == "none" {
+                errors.push(format!(
+                    "{}: `state = \"none\"` is not an engine. A service with no database of its \
+                     own declares no `state` at all, and then no rule about pools, replicas or \
+                     backups applies to it",
+                    m.service
+                ));
+            } else {
+                errors.push(format!(
+                    "{}: `state = \"{motor}\"` is not supported. Native engines: {}. A different \
+                     one is served by an `axon-infra-{motor}` plugin, which receives the neutral \
+                     plan on stdin; without that, axon would generate Postgres infrastructure \
+                     for something that is not Postgres",
+                    m.service,
+                    ENGINES.join(", ")
+                ));
+            }
         }
     }
 

@@ -3587,9 +3587,21 @@ fn an_unknown_engine_does_not_generate_postgres() {
     .unwrap();
     let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!ok, "an unsupported engine has to fail");
-    assert!(err.contains("no esta soportado"), "{err}");
+    assert!(err.contains("is not supported"), "{err}");
     // and the message says how to proceed, not just that it cannot be done
     assert!(err.contains("axon-infra-neo4j"), "{err}");
+
+    // `none` is the one somebody writes to mean "this has no database", and
+    // sending them to build a plugin for that is sending them to build nothing
+    std::fs::write(
+        dir.join("g.toml"),
+        "service = \"g\"\nowner = \"e\"\ntier = \"2\"\n[infra]\nstate = \"none\"\n",
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("declares no `state` at all"), "{err}");
+    assert!(!err.contains("axon-infra-none"), "{err}");
     // postgres is still valid
     std::fs::write(
         dir.join("g.toml"),
