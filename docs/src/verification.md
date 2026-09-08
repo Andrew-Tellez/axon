@@ -42,6 +42,16 @@ has to be fixed cannot end up underneath.
 | A public route with no `rate_limit` or no `timeout_ms` | error |
 | A paginated method that does not return a `cursor` | error |
 
+## Consumers that do not use axon
+
+| | |
+| --- | --- |
+| Traffic on a route past its declared sunset | error (`axon traffic`) |
+| A path that matches no declared route | reported, with its count |
+| A pact expecting a field the provider does not return | error (`axon pact`) |
+| A pact expecting a status the method does not declare | warning: the provider fails that way and does not say so |
+| Declared fields a pact does not read | reported: one name off the list of unknowns |
+
 ## The line for a repo that already exists
 
 | | |

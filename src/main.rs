@@ -11,9 +11,11 @@ mod emit;
 mod import;
 mod infra;
 mod manifest;
+mod pact;
 mod plugin;
 mod pooler;
 mod trace;
+mod traffic;
 mod tui;
 mod verify;
 mod versions;
@@ -123,6 +125,24 @@ enum Cmd {
     },
     /// the API's maintenance cycle: what each version is, and what changed
     Versions { sources: Vec<String> },
+    /// a pact from a consumer that does not use axon, crossed against what
+    /// the provider declares
+    Pact {
+        sources: Vec<String>,
+        /// the pact file (Pact v2, v3 or v4). axon does not need a broker to
+        /// read one: what it wants is the list of fields the consumer needs
+        #[arg(long)]
+        check: PathBuf,
+    },
+    /// who calls what, read from the edge's access log
+    Traffic {
+        sources: Vec<String>,
+        /// the edge's access log, NDJSON. axon does not connect to the edge:
+        /// the log comes in here and the compiler crosses it against what the
+        /// manifests declare
+        #[arg(long)]
+        check: PathBuf,
+    },
     /// the system as it is, drawn: topology, verdict, versions and changes
     Tui {
         sources: Vec<String>,
@@ -535,6 +555,50 @@ fn run() -> Result<ExitCode, String> {
                         bi::dialect(other).ok_or_else(|| format!("unknown warehouse `{other}`"))?;
                     print!("{}", bi::build(&ms, &d));
                 }
+            }
+        }
+        Cmd::Pact { sources, check } => {
+            let ms = manifest::discover(&sources)?;
+            let text =
+                std::fs::read_to_string(&check).map_err(|e| format!("{}: {e}", check.display()))?;
+            let p = pact::parse(&text)?;
+            let (errors, warnings, report) = pact::review(&ms, &p);
+            if !report.is_empty() {
+                println!("{report}");
+            }
+            for w in &warnings {
+                println!("{}  {}", color::yellow("warn"), highlight(w));
+            }
+            for e in &errors {
+                eprintln!("{} {}", color::red("error"), highlight(e));
+            }
+            println!(
+                "{} {}",
+                if errors.is_empty() {
+                    color::green("ok")
+                } else {
+                    color::red("fail")
+                },
+                color::grey(&format!(
+                    "{} interactions, {} errors, {} warnings",
+                    p.expectations.len(),
+                    errors.len(),
+                    warnings.len()
+                ))
+            );
+            if !errors.is_empty() {
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+        Cmd::Traffic { sources, check } => {
+            let ms = manifest::discover(&sources)?;
+            let text =
+                std::fs::read_to_string(&check).map_err(|e| format!("{}: {e}", check.display()))?;
+            let hits = traffic::parse(&text);
+            let (report, fails) = traffic::report(&ms, &hits);
+            print!("{report}");
+            if fails {
+                return Ok(ExitCode::FAILURE);
             }
         }
         Cmd::Tui { sources, frames } => {

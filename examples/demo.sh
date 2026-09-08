@@ -179,6 +179,12 @@ step "las reglas declaradas, evaluadas contra la bodega"
 step "the warehouse: schema, funnel and PII"
 ./check-warehouse.sh
 
+step "el pacto de un consumidor que no usa axon"
+"$AXON" pact . --check pacts/mobile-app-orders.json
+
+step "quien llama a que, leido del edge"
+./check-traffic.sh
+
 step "el tablero, aprovisionado desde el manifiesto"
 python3 check-metabase.py "${AXON_BI_PORT:-3030}"
 

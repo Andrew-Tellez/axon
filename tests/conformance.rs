@@ -6420,3 +6420,190 @@ fn the_accepted_warnings_are_a_line_and_not_a_drawer() {
     let (_, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(ok, "with no line drawn, a warning must not fail the build");
 }
+
+/// Who calls what, from the edge. It is the half of the question that has an
+/// answer when the caller declares nothing: what it asks for is observable,
+/// what it reads of the answer is not.
+#[test]
+fn the_edge_log_says_who_still_calls_what() {
+    // the route matcher first: `{id}` takes one segment and no more, or the
+    // traffic of one route gets counted as another's
+    for (template, path, expected) in [
+        ("/v1/orders/{id}", "/v1/orders/abc", true),
+        ("/v1/orders/{id}", "/v1/orders/abc/refunds", false),
+        ("/v1/orders/{id}", "/v1/orders/", false),
+        ("/v1/orders/{id}", "/v2/orders/abc", false),
+        ("/v1/orders", "/v1/orders", true),
+    ] {
+        assert_eq!(
+            axon_traffic_matches(template, path),
+            expected,
+            "`{template}` vs `{path}`"
+        );
+    }
+
+    let dir = std::env::temp_dir().join("axon-traffic");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = |lines: &[&str]| {
+        std::fs::write(dir.join("edge.ndjson"), lines.join("\n")).unwrap();
+        dir.join("edge.ndjson")
+    };
+    // Traefik's field names, which is what the local target really writes
+    let hit = |path: &str, client: &str| {
+        format!(
+            r#"{{"RequestMethod":"GET","RequestPath":"{path}","ClientHost":"{client}","DownstreamStatus":200}}"#
+        )
+    };
+    let f = log(&[
+        &hit("/v1/tenants/t1/orders/o1", "10.0.0.1"),
+        &hit("/v1/tenants/t1/orders/o2", "10.0.0.1"),
+        &hit("/v1/tenants/t1/orders/o3", "10.0.0.2"),
+        &hit("/v2/tenants/t1/orders/o1", "10.0.0.3"),
+        &hit("/v1/invented", "10.0.0.9"),
+    ]);
+    let (out, err, ok) = axon(&["traffic", "examples", "--check", f.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    // three calls from two clients to the version that is being retired
+    assert!(
+        out.contains("GET /v1/tenants/{tenantId}/orders/{orderId}"),
+        "{out}"
+    );
+    assert!(out.contains("deprecated"), "{out}");
+    assert!(out.contains("use `getOrderV2`"), "{out}");
+    // a path nobody declares gets named: a client pointing at nothing, or
+    // somebody serving outside the manifest
+    assert!(out.contains("undeclared"), "{out}");
+    assert!(out.contains("/v1/invented"), "{out}");
+    // and it does not claim nobody calls what the edge cannot see
+    assert!(
+        out.contains("a call between services does not pass through the edge"),
+        "{out}"
+    );
+
+    // The one thing it fails on is a fact and not a judgement: traffic on
+    // something past its declared sunset. Announced and not done.
+    std::fs::write(
+        dir.join("s.toml"),
+        "service = \"s\"\nversion = \"1.0.0\"\nowner = \"e\"\ntier = \"2\"\n\n\
+         [methods.old]\nhttp = \"GET /v1/things\"\nauth = \"public\"\nrate_limit = 60\n\
+         timeout_ms = 1000\nin = { id = \"uuid\" }\nout = { id = \"uuid\" }\n\
+         deprecated = \"2020-01-01\"\nsunset = \"2020-06-01\"\n",
+    )
+    .unwrap();
+    let f = log(&[&hit("/v1/things", "10.0.0.1")]);
+    let (out, _, ok) = axon(&[
+        "traffic",
+        dir.to_str().unwrap(),
+        "--check",
+        f.to_str().unwrap(),
+    ]);
+    assert!(!ok, "traffic past a sunset did not fail:\n{out}");
+    assert!(out.contains("PAST ITS SUNSET"), "{out}");
+    assert!(out.contains("announced and it did not happen"), "{out}");
+}
+
+/// The matcher, reached through the binary's own behaviour: two routes that
+/// differ only in a segment must not steal each other's traffic.
+fn axon_traffic_matches(template: &str, path: &str) -> bool {
+    let dir = std::env::temp_dir().join(format!(
+        "axon-match-{}-{}",
+        std::process::id(),
+        template.len() * 31 + path.len()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("s.toml"),
+        format!(
+            "service = \"s\"\nversion = \"1.0.0\"\nowner = \"e\"\ntier = \"2\"\n\n\
+             [methods.m]\nhttp = \"GET {template}\"\nauth = \"public\"\nrate_limit = 60\n\
+             timeout_ms = 1000\nin = {{ id = \"uuid\" }}\nout = {{ id = \"uuid\" }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("edge.ndjson"),
+        format!(r#"{{"RequestMethod":"GET","RequestPath":"{path}","ClientHost":"c"}}"#),
+    )
+    .unwrap();
+    let (out, _, _) = axon(&[
+        "traffic",
+        dir.to_str().unwrap(),
+        "--check",
+        dir.join("edge.ndjson").to_str().unwrap(),
+    ]);
+    !out.contains("undeclared")
+}
+
+/// A pact from a consumer that never adopted axon. It is the other half of the
+/// question: what they ask for is observable from the edge, what they READ is
+/// not — unless they hand you something that already says it.
+#[test]
+fn a_foreign_pact_answers_what_the_edge_cannot() {
+    // the example's own fixture: a team with no manifest and no intention of
+    // having one
+    let (out, err, ok) = axon(&[
+        "pact",
+        "examples",
+        "--check",
+        "examples/pacts/mobile-app-orders.json",
+    ]);
+    assert!(ok, "{err}{out}");
+    assert!(out.contains("mobile-app → orders"), "{out}");
+    // the question that unfreezes a contract, answered about a consumer that
+    // declares nothing
+    assert!(
+        out.contains("mobile-app does not read status of getOrder"),
+        "{out}"
+    );
+
+    let dir = std::env::temp_dir().join("axon-pact");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let check = |body: &str| -> (String, String, bool) {
+        let f = dir.join("p.json");
+        std::fs::write(&f, body).unwrap();
+        axon(&["pact", "examples", "--check", f.to_str().unwrap()])
+    };
+    let pact = |status: u16, body: &str| {
+        format!(
+            r#"{{"consumer":{{"name":"c"}},"provider":{{"name":"orders"}},"interactions":[
+                 {{"description":"d","request":{{"method":"GET","path":"/v1/tenants/t/orders/o"}},
+                   "response":{{"status":{status},"body":{body}}}}}]}}"#
+        )
+    };
+
+    // a field the provider does not return: renamed, or the pact went stale
+    let (_, err, ok) = check(&pact(200, r#"{"orderId":"o","customerTier":"gold"}"#));
+    assert!(!ok, "an expectation nobody can satisfy passed clean");
+    assert!(err.contains("expects `customerTier`"), "{err}");
+    assert!(err.contains("the pact is stale"), "{err}");
+
+    // a failure's body is RFC 7807 and not the method's output: comparing them
+    // would report `title` missing from a method that never promised it
+    let (out, _, ok) = check(&pact(404, r#"{"title":"not found","status":404}"#));
+    assert!(ok, "the error body was compared against the output:\n{out}");
+    assert!(out.contains("(of the failure)"), "{out}");
+    // and the status it expects is not declared, which is a finding about the
+    // PROVIDER: it fails that way and does not say so
+    assert!(
+        out.contains("not 2xx nor a failure the method declares"),
+        "{out}"
+    );
+
+    // a path that matches no route
+    let (_, err, ok) = check(
+        r#"{"consumer":{"name":"c"},"provider":{"name":"orders"},"interactions":[
+             {"description":"d","request":{"method":"GET","path":"/v1/gone"},
+              "response":{"status":200,"body":{}}}]}"#,
+    );
+    assert!(!ok);
+    assert!(err.contains("matches no declared route"), "{err}");
+
+    // and a pact about a system whose manifests were not passed
+    let (_, err, ok) =
+        check(r#"{"consumer":{"name":"c"},"provider":{"name":"other"},"interactions":[]}"#);
+    assert!(!ok);
+    assert!(err.contains("there is no manifest for it"), "{err}");
+}

@@ -68,6 +68,8 @@ flowchart TB
   MAN --> API["api.rs<br/><i>OpenAPI + testkit</i>"]
   MAN --> BASE["baseline.rs<br/><i>published contracts</i>"]
   MAN --> ACC["accepted.rs<br/><i>the warnings a repo<br/>lives with, for now</i>"]
+  MAN --> TRF["traffic.rs<br/><i>who calls what,<br/>from the edge log</i>"]
+  MAN --> PCT["pact.rs<br/><i>a pact from a consumer<br/>that does not use axon</i>"]
   MAN --> IMP["import.rs<br/><i>AsyncAPI 2.x/3.x</i>"]
 
   BASE --> VER
@@ -76,7 +78,7 @@ flowchart TB
   EMIT -.-> PLUG
   INF -.-> PLUG
 
-  MAIN["main.rs<br/><i>the CLI: 25 commands</i>"] --> MAN
+  MAIN["main.rs<br/><i>the CLI: 27 commands</i>"] --> MAN
   COL["color.rs · trace.rs"] --> MAIN
 ```
 

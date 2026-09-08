@@ -73,6 +73,47 @@ retriable. See [`errors` on a method](./manifest.md#errors-on-a-method).
 
 It runs with `node --test`, with no dependencies.
 
+## `axon traffic <sources> --check <ndjson>`
+Who calls what, read from the edge's access log. It answers the half of the question that
+has an answer when the caller declares nothing: **what it asks for is observable, what it
+reads of the answer is not**.
+
+```console
+$ axon traffic manifests/ --check .axon/log/edge.ndjson
+19 requests  7 declared routes
+        6    1  GET /v1/tenants/{tenantId}/orders/{orderId} · deprecated · 479d left · use `getOrderV2`
+        5    1  POST /v1/tenants/{tenantId}/orders
+        1    1  GET /v2/tenants/{tenantId}/orders/{orderId}
+```
+
+It reads NDJSON and is tolerant about the field names, because otherwise it would only
+work with the edge axon itself generates. It reports routes with no traffic —saying that
+a call between services does not pass through the edge, so it is not proof that nobody
+calls them— and paths that match no declared route. It fails on one fact and not on a
+judgement: traffic on something **past its declared sunset**, which is a retirement that
+was announced and did not happen.
+
+## `axon pact <sources> --check <pact.json>`
+A pact from a consumer that never adopted axon. axon does not need a broker to **read**
+one: their file already says which fields they need.
+
+```console
+$ axon pact manifests/ --check pacts/mobile-app-orders.json
+mobile-app → orders  ·  2 interactions
+  GET /v1/tenants/t-1/orders/o-1  →  orders.getOrder  ·  reads orderId, total.amount, total.currency
+  mobile-app does not read status of getOrder
+ok 2 interactions, 0 errors, 0 warnings
+```
+
+It answers the two things a foreign consumer leaves unanswered: whether it expects a
+field nobody returns —renamed, or the pact is stale— and **which declared fields it does
+not read**, which is the question that unfreezes a contract. It is not permission to
+delete: another consumer may read it. It is one name off the list of unknowns.
+
+A failure's body is compared as RFC 7807 and not against the method's output, and a
+status the method does not declare comes out as a finding about the **provider**: it
+fails that way and does not say so.
+
 ## `axon accept <sources>`
 The warnings the repo lives with for now. Emits the list to stdout; with
 `axon.accepted.json` present, a warning that is not on it fails the build, and one that

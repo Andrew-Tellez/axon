@@ -260,8 +260,19 @@ services:
       # migration jobs too and fills the log with "port is missing"
       - --providers.docker.exposedByDefault=false
       - --entrypoints.web.address=:80
+      # The access log, in JSON and to a file. It is the only place that knows
+      # who calls what: a caller outside axon declares nothing, and what it
+      # reads of the answer is not observable — but what it ASKS for is right
+      # here. `axon traffic --check` reads this and says who still calls a
+      # version that is being retired.
+      - --accesslog=true
+      - --accesslog.format=json
+      - --accesslog.filepath=/out/log/edge.ndjson
+      - --accesslog.fields.headers.names.X-Api-Version=keep
     ports: ["${AXON_EDGE_PORT:-8000}:80"]
-    volumes: ["/var/run/docker.sock:/var/run/docker.sock:ro"]
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./.axon/log:/out/log"
   checkout:
     build:
       context: .

@@ -1,0 +1,24 @@
+{
+  "consumer": { "name": "mobile-app" },
+  "provider": { "name": "orders" },
+  "interactions": [
+    {
+      "description": "abrir un pedido",
+      "request": { "method": "GET", "path": "/v1/tenants/t-1/orders/o-1" },
+      "response": {
+        "status": 200,
+        "body": { "orderId": "o-1", "total": { "amount": 2500, "currency": "MXN" } }
+      }
+    },
+    {
+      "description": "crear un pedido",
+      "request": {
+        "method": "POST",
+        "path": "/v1/tenants/t-1/orders",
+        "body": { "customerId": "c-1", "customerEmail": "a@b.c", "total": { "amount": 2500, "currency": "MXN" } }
+      },
+      "response": { "status": 200, "body": { "orderId": "o-1" } }
+    }
+  ],
+  "metadata": { "pactSpecification": { "version": "3.0.0" } }
+}

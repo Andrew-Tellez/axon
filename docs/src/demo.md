@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **48 checks against reality**: not against a mock,
+brings the whole system up and makes **51 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -154,6 +154,21 @@ axon: the warehouse has 0 differences against the manifest
   OK: restored whole after breaking it: 1 rows, all with their amount
   OK: 1 rows before and after; the loader is idempotent
 
+==> el pacto de un consumidor que no usa axon
+mobile-app → orders  ·  2 interactions
+  GET /v1/tenants/t-1/orders/o-1  →  orders.getOrder  ·  reads orderId, total.amount, total.currency
+  mobile-app does not read status of getOrder
+ok 2 interactions, 0 errors, 0 warnings
+
+==> quien llama a que, leido del edge
+  un cliente ajeno llamando cinco veces a la version deprecada
+    34 requests  7 declared routes
+           16    1  GET /v1/tenants/{tenantId}/orders/{orderId} · deprecated · 479d left · use `getOrderV2`
+            7    1  POST /v1/tenants/{tenantId}/orders
+  OK: el log del edge nombra a quien todavia llama la version que se retira el 2027-12-31
+  OK: y no afirma que nadie llama lo que el edge no puede ver
+  OK: una ruta que nadie declara sale nombrada, con su conteo
+
 ==> el tablero, aprovisionado desde el manifiesto
   declarado: 4 pregunta(s) —una por metrica y por embudo— contra las vistas generadas
   Metabase aprovisionado desde cero, sin tocar la interfaz
@@ -219,6 +234,8 @@ shortest way to show one thing:
 | `./check-errors.sh` | a declared failure: the final one arrives once, the retriable one uses the whole budget |
 | `./check-versions.sh` | two versions of the same endpoint, and the headers the retired one really sends |
 | `./check-rules.sh` | a rule over a metric: it proposes on the way in, does not repeat, and the guard stops it |
+| `./check-traffic.sh` | who still calls the version being retired, read from the edge's real log |
+| `axon pact . --check pacts/mobile-app-orders.json` | a consumer with no manifest, crossed against the declared contract |
 | `python3 check-metabase.py 3030` | a Metabase provisioned from the manifest, and the question answering the same as the view |
 | `./check-pooler.sh` | tenant isolation through pgdog in transaction mode |
 | `./check-warehouse.sh` | schema, funnel, metrics, PII and drift detection |
