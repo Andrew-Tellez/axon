@@ -7,6 +7,44 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.11.0] — 2026-09-08
+
+### Añadido
+
+- **El sharder se levanta también en k8s.** `--target k8s` se negaba si el manifiesto
+  declaraba `shards > 1`, así que un servicio sharded solo existía en el portátil. Los
+  nodos **no** son de axon —son instancias gestionadas del equipo y llegan como secreto—
+  pero pgdog sí: es la pieza que hay que configurar exacta, y hacerlo a mano es donde un
+  shard acaba apuntando al host equivocado. Salen un `ConfigMap` con los dos archivos
+  generados, un `Deployment` de pgdog pineado por digest, su `Service` en 6432 y una
+  `NetworkPolicy` donde solo entra su propio servicio.
+
+  El `DATABASE_URL` de la app apunta al pooler y **nunca** a un nodo: apuntar a un nodo se
+  salta el sharding y todo funciona, contra un cuarto de los datos.
+
+- **La sustitución se genera con los marcadores.** El archivo generado es una plantilla
+  (`port = ${AXON_DB_PORT_0}` ni siquiera es TOML válido) y hasta ahora lo único que
+  rellenaba esos marcadores era la regex del propio test: en un despliegue real no lo
+  hacía nadie. Ahora la sustitución sale del mismo texto que los marcadores, viaja como
+  initContainer, y una variable sin valor **para el pod diciendo cuál falta** en vez de
+  dejar un `${…}` literal que pgdog rechaza con un error de parseo que nadie relaciona con
+  un secreto.
+
+  Medido: la suite corre esa sustitución con un `sh` de verdad —con una contraseña que
+  lleva `/`, que es justo lo que rompe un `sed` con delimitador `/`— y valida lo que queda
+  contra el esquema oficial de pgdog.
+
+- **El plan neutral lleva la configuración del pooler** (`stores[].pooler`, con sus dos
+  archivos y la lista de variables), así que un `axon-infra-*` que renderice a Nomad o a
+  lo que sea no tiene que volver a derivarla. Está en el esquema publicado.
+
+### Cambiado
+
+- `axon pooler --target k8s` es un target válido: la cabecera del archivo generado nombra
+  ese comando, y un comando que no se puede ejecutar no es documentación.
+- `gcp` y `aws` siguen negándose con `shards > 1`: allí son N instancias de Cloud SQL o
+  RDS. La suite pasó a **92 pruebas**.
+
 ## [0.10.0] — 2026-09-08
 
 ### Añadido
