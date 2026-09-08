@@ -7,6 +7,33 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.12.0] — 2026-09-08
+
+### Añadido
+
+- **`axon pact` lee también los pactos de mensaje.** Hasta ahora solo leía `interactions[]`,
+  o sea pactos HTTP, y un endpoint es la mitad de la superficie. Un **topic** también es un
+  contrato, y quién lee un mensaje —y qué campos— no se observa desde este lado ni siquiera
+  como el edge observa una llamada: o lo dicen, o no se sabe. Entran los `messages[]` de v3
+  y las interacciones con `type: Asynchronous/Messages` de v4, y se cruzan contra lo que el
+  proveedor emite: la misma comparación que hace `uses` para un consumidor de dentro, con la
+  entrada viniendo de fuera.
+
+  El topic se lee de `topic`, `kafka_topic`, `subject`, `destination` o `queue` —no hay una
+  sola clave, cada implementación escribe la suya— y empareja las dos grafías: el pacto dice
+  `order.placed.v1` y el manifiesto `order.placed@v1`.
+
+  Un evento que existe pero es de **otro** proveedor se reporta como eso y no como
+  inexistente: un evento tiene exactamente un dueño y el arreglo es distinto. Y si el mensaje
+  lleva el sobre, lo que el evento promete es lo de dentro de `data`; leer del sobre algo que
+  no viaja ahí es un hallazgo aparte.
+
+### Cambiado
+
+- El resumen de `axon pact` cuenta las dos mitades (`N interactions, M messages`), y el demo
+  pasó a **25 secciones**: comprueba el pacto de un consumidor HTTP y el de uno de un topic.
+- La suite pasó a **93 pruebas**.
+
 ## [0.11.0] — 2026-09-08
 
 ### Añadido
