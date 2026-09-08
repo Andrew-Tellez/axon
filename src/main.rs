@@ -61,6 +61,11 @@ enum Cmd {
         /// environment: applies the `[env.<name>]` overrides
         #[arg(long, default_value = "local")]
         env: String,
+        /// the published schema of the neutral plan, instead of a plan. It is
+        /// what every `axon-infra-*` receives on stdin, and until now had to be
+        /// deduced from an example
+        #[arg(long)]
+        schema: bool,
     },
     /// manifests -> mermaid: event topology
     Graph { sources: Vec<String> },
@@ -349,7 +354,16 @@ fn run() -> Result<ExitCode, String> {
             sources,
             target,
             env,
+            schema,
         } => {
+            if schema {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&infra::plan_schema())
+                        .map_err(|e| e.to_string())?
+                );
+                return Ok(ExitCode::SUCCESS);
+            }
             let ms: Vec<_> = manifest::discover(&sources)?
                 .iter()
                 .map(|m| manifest::for_env(m, &env))

@@ -34,6 +34,7 @@ axon openapi manifests/                           # OpenAPI 3.1 for the whole pl
 axon openapi manifests/ --api-version 2026-01-15  # ...as it was at that version
 axon infra manifests/ --target local              # docker compose: broker, dbs, edge, warehouse, BI
 axon infra manifests/ --target gcp                # terraform; also aws, k8s, or plan
+axon infra --schema                               # the plan's JSON Schema, for a plugin
 axon ci manifests/payments.toml --target gcp      # the pipeline, with axon's own gates
 axon rls manifests/                               # per-row RLS and masked views
 axon pooler manifests/ --service orders --target local   # pgdog, from the manifest

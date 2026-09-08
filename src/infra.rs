@@ -172,6 +172,96 @@ pub struct Store2 {
     pub cache_ttl: u32,
 }
 
+/// The published schema of the neutral plan.
+///
+/// A plugin receives this JSON on stdin and today has to deduce its shape from
+/// an example, which means every `axon-infra-*` out there is guessing —and the
+/// day a field appears, nobody's plugin knows.
+///
+/// It is hand-written and not derived, so the only thing that keeps it honest
+/// is that the suite validates a REAL plan against it with a real validator,
+/// and every object refuses what it does not declare: a field added to the plan
+/// and not to the schema fails, and one declared here and missing there fails
+/// too. Drift in either direction is caught.
+pub fn plan_schema() -> serde_json::Value {
+    let str_ = serde_json::json!({"type": "string"});
+    let bool_ = serde_json::json!({"type": "boolean"});
+    let uint = serde_json::json!({"type": "integer", "minimum": 0});
+    let uint_or_null = serde_json::json!({"type": ["integer", "null"], "minimum": 0});
+    let str_or_null = serde_json::json!({"type": ["string", "null"]});
+    let object = |props: serde_json::Value, doc: &str| {
+        let required: Vec<String> = props
+            .as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        serde_json::json!({
+            "type": "object",
+            "description": doc,
+            "properties": props,
+            "required": required,
+            // What is not declared here does not exist. A plugin that reads a
+            // field the schema does not name is reading something axon never
+            // promised, and would break on the next version without warning.
+            "additionalProperties": false
+        })
+    };
+    let array = |items: serde_json::Value| serde_json::json!({"type": "array", "items": items});
+
+    serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://andrew-tellez.github.io/axon/plan.schema.json",
+        "title": "axon infrastructure plan",
+        "description": "What `axon infra --target plan` emits and every `axon-infra-*` \
+                        plugin receives on stdin. It mentions no provider: rendering it \
+                        for one is exactly what a plugin is for.",
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["flags", "warehouse", "buckets", "routes", "topics", "subs", "stores",
+                     "crons", "secrets", "workloads"],
+        "properties": {
+            "flags": {"type": "boolean",
+                      "description": "there are feature flags declared: local brings up flagd"},
+            "warehouse": {"type": ["string", "null"],
+                          "description": "which warehouse the exporting services export to, \
+                                          or null if none does. One per platform"},
+            "buckets": array(object(serde_json::json!({
+                "service": str_, "bucket": str_, "name": str_,
+                "public": bool_, "cache_ttl": uint_or_null, "retention_days": uint_or_null
+            }), "object storage. `public` decides both the CDN and anonymous reads")),
+            "routes": array(object(serde_json::json!({
+                "service": str_, "method": str_, "path": str_, "port": uint,
+                "public": bool_, "rate_limit": uint_or_null, "timeout_ms": uint
+            }), "the gateway, from the methods that declare `http`")),
+            "topics": array(object(serde_json::json!({
+                "event": str_, "name": str_, "dlq": str_, "analytics": bool_, "table": str_
+            }), "one per event, with its dead-letter queue. Always")),
+            "subs": array(object(serde_json::json!({
+                "service": str_, "event": str_, "name": str_, "max_attempts": uint
+            }), "one subscription per consumer")),
+            "stores": array(object(serde_json::json!({
+                "service": str_, "engine": str_, "outbox": bool_, "ha": bool_,
+                "backup_retention_days": uint, "pitr": bool_, "read_replicas": uint,
+                "pool_size": uint_or_null, "max_connections": uint_or_null,
+                "policies": bool_, "shards": uint_or_null
+            }), "one database per service. `shards` is the pooler's, not the engine's")),
+            "crons": array(object(serde_json::json!({
+                "service": str_, "name": str_, "path": str_, "port": uint, "every_ms": uint
+            }), "what has to be hit periodically: a saga's sweep, a snapshot prune")),
+            "secrets": array(object(serde_json::json!({
+                "service": str_, "key": str_, "name": str_
+            }), "the NAME of each secret, never its value")),
+            "workloads": array(object(serde_json::json!({
+                "service": str_, "kind": {"type": "string", "enum": ["container", "job"]},
+                "schedule": str_or_null,
+                "min_instances": uint, "max_instances": uint, "port": uint,
+                "image_var": str_, "db": bool_,
+                "secrets": array(str_.clone()), "subscribes": array(str_.clone()),
+                "owner": str_, "tier": str_, "version": str_
+            }), "what runs. `container` listens on a port; `job` runs and ends"))
+        }
+    })
+}
+
 /// The neutral plan. Without a single word from any provider.
 #[derive(Debug, Serialize)]
 pub struct Plan {

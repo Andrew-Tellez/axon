@@ -7463,3 +7463,94 @@ fn the_tour_covers_every_command() {
         );
     }
 }
+
+/// The neutral plan has a published schema, and the schema is hand-written —so
+/// the only thing keeping it honest is that a REAL plan goes through a real
+/// validator.
+///
+/// Every object refuses what it does not declare, which is what catches drift
+/// in both directions: a field added to the plan and not to the schema fails,
+/// and one declared here and missing there fails too.
+#[test]
+fn the_neutral_plan_validates_against_its_published_schema() {
+    let (schema, err, ok) = axon(&["infra", "--schema"]);
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&schema).unwrap();
+    assert_eq!(v["$schema"], "https://json-schema.org/draft/2020-12/schema");
+    // it is the contract of a plugin, so it says so and names no provider
+    assert!(
+        v["description"].as_str().unwrap().contains("axon-infra-"),
+        "{schema}"
+    );
+    for provider in ["gcp", "aws", "terraform", "kubernetes"] {
+        assert!(
+            !schema.to_lowercase().contains(provider),
+            "the neutral plan's schema names `{provider}`"
+        );
+    }
+
+    if !has("python3") {
+        eprintln!("salteado: python3 no esta instalado");
+        return;
+    }
+    let dir = std::env::temp_dir().join("axon-plan-schema");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let esquema = dir.join("plan.schema.json");
+    std::fs::write(&esquema, &schema).unwrap();
+
+    let validate = |plan: &str, name: &str| -> (bool, String) {
+        let f = dir.join(name);
+        std::fs::write(&f, plan).unwrap();
+        let out = Command::new("python3")
+            .args([
+                "tests/fixtures/validar-json.py",
+                f.to_str().unwrap(),
+                esquema.to_str().unwrap(),
+            ])
+            .output()
+            .expect("python3");
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+
+    // the example's real plan, which carries every kind of entry there is
+    let (plan, _, ok) = axon(&["infra", "examples", "--target", "plan"]);
+    assert!(ok);
+    let (valid, printed) = validate(&plan, "plan.json");
+    assert!(valid, "a real plan does not validate:\n{printed}");
+    // it never lies by saying it passed when the module is missing
+    assert!(
+        printed.contains("OK: valida") || printed.contains("SALTEADO"),
+        "{printed}"
+    );
+    if printed.contains("SALTEADO") {
+        eprintln!("{}", printed.trim());
+        return;
+    }
+
+    // and the drift, both ways
+    let mut v: serde_json::Value = serde_json::from_str(&plan).unwrap();
+    v["workloads"][0]["invented"] = serde_json::json!(1);
+    let (valid, printed) = validate(&v.to_string(), "extra.json");
+    assert!(!valid, "a field the schema does not declare passed");
+    assert!(printed.contains("Additional properties"), "{printed}");
+
+    let mut v: serde_json::Value = serde_json::from_str(&plan).unwrap();
+    v["workloads"][0].as_object_mut().unwrap().remove("kind");
+    let (valid, printed) = validate(&v.to_string(), "missing.json");
+    assert!(
+        !valid,
+        "a field the schema declares was allowed to be missing"
+    );
+    assert!(
+        printed.contains("'kind' is a required property"),
+        "{printed}"
+    );
+}

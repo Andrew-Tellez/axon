@@ -32,6 +32,7 @@ their own — a compiler that only verifies itself produces invalid output:
 | The generated double | `node --test` over `FakeTransport`: a retriable failure arrives 1 + retries times and a final one exactly once, with no network |
 | The version adapters | `tsc --strict` over the chain and `node --test` running it: the oldest shape has to come out of two adapters applied in order |
 | A job on the four targets | its HCL goes through `terraform validate` with the real providers, and its k8s YAML through a parse: a CronJob's extra nesting is exactly where an indentation breaks |
+| The published plan schema | a real plan goes through a real JSON Schema validator, and every object refuses what it does not declare: drift is caught in both directions |
 | The four targets | they deploy the workload and deliver to somebody |
 | The book's manifest examples | every ```toml block goes through `axon verify` |
 | The output the book quotes | four consecutive words of it have to appear in `src/` |
