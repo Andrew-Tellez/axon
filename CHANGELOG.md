@@ -7,6 +7,37 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.7.0] — 2026-09-08
+
+### Añadido
+
+- **La prueba de carga entra al límite en vez de sentarse en él.** Una prueba plana en el
+  número declarado contesta *aguanta lo que dijimos*; nunca ve qué pasa **un paso más
+  allá**, que es el momento que decide si degrada o se cae. La rampa sale de
+  `rate_limit`: la mitad, el declarado, un tramo sosteniéndolo y 25% por encima. Y hace
+  la distinción que existe para hacer — **un 429 es el límite funcionando y un 5xx es el
+  servicio rompiéndose**—: k6 cuenta los dos igual, así que el script lleva dos métricas
+  propias y el veredicto las lee. También reporta no haber visto ni un 429 en toda la
+  rampa: o el límite nunca se alcanza, o nadie lo aplica.
+- **[Un comando cada uno](https://andrew-tellez.github.io/axon/tour.html)**: los 27
+  comandos con un ejemplo, agrupados por cuándo se alcanzan. Un test la sujeta en los dos
+  sentidos: un comando sin ejemplo es una capacidad que nadie va a encontrar, y un
+  ejemplo de un comando que no existe es una página que miente.
+
+### Corregido
+
+- **El `rate_limit` declarado no lo aplicaba nadie.** Viajaba a `k8s` como una anotación
+  para el controlador de otro y en `local` no hacía absolutamente nada: la prueba de
+  carga le pasaba por encima sin un solo 429. Ahora el edge lleva el middleware, con el
+  límite por minuto —la unidad en que se declara— y un burst de una décima, porque si no
+  el tráfico que no es perfectamente parejo se estrangula por debajo de su propio límite.
+  Gana el más estricto de las rutas que comparten router.
+
+### Cambiado
+
+- El demo pasó a **58 comprobaciones**, y la de carga corre contra el edge y no contra el
+  servicio: pegarle directo mediría un límite que nadie impone.
+
 ## [0.6.0] — 2026-09-08
 
 ### Añadido
