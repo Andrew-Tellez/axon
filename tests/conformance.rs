@@ -6927,3 +6927,77 @@ fn the_openapi_import_does_not_invent_what_the_document_does_not_say() {
         "{err}"
     );
 }
+
+/// A span IS an envelope with other names, and that is what lets a system which
+/// never adopted the envelope be compared against what it declares: a repo with
+/// OpenTelemetry —which is most of them, without anybody deciding to— already
+/// has the real chain in its trace store.
+#[test]
+fn a_span_is_an_envelope_with_other_names() {
+    let dir = std::env::temp_dir().join("axon-spans");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // OTLP JSON: what any collector's file exporter writes
+    let otlp = r##"{"resourceSpans":[
+      {"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"orders"}}]},
+       "scopeSpans":[{"spans":[
+         {"traceId":"t1","spanId":"a1","parentSpanId":"","name":"POST /v1/orders","startTimeUnixNano":"1"}]}]},
+      {"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"payments"}}]},
+       "scopeSpans":[{"spans":[
+         {"traceId":"t1","spanId":"b1","parentSpanId":"a1","name":"process order.placed@v1","startTimeUnixNano":"2"}]}]}
+    ]}"##;
+    let f = dir.join("otlp.json");
+    std::fs::write(&f, otlp).unwrap();
+    let (out, err, ok) = axon(&["trace", f.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    // the tree, rebuilt from spans: the root and its child, in two services
+    assert!(out.contains("POST /v1/orders <- orders"), "{out}");
+    assert!(out.contains("process order.placed@v1 <- payments"), "{out}");
+    // an empty parent is a root and not a parent called ""
+    assert!(
+        out.starts_with("flow t1") || out.contains("flow t1"),
+        "{out}"
+    );
+
+    // Jaeger's answer, which is the other shape that exists in the wild
+    let jaeger = r##"{"data":[{"traceID":"t1","spans":[
+      {"traceID":"t1","spanID":"a1","operationName":"POST /v1/orders","processID":"p1","references":[],"startTime":1},
+      {"traceID":"t1","spanID":"b1","operationName":"process","processID":"p2",
+       "references":[{"refType":"CHILD_OF","spanID":"a1"}],"startTime":2}],
+      "processes":{"p1":{"serviceName":"orders"},"p2":{"serviceName":"payments"}}}]}"##;
+    let g = dir.join("jaeger.json");
+    std::fs::write(&g, jaeger).unwrap();
+    let (out, _, ok) = axon(&["trace", g.to_str().unwrap()]);
+    assert!(ok);
+    assert!(out.contains("<- orders"), "{out}");
+    assert!(out.contains("<- payments"), "{out}");
+
+    // And the half `axon traffic` cannot see: a call between services does not
+    // pass through the edge, and here it is.
+    let (out, _, ok) = axon(&["trace", g.to_str().unwrap(), "--manifests", "examples"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("read from the Jaeger spans"), "{out}");
+    assert!(out.contains("ok orders → payments"), "{out}");
+    // declared and not seen is said, and not silently taken as fine
+    assert!(out.contains("declared and not seen in this trace"), "{out}");
+
+    // A dependency that HAPPENS and nobody declares is the drawing being wrong,
+    // and it fails: the drawing is what somebody reads before deciding what can
+    // be deployed apart.
+    let drift = r##"{"data":[{"traceID":"t2","spans":[
+      {"traceID":"t2","spanID":"c1","operationName":"POST /v1/checkouts","processID":"p1","references":[],"startTime":1},
+      {"traceID":"t2","spanID":"d1","operationName":"GET /v1/orders","processID":"p2",
+       "references":[{"refType":"CHILD_OF","spanID":"c1"}],"startTime":2}],
+      "processes":{"p1":{"serviceName":"checkout"},"p2":{"serviceName":"orders"}}}]}"##;
+    let d = dir.join("drift.json");
+    std::fs::write(&d, drift).unwrap();
+    let (out, _, ok) = axon(&["trace", d.to_str().unwrap(), "--manifests", "examples"]);
+    assert!(!ok, "an undeclared dependency did not fail:\n{out}");
+    assert!(out.contains("undeclared checkout → orders"), "{out}");
+
+    // and with no manifests it only draws: the comparison is asked for
+    let (out, _, ok) = axon(&["trace", d.to_str().unwrap()]);
+    assert!(ok);
+    assert!(!out.contains("undeclared"), "{out}");
+}

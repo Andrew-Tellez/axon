@@ -73,6 +73,12 @@ retriable. See [`errors` on a method](./manifest.md#errors-on-a-method).
 
 It runs with `node --test`, with no dependencies.
 
+## `axon trace <file> [--seq] [--manifests <dir>]`
+The real causal chain. It reads axon's envelope log, **OTLP JSON** or **Jaeger's** API
+answer, and detects which — a span is an envelope with other names. With `--manifests`
+it crosses the real edges between services against the declared ones, which is the half
+`axon traffic` cannot see. See [Traceability](./traceability.md#and-for-a-system-that-never-adopted-the-envelope).
+
 ## `axon traffic <sources> --check <ndjson>`
 Who calls what, read from the edge's access log. It answers the half of the question that
 has an answer when the caller declares nothing: **what it asks for is observable, what it

@@ -18,6 +18,7 @@ their own — a compiler that only verifies itself produces invalid output:
 | The declared metrics | their SQL parses in the three dialects, and the demo compares each one against counting the table by hand |
 | The declared failures | the retriable codes land in the caller's client and the final ones do not, and the demo counts the calls each one really costs |
 | The drawing | `axon tui --frames` renders through ratatui's test backend, and a test reads the picture: every service in it, the external one told apart, the CAP side, and the dying dependency marked |
+| The real chain from spans | the demo reads the running Jaeger and checks the edge it just produced is there and declared, and that an undeclared one fails |
 | Who calls what | the demo generates traffic against the deprecated version and reads it back from the edge's real access log |
 | A foreign pact | crossed against the declared contract: a field nobody returns fails, and the ones the consumer does not read get named |
 | The BI provisioning | the demo provisions a Metabase from zero and compares a question against the same view read from ClickHouse: the dashboard and the manifest have to answer the same number |
@@ -37,7 +38,7 @@ their own — a compiler that only verifies itself produces invalid output:
 
 ```sh
 cargo test --release      # 62 conformance checks
-cd examples && ./demo.sh  # 51 checks against real containers
+cd examples && ./demo.sh  # 53 checks against real containers
 ```
 
 Preview. The command surface is stable; the manifest format can still change before

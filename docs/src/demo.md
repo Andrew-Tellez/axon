@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **51 checks against reality**: not against a mock,
+brings the whole system up and makes **53 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -154,6 +154,16 @@ axon: the warehouse has 0 differences against the manifest
   OK: restored whole after breaking it: 1 rows, all with their amount
   OK: 1 rows before and after; the loader is idempotent
 
+==> la cadena real, leida del almacen de trazas
+  92 spans leidos de Jaeger, sin tocar el log de envelopes
+    read from the Jaeger spans
+    1 edges between services  4 declared
+      ok orders → payments
+      quiet checkout → payments  declared and not seen in this trace
+  OK: la arista orders → payments esta en las trazas y esta declarada
+      undeclared checkout → orders  nobody declares this dependency, and it happened
+  OK: una dependencia que ocurre y nadie declara falla, y el edge no la habria visto
+
 ==> el pacto de un consumidor que no usa axon
 mobile-app → orders  ·  2 interactions
   GET /v1/tenants/t-1/orders/o-1  →  orders.getOrder  ·  reads orderId, total.amount, total.currency
@@ -234,6 +244,7 @@ shortest way to show one thing:
 | `./check-errors.sh` | a declared failure: the final one arrives once, the retriable one uses the whole budget |
 | `./check-versions.sh` | two versions of the same endpoint, and the headers the retired one really sends |
 | `./check-rules.sh` | a rule over a metric: it proposes on the way in, does not repeat, and the guard stops it |
+| `./check-spans.sh` | la cadena real leída de Jaeger, y una dependencia que ocurre sin estar declarada |
 | `./check-traffic.sh` | who still calls the version being retired, read from the edge's real log |
 | `axon pact . --check pacts/mobile-app-orders.json` | a consumer with no manifest, crossed against the declared contract |
 | `python3 check-metabase.py 3030` | a Metabase provisioned from the manifest, and the question answering the same as the view |

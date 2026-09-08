@@ -179,6 +179,9 @@ step "las reglas declaradas, evaluadas contra la bodega"
 step "the warehouse: schema, funnel and PII"
 ./check-warehouse.sh
 
+step "la cadena real, leida del almacen de trazas"
+./check-spans.sh
+
 step "el pacto de un consumidor que no usa axon"
 "$AXON" pact . --check pacts/mobile-app-orders.json
 

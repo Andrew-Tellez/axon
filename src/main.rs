@@ -235,6 +235,11 @@ enum Cmd {
         /// mermaid instead of a tree, to diff against `axon seq`
         #[arg(long)]
         seq: bool,
+        /// the manifests, to cross the REAL edges between services against the
+        /// declared ones. It is the half `axon traffic` cannot see: a call
+        /// between services does not pass through the edge
+        #[arg(long = "manifests")]
+        manifests: Vec<String>,
     },
 }
 
@@ -795,13 +800,16 @@ fn run() -> Result<ExitCode, String> {
             log,
             correlation,
             seq,
+            manifests,
         } => {
             let text = if log == "-" {
                 std::io::read_to_string(std::io::stdin()).map_err(|e| e.to_string())?
             } else {
                 std::fs::read_to_string(&log).map_err(|e| format!("{log}: {e}"))?
             };
-            let evs = trace::parse(&text);
+            // The envelope log, OTLP or Jaeger: a span is an envelope with
+            // other names, so from here on it is the same code.
+            let (evs, from) = trace::parse_any(&text);
             let c = correlation.as_deref();
             println!(
                 "{}",
@@ -811,6 +819,15 @@ fn run() -> Result<ExitCode, String> {
                     trace::tree(&evs, c)
                 }
             );
+            if !manifests.is_empty() {
+                let ms = manifest::discover(&manifests)?;
+                println!("{}", color::grey(&format!("read from the {from}")));
+                let (report, fails) = trace::edges(&evs, &ms);
+                print!("{report}");
+                if fails {
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
         }
     }
     Ok(ExitCode::SUCCESS)
