@@ -52,6 +52,9 @@ enum Cmd {
         /// deploy platform; without it only the gates get generated
         #[arg(long, default_value = "none")]
         target: String,
+        /// forge that runs the pipeline
+        #[arg(long, default_value = "github", value_parser = emit::FORGES)]
+        forge: String,
     },
     /// manifests -> IaC. `--target plan` gives the neutral plan in JSON.
     Infra {
@@ -349,11 +352,15 @@ fn run() -> Result<ExitCode, String> {
                 print!("{}", plugin::run(&bin, &entry.to_string())?);
             }
         }
-        Cmd::Ci { manifest, target } => {
+        Cmd::Ci {
+            manifest,
+            target,
+            forge,
+        } => {
             let m = manifest::load(&manifest)?;
             let dir = manifest.parent().unwrap_or(std::path::Path::new("."));
             let pol = verify::load_policy(dir);
-            println!("{}", emit::build_ci(&m, &pol.ci, &target));
+            println!("{}", emit::build_ci(&m, &pol.ci, &target, &forge)?);
         }
         Cmd::Infra {
             sources,

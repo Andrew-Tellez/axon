@@ -7732,3 +7732,95 @@ restore = "off"
     assert!(!ok);
     assert!(err.contains("only moves a flag"), "{err}");
 }
+
+/// The gates are axon's; the syntax around them is the forge's. What matters
+/// is that changing forge does not lose a gate: the same pipeline, in another
+/// dialect. Parsed with a real YAML parser, not with a substring search.
+#[test]
+fn the_gitlab_pipeline_keeps_the_same_gates() {
+    let (yml, err, ok) = axon(&[
+        "ci",
+        "examples/payments.toml",
+        "--target",
+        "k8s",
+        "--forge",
+        "gitlab",
+    ]);
+    assert!(ok, "{err}");
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yml).expect("invalid YAML");
+
+    let stages = doc["stages"].as_sequence().expect("no stages");
+    let stages: Vec<_> = stages.iter().map(|s| s.as_str().unwrap()).collect();
+    assert_eq!(stages, ["contracts", "test", "deploy"]);
+
+    // the three gates, in the job that blocks the merge
+    let contracts = serde_yaml_ng::to_string(&doc["contracts"]["script"]).unwrap();
+    for gate in [
+        "axon verify ./",
+        "git diff --exit-code",
+        "-validateMigrationNaming=true validate",
+    ] {
+        assert!(contracts.contains(gate), "gate lost in gitlab: {gate}");
+    }
+
+    // deploy only from the default branch: a merge request that deploys is a
+    // merge request that deploys without review
+    let rules = serde_yaml_ng::to_string(&doc["deploy"]["rules"]).unwrap();
+    assert!(
+        rules.contains("$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH")
+            && !rules.contains("merge_request_event"),
+        "deploy is not restricted to the default branch:\n{rules}"
+    );
+    assert!(
+        doc["deploy"]["id_tokens"]["AXON_ID_TOKEN"]["aud"].as_str() == Some("payments"),
+        "no OIDC: it would go back to a long-lived key in a variable"
+    );
+
+    let deploy = serde_yaml_ng::to_string(&doc["deploy"]["script"]).unwrap();
+    assert!(
+        deploy.contains("kubectl rollout status") && !deploy.contains("gcloud"),
+        "the target leaked another cloud:\n{deploy}"
+    );
+    assert!(
+        deploy.contains("@$DIGEST"),
+        "deployed by tag, not by digest: the deploy stops being reproducible"
+    );
+    // and the check against what is deployed, not against the repo
+    assert!(deploy.contains("axon verify https://payments.internal"));
+}
+
+/// GitHub's `${{ }}` is literal text for GitLab. Emitting it would push an
+/// image whose tag is the expression itself, and nothing would say so until
+/// somebody read the registry.
+#[test]
+fn the_forge_does_not_silently_swallow_a_foreign_expression() {
+    let dir = std::env::temp_dir().join("axon-forge");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy("examples/payments.toml", dir.join("payments.toml")).unwrap();
+    std::fs::create_dir_all(dir.join("payments")).unwrap();
+    for frag in ["charging.toml", "payouts.toml"] {
+        std::fs::copy(
+            format!("examples/payments/{frag}"),
+            dir.join("payments").join(frag),
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        dir.join("axon.policy.toml"),
+        "[ci]\nimage = \"${{ vars.REGISTRY }}/{service}@${{ steps.imagen.outputs.digest }}\"\n",
+    )
+    .unwrap();
+    let manifest = dir.join("payments.toml");
+    let manifest = manifest.to_str().unwrap();
+
+    let (_, err, ok) = axon(&["ci", manifest, "--target", "k8s", "--forge", "gitlab"]);
+    assert!(!ok, "it emitted a pipeline with a foreign expression");
+    assert!(
+        err.contains("literal text"),
+        "the error does not say why:\n{err}"
+    );
+    // the same policy on its own forge keeps working
+    let (yml, err, ok) = axon(&["ci", manifest, "--target", "k8s", "--forge", "github"]);
+    assert!(ok, "{err}");
+    assert!(yml.contains("steps.imagen.outputs.digest"));
+}

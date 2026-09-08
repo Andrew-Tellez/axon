@@ -36,6 +36,7 @@ axon infra manifests/ --target local              # docker compose: broker, dbs,
 axon infra manifests/ --target gcp                # terraform; also aws, k8s, or plan
 axon infra --schema                               # the plan's JSON Schema, for a plugin
 axon ci manifests/payments.toml --target gcp      # the pipeline, with axon's own gates
+axon ci manifests/payments.toml --target gcp --forge gitlab   # the same gates for GitLab
 axon rls manifests/                               # per-row RLS and masked views
 axon pooler manifests/ --service orders --target local   # pgdog, from the manifest
 axon flags manifests/                             # flagd config (OpenFeature)

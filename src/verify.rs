@@ -24,7 +24,9 @@ pub struct Ci {
     pub service_dir: String,
     pub test_cmd: String,
     pub contracts_path: String,
-    pub image: String,
+    /// Absent means "the forge's default", which differs between GitHub and
+    /// GitLab: the expression syntax is not portable.
+    pub image: Option<String>,
 }
 
 impl Default for Ci {
@@ -34,7 +36,7 @@ impl Default for Ci {
             service_dir: "services/{service}".into(),
             test_cmd: "make -C services/{service} test".into(),
             contracts_path: "services/{service}/src/contracts.ts".into(),
-            image: "${{ vars.REGISTRY }}/{service}@${{ steps.imagen.outputs.digest }}".into(),
+            image: None,
         }
     }
 }
@@ -889,12 +891,13 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
 
     // A08: integrity failures. A tag is mutable: what gets deployed today is
     // not what was audited yesterday.
-    if pol.ci.image.contains(":latest") || !pol.ci.image.contains('@') {
-        warnings.push(format!(
-            "[A08] [ci].image `{}` does not pin a digest; a tag is mutable and the deploy \
-             stops being reproducible",
-            pol.ci.image
-        ));
+    if let Some(img) = &pol.ci.image {
+        if img.contains(":latest") || !img.contains('@') {
+            warnings.push(format!(
+                "[A08] [ci].image `{img}` does not pin a digest; a tag is mutable and the \
+                 deploy stops being reproducible"
+            ));
+        }
     }
 
     // API patterns: what separates an endpoint from one that survives production

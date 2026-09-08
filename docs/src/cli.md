@@ -301,8 +301,8 @@ for `axon-infra-<target>` on the `PATH`.
 
 `--target plan` prints the plan in JSON: the escape hatch for any provider with no target.
 
-## `axon ci <manifest> [--target gcp|aws|k8s]`
-A GitHub Actions pipeline. axon knows the **gates**: `verify` against every manifest (not
+## `axon ci <manifest> [--target gcp|aws|k8s] [--forge github|gitlab]`
+A pipeline for GitHub Actions or GitLab CI. axon knows the **gates**: `verify` against every manifest (not
 just its own), generated code up to date, migrations in dry-run with the right naming
 convention, OIDC instead of keys, and infra applied before code — the topic has to exist
 by the time the first pod that publishes to it starts.
@@ -320,8 +320,18 @@ manifests_dir  = "manifests"
 service_dir    = "services/{service}"
 test_cmd       = "make -C services/{service} test"
 contracts_path = "services/{service}/src/contracts.ts"
-image          = "${{ vars.REGISTRY }}/{service}:${{ github.sha }}"
+image          = "${{ vars.REGISTRY }}/{service}@${{ steps.imagen.outputs.digest }}"
 ```
+
+`image` is the one field that is not portable between forges: GitHub's `${{ }}` is
+literal text for GitLab, so the deploy would push an image whose tag is the expression
+itself and nothing would say so until somebody read the registry. Leave it out and each
+forge gets its own default (`$CI_REGISTRY_IMAGE/{service}@$DIGEST` on GitLab); set it to
+GitHub syntax and `--forge gitlab` **refuses** instead of emitting a broken pipeline.
+
+The gates do not change with the forge —they are axon's— only the syntax around them:
+`stages` and `rules` instead of `jobs` and `on`, `id_tokens` instead of
+`permissions: id-token`, and `.axon` as the template job that installs the binary.
 
 # Diagrams
 
