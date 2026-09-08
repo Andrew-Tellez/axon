@@ -67,14 +67,16 @@ flowchart TB
   MAN --> LOAD["carga.rs<br/><i>k6 script + verdict</i>"]
   MAN --> API["api.rs<br/><i>OpenAPI + testkit</i>"]
   MAN --> BASE["baseline.rs<br/><i>published contracts</i>"]
+  MAN --> ACC["accepted.rs<br/><i>the warnings a repo<br/>lives with, for now</i>"]
   MAN --> IMP["import.rs<br/><i>AsyncAPI 2.x/3.x</i>"]
 
   BASE --> VER
+  ACC --> VER
   PLUG["plugin.rs<br/><i>axon-gen-* · axon-infra-*<br/>axon-check-*</i>"] --> VER
   EMIT -.-> PLUG
   INF -.-> PLUG
 
-  MAIN["main.rs<br/><i>the CLI: 24 commands</i>"] --> MAN
+  MAIN["main.rs<br/><i>the CLI: 25 commands</i>"] --> MAN
   COL["color.rs · trace.rs"] --> MAIN
 ```
 

@@ -73,6 +73,12 @@ retriable. See [`errors` on a method](./manifest.md#errors-on-a-method).
 
 It runs with `node --test`, with no dependencies.
 
+## `axon accept <sources>`
+The warnings the repo lives with for now. Emits the list to stdout; with
+`axon.accepted.json` present, a warning that is not on it fails the build, and one that
+stopped happening is reported so the list shrinks. See
+[Getting in without rewriting anything](./importing.md#the-line-axon-accept).
+
 ## `axon tui <sources> [--frames N]`
 The system as it is, drawn and animated: the topology as a force-directed graph —what
 talks together ends up together— with the verdict, the versions, and what changed against

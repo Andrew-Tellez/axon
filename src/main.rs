@@ -1,4 +1,5 @@
 //! axon — the manifest is the source of truth; the rest are projections.
+mod accepted;
 mod api;
 mod baseline;
 mod bi;
@@ -157,6 +158,10 @@ enum Cmd {
     },
     /// snapshot of the published contracts, to detect incompatible changes
     Baseline { sources: Vec<String> },
+    /// the warnings this repo lives with for now: with the file present, a new
+    /// one fails the build. It is how an existing codebase can adopt `verify`
+    /// without fixing two hundred things first
+    Accept { sources: Vec<String> },
     /// pooler or sharder config, derived from the manifest
     Pooler {
         sources: Vec<String>,
@@ -211,6 +216,60 @@ enum Cmd {
         #[arg(long)]
         seq: bool,
     },
+}
+
+/// The manifests and the directory the repo's own files live in. `verify` and
+/// `accept` have to look at the same place, or the list of accepted warnings
+/// would be written against a different report than the one that reads it.
+fn discover_with_root(sources: &[String]) -> Result<(Vec<manifest::Manifest>, PathBuf), String> {
+    let ms = manifest::discover(sources)?;
+    let first = PathBuf::from(sources.first().map(|s| s.as_str()).unwrap_or("."));
+    let root = if first.is_dir() {
+        first
+    } else {
+        first
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf()
+    };
+    Ok((ms, root))
+}
+
+/// Everything `verify` knows: the rules, the published contracts and whatever
+/// the check plugins say.
+fn full_report(ms: &[manifest::Manifest], root: &std::path::Path) -> verify::Report {
+    let mut r = verify::verify(ms, &verify::load_policy(root));
+    if let Some(b) = baseline::cargar(root) {
+        let (errors, warnings) = baseline::comparar(ms, &b);
+        r.errors.extend(errors);
+        r.warnings.extend(warnings);
+    } else {
+        r.warnings.push(format!(
+            "no {}: `verify` cannot detect a breaking change in an already published \
+             version. Generate it with `axon baseline`",
+            baseline::ARCHIVO
+        ));
+    }
+    let payload = serde_json::to_string(ms).unwrap_or_default();
+    for bin in plugin::checks() {
+        match plugin::run(&bin, &payload) {
+            Ok(out) => match serde_json::from_str::<Vec<plugin::Finding>>(&out) {
+                Ok(fs) => {
+                    for f in fs {
+                        let line = format!("[{bin}] {}", f.message);
+                        if f.level == "error" {
+                            r.errors.push(line)
+                        } else {
+                            r.warnings.push(line)
+                        }
+                    }
+                }
+                Err(e) => r.warnings.push(format!("[{bin}] invalid output: {e}")),
+            },
+            Err(e) => r.warnings.push(format!("[{bin}] did not run: {e}")),
+        }
+    }
+    r
 }
 
 fn main() -> ExitCode {
@@ -307,69 +366,93 @@ fn run() -> Result<ExitCode, String> {
             );
         }
         Cmd::Verify { sources } => {
-            let ms = manifest::discover(&sources)?;
-            let dir = std::path::Path::new(sources.first().map(|s| s.as_str()).unwrap_or("."));
-            let root = if dir.is_dir() {
-                dir
-            } else {
-                dir.parent().unwrap_or(std::path::Path::new("."))
+            let (ms, root) = discover_with_root(&sources)?;
+            let mut r = full_report(&ms, &root);
+
+            // The accepted warnings, if the repo drew that line. Its presence
+            // IS the opt-in: with the file there, a warning that is not on the
+            // list stops being a suggestion and fails the build.
+            let list = accepted::cargar(&root);
+            let (nuevas, vigentes, stale) = match &list {
+                Some(a) => accepted::partir(&r.warnings, a),
+                None => (r.warnings.iter().collect(), 0, vec![]),
             };
-            let mut r = verify::verify(&ms, &verify::load_policy(root));
-            // the published contracts, if the repo registers them
-            if let Some(b) = baseline::cargar(root) {
-                let (errors, warnings) = baseline::comparar(&ms, &b);
-                r.errors.extend(errors);
-                r.warnings.extend(warnings);
-            } else {
-                r.warnings.push(format!(
-                    "no {}: `verify` cannot detect a breaking change in an already \
-                     published version. Generate it with `axon baseline`",
-                    baseline::ARCHIVO
-                ));
-            }
-            let payload = serde_json::to_string(&ms).unwrap_or_default();
-            for bin in plugin::checks() {
-                match plugin::run(&bin, &payload) {
-                    Ok(out) => match serde_json::from_str::<Vec<plugin::Finding>>(&out) {
-                        Ok(fs) => {
-                            for f in fs {
-                                let line = format!("[{bin}] {}", f.message);
-                                if f.level == "error" {
-                                    r.errors.push(line)
-                                } else {
-                                    r.warnings.push(line)
-                                }
-                            }
-                        }
-                        Err(e) => r.warnings.push(format!("[{bin}] invalid output: {e}")),
-                    },
-                    Err(e) => r.warnings.push(format!("[{bin}] did not run: {e}")),
-                }
-            }
+            let bloquea = list.is_some() && !nuevas.is_empty();
+
             // Errors first: they are what has to be fixed, and in a long list
             // what matters cannot end up at the bottom.
             for e in &r.errors {
                 eprintln!("{} {}", color::red("error"), highlight(e));
             }
-            for w in &r.warnings {
-                println!("{}  {}", color::yellow("warn"), highlight(w));
+            for w in &nuevas {
+                if bloquea {
+                    eprintln!("{} {}", color::red("new"), highlight(w));
+                } else {
+                    println!("{}  {}", color::yellow("warn"), highlight(w));
+                }
             }
-            let summary = format!(
-                "{} services, {} errors, {} warnings",
-                ms.len(),
-                r.errors.len(),
+            // The list can only shrink without anybody noticing. Saying which
+            // entries no longer happen is what keeps it from becoming the place
+            // warnings go to be forgotten.
+            if !stale.is_empty() {
+                println!(
+                    "{}  {}; run `axon accept` to shrink the list",
+                    color::green("gone"),
+                    if stale.len() == 1 {
+                        "1 accepted warning no longer happens".to_string()
+                    } else {
+                        format!("{} accepted warnings no longer happen", stale.len())
+                    }
+                );
+            }
+            if vigentes > 0 {
+                println!(
+                    "{}",
+                    color::grey(&format!(
+                        "      {vigentes} warnings accepted in {}",
+                        accepted::ARCHIVO
+                    ))
+                );
+            }
+            // Two whole sentences and not one with a hole in it: the test that
+            // checks the book quotes what the tool prints compares words, and a
+            // word that only exists at runtime cannot be found in `src/`.
+            let counted = if list.is_some() {
+                nuevas.len()
+            } else {
                 r.warnings.len()
-            );
-            if r.errors.is_empty() && r.warnings.is_empty() {
+            };
+            // Positional holes and not named ones: the test that checks the book
+            // quotes what the tool prints compares the words of the literal, and
+            // a `{name}` in the middle splits the sentence in two.
+            let summary = if vigentes > 0 {
+                format!(
+                    "{} services, {} errors, {} warnings ({} accepted)",
+                    ms.len(),
+                    r.errors.len(),
+                    counted,
+                    vigentes
+                )
+            } else {
+                format!(
+                    "{} services, {} errors, {} warnings",
+                    ms.len(),
+                    r.errors.len(),
+                    counted
+                )
+            };
+            let clean = r.errors.is_empty() && nuevas.is_empty();
+            if clean {
                 println!("{} {}", color::green("ok"), color::grey(&summary));
-            } else if r.errors.is_empty() {
+            } else if r.errors.is_empty() && !bloquea {
                 println!("{}  {}", color::yellow("near"), color::grey(&summary));
             } else {
                 println!("{} {}", color::red("fail"), color::grey(&summary));
             }
-            if !r.errors.is_empty() {
+            if !r.errors.is_empty() || bloquea {
                 return Ok(ExitCode::FAILURE);
             }
+            r.warnings.clear();
         }
         Cmd::Import {
             format: _,
@@ -558,6 +641,15 @@ fn run() -> Result<ExitCode, String> {
                     }
                 }
             }
+        }
+        Cmd::Accept { sources } => {
+            let (ms, root) = discover_with_root(&sources)?;
+            let r = full_report(&ms, &root);
+            let a = accepted::tomar(&ms, &r.warnings);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&a).map_err(|e| e.to_string())?
+            );
         }
         Cmd::Baseline { sources } => {
             let b = baseline::tomar(&manifest::discover(&sources)?);

@@ -6332,3 +6332,91 @@ fn the_local_target_brings_up_something_to_read_the_warehouse_with() {
         );
     }
 }
+
+/// The line an existing codebase can draw: today's warnings are accepted, the
+/// next one is not. Without it `verify` is all-or-nothing, which is what keeps
+/// it out of a repo that already exists — the first run prints two hundred
+/// warnings, nobody reads them, and the tool gets turned off in a week.
+#[test]
+fn the_accepted_warnings_are_a_line_and_not_a_drawer() {
+    let dir = std::env::temp_dir().join("axon-accept");
+    let write = |extra: &str| {
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("old.toml"),
+            format!(
+                "service = \"old\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"2\"\n\n\
+                 [emits.\"a.happened@v1\"]\nid = \"uuid\"\n{extra}"
+            ),
+        )
+        .unwrap();
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    write("");
+
+    // as it stands: warnings nobody is going to read, and a green exit
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "warnings do not fail on their own");
+    assert!(out.contains("has no consumers"), "{out}");
+
+    // the line gets drawn
+    let (json, err, ok) = axon(&["accept", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    std::fs::write(dir.join("axon.accepted.json"), &json).unwrap();
+    let a: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(
+        a["warnings"].as_array().unwrap().len() >= 2,
+        "it accepted nothing: {json}"
+    );
+
+    // and now the same repo is clean, saying how many it is living with
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("warnings accepted in axon.accepted.json"),
+        "{out}"
+    );
+    assert!(
+        out.contains("(3 accepted)") || out.contains("accepted)"),
+        "{out}"
+    );
+
+    // the next one fails: the file's presence IS the opt-in, so nobody has to
+    // remember a flag for this to work
+    write("\n[emits.\"b.happened@v1\"]\nid = \"uuid\"\n");
+    let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(
+        !ok,
+        "a new warning did not fail with the line drawn:\n{out}"
+    );
+    assert!(err.contains("b.happened@v1"), "{err}");
+
+    // and the list can only shrink without anybody noticing: an entry that no
+    // longer happens gets reported, or the file becomes the place warnings go
+    // to be forgotten
+    let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    v["warnings"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("something that does not happen any more"));
+    std::fs::write(
+        dir.join("axon.accepted.json"),
+        serde_json::to_string_pretty(&v).unwrap(),
+    )
+    .unwrap();
+    write("");
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("1 accepted warning no longer happens"),
+        "{out}"
+    );
+    assert!(out.contains("axon accept"), "{out}");
+
+    // an accepted list nobody wrote changes nothing: without the file, a
+    // warning is still just a warning
+    std::fs::remove_file(dir.join("axon.accepted.json")).unwrap();
+    write("\n[emits.\"b.happened@v1\"]\nid = \"uuid\"\n");
+    let (_, _, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "with no line drawn, a warning must not fail the build");
+}

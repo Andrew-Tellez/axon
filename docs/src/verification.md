@@ -42,6 +42,15 @@ has to be fixed cannot end up underneath.
 | A public route with no `rate_limit` or no `timeout_ms` | error |
 | A paginated method that does not return a `cursor` | error |
 
+## The line for a repo that already exists
+
+| | |
+| --- | --- |
+| A warning already in `axon.accepted.json` | accepted, counted apart |
+| A warning that is not on the list, with the file present | error: the file's presence is the opt-in |
+| An accepted warning that stopped happening | reported, so the list shrinks |
+| Any warning, with no file | a warning, as always |
+
 ## Rules over a metric
 
 | | |
