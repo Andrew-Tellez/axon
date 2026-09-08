@@ -105,10 +105,10 @@ one: their file already says which fields they need.
 
 ```console
 $ axon pact manifests/ --check pacts/mobile-app-orders.json
-mobile-app → orders  ·  2 interactions
+mobile-app → orders  ·  2 interactions, 0 messages
   GET /v1/tenants/t-1/orders/o-1  →  orders.getOrder  ·  reads orderId, total.amount, total.currency
   mobile-app does not read status of getOrder
-ok 2 interactions, 0 errors, 0 warnings
+ok 2 interactions, 0 messages, 0 errors, 0 warnings
 ```
 
 It answers the two things a foreign consumer leaves unanswered: whether it expects a
@@ -119,6 +119,30 @@ delete: another consumer may read it. It is one name off the list of unknowns.
 A failure's body is compared as RFC 7807 and not against the method's output, and a
 status the method does not declare comes out as a finding about the **provider**: it
 fails that way and does not say so.
+
+### And the topics
+
+An endpoint is half the surface. A **message pact** —`messages[]` in v3, an interaction
+with `type: Asynchronous/Messages` in v4— says which fields of an event a foreign
+consumer reads, and that is something no amount of observation can answer: `axon traffic`
+sees a call because it passes through the edge, but nobody sees who reads a message.
+
+```console
+$ axon pact manifests/ --check pacts/reporting-orders.json
+reporting → orders  ·  0 interactions, 1 messages
+  order.placed@v1  ·  reads orderId, total.amount, total.currency  (and traceparent, type of the envelope)
+  reporting does not read customerId, customerEmail of order.placed@v1
+ok 0 interactions, 1 messages, 0 errors, 0 warnings
+```
+
+The topic is read from `topic`, `kafka_topic`, `subject`, `destination` or `queue` in the
+metadata —there is no single key, each implementation writes its own— and it matches both
+spellings: the pact says `order.placed.v1`, the manifest says `order.placed@v1`. An event
+that exists but belongs to **another** provider is reported as that and not as a missing
+one: an event has exactly one owner, and the fix is a different one.
+
+If the message carries the envelope, what the event promises is what is inside `data`;
+reading something off the envelope that does not travel there is a finding of its own.
 
 ## `axon import <asyncapi|openapi> <file>`
 An existing catalogue or an existing HTTP document turned into a manifest. See

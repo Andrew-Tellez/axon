@@ -189,10 +189,16 @@ axon: the warehouse has 0 differences against the manifest
   OK: una dependencia que ocurre y nadie declara falla, y el edge no la habria visto
 
 ==> el pacto de un consumidor que no usa axon
-mobile-app → orders  ·  2 interactions
+mobile-app → orders  ·  2 interactions, 0 messages
   GET /v1/tenants/t-1/orders/o-1  →  orders.getOrder  ·  reads orderId, total.amount, total.currency
   mobile-app does not read status of getOrder
-ok 2 interactions, 0 errors, 0 warnings
+ok 2 interactions, 0 messages, 0 errors, 0 warnings
+
+==> y el pacto de un consumidor de un topic
+reporting → orders  ·  0 interactions, 1 messages
+  order.placed@v1  ·  reads orderId, total.amount, total.currency  (and traceparent, type of the envelope)
+  reporting does not read customerId, customerEmail of order.placed@v1
+ok 0 interactions, 1 messages, 0 errors, 0 warnings
 
 ==> quien llama a que, leido del edge
   un cliente ajeno llamando cinco veces a la version deprecada

@@ -1,0 +1,19 @@
+{
+  "consumer": { "name": "reporting" },
+  "provider": { "name": "orders" },
+  "messages": [
+    {
+      "description": "un pedido creado alimenta el reporte diario",
+      "metadata": { "topic": "order.placed.v1", "contentType": "application/json" },
+      "contents": {
+        "type": "order.placed@v1",
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "data": {
+          "orderId": "o-1",
+          "total": { "amount": 2500, "currency": "MXN" }
+        }
+      }
+    }
+  ],
+  "metadata": { "pactSpecification": { "version": "3.0.0" } }
+}

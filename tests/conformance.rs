@@ -7968,3 +7968,89 @@ fn the_sharder_on_k8s_yields_a_config_pgdog_can_read() {
     );
     eprintln!("{}", printed.trim());
 }
+
+/// The other surface: a topic. What a foreign consumer reads of a MESSAGE
+/// cannot be observed from here at all — not even the way the edge log
+/// observes a call — so either they say so or nobody knows. A message pact
+/// already says it.
+#[test]
+fn a_foreign_pact_also_covers_the_topics() {
+    let (out, err, ok) = axon(&[
+        "pact",
+        "examples",
+        "--check",
+        "examples/pacts/reporting-orders.json",
+    ]);
+    assert!(ok, "{err}{out}");
+    // the topic in the pact is `order.placed.v1` and the event is
+    // `order.placed@v1`: the same thing, and both spellings have to match
+    assert!(out.contains("order.placed@v1  ·  reads orderId"), "{out}");
+    // what it does NOT read, which is the question that unfreezes a contract
+    assert!(
+        out.contains("reporting does not read customerId, customerEmail of order.placed@v1"),
+        "{out}"
+    );
+
+    let dir = std::env::temp_dir().join("axon-pact-msg");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let check = |body: &str| -> (String, String, bool) {
+        let f = dir.join("p.json");
+        std::fs::write(&f, body).unwrap();
+        axon(&["pact", "examples", "--check", f.to_str().unwrap()])
+    };
+    let msg = |topic: &str, contents: &str| {
+        format!(
+            r#"{{"consumer":{{"name":"c"}},"provider":{{"name":"orders"}},"messages":[
+                 {{"description":"d","metadata":{{"topic":"{topic}"}},"contents":{contents}}}]}}"#
+        )
+    };
+
+    // a field the event does not carry
+    let (_, err, ok) = check(&msg("order.placed@v1", r#"{"orderId":"o","discount":1}"#));
+    assert!(!ok, "an expectation nobody can satisfy passed clean");
+    assert!(
+        err.contains("expects `discount` in `order.placed@v1`"),
+        "{err}"
+    );
+
+    // the event exists, but it belongs to somebody else. A different mistake
+    // from it not existing, and the fix is a different one
+    let (_, err, ok) = check(&msg("payment.captured.v1", r#"{"paymentId":"p"}"#));
+    assert!(!ok);
+    assert!(
+        err.contains("is emitted by payments, not by orders"),
+        "{err}"
+    );
+
+    // no such event, and it says where the topic is read from instead of
+    // leaving the consumer guessing why it did not match
+    let (_, err, ok) = check(&msg("order.invented.v1", r#"{"orderId":"o"}"#));
+    assert!(!ok);
+    assert!(err.contains("matches no event orders emits"), "{err}");
+    assert!(err.contains("`kafka_topic`"), "{err}");
+
+    // the envelope is not the event: reading `data.orderId` is reading the
+    // event's field, and reading something the envelope does not carry is a
+    // finding of its own
+    let (out, _, ok) = check(&msg(
+        "order.placed@v1",
+        r#"{"type":"order.placed@v1","tenant":"t","data":{"orderId":"o"}}"#,
+    ));
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("it reads `tenant` off the envelope, which does not travel there"),
+        "{out}"
+    );
+
+    // v4 keeps them among the interactions with a `type` that says so
+    let (out, err, ok) = check(
+        r#"{"consumer":{"name":"c"},"provider":{"name":"orders"},"interactions":[
+             {"type":"Asynchronous/Messages","description":"d",
+              "metadata":{"kafka_topic":"order.placed.v1"},
+              "contents":{"content":{"orderId":"o"}}}]}"#,
+    );
+    assert!(ok, "{err}{out}");
+    assert!(out.contains("0 interactions, 1 messages"), "{out}");
+    assert!(out.contains("order.placed@v1  ·  reads orderId"), "{out}");
+}

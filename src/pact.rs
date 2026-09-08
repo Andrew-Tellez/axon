@@ -29,11 +29,48 @@ pub struct Expectation {
     pub reads: Vec<String>,
 }
 
+/// What a consumer expects of an EVENT. The other half of the surface: a
+/// topic is a contract too, and one nobody can observe from the provider's
+/// side —who reads a message, and which of its fields, is invisible from
+/// here.
+pub struct Message {
+    pub description: String,
+    /// How the pact names the event. A message pact carries it in its
+    /// metadata, because a message has no path to be recognised by.
+    pub subject: String,
+    /// The fields of the message the consumer expects, flattened. If the pact
+    /// carries the whole envelope, this is what is inside `data`: `data.total`
+    /// is not a field of the event, it is where the event travels.
+    pub reads: Vec<String>,
+    /// Envelope fields it reads, if it carries the envelope.
+    pub envelope: Vec<String>,
+}
+
 pub struct Pact {
     pub consumer: String,
     pub provider: String,
     pub expectations: Vec<Expectation>,
+    pub messages: Vec<Message>,
 }
+
+/// What axon's envelope carries around every event. A consumer reading
+/// `traceparent` is reading something real; one reading `tenant` off the
+/// envelope is reading nothing.
+const ENVELOPE: [&str; 8] = [
+    "id",
+    "type",
+    "source",
+    "data",
+    "time",
+    "traceparent",
+    "correlationId",
+    "causationId",
+];
+
+/// Where a message pact names its topic. There is no single key: each broker's
+/// implementation writes its own, so the ones in use are tried and, failing
+/// that, it says so instead of guessing.
+const SUBJECT_KEYS: [&str; 5] = ["topic", "kafka_topic", "subject", "destination", "queue"];
 
 fn flatten(prefix: &str, v: &Value, out: &mut Vec<String>) {
     match v {
@@ -84,7 +121,7 @@ pub fn parse(text: &str) -> Result<Pact, String> {
         .and_then(|i| i.as_array())
         .cloned()
         .unwrap_or_default();
-    for it in items {
+    for it in items.iter() {
         // v4 marks the kind; anything that is not a synchronous HTTP
         // interaction has nothing to compare against a route
         if it
@@ -121,10 +158,71 @@ pub fn parse(text: &str) -> Result<Pact, String> {
             reads,
         });
     }
+    let mut messages = Vec::new();
+    // v3 keeps them in their own list; v4 puts them among the interactions
+    // with a `type` that says so.
+    let async_ = v
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .chain(items.into_iter().filter(|it: &Value| {
+            it.get("type")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| t.contains("Asynchronous") || t.contains("Message"))
+        }));
+    for it in async_ {
+        let description = it
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("(no description)")
+            .to_string();
+        let meta = it.get("metadata");
+        let subject = SUBJECT_KEYS
+            .iter()
+            .find_map(|k| meta?.get(k)?.as_str())
+            .map(|s| s.to_string())
+            // No metadata: the description is the last resort, and only when it
+            // IS the event's name. Deducing an event from a sentence is how a
+            // pact ends up compared against the wrong contract.
+            .unwrap_or_else(|| description.clone());
+        // v4 wraps the body one level deeper
+        let contents = it
+            .get("contents")
+            .and_then(|c| c.get("content").or(Some(c)))
+            .cloned()
+            .unwrap_or(Value::Null);
+        // With the envelope, what the event carries is inside `data`. Without
+        // it, the pact is the event itself.
+        let wrapped = contents.get("data").is_some()
+            && contents.as_object().is_some_and(|o| {
+                o.keys()
+                    .any(|k| k != "data" && ENVELOPE.contains(&k.as_str()))
+            });
+        let (mut reads, mut envelope) = (Vec::new(), Vec::new());
+        match wrapped {
+            true => {
+                flatten("", &contents["data"], &mut reads);
+                envelope = contents
+                    .as_object()
+                    .map(|o| o.keys().filter(|k| *k != "data").cloned().collect())
+                    .unwrap_or_default();
+            }
+            false => flatten("", &contents, &mut reads),
+        }
+        messages.push(Message {
+            description,
+            subject,
+            reads,
+            envelope,
+        });
+    }
     Ok(Pact {
         consumer: name("consumer"),
         provider: name("provider"),
         expectations,
+        messages,
     })
 }
 
@@ -144,6 +242,114 @@ fn declared_output(fields: &Fields) -> Vec<String> {
         }
     }
     out
+}
+
+/// Crosses the message half of a pact against what the provider emits.
+///
+/// The same comparison `uses` makes for a consumer inside axon, with the input
+/// coming from outside: a topic is a contract too, and what somebody reads of
+/// a message cannot be observed from this side at all — not even the way
+/// `axon traffic` observes a call.
+fn messages(
+    ms: &[Manifest],
+    pact: &Pact,
+    provider: &Manifest,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+    o: &mut Vec<String>,
+) {
+    // what each event's pact reads, accumulated across messages
+    let mut read_by_event: IndexMap<String, Vec<String>> = IndexMap::new();
+    for msg in &pact.messages {
+        // The pact names a topic; the manifest names an event. They are the
+        // same thing with `@` swapped for `.`, so both spellings match.
+        let hit = provider
+            .emits
+            .keys()
+            .find(|ev| **ev == msg.subject || crate::manifest::topic(ev) == msg.subject);
+        let Some(ev) = hit else {
+            // Owned by somebody else is a different mistake from not existing,
+            // and the fix is a different one too.
+            let owner = ms
+                .iter()
+                .filter(|m| !m.external)
+                .find(|m| {
+                    m.emits
+                        .keys()
+                        .any(|e| *e == msg.subject || crate::manifest::topic(e) == msg.subject)
+                })
+                .map(|m| m.service.clone());
+            errors.push(match owner {
+                Some(who) => format!(
+                    "`{}`: `{}` is emitted by {who}, not by {}. An event has exactly one owner, \
+                     and the pact is against the wrong provider",
+                    msg.description, msg.subject, pact.provider
+                ),
+                None => format!(
+                    "`{}`: `{}` matches no event {} emits. Either the consumer is subscribed to \
+                     something that no longer exists, or the pact does not say which topic it \
+                     is about (it is read from `{}` in the metadata)",
+                    msg.description,
+                    msg.subject,
+                    pact.provider,
+                    SUBJECT_KEYS.join("`, `")
+                ),
+            });
+            continue;
+        };
+        let declared = declared_output(&provider.emits[ev]);
+        for field in &msg.reads {
+            if !declared.contains(field) {
+                errors.push(format!(
+                    "`{}`: it expects `{field}` in `{ev}`, which the event does not carry. \
+                     Either it was renamed and the consumer is reading nothing, or the pact is \
+                     stale",
+                    msg.description
+                ));
+            }
+        }
+        for field in &msg.envelope {
+            if !ENVELOPE.contains(&field.as_str()) {
+                warnings.push(format!(
+                    "`{}`: it reads `{field}` off the envelope, which does not travel there. \
+                     The envelope carries {}",
+                    msg.description,
+                    ENVELOPE.join(", ")
+                ));
+            }
+        }
+        read_by_event
+            .entry(ev.clone())
+            .or_default()
+            .extend(msg.reads.clone());
+        o.push(format!(
+            "  {ev}  ·  reads {}{}",
+            match msg.reads.is_empty() {
+                true => "nothing".to_string(),
+                false => msg.reads.join(", "),
+            },
+            match msg.envelope.is_empty() {
+                true => String::new(),
+                false => format!("  (and {} of the envelope)", msg.envelope.join(", ")),
+            }
+        ));
+    }
+    // The same question as for a route: what this consumer does NOT read. Not
+    // permission to delete —another consumer may read it— but one name off the
+    // list of unknowns.
+    for (ev, reads) in &read_by_event {
+        let unused: Vec<String> = declared_output(&provider.emits[ev])
+            .into_iter()
+            .filter(|f| !reads.contains(f))
+            .collect();
+        if !unused.is_empty() {
+            o.push(format!(
+                "  {} does not read {} of {ev}",
+                pact.consumer,
+                unused.join(", ")
+            ));
+        }
+    }
 }
 
 /// Crosses a pact against what the provider declares.
@@ -168,11 +374,13 @@ pub fn review(ms: &[Manifest], pact: &Pact) -> (Vec<String>, Vec<String>, String
         return (errors, warnings, String::new());
     };
     o.push(format!(
-        "{} → {}  ·  {} interactions",
+        "{} → {}  ·  {} interactions, {} messages",
         pact.consumer,
         pact.provider,
-        pact.expectations.len()
+        pact.expectations.len(),
+        pact.messages.len()
     ));
+    messages(ms, pact, provider, &mut errors, &mut warnings, &mut o);
 
     // what the pact reads of each method, accumulated: the answer to "can I
     // remove this field" is over the whole pact and not one interaction

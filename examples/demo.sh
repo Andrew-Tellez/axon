@@ -191,6 +191,12 @@ step "la cadena real, leida del almacen de trazas"
 step "el pacto de un consumidor que no usa axon"
 "$AXON" pact . --check pacts/mobile-app-orders.json
 
+# La otra mitad de la superficie: un topic. Lo que alguien lee de un mensaje no
+# se observa desde aqui —el edge ve una llamada, a un consumidor de un topic no
+# lo ve nadie— asi que o lo dicen, o no se sabe.
+step "y el pacto de un consumidor de un topic"
+"$AXON" pact . --check pacts/reporting-orders.json
+
 step "quien llama a que, leido del edge"
 ./check-traffic.sh
 

@@ -617,8 +617,9 @@ fn run() -> Result<ExitCode, String> {
                     color::red("fail")
                 },
                 color::grey(&format!(
-                    "{} interactions, {} errors, {} warnings",
+                    "{} interactions, {} messages, {} errors, {} warnings",
                     p.expectations.len(),
+                    p.messages.len(),
                     errors.len(),
                     warnings.len()
                 ))

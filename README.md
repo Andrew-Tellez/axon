@@ -139,7 +139,7 @@ $ cd examples && ./demo.sh
   axon: 0 thresholds breached
 ```
 
-It runs in CI on every push. The whole run —24 sections, 62 checks— and what happens when
+It runs in CI on every push. The whole run —25 sections, 62 checks— and what happens when
 you run it **twice in a row** are in
 [The demo, measured](https://andrew-tellez.github.io/axon/demo.html).
 
