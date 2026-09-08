@@ -7,6 +7,20 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.8.0] — 2026-09-08
+
+### Añadido
+
+- **El plan neutral tiene esquema publicado.** Un `axon-infra-*` recibe el plan por stdin
+  y hasta ahora tenía que deducir su forma de un ejemplo: todo plugin ahí fuera estaba
+  adivinando, y el día que aparece un campo nadie se entera. `axon infra --schema` emite
+  el JSON Schema 2020-12, que **no nombra ningún proveedor** —el plan tampoco, y hay un
+  test que lo comprueba— y en el que **cada objeto rechaza lo que no declara**, que es lo
+  que lo convierte en contrato y no en documentación. Está escrito a mano, así que lo
+  único que lo mantiene honesto es que un plan real pase por un validador de verdad, y
+  que la deriva se atrape en los dos sentidos: un campo agregado al plan y no al esquema
+  falla, y uno declarado en el esquema que el plan no tenga falla también.
+
 ## [0.7.0] — 2026-09-08
 
 ### Añadido
