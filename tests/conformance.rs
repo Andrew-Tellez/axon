@@ -102,22 +102,86 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
     }
 }
 
-/// What this refusal prevents: a `terraform apply` with no error and a single
-/// Postgres where the manifest declares four. The sharding would not exist and
-/// nothing would say so. k8s does render it, so it is not in this list.
+/// The sharder exists on every native target now. What used to be a blanket
+/// refusal is an ARITHMETIC one: on a managed cloud pgdog is a sidecar —Cloud
+/// Run and ECS serve HTTP, and the Postgres protocol needs a process next to
+/// the app— so the pool stops being one and becomes one per instance. That
+/// multiplication is what takes a database down the day it scales.
 #[test]
-fn sharding_is_not_rendered_where_it_does_not_exist() {
+fn the_sidecars_multiplication_is_done_before_the_apply() {
     for t in ["gcp", "aws"] {
         let (_, err, ok) = axon(&["infra", "examples", "--target", t]);
-        assert!(!ok, "{t} rendered a plan with sharding it cannot shard");
-        assert!(err.contains("shards = 4"), "{t}: {err}");
-        assert!(err.contains("--target local"), "{t}: {err}");
+        assert!(!ok, "{t} rendered a pool per instance that does not fit");
+        assert!(err.contains("40 x 10 instances = 400"), "{t}: {err}");
+        assert!(err.contains("per node"), "{t}: {err}");
     }
-    // and with no pooler —and a warehouse the target can feed— all three
-    // still render
-    for t in ["gcp", "aws", "k8s"] {
-        let (_, err, ok) = axon(&["infra", &source_for(t), "--target", t]);
+    // and with numbers that fit, the four nodes and the sidecar do render
+    let dir = std::env::temp_dir().join("axon-shard-cloud");
+    let _ = std::fs::remove_dir_all(&dir);
+    copy_tree(std::path::Path::new("examples"), &dir);
+    let orders = dir.join("orders.toml");
+    let text = std::fs::read_to_string(&orders)
+        .unwrap()
+        .replace("pool_size = 40", "pool_size = 8")
+        .replace(
+            "max_connections = 100",
+            "max_connections = 100\nmax_instances = 10",
+        );
+    std::fs::write(&orders, text).unwrap();
+    for (t, warehouse, instance, sidecar) in [
+        (
+            "gcp",
+            "bigquery",
+            "google_sql_database_instance\" \"orders_shard_3",
+            "volume_mounts",
+        ),
+        (
+            "aws",
+            "snowflake",
+            "aws_db_instance\" \"orders_shard_3",
+            "pgdog-config",
+        ),
+    ] {
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "toml") {
+                continue;
+            }
+            let t2 = std::fs::read_to_string(&p)
+                .unwrap()
+                .replace(
+                    "warehouse = \"clickhouse\"",
+                    &format!("warehouse = \"{warehouse}\""),
+                )
+                .replace(
+                    "warehouse = \"bigquery\"",
+                    &format!("warehouse = \"{warehouse}\""),
+                )
+                .replace(
+                    "warehouse = \"snowflake\"",
+                    &format!("warehouse = \"{warehouse}\""),
+                );
+            std::fs::write(&p, t2).unwrap();
+        }
+        let (tf, err, ok) = axon(&["infra", dir.to_str().unwrap(), "--target", t]);
         assert!(ok, "{t}: {err}");
+        // one INSTANCE per node and not one instance with four databases
+        assert!(
+            tf.contains(instance),
+            "{t} did not render the fourth node:\n{err}"
+        );
+        assert!(tf.contains(sidecar), "{t} did not render the sharder");
+        // the app talks to the sidecar and never to a node
+        assert!(
+            tf.contains("orders_pooler_url"),
+            "{t}: the app points at a node, which skips the sharding"
+        );
+        // the configuration is a secret whose VALUE axon does not know
+        assert!(tf.contains("orders-pgdog-users"), "{t}");
+        assert!(
+            !tf.contains("${AXON_DB_HOST_0}"),
+            "{t}: a generated file is no place for a host"
+        );
     }
 }
 
@@ -579,6 +643,36 @@ fn build_without_sources_fails_clearly() {
     assert!(err.contains("Pass the other manifests"), "{err}");
 }
 
+/// The example, with numbers that let the sharder's sidecar fit: the pool is
+/// one per instance there, and the example's is sized for a pooler of its own.
+fn fixture_sharded(suffix: &str) -> impl Fn(&str) -> String {
+    let base = std::env::temp_dir().join(format!("axon-shards-{suffix}"));
+    move |warehouse: &str| {
+        let dir = base.join(warehouse);
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_tree(std::path::Path::new("examples"), &dir);
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            if p.extension().is_none_or(|x| x != "toml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&p)
+                .unwrap()
+                .replace(
+                    "warehouse = \"clickhouse\"",
+                    &format!("warehouse = \"{warehouse}\""),
+                )
+                .replace("pool_size = 40", "pool_size = 8")
+                .replace(
+                    "max_connections = 100",
+                    "max_connections = 100\nmax_instances = 10",
+                );
+            std::fs::write(&p, text).unwrap();
+        }
+        dir.to_string_lossy().to_string()
+    }
+}
+
 /// `terraform fmt` only says the HCL parses. `validate` with the real
 /// providers says the attributes exist —which is what catches an
 /// interpolation of a non-existent variable or a block missing a field.
@@ -637,9 +731,28 @@ fn the_generated_hcl_validates() {
         job.clone(),
     ));
     casos.push(("aws-job".into(), casos[1].1, casos[1].2.clone(), job));
+    // And WITH the sharder: N instances and a sidecar, which is a different
+    // shape from everything above —a second container in the service, a volume
+    // from a secret— and where an attribute that does not exist would only show
+    // up on the apply.
+    let sharded = fixture_sharded("tf");
+    casos.push((
+        "gcp-shards".into(),
+        casos[0].1,
+        casos[0].2.clone(),
+        sharded("bigquery"),
+    ));
+    casos.push((
+        "aws-shards".into(),
+        casos[1].1,
+        casos[1].2.clone(),
+        sharded("snowflake"),
+    ));
 
     for (etiqueta, provider, vars, fuente_tf) in casos {
-        let target = etiqueta.trim_end_matches("-saga");
+        let target = etiqueta
+            .trim_end_matches("-saga")
+            .trim_end_matches("-shards");
         let dir = std::env::temp_dir().join(format!("axon-tf-{etiqueta}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

@@ -164,8 +164,37 @@ The suite runs that substitution with a real `sh` and validates what comes out a
 pgdog's official schema. Before this, the only thing that filled those markers was the
 test's own regex.
 
-`gcp` and `aws` still refuse: N managed instances there are Cloud SQL or RDS, and
-emitting one where the manifest declares four would apply with no error.
+### And on a managed cloud, a sidecar
+
+On `gcp` and `aws` the nodes are N managed instances —Cloud SQL or RDS, one **instance**
+per node, because a shard sharing an engine with the other three shares its ceiling, its
+CPU and its outage— and pgdog cannot be a service of its own: Cloud Run and ECS serve
+HTTP, and the Postgres wire protocol needs a process the app reaches on localhost. So it
+goes as a **sidecar**, mounted from a secret whose value axon does not know.
+
+That changes the arithmetic, and the change is the interesting part: the pool stops being
+one and becomes **one per instance**. axon does the multiplication before the apply and
+refuses when it does not fit:
+
+```console
+$ axon infra manifests/ --target gcp
+axon: orders: on `gcp` the sharder is a sidecar —Cloud Run and ECS serve HTTP, and the
+Postgres protocol needs a process next to the app—, so the pool is one PER INSTANCE:
+40 x 10 instances = 400, plus 2 reserved, over the limit of 100 per node. Lower
+`[pooler] pool_size`, lower `max_instances`, or raise the node's `max_connections`
+```
+
+That is a better refusal than the blanket one it replaces: it names the number, where it
+came from and the three ways out. Connection exhaustion does not show up when you test
+with one instance — it shows up the day it scales.
+
+The app's `DATABASE_URL` comes from a **different secret** (`<service>-pooler-url`) than
+the unsharded one, so nobody points the service at a node by reusing the old URL: that
+skips the sharding and works, against a quarter of the data.
+
+Both renders go through `terraform validate` with the real providers in the suite: the
+sidecar is a second container, a volume from a secret and a `dependsOn`, and an attribute
+that does not exist there would only show up on the apply.
 
 ### And measured through the pooler
 

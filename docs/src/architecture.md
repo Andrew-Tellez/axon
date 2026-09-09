@@ -164,7 +164,7 @@ And the whole mapping, measured on this repo's own example — the counts are wh
 | `read_replicas = 2` | replica instances | `replicate_source_db` | — | — |
 | `migrations = "sql/…"` | applied by your pipeline | idem | idem | a Flyway job per node |
 | `pii` + `tenant_column` | `axon rls` → `R__rls.sql` | idem | idem | a second Flyway job, own history |
-| `[pooler] shards = 4` | **refused** (see below) | **refused** | ConfigMap + pgdog `Deployment` + its `Service` | 4 nodes + pgdog with its config |
+| `[pooler] shards = 4` | 4 Cloud SQL instances + pgdog **sidecar** | 4 RDS instances + pgdog sidecar | ConfigMap + pgdog `Deployment` + its `Service` | 4 nodes + pgdog with its config |
 | a `[methods.*]` with `http` | url_map + backend + NEG | `apigatewayv2_route` + `_integration` | `HTTPRoute` + `Gateway` | Traefik labels |
 | the service itself | `google_cloud_run_v2_service` + service account | `aws_ecs_service` + `_task_definition` | `Deployment` + `Service` + `HPA` + `NetworkPolicy` | a container with a healthcheck |
 | `[infra.buckets.*]` | `google_storage_bucket` (+ CDN backend) | `aws_s3_bucket` (+ CloudFront) | — | MinIO + a creation job |
@@ -174,20 +174,24 @@ And the whole mapping, measured on this repo's own example — the counts are wh
 | `[flags.*]` | — (your provider) | — | — | flagd + its config |
 | every service | OTel env vars, sampling from `tier` | idem | idem | Jaeger + full sampling |
 
-Two of those cells say **refused**, and that is the design:
+No cell there says *refused* any more, and one of them is why the refusals that remain
+are worth reading — the sharder on a managed cloud renders, and axon does the arithmetic
+its shape implies before the apply:
 
 ```mermaid
 flowchart LR
-  D["[pooler] shards = 4"] --> R{"can the target<br/>render sharding?"}
+  D["[pooler] shards = 4"] --> R{"how does the target<br/>reach the sharder?"}
   R -->|local| Y["4 nodes + pgdog"]
   R -->|k8s| K["pgdog + its ConfigMap<br/><i>the nodes are the team's, and<br/>arrive as a secret</i>"]
-  R -->|"gcp · aws"| N["<b>error, not one instance</b><br/><i>emitting one would apply with no<br/>error and leave the sharding<br/>non-existent</i>"]
-  N --> ESC["--target plan<br/><i>the nodes are in the plan;<br/>render them yourself</i>"]
+  R -->|"gcp · aws"| S["4 managed instances<br/>+ pgdog as a <b>sidecar</b><br/><i>Cloud Run and ECS serve HTTP;<br/>the Postgres protocol needs a<br/>process next to the app</i>"]
+  S --> A{"pool x instances<br/>fits the node's ceiling?"}
+  A -->|no| N["<b>error before the apply</b><br/><i>a sidecar makes the pool one PER<br/>INSTANCE, and that multiplication is<br/>what takes a database down the day<br/>it scales</i>"]
 ```
 
 A generator that emits *something* for what it cannot express produces wrong output with
-no error, which is the worst failure mode there is. The same refusal covers a warehouse
-with no ingest path on the chosen target.
+no error, which is the worst failure mode there is. The same shape covers a warehouse with
+no ingest path on the chosen target, which refuses outright: there, nothing axon can emit
+would carry the events.
 
 ## The verification loop
 
