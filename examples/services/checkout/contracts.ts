@@ -134,6 +134,8 @@ export const manifest = {
       "scopes": [
         "payments:write"
       ],
+      "roles": [],
+      "plans": [],
       "rate_limit": null,
       "timeout_ms": 30000,
       "paginated": false,
@@ -266,6 +268,27 @@ export const manifest = {
     "engine": null
   },
   "catalog": {},
+  "auth": {
+    "issuers": [
+      "https://auth.demo.mx"
+    ],
+    "audience": "checkout",
+    "verify": "jwks",
+    "jwks_uri": "https://auth.demo.mx/.well-known/jwks.json",
+    "introspection_url": null,
+    "algorithms": [
+      "EdDSA",
+      "ES256"
+    ],
+    "clock_skew_s": 60,
+    "max_token_age_s": 900,
+    "revocation": "eventual",
+    "subject_claim": "sub",
+    "tenant_claim": "org_id",
+    "scopes_claim": "scope",
+    "roles_claim": "roles",
+    "impersonation": null
+  },
   "metrics": {},
   "rules": {},
   "infra": {
@@ -957,6 +980,27 @@ export const httpRoutes = ["POST /v1/checkouts"] as const;
 export const isolationLevel = "READ COMMITTED" as const;
 /** Staleness budget: data older than this does not get served. */
 export const maxStalenessMs = 5000;
+
+/** Who is calling, out of the token and nothing else.
+ *
+ *  Read from `sub` (subject), `org_id` (tenant), `scope` (scopes) and
+ *  `roles` (roles). The claim names are declared in the manifest so two
+ *  services cannot read the same token differently. */
+export interface AuthContext {
+  subject: string;
+  tenant: string | null;
+  scopes: readonly string[];
+  roles: readonly string[];
+  /** Who is REALLY calling when somebody acts on another's behalf. */
+  actor: string | null;
+}
+
+/** The adapter. axon holds no key and calls no issuer: it declares the
+ *  shape and you bring the verifier —better-auth, Auth0, Keycloak, jose.
+ *  Accepted issuers: https://auth.demo.mx. */
+export interface AuthVerifier {
+  verify(credential: string): Promise<AuthContext>;
+}
 
 
 /** What each method demands of whoever calls it, from the manifest. */

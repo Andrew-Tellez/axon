@@ -52,6 +52,10 @@ successor = "getOrderV2"
 http = "GET /v2/tenants/{tenantId}/orders/{orderId}"
 auth = "required"
 scopes = ["orders:read"]
+# El requisito por endpoint: QUIEN puede entrar y con que derecho contratado.
+# Los nombres se comprueban contra los catalogos de arriba.
+roles = ["admin", "support"]
+plans = ["free", "pro"]
 timeout_ms = 2000
 in = { tenantId = "uuid", orderId = "uuid" }
 out = { orderId = "uuid", status = "string", total = "money", customerId = "uuid" }
@@ -241,6 +245,27 @@ default = true
 # Declarada es UNA: la tabla, su semilla y un tipo union donde un valor
 # inventado no compila. Y anadir uno es un diff que alguien revisa, no un
 # INSERT que alguien corrio.
+# Los roles y los planes son vocabulario de la plataforma, igual que los scopes:
+# lo que axon declara es el NOMBRE, para que un dedazo falle en `verify` en vez
+# de ser un 403 que nadie ve en la revision. Que scopes tiene cada rol es
+# configuracion mutable del proveedor y NO se declara aqui: seria una segunda
+# copia que se queda vieja en silencio.
+[catalog.role]
+key = "name"
+fields = { name = "string", description = "string" }
+entries = [
+  { name = "admin", description = "Todo" },
+  { name = "support", description = "Lee y puede actuar en nombre de un cliente" },
+]
+
+[catalog.plan]
+key = "code"
+fields = { code = "string", name = "string" }
+entries = [
+  { code = "free", name = "Gratis" },
+  { code = "pro", name = "Pro" },
+]
+
 [catalog.currency]
 key = "code"
 fields = { code = "string", name = "string", decimals = "int" }
@@ -249,3 +274,39 @@ entries = [
   { code = "USD", name = "US Dollar", decimals = 2 },
   { code = "CLP", name = "Peso chileno", decimals = 0 },
 ]
+
+# Como un llamante se convierte en un principal.
+#
+# axon no autentica a nadie ni guarda una credencial. Lo que se declara aqui es
+# la FORMA que tiene que tener un token verificado, para que el `auth` del edge,
+# los `scopes` del metodo y el RLS que el compilador ya genera dejen de ser tres
+# esperanzas independientes que casualmente coinciden.
+#
+# Quien emite el token —better-auth, Auth0, Keycloak, Cognito, treinta lineas de
+# jose— es un adaptador, igual que Bus, Cache u Outbox. Aqui no aparece ningun
+# proveedor: los nombres de claim son toda la superficie especifica, y son datos.
+[auth]
+# Una lista y no un valor: lo mas frecuente en la vida de un sistema de auth es
+# una migracion, y son semanas aceptando dos.
+issuers   = ["https://auth.demo.mx"]
+audience  = "orders"
+verify    = "jwks"
+jwks_uri  = "https://auth.demo.mx/.well-known/jwks.json"
+# Lista cerrada: `none` no es verificacion, y un HMAC donde hay un juego de
+# claves publicado deja firmar con la clave publica como si fuera el secreto.
+algorithms      = ["EdDSA", "ES256"]
+clock_skew_s    = 60
+revocation      = "eventual"
+max_token_age_s = 900
+subject_claim = "sub"
+tenant_claim  = "org_id"
+scopes_claim  = "scope"
+roles_claim   = "roles"
+
+# Actuar en nombre de otro. Decide dos cosas: a que inquilino se ata el RLS —al
+# del impersonado, o la fila es invisible y el ticket no se puede contestar— y
+# si la escritura dice quien lo hizo de verdad.
+[auth.impersonation]
+claim = "act"
+roles = ["support"]
+audit = true

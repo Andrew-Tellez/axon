@@ -118,6 +118,27 @@ fn kind_of(v: &toml::Value) -> &'static str {
     }
 }
 
+/// The declared entries of a catalog with this name, from whichever service
+/// owns it. A catalogue is platform vocabulary: the roles do not belong to one
+/// service any more than the scopes do.
+fn catalog_names(ms: &[Manifest], name: &str) -> Option<Vec<String>> {
+    let cat = ms
+        .iter()
+        .filter(|m| !m.external)
+        .find_map(|m| m.catalog.get(name))?;
+    Some(
+        cat.entries
+            .iter()
+            .filter_map(|e| e.get(&cat.key))
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| v.to_string())
+            })
+            .collect(),
+    )
+}
+
 pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     let (mut errors, mut warnings) = (Vec::new(), Vec::new());
 
@@ -987,6 +1008,248 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                      be seeded, and half of what declaring it buys is that the database knows \
                      it too"
                 ));
+            }
+        }
+    }
+
+    // ---- how a caller becomes a principal ----
+    //
+    // The rules here are deliberately few. Three adversarial reviews of the
+    // design agreed on the same trap: a rule that fires on a correct setup
+    // —a per-API audience, an issuer migration, a long-lived machine token—
+    // gets the whole family silenced, and the good ones go with it. So what is
+    // checked is only what cannot be a legitimate configuration.
+    let with_auth: Vec<&Manifest> = ms
+        .iter()
+        .filter(|m| !m.external && !m.auth.issuers.is_empty())
+        .collect();
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        let a = &m.auth;
+        let declared = !a.issuers.is_empty() || a.verify.is_some();
+        // A method that demands something with nothing saying where the token's
+        // claims are read from: the guard is fed by an adapter with no contract,
+        // and two services read the same token differently.
+        let demanding = m
+            .methods
+            .values()
+            .any(|me| me.auth.as_deref() == Some("required") || !me.scopes.is_empty());
+        if demanding && !declared {
+            warnings.push(format!(
+                "{svc}: methods demand authentication and there is no `[auth]`. What extracts \
+                 the subject, the tenant and the scopes from the token is then a hand-written \
+                 adapter with no contract, and two services can read the same token differently"
+            ));
+        }
+        if !declared {
+            continue;
+        }
+        let verify_mode = a.verify.as_deref().unwrap_or("jwks");
+        if !AUTH_VERIFY.contains(&verify_mode) {
+            errors.push(format!(
+                "{svc}: `[auth] verify = \"{verify_mode}\"` is not one of {}",
+                AUTH_VERIFY.join(", ")
+            ));
+        }
+        // The mechanism and its address have to agree: a `jwks` with no URI is
+        // a service that typechecks and cannot boot, and a URI under another
+        // mechanism is a dead field somebody later "fixes" by pointing the
+        // verifier at it.
+        match verify_mode {
+            "jwks" if a.jwks_uri.is_none() => errors.push(format!(
+                "{svc}: `verify = \"jwks\"` with no `jwks_uri`. There is nothing to fetch the \
+                 keys from, and it typechecks"
+            )),
+            "introspection" if a.introspection_url.is_none() => errors.push(format!(
+                "{svc}: `verify = \"introspection\"` with no `introspection_url`"
+            )),
+            "adapter" => warnings.push(format!(
+                "{svc}: `verify = \"adapter\"`. axon hands over the interface and promises \
+                 NOTHING about this token: not the algorithm, not the age, not the revocation. \
+                 What those fields say here is documentation"
+            )),
+            _ => {}
+        }
+        if a.issuers.is_empty() {
+            errors.push(format!(
+                "{svc}: `[auth]` with no `issuers`. A verifier that does not check who minted \
+                 the token accepts one minted by anybody"
+            ));
+        }
+        for alg in &a.algorithms {
+            if WEAK_ALGORITHMS.contains(&alg.as_str()) {
+                errors.push(format!(
+                    "{svc}: `[auth] algorithms` accepts `{alg}`. `none` is no verification at \
+                     all, and an HMAC where a key set is published lets somebody sign with the \
+                     public key as if it were the secret. Both fail OPEN and both look like a \
+                     normal 200"
+                ));
+            }
+        }
+        if a.algorithms.is_empty() && verify_mode == "jwks" {
+            errors.push(format!(
+                "{svc}: `verify = \"jwks\"` with no `algorithms`. Accepting whatever the token's \
+                 header says is how `none` and the HMAC trick get in"
+            ));
+        }
+        // `immediate` over offline verification is a promise the mechanism
+        // cannot keep: nothing in a signature says the session was withdrawn.
+        if a.revocation.as_deref() == Some("immediate") && verify_mode == "jwks" {
+            errors.push(format!(
+                "{svc}: `revocation = \"immediate\"` with `verify = \"jwks\"`. Verifying a \
+                 signature offline cannot see a session that was withdrawn: either the \
+                 revocation is `eventual` —and its window is `max_token_age_s`— or the \
+                 verification asks the issuer"
+            ));
+        }
+        if let Some(r) = &a.revocation {
+            if !AUTH_REVOCATION.contains(&r.as_str()) {
+                errors.push(format!(
+                    "{svc}: `revocation = \"{r}\"` is not one of {}",
+                    AUTH_REVOCATION.join(", ")
+                ));
+            }
+            if r == "eventual" && a.max_token_age_s.is_none() {
+                errors.push(format!(
+                    "{svc}: `revocation = \"eventual\"` with no `max_token_age_s`. The window \
+                     between withdrawing a token and it stopping is exactly that number, and \
+                     without it nobody can say how long it is"
+                ));
+            }
+        }
+        // The tenant has to come from the TOKEN. Read from the body or the
+        // route it is whatever the caller sent, and the RLS binds to that.
+        if m.infra.tenant_column.is_some() && a.tenant_claim.is_none() {
+            errors.push(format!(
+                "{svc}: multi-tenant —`tenant_column`— and no `[auth] tenant_claim`. The tenant \
+                 the RLS binds to would come from the request instead of from the token, which \
+                 is the caller choosing whose rows to read"
+            ));
+        }
+        // Two things read out of the same claim is one of them reading the
+        // wrong thing, and it is a typo nobody sees.
+        let claims: Vec<(&str, &Option<String>)> = vec![
+            ("subject_claim", &a.subject_claim),
+            ("tenant_claim", &a.tenant_claim),
+            ("scopes_claim", &a.scopes_claim),
+            ("roles_claim", &a.roles_claim),
+        ];
+        for (i, (n1, c1)) in claims.iter().enumerate() {
+            for (n2, c2) in claims.iter().skip(i + 1) {
+                if let (Some(x), Some(y)) = (c1, c2) {
+                    if x == y {
+                        errors.push(format!(
+                            "{svc}: `{n1}` and `{n2}` both read `{x}`. One of the two is \
+                             reading the wrong thing, and nothing at runtime says which"
+                        ));
+                    }
+                }
+            }
+        }
+        // Impersonation: it decides which tenant the RLS binds to and whether
+        // the write says who really did it.
+        if let Some(imp) = &a.impersonation {
+            if !imp.audit {
+                errors.push(format!(
+                    "{svc}: impersonation declared with `audit = false`. A change made in \
+                     somebody else's name with no trace of who made it is the worst version of \
+                     this: the row says the customer did it"
+                ));
+            }
+            if imp.roles.is_empty() {
+                errors.push(format!(
+                    "{svc}: impersonation declared and nobody may do it. `roles` empty means \
+                     the guard lets everyone through or nobody, depending on how it is read"
+                ));
+            }
+            for r in &imp.roles {
+                if let Some(cat) = catalog_names(ms, "role") {
+                    if !cat.contains(r) {
+                        errors.push(format!(
+                            "{svc}: `{r}` may impersonate and is not in `[catalog.role]`. A \
+                             typo here is a grant that silently never applies"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // Platform-wide: the issuers, the mechanism and the claim names. NOT the
+    // audience, which is per service on purpose —and not per-API, which is how
+    // Auth0 and Cognito model it, so it is never checked for uniqueness.
+    if let Some(first) = with_auth.first() {
+        for m in with_auth.iter().skip(1) {
+            if m.auth.issuers != first.auth.issuers {
+                errors.push(format!(
+                    "{}: accepts issuers {:?} and {} accepts {:?}. A token that authenticates \
+                     at one hop and 401s at the next is a failure nothing before production \
+                     shows",
+                    m.service, m.auth.issuers, first.service, first.auth.issuers
+                ));
+            }
+            for (name, a, b) in [
+                (
+                    "subject_claim",
+                    &m.auth.subject_claim,
+                    &first.auth.subject_claim,
+                ),
+                (
+                    "tenant_claim",
+                    &m.auth.tenant_claim,
+                    &first.auth.tenant_claim,
+                ),
+                (
+                    "scopes_claim",
+                    &m.auth.scopes_claim,
+                    &first.auth.scopes_claim,
+                ),
+                ("roles_claim", &m.auth.roles_claim, &first.auth.roles_claim),
+            ] {
+                if a != b {
+                    errors.push(format!(
+                        "{}: reads `{name}` from {:?} and {} reads it from {:?}. It is the same \
+                         token: one of the two gets nothing, and an empty list of scopes is a \
+                         403 that looks like a permissions problem",
+                        m.service, a, first.service, b
+                    ));
+                }
+            }
+        }
+    }
+    // What each endpoint demands, against the declared lists. The requirement
+    // is the contract; the mapping from a role to its scopes is the provider's
+    // and is not declared anywhere here.
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        for (name, me) in &m.methods {
+            for (kind, values) in [("role", &me.roles), ("plan", &me.plans)] {
+                if values.is_empty() {
+                    continue;
+                }
+                if me.auth.as_deref() == Some("public") {
+                    errors.push(format!(
+                        "{svc}.{name}: `auth = \"public\"` and it demands a {kind}. There is no \
+                         principal to check it against, so the guard cannot run and the \
+                         requirement is decoration"
+                    ));
+                }
+                match catalog_names(ms, kind) {
+                    Some(catalogue) => {
+                        for v in values {
+                            if !catalogue.contains(v) {
+                                errors.push(format!(
+                                    "{svc}.{name}: demands the {kind} `{v}`, which is not in \
+                                     `[catalog.{kind}]`. A typo here is a 403 in production \
+                                     that nobody sees in review"
+                                ));
+                            }
+                        }
+                    }
+                    None => warnings.push(format!(
+                        "{svc}.{name}: demands {kind}(s) {values:?} and no service declares \
+                         `[catalog.{kind}]`. Nothing can catch a typo in that name"
+                    )),
+                }
             }
         }
     }

@@ -144,3 +144,31 @@ max_staleness_ms = 5000
 
 [env.prod]
 min_instances = 2
+
+# Como un llamante se convierte en un principal.
+#
+# axon no autentica a nadie ni guarda una credencial. Lo que se declara aqui es
+# la FORMA que tiene que tener un token verificado, para que el `auth` del edge,
+# los `scopes` del metodo y el RLS que el compilador ya genera dejen de ser tres
+# esperanzas independientes que casualmente coinciden.
+#
+# Quien emite el token —better-auth, Auth0, Keycloak, Cognito, treinta lineas de
+# jose— es un adaptador, igual que Bus, Cache u Outbox. Aqui no aparece ningun
+# proveedor: los nombres de claim son toda la superficie especifica, y son datos.
+[auth]
+# Una lista y no un valor: lo mas frecuente en la vida de un sistema de auth es
+# una migracion, y son semanas aceptando dos.
+issuers   = ["https://auth.demo.mx"]
+audience  = "checkout"
+verify    = "jwks"
+jwks_uri  = "https://auth.demo.mx/.well-known/jwks.json"
+# Lista cerrada: `none` no es verificacion, y un HMAC donde hay un juego de
+# claves publicado deja firmar con la clave publica como si fuera el secreto.
+algorithms      = ["EdDSA", "ES256"]
+clock_skew_s    = 60
+revocation      = "eventual"
+max_token_age_s = 900
+subject_claim = "sub"
+tenant_claim  = "org_id"
+scopes_claim  = "scope"
+roles_claim   = "roles"

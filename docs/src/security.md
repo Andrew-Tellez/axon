@@ -71,6 +71,93 @@ A call between services carries its own credential, not the user's: in the examp
 deployment it comes from its own workload identity. The generated headers propagate the
 trace and the idempotency key, never the authorization: that belongs to whoever deploys.
 
+## The shape of the token, and no provider's name
+
+axon authenticates nobody and holds no credential. What `[auth]` declares is the **shape a
+verified token must have**, so that the `auth = "required"` at the edge, the `scopes` of a
+method and the RLS the compiler already generates stop being three independent hopes that
+happen to agree:
+
+```toml
+[auth]
+issuers   = ["https://auth.acme.mx"]   # a LIST: an IdP migration is weeks accepting two
+audience  = "payments"                 # per service
+verify    = "jwks"                     # jwks | introspection | adapter
+jwks_uri  = "https://auth.acme.mx/.well-known/jwks.json"
+algorithms      = ["EdDSA", "ES256"]   # a closed list
+revocation      = "eventual"
+max_token_age_s = 900
+
+subject_claim = "sub"
+tenant_claim  = "org_id"
+scopes_claim  = "scope"
+roles_claim   = "roles"
+```
+
+Who mints the token —better-auth, Auth0, Keycloak, Cognito, thirty lines of `jose`— is an
+**adapter**, exactly like `Bus`, `Cache` or `Outbox`. No provider is named in the block,
+and that absence is the point: a field that only makes sense for one vendor does not
+belong to a compiler. The claim names are the whole provider-specific surface, and they
+are data.
+
+What is refused, and why each one has no symptom:
+
+| The rule | What it prevents |
+| --- | --- |
+| `none` or an `HS*` in `algorithms` | both fail **open**: `none` makes every forged token valid, and an HMAC where a key set is published lets somebody sign with the public key as if it were the secret. Both look like a normal 200 |
+| `revocation = "immediate"` with `verify = "jwks"` | verifying a signature offline cannot see a session that was withdrawn: the promise is one the mechanism cannot keep |
+| `eventual` with no `max_token_age_s` | the window between withdrawing a token and it stopping is exactly that number, and without it nobody can say how long it is |
+| `tenant_column` and no `tenant_claim` | the tenant the RLS binds to would come from the request instead of the token, which is the caller choosing whose rows to read |
+| two claim names that are the same | one of the two is reading the wrong thing, and nothing at runtime says which |
+| `jwks` with no `jwks_uri` | it typechecks and cannot boot |
+| two services reading the same claim from different places | it is the same token: one of them gets nothing, and an empty scope list is a 403 that reads as a permissions problem |
+
+And what is **not** refused, on purpose. Three adversarial reviews of this design agreed
+on the same trap: a per-service `audience` uniqueness rule breaks Auth0 (one API
+identifier for several services is the vendor's own shape) and Cognito (access tokens
+carry no `aud` at all), and a single scalar `issuer` breaks every IdP migration, which is
+the longest-lived event in an auth system's life. A rule that fires on a correct setup
+gets the whole family silenced, and the good ones go with it.
+
+### Roles and plans per endpoint, and the line axon does not cross
+
+```toml
+[methods.refundPayment]
+auth   = "required"
+scopes = ["payments:write"]     # the verb
+roles  = ["admin", "support"]   # who
+plans  = ["pro", "enterprise"]  # the entitlement that was paid for
+```
+
+axon declares **the requirement**, which is contract: it travels in the OpenAPI and in the
+generated guard. It does **not** declare the mapping from a role to its scopes — that is
+the provider's mutable configuration, which axon can neither observe nor diff, so a second
+copy here would go stale in silence and a rule over it would report as an error what
+somebody correctly changed on the other side.
+
+The names are checked against `[catalog.role]` and `[catalog.plan]`, so a typo fails in
+`verify` instead of being a 403 nobody sees in review. With no catalogue it says so rather
+than pretending to check.
+
+### Impersonation
+
+```toml
+[auth.impersonation]
+claim = "act"          # RFC 8693
+roles = ["support"]
+audit = true
+```
+
+It belongs in the manifest because it decides two things the compiler already reasons
+about: **which tenant the RLS binds to** —the impersonated one, or the row is invisible
+and the ticket unanswerable— and whether the write says who really did it. `audit = false`
+is refused: a change made in somebody else's name with no trace is the worst version of
+this, because the row says the customer did it.
+
+The generated `AuthContext` keeps `subject` and `actor` apart, and `withTenant(ctx, tx)`
+is the **only** thing that emits `SET LOCAL axon.tenant`. There is no overload taking a
+bare string, on purpose: with one, a handler binds the RLS to whatever arrived in the body.
+
 ## RLS and masking
 
 ```toml

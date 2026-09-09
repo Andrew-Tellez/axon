@@ -145,6 +145,8 @@ export const manifest = {
       "idempotent": true,
       "auth": "public",
       "scopes": [],
+      "roles": [],
+      "plans": [],
       "rate_limit": 60,
       "timeout_ms": 5000,
       "paginated": false,
@@ -177,6 +179,8 @@ export const manifest = {
       "scopes": [
         "orders:read"
       ],
+      "roles": [],
+      "plans": [],
       "rate_limit": null,
       "timeout_ms": 2000,
       "paginated": false,
@@ -202,6 +206,14 @@ export const manifest = {
       "auth": "required",
       "scopes": [
         "orders:read"
+      ],
+      "roles": [
+        "admin",
+        "support"
+      ],
+      "plans": [
+        "free",
+        "pro"
       ],
       "rate_limit": null,
       "timeout_ms": 2000,
@@ -309,6 +321,42 @@ export const manifest = {
     }
   },
   "catalog": {
+    "role": {
+      "key": "name",
+      "fields": {
+        "name": "string",
+        "description": "string"
+      },
+      "entries": [
+        {
+          "name": "admin",
+          "description": "Todo"
+        },
+        {
+          "name": "support",
+          "description": "Lee y puede actuar en nombre de un cliente"
+        }
+      ],
+      "table": null
+    },
+    "plan": {
+      "key": "code",
+      "fields": {
+        "code": "string",
+        "name": "string"
+      },
+      "entries": [
+        {
+          "code": "free",
+          "name": "Gratis"
+        },
+        {
+          "code": "pro",
+          "name": "Pro"
+        }
+      ],
+      "table": null
+    },
     "currency": {
       "key": "code",
       "fields": {
@@ -334,6 +382,33 @@ export const manifest = {
         }
       ],
       "table": null
+    }
+  },
+  "auth": {
+    "issuers": [
+      "https://auth.demo.mx"
+    ],
+    "audience": "orders",
+    "verify": "jwks",
+    "jwks_uri": "https://auth.demo.mx/.well-known/jwks.json",
+    "introspection_url": null,
+    "algorithms": [
+      "EdDSA",
+      "ES256"
+    ],
+    "clock_skew_s": 60,
+    "max_token_age_s": 900,
+    "revocation": "eventual",
+    "subject_claim": "sub",
+    "tenant_claim": "org_id",
+    "scopes_claim": "scope",
+    "roles_claim": "roles",
+    "impersonation": {
+      "claim": "act",
+      "roles": [
+        "support"
+      ],
+      "audit": true
     }
   },
   "metrics": {
@@ -532,6 +607,32 @@ export async function cachedOrder(
   return value;
 }
 
+/** `role`: the declared list. A value that is not on it does not
+ *  compile, so the code cannot offer what the database will reject. */
+export type Role = "admin" | "support";
+
+export const roleCatalog : ReadonlyArray<{ name: Role; description: string }> = Object.freeze([
+  { name: "admin", description: "Todo" },
+  { name: "support", description: "Lee y puede actuar en nombre de un cliente" },
+]);
+
+/** Lookup by `name`. Frozen: a catalog somebody can mutate at runtime is a
+ *  catalog that stops matching the table. */
+export const findRole = (k: Role) => roleCatalog.find((e) => e.name === k)!;
+
+/** `plan`: the declared list. A value that is not on it does not
+ *  compile, so the code cannot offer what the database will reject. */
+export type Plan = "free" | "pro";
+
+export const planCatalog : ReadonlyArray<{ code: Plan; name: string }> = Object.freeze([
+  { code: "free", name: "Gratis" },
+  { code: "pro", name: "Pro" },
+]);
+
+/** Lookup by `code`. Frozen: a catalog somebody can mutate at runtime is a
+ *  catalog that stops matching the table. */
+export const findPlan = (k: Plan) => planCatalog.find((e) => e.code === k)!;
+
 /** `currency`: the declared list. A value that is not on it does not
  *  compile, so the code cannot offer what the database will reject. */
 export type Currency = "MXN" | "USD" | "CLP";
@@ -569,6 +670,83 @@ export const retiredRoutes: Record<string, Record<string, string>> = {
 export const isolationLevel = "READ COMMITTED" as const;
 /** Staleness budget: data older than this does not get served. */
 export const maxStalenessMs = 3000;
+
+/** Who is calling, out of the token and nothing else.
+ *
+ *  Read from `sub` (subject), `org_id` (tenant), `scope` (scopes) and
+ *  `roles` (roles). The claim names are declared in the manifest so two
+ *  services cannot read the same token differently. */
+export interface AuthContext {
+  subject: string;
+  tenant: string | null;
+  scopes: readonly string[];
+  roles: readonly string[];
+  /** Who is REALLY calling when somebody acts on another's behalf. */
+  actor: string | null;
+}
+
+/** The adapter. axon holds no key and calls no issuer: it declares the
+ *  shape and you bring the verifier —better-auth, Auth0, Keycloak, jose.
+ *  Accepted issuers: https://auth.demo.mx. */
+export interface AuthVerifier {
+  verify(credential: string): Promise<AuthContext>;
+}
+
+/** Binds the transaction to the caller's tenant. It takes the CONTEXT and
+ *  not a string on purpose: with a string overload, a handler binds the RLS
+ *  to whatever arrived in the body or the route, which is the caller
+ *  choosing whose rows to read.
+ *
+ *  `SET LOCAL` and not `SET`: measured against Postgres 16, one session
+ *  `SET` poisons the connection for everyone the pooler hands it to. */
+export async function withTenant<T>(
+  ctx: AuthContext,
+  tx: { query(sql: string): Promise<T> },
+): Promise<T> {
+  if (!ctx.tenant) throw new AxonProblem(403, "no_tenant", "the token carries no tenant_id");
+  // the value comes from the token, so it cannot carry a quote it was not
+  // given, and it is checked before it travels anyway
+  if (!/^[A-Za-z0-9_.:-]+$/.test(ctx.tenant)) throw new AxonProblem(403, "bad_tenant");
+  return tx.query(`SET LOCAL axon.tenant = '${ctx.tenant}'`);
+}
+
+/** The role the caller carries, against the ones the endpoint declared.
+ *  RFC 6750's `insufficient_scope`, not a bare 403: a caller has to be able
+ *  to tell "you are nobody" from "you are somebody who may not do this". */
+export function requireRoles(ctx: AuthContext, ...any_of: string[]): void {
+  if (any_of.some((r) => ctx.roles.includes(r))) return;
+  throw new AxonProblem(403, "insufficient_scope", `requires one of ${any_of.join(", ")}`);
+}
+
+/** The contracted entitlement. It is not a role: a plan is what was paid
+ *  for, and mixing the two is how a downgrade silently keeps a feature. */
+export function requirePlan(plan: string | null, ...any_of: string[]): void {
+  if (plan && any_of.includes(plan)) return;
+  throw new AxonProblem(403, "insufficient_scope", `requires plan ${any_of.join(" or ")}`);
+}
+
+/** What each endpoint demands, from the manifest. It travels with the code
+ *  so the edge, the OpenAPI and the guard cannot disagree. */
+export const requirements = {
+  getOrderV2: { roles: ["admin","support"], plans: ["free","pro"] },
+} as const;
+
+/** Acting on somebody else's behalf, read from `act` (RFC 8693).
+ *
+ *  Two things it decides, and both are why it is declared: the RLS binds to
+ *  the IMPERSONATED tenant —otherwise the row is invisible and the ticket
+ *  unanswerable— and every write carries who really did it. A change made
+ *  in somebody else's name with no trace is the worst version of this. */
+export function requireImpersonator(ctx: AuthContext): string {
+  if (!ctx.actor) throw new AxonProblem(403, "insufficient_scope", "not impersonating");
+  requireRoles({ ...ctx, roles: ctx.roles }, "support");
+  return ctx.actor;
+}
+
+/** The audit line. Declared `audit = true`, so it is not optional and it
+ *  is not the handler's to remember. */
+export const impersonationAudit = (ctx: AuthContext, action: string) =>
+  ({ actor: ctx.actor, subject: ctx.subject, tenant: ctx.tenant, action, at: new Date().toISOString() });
 
 
 /** What each method demands of whoever calls it, from the manifest. */

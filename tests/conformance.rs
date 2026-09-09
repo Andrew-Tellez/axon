@@ -8494,3 +8494,123 @@ fn a_catalog_is_one_list_in_three_places() {
         "{err}"
     );
 }
+
+/// How a caller becomes a principal. axon authenticates nobody: what it
+/// declares is the SHAPE a verified token must have, so the `auth` at the
+/// edge, the `scopes` of a method and the RLS in the database stop being three
+/// independent hopes that happen to agree.
+#[test]
+fn the_auth_block_refuses_what_fails_open() {
+    let dir = std::env::temp_dir().join("axon-auth");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = "service = \"shop\"\nowner = \"t\"\ntier = \"2\"\nversion = \"1.0.0\"\n\
+        [cap]\nconsistency = \"eventual\"\non_partition = \"degrade\"\nmax_staleness_ms = 5000\n\
+        [infra]\nstate = \"postgres\"\ntenant_column = \"tenant_id\"\nmigrations = \"sql/shop\"\n\
+        [methods.getItem]\nhttp = \"GET /v1/items/{itemId}\"\nauth = \"required\"\n\
+        scopes = [\"items:read\"]\nin = { tenantId = \"uuid\", itemId = \"uuid\" }\n\
+        out = { itemId = \"uuid\" }\n[api]\nscopes = [\"items:read\"]\n";
+    let good = "[auth]\nissuers = [\"https://a\"]\nverify = \"jwks\"\njwks_uri = \"https://a/j\"\n\
+        algorithms = [\"EdDSA\"]\ntenant_claim = \"org\"\nsubject_claim = \"sub\"\n\
+        revocation = \"eventual\"\nmax_token_age_s = 900\n";
+    let check = |extra: &str| -> (String, String, bool) {
+        std::fs::write(dir.join("shop.toml"), format!("{base}{extra}")).unwrap();
+        axon(&["verify", dir.to_str().unwrap()])
+    };
+    let (_, err, ok) = check(good);
+    assert!(ok, "a correct block did not pass: {err}");
+
+    // the two that fail OPEN, and look like a normal 200
+    let (_, err, ok) = check(&good.replace("\"EdDSA\"", "\"HS256\""));
+    assert!(!ok);
+    assert!(err.contains("as if it were the secret"), "{err}");
+    let (_, err, ok) = check(&good.replace("\"EdDSA\"", "\"none\""));
+    assert!(!ok);
+    assert!(err.contains("no verification at all"), "{err}");
+
+    // a promise the mechanism cannot keep
+    let (_, err, ok) = check(&good.replace("\"eventual\"", "\"immediate\""));
+    assert!(!ok);
+    assert!(
+        err.contains("cannot see a session that was withdrawn"),
+        "{err}"
+    );
+
+    // the tenant has to come from the TOKEN: read from the request it is the
+    // caller choosing whose rows to read
+    let (_, err, ok) = check(&good.replace("tenant_claim = \"org\"\n", ""));
+    assert!(!ok);
+    assert!(err.contains("caller choosing whose rows to read"), "{err}");
+
+    // and a mechanism with nowhere to fetch its keys typechecks and cannot boot
+    let (_, err, ok) = check(&good.replace("jwks_uri = \"https://a/j\"\n", ""));
+    assert!(!ok);
+    assert!(err.contains("nothing to fetch the keys from"), "{err}");
+
+    // What it does NOT refuse, on purpose: three adversarial reviews of the
+    // design agreed that a per-service `audience` uniqueness rule breaks Auth0
+    // (one API identifier for several services) and Cognito (access tokens
+    // carry no `aud` at all), and a scalar issuer breaks every IdP migration.
+    // A rule that fires on a correct setup gets the family silenced.
+    std::fs::write(
+        dir.join("other.toml"),
+        format!(
+            "{}{}",
+            base.replace("\"shop\"", "\"other\"")
+                .replace("GET /v1/items/{itemId}", "GET /v1/others/{itemId}"),
+            good
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        format!("{base}{good}audience = \"shop\"\n"),
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "two services sharing an audience was refused: {err}");
+    // but the same token read differently by two services IS refused: one of
+    // them gets nothing, and an empty scope list is a 403 that reads as a
+    // permissions problem
+    std::fs::write(
+        dir.join("other.toml"),
+        format!(
+            "{}{}",
+            base.replace("\"shop\"", "\"other\"")
+                .replace("GET /v1/items/{itemId}", "GET /v1/others/{itemId}"),
+            good.replace("subject_claim = \"sub\"", "subject_claim = \"uid\"")
+        ),
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("It is the same token"), "{err}");
+}
+
+/// Impersonation decides two things, and that is why it is declared: which
+/// tenant the RLS binds to, and whether the write says who really did it.
+#[test]
+fn impersonation_without_a_trail_is_refused() {
+    let dir = std::env::temp_dir().join("axon-imp");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = "service = \"shop\"\nowner = \"t\"\ntier = \"2\"\nversion = \"1.0.0\"\n\
+        [cap]\nconsistency = \"eventual\"\non_partition = \"degrade\"\nmax_staleness_ms = 5000\n\
+        [methods.getItem]\nin = { itemId = \"uuid\" }\nout = { itemId = \"uuid\" }\n\
+        [auth]\nissuers = [\"https://a\"]\nverify = \"jwks\"\njwks_uri = \"https://a/j\"\n\
+        algorithms = [\"EdDSA\"]\n[auth.impersonation]\nclaim = \"act\"\nroles = [\"support\"]\n";
+    std::fs::write(dir.join("shop.toml"), format!("{base}audit = false\n")).unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("the row says the customer did it"), "{err}");
+
+    std::fs::write(dir.join("shop.toml"), format!("{base}audit = true\n")).unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    // and it comes out in the code, with the actor kept apart from the subject
+    let (ts, _, ok) = axon(&["build", dir.join("shop.toml").to_str().unwrap()]);
+    assert!(ok);
+    assert!(ts.contains("actor: string | null"), "{ts}");
+    assert!(ts.contains("export function requireImpersonator"), "{ts}");
+    assert!(ts.contains("impersonationAudit"), "{ts}");
+}

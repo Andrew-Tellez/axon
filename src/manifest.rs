@@ -45,6 +45,15 @@ pub struct Method {
     /// from outside.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Who may call it, by role. The requirement is the contract and goes in
+    /// the OpenAPI and in the generated guard; the mapping from a role to its
+    /// scopes is the provider's and is deliberately not declared here.
+    #[serde(default)]
+    pub roles: Vec<String>,
+    /// The entitlement it takes: a plan, a tier, a contracted feature. Same
+    /// shape as `roles` and for the same reason.
+    #[serde(default)]
+    pub plans: Vec<String>,
     /// Requests per minute at the gateway.
     pub rate_limit: Option<u32>,
     /// Time budget at the edge.
@@ -1045,6 +1054,94 @@ impl Metric {
     }
 }
 
+/// How a caller becomes a principal.
+///
+/// axon authenticates nobody and holds no credential. What is declared here is
+/// the SHAPE a verified token must have, so that the `auth = "required"` at
+/// the edge, the `scopes` of a method and the RLS the compiler already
+/// generates stop being three independent hopes that happen to agree.
+///
+/// Who mints the token —better-auth, Auth0, Keycloak, Cognito, thirty lines of
+/// jose— is an adapter, exactly like `Bus`, `Cache` and `Outbox`. No provider
+/// is named in this block, and that absence is the point: a field that only
+/// makes sense for one vendor does not belong to a compiler. The claim names
+/// are the whole provider-specific surface, and they are data.
+///
+/// What is deliberately NOT here: the mapping from a role to its scopes. That
+/// is the provider's mutable configuration, which axon can neither observe nor
+/// diff, so declaring it would be a second copy that goes stale in silence —
+/// and a rule over it would report as an error what somebody correctly changed
+/// on the other side.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Auth {
+    /// Accepted issuers. A list and not one value because the longest-lived
+    /// event in an auth system's life is a migration: two issuers accepted for
+    /// six weeks. With a single field that window is a red CI or a lie.
+    #[serde(default)]
+    pub issuers: Vec<String>,
+    /// This service's audience. Per service, unlike the rest: a token minted
+    /// for the reporting service accepted by the payments service is a total,
+    /// invisible failure —every signature checks out and every log line looks
+    /// normal.
+    pub audience: Option<String>,
+    /// `jwks` verifies offline, `introspection` asks the issuer, `adapter`
+    /// means axon promises nothing and only hands over the interface. It is
+    /// the field that decides what the compiler may state about revocation.
+    pub verify: Option<String>,
+    pub jwks_uri: Option<String>,
+    pub introspection_url: Option<String>,
+    /// A closed list, not a preference. `none` accepted anywhere makes every
+    /// forged token valid, and an HS* alongside a published key set lets
+    /// somebody sign with the public key as if it were the secret. Both fail
+    /// OPEN, and both look like a normal 200.
+    #[serde(default)]
+    pub algorithms: Vec<String>,
+    pub clock_skew_s: Option<u32>,
+    /// The worst case between a revocation and its effect. Without a number,
+    /// "revoked" is a word the compiler cannot print anywhere.
+    pub max_token_age_s: Option<u32>,
+    /// `eventual` or `immediate`. `immediate` over offline verification is a
+    /// promise the mechanism cannot keep.
+    pub revocation: Option<String>,
+    /// Where each thing axon already reasons about lives inside the token.
+    pub subject_claim: Option<String>,
+    /// Mandatory when `[infra] tenant_column` is set: it is what binds the RLS
+    /// to the caller instead of to whatever the handler happened to pass.
+    pub tenant_claim: Option<String>,
+    pub scopes_claim: Option<String>,
+    pub roles_claim: Option<String>,
+    /// Acting on somebody else's behalf. See `Impersonation`.
+    pub impersonation: Option<Impersonation>,
+}
+
+/// Support acting as a user, and the two questions that decides.
+///
+/// Which tenant the RLS binds to —the impersonated one, or the row is invisible
+/// and the ticket unanswerable— and whether the write says who really did it.
+/// A change made in somebody else's name with no trace is the worst version of
+/// this, so the audit is not optional.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Impersonation {
+    /// The claim carrying the real actor. RFC 8693 calls it `act`.
+    pub claim: String,
+    /// Who may impersonate. Names, checked against the declared catalogue: a
+    /// typo here is a grant that silently never applies.
+    #[serde(default)]
+    pub roles: Vec<String>,
+    /// Every write stamped with the actor. `false` has to be written by hand,
+    /// and `verify` says what it costs.
+    #[serde(default)]
+    pub audit: bool,
+}
+
+pub const AUTH_VERIFY: [&str; 3] = ["jwks", "introspection", "adapter"];
+pub const AUTH_REVOCATION: [&str; 2] = ["eventual", "immediate"];
+/// Refused outright: `none` is no verification, and an HMAC over a published
+/// key set is a shared secret wearing a public key's clothes.
+pub const WEAK_ALGORITHMS: [&str; 4] = ["none", "HS256", "HS384", "HS512"];
+
 /// A catalog: a small, fixed list that several services have to agree on.
 ///
 /// Currencies, statuses, reasons, countries. The list nobody thinks is worth
@@ -1283,6 +1380,9 @@ pub struct Manifest {
     /// Fixed lists several services have to agree on. See `Catalog`.
     #[serde(default)]
     pub catalog: IndexMap<String, Catalog>,
+    /// The shape a verified token must have. See `Auth`.
+    #[serde(default)]
+    pub auth: Auth,
     /// Business metrics over the declared events. See `Metric`.
     #[serde(default)]
     pub metrics: IndexMap<String, Metric>,

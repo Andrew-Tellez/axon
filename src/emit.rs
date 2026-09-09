@@ -332,6 +332,9 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
             ))
             .unwrap_or_default(),
     ));
+    if !m.auth.issuers.is_empty() || m.auth.verify.is_some() {
+        out.push(auth_ts(m));
+    }
     out.push(scopes_ts(m));
     out.push(errors_ts(m));
     out.push(flags_ts(m));
@@ -2282,6 +2285,138 @@ fn cache_ts(m: &Manifest) -> String {
                }}\n\
              }}\n",
             arms.join("\n")
+        ));
+    }
+    o.join("\n")
+}
+
+/// The principal, generated.
+///
+/// One interface —`AuthVerifier`— and a type. axon verifies nothing: it says
+/// what a verified token has to yield, and the adapter that yields it is
+/// yours, exactly like `Bus` or `Cache`. What the compiler buys with this is
+/// that the guard at the edge and the tenant the database binds to come out of
+/// the SAME place, instead of being two hopes that agree until the day they do
+/// not.
+fn auth_ts(m: &Manifest) -> String {
+    let a = &m.auth;
+    let claim = |c: &Option<String>, fallback: &str| c.clone().unwrap_or_else(|| fallback.into());
+    let mut o = vec![format!(
+        "/** Who is calling, out of the token and nothing else.\n \
+         *\n \
+         *  Read from `{sub}` (subject), `{tenant}` (tenant), `{scopes}` (scopes) and\n \
+         *  `{roles}` (roles). The claim names are declared in the manifest so two\n \
+         *  services cannot read the same token differently. */\n\
+         export interface AuthContext {{\n  \
+           subject: string;\n  \
+           tenant: string | null;\n  \
+           scopes: readonly string[];\n  \
+           roles: readonly string[];\n  \
+           /** Who is REALLY calling when somebody acts on another's behalf. */\n  \
+           actor: string | null;\n\
+         }}\n\n\
+         /** The adapter. axon holds no key and calls no issuer: it declares the\n \
+         *  shape and you bring the verifier —better-auth, Auth0, Keycloak, jose.\n \
+         *  Accepted issuers: {issuers}. */\n\
+         export interface AuthVerifier {{\n  \
+           verify(credential: string): Promise<AuthContext>;\n\
+         }}\n",
+        sub = claim(&a.subject_claim, "sub"),
+        tenant = claim(&a.tenant_claim, "—"),
+        scopes = claim(&a.scopes_claim, "scope"),
+        roles = claim(&a.roles_claim, "roles"),
+        issuers = a.issuers.join(", "),
+    )];
+    // The tenant, from the token to the transaction, with nothing in between.
+    // This is the whole point of the block: there is no overload taking a bare
+    // string, so a handler cannot bind the RLS to something the caller sent.
+    if let Some(col) = &m.infra.tenant_column {
+        o.push(format!(
+            "/** Binds the transaction to the caller's tenant. It takes the CONTEXT and\n \
+             *  not a string on purpose: with a string overload, a handler binds the RLS\n \
+             *  to whatever arrived in the body or the route, which is the caller\n \
+             *  choosing whose rows to read.\n \
+             *\n \
+             *  `SET LOCAL` and not `SET`: measured against Postgres 16, one session\n \
+             *  `SET` poisons the connection for everyone the pooler hands it to. */\n\
+             export async function withTenant<T>(\n  \
+               ctx: AuthContext,\n  \
+               tx: {{ query(sql: string): Promise<T> }},\n\
+             ): Promise<T> {{\n  \
+               if (!ctx.tenant) throw new AxonProblem(403, \"no_tenant\", \"the token carries no {col}\");\n  \
+               // the value comes from the token, so it cannot carry a quote it was not\n  \
+               // given, and it is checked before it travels anyway\n  \
+               if (!/^[A-Za-z0-9_.:-]+$/.test(ctx.tenant)) throw new AxonProblem(403, \"bad_tenant\");\n  \
+               return tx.query(`SET LOCAL axon.tenant = '${{ctx.tenant}}'`);\n\
+             }}\n"
+        ));
+    }
+    // What each endpoint demands. The requirement is the contract; the mapping
+    // from a role to its scopes is the provider's and is nowhere here.
+    let demanding: Vec<(&String, &Method)> = m
+        .methods
+        .iter()
+        .filter(|(_, me)| !me.roles.is_empty() || !me.plans.is_empty())
+        .collect();
+    if !demanding.is_empty() {
+        o.push(
+            "/** The role the caller carries, against the ones the endpoint declared.\n \
+             *  RFC 6750's `insufficient_scope`, not a bare 403: a caller has to be able\n \
+             *  to tell \"you are nobody\" from \"you are somebody who may not do this\". */\n\
+             export function requireRoles(ctx: AuthContext, ...any_of: string[]): void {\n  \
+               if (any_of.some((r) => ctx.roles.includes(r))) return;\n  \
+               throw new AxonProblem(403, \"insufficient_scope\", `requires one of ${any_of.join(\", \")}`);\n\
+             }\n\n\
+             /** The contracted entitlement. It is not a role: a plan is what was paid\n \
+             *  for, and mixing the two is how a downgrade silently keeps a feature. */\n\
+             export function requirePlan(plan: string | null, ...any_of: string[]): void {\n  \
+               if (plan && any_of.includes(plan)) return;\n  \
+               throw new AxonProblem(403, \"insufficient_scope\", `requires plan ${any_of.join(\" or \")}`);\n\
+             }\n"
+                .to_string(),
+        );
+        let rows: Vec<String> = demanding
+            .iter()
+            .map(|(name, me)| {
+                format!(
+                    "  {}: {{ roles: {}, plans: {} }},",
+                    camel(name),
+                    serde_json::to_string(&me.roles).unwrap_or_default(),
+                    serde_json::to_string(&me.plans).unwrap_or_default()
+                )
+            })
+            .collect();
+        o.push(format!(
+            "/** What each endpoint demands, from the manifest. It travels with the code\n \
+             *  so the edge, the OpenAPI and the guard cannot disagree. */\n\
+             export const requirements = {{\n{}\n}} as const;\n",
+            rows.join("\n")
+        ));
+    }
+    if let Some(imp) = &a.impersonation {
+        o.push(format!(
+            "/** Acting on somebody else's behalf, read from `{claim}` (RFC 8693).\n \
+             *\n \
+             *  Two things it decides, and both are why it is declared: the RLS binds to\n \
+             *  the IMPERSONATED tenant —otherwise the row is invisible and the ticket\n \
+             *  unanswerable— and every write carries who really did it. A change made\n \
+             *  in somebody else's name with no trace is the worst version of this. */\n\
+             export function requireImpersonator(ctx: AuthContext): string {{\n  \
+               if (!ctx.actor) throw new AxonProblem(403, \"insufficient_scope\", \"not impersonating\");\n  \
+               requireRoles({{ ...ctx, roles: ctx.roles }}, {roles});\n  \
+               return ctx.actor;\n\
+             }}\n\n\
+             /** The audit line. Declared `audit = true`, so it is not optional and it\n \
+             *  is not the handler's to remember. */\n\
+             export const impersonationAudit = (ctx: AuthContext, action: string) =>\n  \
+               ({{ actor: ctx.actor, subject: ctx.subject, tenant: ctx.tenant, action, at: new Date().toISOString() }});\n",
+            claim = imp.claim,
+            roles = imp
+                .roles
+                .iter()
+                .map(|r| format!("\"{r}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
         ));
     }
     o.join("\n")
