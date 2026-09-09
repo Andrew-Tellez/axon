@@ -1610,10 +1610,8 @@ fn reads(sql: &str) -> Option<(String, Vec<String>)> {
                         _ => break,
                     }
                 }
-                match last {
-                    Some(t) => tables.push(t),
-                    None => return None, // a subquery
-                }
+                // no name after FROM: a subquery, and it does not answer
+                tables.push(last?);
                 i = j + 1;
                 continue;
             }
