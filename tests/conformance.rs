@@ -8979,9 +8979,9 @@ fn init_writes_a_project_that_verifies_clean() {
     let dir = std::env::temp_dir().join("axon-init");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let (out, err, ok) = axon(&["init", "billing", "--path", dir.to_str().unwrap()]);
+    let (written, err, ok) = axon(&["init", "billing", "--path", dir.to_str().unwrap()]);
     assert!(ok, "{err}");
-    assert!(out.contains("wrote billing.toml"), "{out}");
+    assert!(written.contains("wrote billing.toml"), "{written}");
 
     // the layout is the one the rest of the CLI expects: the manifest at the
     // root, so `migrations` needs no `../`
@@ -9014,6 +9014,19 @@ fn init_writes_a_project_that_verifies_clean() {
             "the scaffold still trips `{gone}`:\n{out}"
         );
     }
+
+    // the stub answers 501 and says WHERE to implement it. A stub that
+    // answered 200 with invented data would be the one thing this project
+    // exists to prevent: something that looks right and is not.
+    let index = std::fs::read_to_string(dir.join("services/billing/index.ts")).unwrap();
+    assert!(index.contains("not_implemented"), "{index}");
+    assert!(
+        index.contains("implement it in services/billing/index.ts"),
+        "{index}"
+    );
+    // and the next steps rebuild: without `--build`, changing the code and
+    // running `up` again silently runs the old image
+    assert!(written.contains("up -d --build --wait"), "{written}");
 
     // it builds, and the compose it emits is well-formed
     let (ts, err, ok) = axon(&[

@@ -69,7 +69,7 @@ pub fn run(root: &Path, service: &str) -> Result<String, String> {
          axon verify .                     # 0 errors: the layout is the one the CLI expects\n  \
          axon build {service}.toml . > services/{service}/contracts.ts\n  \
          axon infra . --target local > axon.local.yml\n  \
-         docker compose -f axon.local.yml up -d --wait\n\n\
+         docker compose -f axon.local.yml up -d --build --wait\n\n\
          The two warnings it starts with are the next two decisions, not defects:\n  \
          [auth]        where the subject, the tenant and the scopes are read from\n  \
          axon baseline records what is published, so a breaking change can be seen\n",
@@ -162,22 +162,36 @@ CMD ["node", "--experimental-strip-types", "services/SERVICE/index.ts"]
 
 fn index_ts(service: &str) -> String {
     format!(
-        r#"// Your code. Everything that crosses a process boundary is generated;
-// what is here is the part only you know.
+        r#"// Your code. Everything that crosses a process boundary is generated; what is
+// here is the part only you know.
 //
 //   axon build {service}.toml . > services/{service}/contracts.ts
 //
 // and then implement the abstract methods of the generated class.
-console.log("[{service}] up. Generate the contracts and implement them:");
-console.log("  axon build {service}.toml . > services/{service}/contracts.ts");
-
-// A health endpoint, because the compose waits for one before it starts
-// anything that depends on this service.
 import {{ createServer }} from "node:http";
-createServer((_req, res) => {{
-  res.writeHead(200, {{ "content-type": "application/json" }});
-  res.end(JSON.stringify({{ status: "ok" }}));
-}}).listen(8080);
+import {{ httpRoutes }} from "./contracts.ts";
+
+// The declared routes answer 501 and say WHERE to implement them. A stub that
+// answered 200 with invented data would be the one thing this whole project
+// exists to prevent: something that looks right and is not.
+createServer((req, res) => {{
+  if (req.url === "/healthz" || req.url === "/") {{
+    res.writeHead(200, {{ "content-type": "application/json" }});
+    return res.end(JSON.stringify({{ status: "ok" }}));
+  }}
+  const method = httpRoutes.find((r) => r.startsWith(`${{req.method}} `));
+  res.writeHead(501, {{ "content-type": "application/problem+json" }});
+  res.end(
+    JSON.stringify({{
+      type: "about:blank",
+      title: "not_implemented",
+      status: 501,
+      detail: method
+        ? `the manifest declares ${{method}}; implement it in services/{service}/index.ts`
+        : `no declared route matches ${{req.method}} ${{req.url}}. What exists: ${{httpRoutes.join(", ")}}`,
+    }}),
+  );
+}}).listen(8080, () => console.log("[{service}] listening on :8080"));
 "#
     )
 }
