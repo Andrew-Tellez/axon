@@ -73,64 +73,61 @@ fi
 echo "  OK: 2 replicas subscribed to order.placed.v1, both in the queue group"
 
 # NATS core is fire and forget: a message published in the instant before the
-# subscriber is ready is dropped and nobody says so. The broker counts what it
-# delivered per subscription, so that counter —and not a sleep— is what says
-# whether it arrived. Publishing again only when NOTHING was delivered keeps
-# the check below honest: if it had arrived, a second copy would show up as a
-# second row and fail, which is exactly what it is there to catch.
-# The endpoint answers pretty-printed, so the whitespace goes first: without
-# that, every field is its own line and the object cannot be matched whole.
-delivered() {
-  $COMPOSE exec -T broker wget -qO- "http://127.0.0.1:8222/subsz?subs=1" 2>/dev/null \
-    | tr -d " \n" | tr "}" "\n" | grep "order.placed.v1" | grep "axon-warehouse" \
-    | sed 's/.*"msgs":\([0-9]*\).*/\1/' | awk '{t += $1} END {print t + 0}'
-}
-
+# subscriber is ready is dropped and nobody says so. So it is published again
+# until ITS OWN row lands, with a new id each time.
+#
+# Not by watching the broker's delivery counter, which is what this did first
+# and got wrong: the outbox relay publishes the demo's real orders on a timer,
+# so the counter moves for somebody else's message and the check believes its
+# own arrived. What proves delivery is the row, and nothing else.
+#
+# A new id per attempt keeps the assertion below honest: if the queue group
+# did NOT deduplicate, the id that arrived would have two rows, and that is
+# checked at the end over every id this ran.
 publish() {
   docker run --rm --network "$NET" natsio/nats-box:0.14.5 \
-    nats pub order.placed.v1 -s nats://broker:4222 "$1" > .axon/nats-pub.log 2>&1
+    nats pub order.placed.v1 -s nats://broker:4222 \
+    "{\"id\":\"$1\",\"type\":\"order.placed@v1\",\"source\":\"orders\",\"time\":\"2026-09-08T12:00:00Z\",\"traceparent\":\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\",\"correlationId\":\"$1\",\"causationId\":null,\"data\":{\"orderId\":\"o-$1\",\"customerId\":\"c-1\",\"customerEmail\":\"$EMAIL\",\"total\":{\"amount\":2500,\"currency\":\"MXN\"}}}" \
+    > .axon/nats-pub.log 2>&1
 }
 
 echo "  one real envelope, published to the broker"
-ENVELOPE="{\"id\":\"$ID\",\"type\":\"order.placed@v1\",\"source\":\"orders\",\"time\":\"2026-09-08T12:00:00Z\",\"traceparent\":\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\",\"correlationId\":\"$ID\",\"causationId\":null,\"data\":{\"orderId\":\"o-$ID\",\"customerId\":\"c-1\",\"customerEmail\":\"$EMAIL\",\"total\":{\"amount\":2500,\"currency\":\"MXN\"}}}"
-
-before=$(delivered)
-i=0
-while [ "$i" -lt 5 ]; do
-  publish "$ENVELOPE"
-  j=0
-  while [ "$j" -lt 10 ]; do
-    if [ "$(delivered)" -gt "$before" ]; then break; fi
-    j=$((j + 1)); sleep 1
-  done
-  if [ "$(delivered)" -gt "$before" ]; then break; fi
-  echo "    the broker delivered nothing; publishing again"
-  i=$((i + 1))
-done
-[ "$(delivered)" -gt "$before" ] || { echo "  FAILED: the broker never delivered it"; exit 1; }
-
-# Generous on purpose: the generated config gives every sink a 256 MB disk
-# buffer —five of them— and on a loaded runner creating those files takes a
-# while before the first row moves. Measuring the config as it is means
-# waiting for what the config asks for.
-i=0
+attempt=0
 rows=0
-while [ "$i" -lt 90 ]; do
-  rows=$(ch -q "SELECT count(*) FROM axon.order_placed_v1 WHERE event_id = '$ID'")
+while [ "$attempt" -lt 5 ]; do
+  ID="vector-$attempt-$(date +%s)"
+  publish "$ID"
+  i=0
+  while [ "$i" -lt 30 ]; do
+    rows=$(ch -q "SELECT count(*) FROM axon.order_placed_v1 WHERE event_id = '$ID'")
+    if [ "$rows" -ge 1 ]; then break; fi
+    i=$((i + 1)); sleep 2
+  done
   if [ "$rows" -ge 1 ]; then break; fi
-  i=$((i + 1)); sleep 2
+  echo "    nothing landed; publishing again"
+  attempt=$((attempt + 1))
 done
+
 if [ "$rows" -ne 1 ]; then
   echo "  FAILED: $rows rows for one event (the queue group does not deduplicate, or nothing arrived)"
   echo "  --- what the publisher said ---"; tail -3 .axon/nats-pub.log
   # What the BROKER counted: `msgs` per subscription says whether NATS
-  # delivered it at all, which is the fork in the diagnosis —lost on the way in,
-  # or lost between Vector and the warehouse.
-  echo "  --- what the broker counted: $(delivered) delivered ---"
+  # The broker's own view: how many subscriptions of the queue group exist and
+  # what they were sent. It is the fork in the diagnosis —lost on the way in, or
+  # lost between Vector and the warehouse.
+  echo "  --- what the broker sees ---"
+  $COMPOSE exec -T broker wget -qO- "http://127.0.0.1:8222/subsz?subs=1" 2>/dev/null \
+    | tr -d " \n" | tr "}" "\n" | grep "order.placed.v1" | grep "axon-warehouse" || true
   echo "  --- rows in the table: $(ch -q "SELECT count(*) FROM axon.order_placed_v1"), \
 of them from this check: $(ch -q "SELECT count(*) FROM axon.order_placed_v1 WHERE event_id LIKE 'vector-%'") ---"
   echo "  --- vector 1 ---"; docker logs axon-vector-1 2>&1 | tail -40
   echo "  --- vector 2 ---"; docker logs axon-vector-2 2>&1 | tail -40
+  exit 1
+fi
+dup=$(ch -q "SELECT max(n) FROM (SELECT count(*) AS n FROM axon.order_placed_v1 \
+             WHERE event_id LIKE 'vector-%' GROUP BY event_id)")
+if [ "$dup" != "1" ]; then
+  echo "  FAILED: an event landed $dup times; the queue group does not deduplicate"
   exit 1
 fi
 echo "  OK: 1 row from 2 replicas; the queue group delivers the event once"
