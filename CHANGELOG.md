@@ -7,6 +7,16 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.24.2] — 2026-09-09
+
+### Corregido
+
+- **El generador de Go emitía código que no compila** cuando un manifiesto declaraba
+  `scopes` y ningún `errors`: `RequireScopes` devuelve un `&Problem` y el tipo solo se
+  escribía al lado de las fallas declaradas — `undefined: Problem` en la primera
+  compilación. Ahora `Problem` sale si hay fallas **o** scopes, y el conformance genera ese
+  caso exacto y lo pasa por `go build`.
+
 ## [0.24.1] — 2026-09-09
 
 ### Corregido
