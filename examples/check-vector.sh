@@ -61,7 +61,7 @@ subs() {
 }
 i=0
 while [ "$i" -lt 90 ]; do
-  [ "$(subs)" -ge 2 ] && break
+  if [ "$(subs)" -ge 2 ]; then break; fi
   i=$((i + 1)); sleep 1
 done
 if [ "$(subs)" -lt 2 ]; then
@@ -72,17 +72,48 @@ if [ "$(subs)" -lt 2 ]; then
 fi
 echo "  OK: 2 replicas subscribed to order.placed.v1, both in the queue group"
 
+# NATS core is fire and forget: a message published in the instant before the
+# subscriber is ready is dropped and nobody says so. The broker counts what it
+# delivered per subscription, so that counter —and not a sleep— is what says
+# whether it arrived. Publishing again only when NOTHING was delivered keeps
+# the check below honest: if it had arrived, a second copy would show up as a
+# second row and fail, which is exactly what it is there to catch.
+# The endpoint answers pretty-printed, so the whitespace goes first: without
+# that, every field is its own line and the object cannot be matched whole.
+delivered() {
+  $COMPOSE exec -T broker wget -qO- "http://127.0.0.1:8222/subsz?subs=1" 2>/dev/null \
+    | tr -d " \n" | tr "}" "\n" | grep "order.placed.v1" | grep "axon-warehouse" \
+    | sed 's/.*"msgs":\([0-9]*\).*/\1/' | awk '{t += $1} END {print t + 0}'
+}
+
+publish() {
+  docker run --rm --network "$NET" natsio/nats-box:0.14.5 \
+    nats pub order.placed.v1 -s nats://broker:4222 "$1" > .axon/nats-pub.log 2>&1
+}
+
 echo "  one real envelope, published to the broker"
-docker run --rm --network "$NET" natsio/nats-box:0.14.5 \
-  nats pub order.placed.v1 -s nats://broker:4222 \
-  "{\"id\":\"$ID\",\"type\":\"order.placed@v1\",\"source\":\"orders\",\"time\":\"2026-09-08T12:00:00Z\",\"traceparent\":\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\",\"correlationId\":\"$ID\",\"causationId\":null,\"data\":{\"orderId\":\"o-$ID\",\"customerId\":\"c-1\",\"customerEmail\":\"$EMAIL\",\"total\":{\"amount\":2500,\"currency\":\"MXN\"}}}" \
-  > .axon/nats-pub.log 2>&1
+ENVELOPE="{\"id\":\"$ID\",\"type\":\"order.placed@v1\",\"source\":\"orders\",\"time\":\"2026-09-08T12:00:00Z\",\"traceparent\":\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\",\"correlationId\":\"$ID\",\"causationId\":null,\"data\":{\"orderId\":\"o-$ID\",\"customerId\":\"c-1\",\"customerEmail\":\"$EMAIL\",\"total\":{\"amount\":2500,\"currency\":\"MXN\"}}}"
+
+before=$(delivered)
+i=0
+while [ "$i" -lt 5 ]; do
+  publish "$ENVELOPE"
+  j=0
+  while [ "$j" -lt 10 ]; do
+    if [ "$(delivered)" -gt "$before" ]; then break; fi
+    j=$((j + 1)); sleep 1
+  done
+  if [ "$(delivered)" -gt "$before" ]; then break; fi
+  echo "    the broker delivered nothing; publishing again"
+  i=$((i + 1))
+done
+[ "$(delivered)" -gt "$before" ] || { echo "  FAILED: the broker never delivered it"; exit 1; }
 
 i=0
 rows=0
 while [ "$i" -lt 60 ]; do
   rows=$(ch -q "SELECT count(*) FROM axon.order_placed_v1 WHERE event_id = '$ID'")
-  [ "$rows" -ge 1 ] && break
+  if [ "$rows" -ge 1 ]; then break; fi
   i=$((i + 1)); sleep 1
 done
 if [ "$rows" -ne 1 ]; then
@@ -91,9 +122,7 @@ if [ "$rows" -ne 1 ]; then
   # What the BROKER counted: `msgs` per subscription says whether NATS
   # delivered it at all, which is the fork in the diagnosis —lost on the way in,
   # or lost between Vector and the warehouse.
-  echo "  --- what the broker counted ---"
-  $COMPOSE exec -T broker wget -qO- "http://127.0.0.1:8222/subsz?subs=1" 2>/dev/null \
-    | tr "}" "\n" | grep "order.placed.v1" | grep "axon-warehouse" || true
+  echo "  --- what the broker counted: $(delivered) delivered ---"
   echo "  --- rows in the table: $(ch -q "SELECT count(*) FROM axon.order_placed_v1") ---"
   echo "  --- vector 1 ---"; docker logs axon-vector-1 2>&1 | tail -40
   echo "  --- vector 2 ---"; docker logs axon-vector-2 2>&1 | tail -40
