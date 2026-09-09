@@ -259,6 +259,16 @@ In 2.x the direction is from outside the app: `publish` is what others publish t
 
 What AsyncAPI does not declare comes out as `TODO` and `verify` treats it as absent.
 
+## `axon crud <manifest> --expand`
+Prints the methods a `[crud.*]` stands for, as TOML. It exists so overriding one is copy,
+paste and edit: a method declared by hand **wins whole**, and this is what it would have
+replaced. For an overridden endpoint it prints what axon *would* have generated and says
+so — printing the override there would be a lie in the one place somebody reads to decide
+whether to override.
+
+There is no partial override on purpose. Two declarations of the same endpoint with merge
+rules is a question nobody can answer at three in the morning.
+
 ## `axon auth <manifest> [--lang ts]`
 The verifier for what `[auth]` declares: standard JOSE, driven by the manifest — the
 issuers, the key set, the accepted algorithms and the name of every claim. The same file

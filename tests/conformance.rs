@@ -8661,3 +8661,128 @@ fn the_verifier_comes_out_of_the_manifest_and_names_no_provider() {
     assert!(!ok);
     assert!(err.contains("declares no `[auth]`"), "{err}");
 }
+
+/// A CRUD: the five endpoints with no business logic. What makes declaring
+/// them worth anything is not the typing saved — it is that the compiler
+/// already reads the migrations with a real SQL parser, so a CRUD over a
+/// column that does not exist fails at build and not at the first request.
+#[test]
+fn a_crud_is_checked_against_the_real_schema() {
+    let dir = std::env::temp_dir().join("axon-crud");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/V1__item.sql"),
+        "CREATE TABLE item (\n  id uuid PRIMARY KEY,\n  tenant_id uuid NOT NULL,\n  \
+         name text NOT NULL,\n  price_amount bigint NOT NULL,\n  price_currency text NOT NULL\n);\n",
+    )
+    .unwrap();
+    let base = "service = \"shop\"\nowner = \"t\"\ntier = \"2\"\nversion = \"1.0.0\"\n\
+        [cap]\nconsistency = \"eventual\"\non_partition = \"degrade\"\nmax_staleness_ms = 5000\n\
+        [infra]\nstate = \"postgres\"\nmigrations = \"sql/shop\"\ntenant_column = \"tenant_id\"\n\
+        [api]\nscopes = [\"items:read\", \"items:write\"]\n";
+    let crud = "[crud.item]\ntable = \"item\"\nkey = \"itemId\"\npath = \"/v1/items\"\n\
+        fields = { name = \"string\", price = \"money\" }\n\
+        read_scope = \"items:read\"\nwrite_scope = \"items:write\"\n";
+    let write = |extra: &str| {
+        std::fs::write(dir.join("shop.toml"), format!("{base}{extra}")).unwrap();
+    };
+    write(crud);
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "a correct CRUD did not pass: {err}");
+
+    // the five endpoints, as ordinary methods: everything downstream works on
+    // them with no new machinery
+    let (api, _, ok) = axon(&["openapi", dir.to_str().unwrap()]);
+    assert!(ok);
+    for route in [
+        "\"post\"",
+        "/v1/tenants/{tenantId}/items",
+        "/v1/tenants/{tenantId}/items/{itemId}",
+    ] {
+        assert!(api.contains(route), "{route} is missing:\n{api}");
+    }
+    // and axon's own rules applied to them: the create takes the key so a
+    // retry cannot duplicate the row, and the list pages by cursor
+    let (ts, _, _) = axon(&["build", dir.join("shop.toml").to_str().unwrap()]);
+    assert!(ts.contains("createItem"), "{ts}");
+    assert!(ts.contains("cursor"), "the list does not page by cursor");
+
+    // a table nobody migrates: the five endpoints would come out and every one
+    // would fail on its first query
+    write(&crud.replace("\"item\"", "\"items\""));
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("is in no migration"), "{err}");
+
+    // a column that does not exist
+    write(&crud.replace("price = \"money\"", "colour = \"string\""));
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("has no column `colour`"), "{err}");
+
+    // one scope for reading and writing: a token issued to read then deletes
+    write(&crud.replace(
+        "write_scope = \"items:write\"",
+        "write_scope = \"items:read\"",
+    ));
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("then deletes rows"), "{err}");
+
+    // the key has to identify one row: without a unique, the read returns one
+    // of several and the update writes to all of them
+    write(&crud.replace(
+        "key = \"itemId\"",
+        "key = \"itemId\"\nkey_column = \"name\"",
+    ));
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("would write to all of them"), "{err}");
+}
+
+/// The override, and why there is only one kind: a method declared by hand
+/// wins WHOLE. Two declarations of the same endpoint with merge rules is a
+/// question nobody can answer at three in the morning.
+#[test]
+fn a_hand_written_method_wins_over_the_crud() {
+    let dir = std::env::temp_dir().join("axon-crud-override");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/V1__item.sql"),
+        "CREATE TABLE item (id uuid PRIMARY KEY, tenant_id uuid NOT NULL, name text NOT NULL);\n",
+    )
+    .unwrap();
+    let manifest = "service = \"shop\"\nowner = \"t\"\ntier = \"2\"\nversion = \"1.0.0\"\n\
+        [cap]\nconsistency = \"eventual\"\non_partition = \"degrade\"\nmax_staleness_ms = 5000\n\
+        [infra]\nstate = \"postgres\"\nmigrations = \"sql/shop\"\ntenant_column = \"tenant_id\"\n\
+        [api]\nscopes = [\"items:read\", \"items:write\"]\n\
+        [crud.item]\ntable = \"item\"\nkey = \"itemId\"\npath = \"/v1/items\"\n\
+        fields = { name = \"string\" }\nread_scope = \"items:read\"\nwrite_scope = \"items:write\"\n\
+        [methods.readItem]\nhttp = \"GET /v1/tenants/{tenantId}/items/{itemId}\"\n\
+        auth = \"required\"\nscopes = [\"items:read\"]\n\
+        in = { tenantId = \"uuid\", itemId = \"uuid\" }\n\
+        out = { itemId = \"uuid\", name = \"string\", createdBy = \"uuid\" }\n";
+    std::fs::write(dir.join("shop.toml"), manifest).unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    // the hand-written one is what travels
+    let (ts, _, _) = axon(&["build", dir.join("shop.toml").to_str().unwrap()]);
+    assert!(ts.contains("createdBy"), "the override did not win:\n{ts}");
+
+    // and `--expand` prints what WOULD have been generated, saying it is
+    // overridden: printing the override there would be a lie in the one place
+    // somebody reads to decide whether to override
+    let (toml, err, ok) = axon(&["crud", dir.join("shop.toml").to_str().unwrap(), "--expand"]);
+    assert!(ok, "{err}");
+    assert!(toml.contains("`readItem` is declared by hand"), "{toml}");
+    assert!(
+        !toml
+            .split("[methods.readItem]")
+            .nth(1)
+            .unwrap_or_default()
+            .contains("createdBy"),
+        "it printed the override as if axon had generated it:\n{toml}"
+    );
+}

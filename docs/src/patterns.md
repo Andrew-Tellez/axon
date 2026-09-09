@@ -859,6 +859,56 @@ And a different type between the two is an error too: on the swap, the view chan
 with nothing saying so. A column too many in the shadow is only a warning — it is spare
 until the next swap, and after that it is the view that has it.
 
+## The CRUD, and the five rules it inherits
+
+The five endpoints with no business logic, that every service rewrites anyway: create,
+read, update, delete, list. By hand they are five routes, five scopes, five entries in the
+OpenAPI and five chances to forget the tenant in the `WHERE`.
+
+```toml
+[crud.item]
+table = "item"                                   # it has to exist in the migrations
+key   = "itemId"                                 # `key_column = "id"` by default
+path  = "/v1/items"
+fields = { name = "string", price = "money" }
+read_scope  = "items:read"
+write_scope = "items:write"
+write_roles = ["admin"]
+```
+
+They expand into ordinary `[methods.*]` **before anything else reads the manifest**, so
+`verify`, the OpenAPI, the testkit, the edge and the generated client work on them with no
+new machinery. Which also means they inherit every rule that already applies to a method,
+and two of those shaped the design:
+
+- the create **takes the key from the caller**, because axon refuses a mutation that is not
+  idempotent — a client retry would duplicate the row, and a server-generated id is exactly
+  what makes that impossible to fix;
+- the list **pages by cursor**, because an offset breaks as the table grows.
+
+What makes declaring it worth anything is not the typing saved. The compiler already reads
+the migrations with a real SQL parser, so:
+
+| The rule | What it prevents |
+| --- | --- |
+| the table is in a migration | five endpoints that come out and fail on their first query |
+| every field is a column (`money` is two) | an `INSERT` that fails the first time somebody calls it |
+| the key is covered by a PRIMARY KEY or UNIQUE | the read returns *one of* several rows and the update writes to *all* of them |
+| the table carries the `tenant_column`, or is exempt | a CRUD is exactly where the `WHERE` gets forgotten |
+| reads and writes are different scopes | a token issued to read deletes a row |
+
+### Overriding one
+
+Declare the method by hand and it wins, whole:
+
+```console
+$ axon crud manifests/shop.toml --expand      # what it would generate, ready to paste
+```
+
+Copy the one you want to change, edit it, and it replaces the generated one. There is no
+partial override —"the same but with another `out`"— on purpose: that is a second language
+with its own merge rules, and the day the two disagree nobody knows which one is serving.
+
 ## The catalog: one list in three places
 
 Currencies, statuses, reasons, countries. The list nobody thinks is worth declaring, so it

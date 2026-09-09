@@ -1254,6 +1254,117 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // ---- the CRUD, against the real schema ----
+    //
+    // The five endpoints with no business logic. What makes declaring them
+    // worth anything is not the typing saved: it is that the compiler already
+    // reads the migrations with a real SQL parser, so a CRUD over a column
+    // that does not exist fails here instead of at the first request.
+    let crud_schemas = crate::manifest::schemas(ms);
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        for (name, c) in &m.crud {
+            for op in &c.operations {
+                if !CRUD_OPERATIONS.contains(&op.as_str()) {
+                    errors.push(format!(
+                        "{svc}: `[crud.{name}] operations` has `{op}`, which is not one of {}",
+                        CRUD_OPERATIONS.join(", ")
+                    ));
+                }
+            }
+            if m.infra.state.is_none() {
+                errors.push(format!(
+                    "{svc}: `[crud.{name}]` with no `[infra] state`: there is no table to read"
+                ));
+                continue;
+            }
+            let Some(tables) = crud_schemas.get(svc) else {
+                warnings.push(format!(
+                    "{svc}: `[crud.{name}]` and no migrations were read, so nothing can check \
+                     that `{}` and its columns exist",
+                    c.table
+                ));
+                continue;
+            };
+            let Some(table) = tables.get(&c.table) else {
+                errors.push(format!(
+                    "{svc}: `[crud.{name}] table = \"{}\"` is in no migration. The five \
+                     endpoints would come out and every one of them would fail on its first \
+                     query",
+                    c.table
+                ));
+                continue;
+            };
+            let key_col = c.key_column();
+            if !table.has(&key_col) {
+                errors.push(format!(
+                    "{svc}: `[crud.{name}]` is keyed by `{key_col}` and `{}` has no such \
+                     column",
+                    c.table
+                ));
+            } else if !table.uniques.iter().any(|u| u == &vec![key_col.clone()]) {
+                // Not unique means the read returns "a" row and the update
+                // writes "some" rows: both work in a demo and neither is right.
+                errors.push(format!(
+                    "{svc}: `[crud.{name}]` is keyed by `{}.{key_col}` and no PRIMARY KEY or \
+                     UNIQUE covers it alone. The read would return one of several rows and the \
+                     update would write to all of them",
+                    c.table
+                ));
+            }
+            for (field, kind) in &c.fields {
+                // `money` is two columns, here as everywhere else.
+                let cols: Vec<String> = match kind.as_str() {
+                    "money" => vec![
+                        format!("{}_amount", crate::bi::snake(field)),
+                        format!("{}_currency", crate::bi::snake(field)),
+                    ],
+                    _ => vec![crate::bi::snake(field)],
+                };
+                for col in cols {
+                    if !table.has(&col) {
+                        errors.push(format!(
+                            "{svc}: `[crud.{name}]` writes `{field}` and `{}` has no column \
+                             `{col}`. The endpoint would come out and the INSERT would fail on \
+                             its first call",
+                            c.table
+                        ));
+                    }
+                }
+            }
+            // The tenant is not optional in a multi-tenant table: a CRUD is
+            // exactly where the `WHERE` gets forgotten, and the RLS is the last
+            // line and not the only one.
+            if let Some(col) = &m.infra.tenant_column {
+                if !table.has(col) && !m.infra.tenant_exempt.contains(&c.table) {
+                    errors.push(format!(
+                        "{svc}: `[crud.{name}]` is over `{}`, which has no `{col}`, and the \
+                         service is multi-tenant. Either the table carries it or it is listed \
+                         in `tenant_exempt` as a decision",
+                        c.table
+                    ));
+                }
+            }
+            // Reads and writes are not the same permission: one scope for both
+            // is how a token issued to read deletes a row.
+            let writes = ["create", "update", "delete"].iter().any(|o| c.has(o));
+            if writes && c.write_scope.is_none() {
+                errors.push(format!(
+                    "{svc}: `[crud.{name}]` creates, updates or deletes and declares no \
+                     `write_scope`. Anybody the edge lets through can write"
+                ));
+            }
+            if c.read_scope.is_some() && c.read_scope == c.write_scope {
+                errors.push(format!(
+                    "{svc}: `[crud.{name}]` uses `{}` for reading and for writing. A token \
+                     issued to read then deletes rows, and the difference between the two is \
+                     the only thing a scope is for",
+                    c.read_scope.clone().unwrap_or_default()
+                ));
+            }
+        }
+    }
+
     // ---- the engine has to exist ----
     for m in ms.iter().filter(|m| !m.external) {
         let Some(motor) = &m.infra.state else {

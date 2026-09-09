@@ -224,6 +224,13 @@ enum Cmd {
         #[arg(long, default_value = "ts", value_parser = ["ts"])]
         lang: String,
     },
+    /// what a `[crud.*]` stands for, as TOML you can paste and edit
+    Crud {
+        manifest: String,
+        /// prints the generated methods instead of nothing
+        #[arg(long)]
+        expand: bool,
+    },
     /// the declared lists: table, seed and type from one place
     Catalog {
         sources: Vec<String>,
@@ -893,6 +900,13 @@ fn run() -> Result<ExitCode, String> {
             let _ = lang;
             let m = manifest::load_any(&manifest)?;
             print!("{}", emit::verifier_ts(&m)?)
+        }
+        Cmd::Crud { manifest, expand } => {
+            let m = manifest::load_any(&manifest)?;
+            if !expand {
+                return Err("nothing to do without `--expand`".into());
+            }
+            print!("{}", catalog::expanded_toml(&m)?)
         }
         Cmd::Catalog { sources, service } => {
             let ms = manifest::discover(&sources)?;

@@ -1054,6 +1054,203 @@ impl Metric {
     }
 }
 
+/// A CRUD, declared once.
+///
+/// The five endpoints that have no business logic and that every service
+/// rewrites anyway: create, read, update, delete, list. Written by hand they
+/// are five routes, five scopes, five entries in the OpenAPI, five handlers
+/// and five chances to forget the tenant in the `WHERE`.
+///
+/// Declared, they expand into ordinary `[methods.*]` before anything else
+/// looks at the manifest, so `verify`, the OpenAPI, the testkit, the edge and
+/// the generated client work on them with no new machinery. And because the
+/// compiler already reads the migrations with a real SQL parser, a CRUD over a
+/// column that does not exist fails at build instead of at the first request.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Crud {
+    /// The table it is over. It has to exist in the declared migrations.
+    pub table: String,
+    /// The key, as the caller names it: `itemId` for a column `id`.
+    pub key: String,
+    /// The column that key maps to. `id` by default.
+    pub key_column: Option<String>,
+    /// The writable shape. Every one has to be a column of the table.
+    #[serde(default)]
+    pub fields: Fields,
+    /// The route prefix: `/v1/items`.
+    pub path: String,
+    /// What each half demands. Reads and writes are not the same permission,
+    /// and giving them one scope is how a token issued to read deletes a row.
+    pub read_scope: Option<String>,
+    pub write_scope: Option<String>,
+    /// Who may write. Same shape as a method's `roles`.
+    #[serde(default)]
+    pub write_roles: Vec<String>,
+    /// Which of the five to generate. All of them by default: a CRUD missing
+    /// its delete is a decision, and it is written down.
+    #[serde(default = "crud_all")]
+    pub operations: Vec<String>,
+}
+
+fn crud_all() -> Vec<String> {
+    CRUD_OPERATIONS.iter().map(|s| s.to_string()).collect()
+}
+
+pub const CRUD_OPERATIONS: [&str; 5] = ["create", "read", "update", "delete", "list"];
+
+impl Crud {
+    pub fn key_column(&self) -> String {
+        self.key_column.clone().unwrap_or_else(|| "id".into())
+    }
+    pub fn has(&self, op: &str) -> bool {
+        self.operations.iter().any(|o| o == op)
+    }
+}
+
+/// Expands every `[crud.*]` into the methods it stands for.
+///
+/// It runs at load, before anything reads the manifest, so nothing downstream
+/// has to know that a CRUD exists: what it sees is five declared methods, and
+/// every rule that already applies to a method applies to these.
+pub fn expand(m: &mut Manifest) -> Result<(), String> {
+    let cruds: Vec<(String, Crud)> = m.crud.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (name, c) in cruds {
+        let entity = pascal(&name);
+        let tenant = m.infra.tenant_column.clone();
+        // The tenant travels in the ROUTE, like everywhere else in axon: it is
+        // what lets the sharder route the query and the RLS bind it, and a
+        // CRUD that leaves it implicit is the one place it gets forgotten.
+        let (prefix, tenant_in) = match &tenant {
+            Some(col) => (
+                format!(
+                    "/v1/tenants/{{{}}}{}",
+                    camel(col),
+                    c.path.trim_start_matches("/v1")
+                ),
+                Some(camel(col)),
+            ),
+            None => (c.path.clone(), None),
+        };
+        let with_key = |mut f: Fields| -> Fields {
+            if let Some(t) = &tenant_in {
+                f.shift_insert(0, t.clone(), "uuid".to_string());
+            }
+            f
+        };
+        let mut out_fields = c.fields.clone();
+        out_fields.shift_insert(0, c.key.clone(), "uuid".to_string());
+
+        let mut add =
+            |op: &str, verb: &str, path: String, input: Fields, output: Fields, idem: bool| {
+                if !c.has(op) {
+                    return;
+                }
+                let method = format!("{op}{entity}");
+                // A method declared by hand WINS, whole. That is the override, and
+                // it is one concept and not a second dialect: `axon crud --expand`
+                // prints what would be generated, ready to paste and edit. A
+                // partial override —"the same but with another `out`"— would be a
+                // second language with its own merge rules, and the day the two
+                // disagree nobody knows which one is serving.
+                if m.methods.contains_key(&method) {
+                    return;
+                }
+                let write = matches!(op, "create" | "update" | "delete");
+                m.methods.insert(
+                    method,
+                    Method {
+                        input,
+                        output,
+                        http: Some(format!("{verb} {path}")),
+                        idempotent: idem,
+                        auth: Some("required".into()),
+                        scopes: match write {
+                            true => c.write_scope.clone().into_iter().collect(),
+                            false => c.read_scope.clone().into_iter().collect(),
+                        },
+                        roles: match write {
+                            true => c.write_roles.clone(),
+                            false => Vec::new(),
+                        },
+                        paginated: op == "list",
+                        ..Default::default()
+                    },
+                );
+            };
+        let key_path = format!("{prefix}/{{{}}}", c.key);
+        let mut key_in = Fields::new();
+        key_in.insert(c.key.clone(), "uuid".to_string());
+        // The create takes the KEY from the caller, and is therefore
+        // idempotent. axon's own rule refuses a mutation that is not —a client
+        // retry would duplicate the row— and a server-generated id is exactly
+        // what makes that impossible to fix. A uuid from the caller costs
+        // nothing and makes the retry safe.
+        let create_in = {
+            let mut f = c.fields.clone();
+            f.shift_insert(0, c.key.clone(), "uuid".to_string());
+            with_key(f)
+        };
+        add(
+            "create",
+            "POST",
+            prefix.clone(),
+            create_in,
+            {
+                let mut f = Fields::new();
+                f.insert(c.key.clone(), "uuid".to_string());
+                f
+            },
+            true,
+        );
+        add(
+            "read",
+            "GET",
+            key_path.clone(),
+            with_key(key_in.clone()),
+            out_fields.clone(),
+            false,
+        );
+        add(
+            "update",
+            "PATCH",
+            key_path.clone(),
+            {
+                let mut f = key_in.clone();
+                for (k, v) in &c.fields {
+                    f.insert(k.clone(), v.clone());
+                }
+                with_key(f)
+            },
+            out_fields.clone(),
+            true,
+        );
+        add(
+            "delete",
+            "DELETE",
+            key_path,
+            with_key(key_in),
+            {
+                let mut f = Fields::new();
+                f.insert("deleted".into(), "bool".into());
+                f
+            },
+            true,
+        );
+        // The list pages by CURSOR and not by offset, because axon's own rule
+        // over `paginated` says so: an offset breaks as the table grows, and a
+        // generated endpoint has no excuse to be the one that ignores it.
+        let mut list_in = Fields::new();
+        list_in.insert("cursor".into(), "string".into());
+        list_in.insert("limit".into(), "int".into());
+        let mut list_out = Fields::new();
+        list_out.insert("items".into(), "json".into());
+        list_out.insert("cursor".into(), "string".into());
+        add("list", "GET", prefix, with_key(list_in), list_out, false);
+    }
+    Ok(())
+}
+
 /// How a caller becomes a principal.
 ///
 /// axon authenticates nobody and holds no credential. What is declared here is
@@ -1383,6 +1580,9 @@ pub struct Manifest {
     /// The shape a verified token must have. See `Auth`.
     #[serde(default)]
     pub auth: Auth,
+    /// The five endpoints with no business logic. See `Crud`.
+    #[serde(default, skip_serializing)]
+    pub crud: IndexMap<String, Crud>,
     /// Business metrics over the declared events. See `Metric`.
     #[serde(default)]
     pub metrics: IndexMap<String, Metric>,
@@ -1483,12 +1683,14 @@ pub struct Fragment {
     pub view: IndexMap<String, View>,
     pub metrics: IndexMap<String, Metric>,
     pub catalog: IndexMap<String, Catalog>,
+    pub crud: IndexMap<String, Crud>,
 }
 
 /// The blocks a fragment may carry. Anything else is the service's, and saying
 /// so by name beats a generic "unknown field".
-const FRAGMENT_BLOCKS: [&str; 12] = [
+const FRAGMENT_BLOCKS: [&str; 13] = [
     "catalog",
+    "crud",
     "pii",
     "emits",
     "consumes",
@@ -1608,6 +1810,10 @@ pub fn load(path: &Path) -> Result<Manifest, String> {
         let f: Fragment = toml::from_str(&piece).map_err(|e| format!("{}: {e}", file.display()))?;
         merge(&mut m, f, &file)?;
     }
+    // Last, and before anybody reads the manifest: what a CRUD stands for is
+    // five ordinary methods, and every rule that already applies to a method
+    // has to apply to them. Expanding here is what buys that for free.
+    expand(&mut m)?;
     Ok(m)
 }
 

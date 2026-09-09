@@ -39,6 +39,7 @@ axon infra --schema                               # the plan's JSON Schema, for 
 axon ci manifests/payments.toml --target gcp      # the pipeline, with axon's own gates
 axon ci manifests/payments.toml --target gcp --forge gitlab   # the same gates for GitLab
 axon auth manifests/orders.toml                   # the verifier, from the declared claims
+axon crud manifests/shop.toml --expand            # what a [crud.*] stands for, to paste and edit
 axon catalog manifests/ --service orders          # the declared lists: table, seed and type
 axon rls manifests/                               # per-row RLS and masked views
 axon pooler manifests/ --service orders --target local   # pgdog, from the manifest

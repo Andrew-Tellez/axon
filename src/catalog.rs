@@ -226,3 +226,74 @@ pub fn build_ts(m: &Manifest) -> String {
     }
     o.join("\n\n")
 }
+
+/// The methods a `[crud.*]` stands for, as TOML.
+///
+/// It exists so overriding one is copy, paste and edit: axon prints exactly
+/// what it would generate, the person keeps the parts they want and changes
+/// the rest, and a method declared by hand wins whole. One concept instead of
+/// a second dialect of partial overrides with their own merge rules.
+pub fn expanded_toml(m: &Manifest) -> Result<String, String> {
+    if m.crud.is_empty() {
+        return Err(format!("{}: declares no `[crud.*]`", m.service));
+    }
+    let mut o = vec![
+        format!(
+            "# The methods `{}`'s CRUDs stand for, as axon expands them.",
+            m.service
+        ),
+        "#".to_string(),
+        "# Paste one into the manifest and edit it: a method declared by hand wins".to_string(),
+        "# whole, and `verify` says so. There is no partial override on purpose —".to_string(),
+        "# two declarations of the same endpoint with merge rules is a question".to_string(),
+        "# nobody can answer at three in the morning.".to_string(),
+        String::new(),
+    ];
+    let fields = |f: &Fields| -> String {
+        f.iter()
+            .map(|(k, v)| format!("{k} = \"{v}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    // The pure expansion, with the hand-written methods out of the way: what
+    // the manifest holds for an overridden endpoint is the OVERRIDE, and
+    // printing that as "what axon would generate" would be a lie in the one
+    // place somebody is reading to decide whether to override.
+    let mut pure = m.clone();
+    pure.methods.clear();
+    expand(&mut pure)?;
+    for (name, me) in &pure.methods {
+        let overridden = m.methods.get(name).is_some_and(|real| {
+            real.http != me.http || real.input != me.input || real.output != me.output
+        });
+        if overridden {
+            o.push(format!(
+                "# `{name}` is declared by hand in the manifest and that one wins: this is\n\
+                 # what axon WOULD have generated, for comparison."
+            ));
+        }
+        o.push(format!("[methods.{name}]"));
+        if let Some(h) = &me.http {
+            o.push(format!("http = \"{h}\""));
+        }
+        if let Some(a) = &me.auth {
+            o.push(format!("auth = \"{a}\""));
+        }
+        if !me.scopes.is_empty() {
+            o.push(format!("scopes = {:?}", me.scopes));
+        }
+        if !me.roles.is_empty() {
+            o.push(format!("roles = {:?}", me.roles));
+        }
+        if me.idempotent {
+            o.push("idempotent = true".into());
+        }
+        if me.paginated {
+            o.push("paginated = true".into());
+        }
+        o.push(format!("in = {{ {} }}", fields(&me.input)));
+        o.push(format!("out = {{ {} }}", fields(&me.output)));
+        o.push(String::new());
+    }
+    Ok(o.join("\n"))
+}
