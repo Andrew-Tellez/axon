@@ -378,6 +378,42 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
 /// axon's— and only the syntax around them changes.
 pub const FORGES: [&str; 2] = ["github", "gitlab"];
 
+/// One `axon build` per contract the repo keeps, each in the language its
+/// extension names.
+fn regenerate(ci: &crate::verify::Ci, svc: &str, manifests: &str) -> Vec<String> {
+    ci.contracts(svc)
+        .iter()
+        .map(|out| {
+            let lang = if out.ends_with(".go") { "go" } else { "ts" };
+            format!("axon build {manifests}/{svc}.toml {manifests}/ --lang {lang} > {out}")
+        })
+        .collect()
+}
+
+/// The manifest's `migrations` is relative to the manifest —that is how it is
+/// read everywhere else— and the pipeline runs from the repo's root. Joining
+/// them is the difference between `sql/inventory` and a `./../sql/inventory`
+/// that walks out of the checkout.
+fn from_repo_root(manifests_dir: &str, route: &str) -> String {
+    if route.is_empty() || route.starts_with('/') {
+        return route.to_string();
+    }
+    let mut parts: Vec<&str> = vec![];
+    for seg in manifests_dir.split('/').chain(route.split('/')) {
+        match seg {
+            "" | "." => {}
+            ".." => match parts.last() {
+                Some(&last) if last != ".." => {
+                    parts.pop();
+                }
+                _ => parts.push(".."),
+            },
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
 pub fn build_ci(
     m: &Manifest,
     ci: &crate::verify::Ci,
@@ -393,10 +429,9 @@ pub fn build_ci(
 fn build_ci_github(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String {
     let svc = &m.service;
     let en = |field: &String| ci.path(field, svc);
-    let (dir, test, contracts, image, manifests) = (
+    let (dir, test, image, manifests) = (
         en(&ci.service_dir),
         en(&ci.test_cmd),
-        en(&ci.contracts_path),
         ci.image
             .clone()
             .unwrap_or_else(|| {
@@ -405,14 +440,14 @@ fn build_ci_github(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String
             .replace("{service}", svc),
         ci.manifests_dir.clone(),
     );
-    // The gate regenerates what the repo actually keeps. It was hardcoded to
-    // TypeScript, so a Go service was diffed against a language it does not
-    // use: the check passed by generating a file nobody reads.
-    let lang = if contracts.ends_with(".go") { "go" } else { "ts" };
+    // The gate regenerates every contract the repo keeps, in the language of
+    // each one: it was hardcoded to TypeScript and to a single file, so a Go
+    // contract —or a second one— was never compared against anything.
+    let regen = regenerate(ci, svc, &manifests).join("\n          ");
 
     let mut gates = String::new();
     if !migrations_of(m).is_empty() {
-        let route = m.infra.migrations.clone().unwrap_or_default();
+        let route = from_repo_root(&manifests, &m.infra.migrations.clone().unwrap_or_default());
         // The flags come from the naming the repo uses, not from the one axon
         // prefers: handing a Flyway repo axon's convention is what made its
         // own naming look like a mistake.
@@ -501,7 +536,7 @@ jobs:
       - run: axon verify {manifests}/
       - name: generated code up to date
         run: |
-          axon build {manifests}/{svc}.toml {manifests}/ --lang {lang} > {contracts}
+          {regen}
           git diff --exit-code || {{
             echo "::error::generated code is out of date; run axon build"
             exit 1
@@ -546,20 +581,20 @@ jobs:
 fn build_ci_gitlab(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> Result<String, String> {
     let svc = &m.service;
     let en = |field: &String| ci.path(field, svc);
-    let (dir, test, contracts, image, manifests) = (
+    let (dir, test, image, manifests) = (
         en(&ci.service_dir),
         en(&ci.test_cmd),
-        en(&ci.contracts_path),
         ci.image
             .clone()
             .unwrap_or_else(|| "$CI_REGISTRY_IMAGE/{service}@$DIGEST".into())
             .replace("{service}", svc),
         ci.manifests_dir.clone(),
     );
-    // The gate regenerates what the repo actually keeps. It was hardcoded to
-    // TypeScript, so a Go service was diffed against a language it does not
-    // use: the check passed by generating a file nobody reads.
-    let lang = if contracts.ends_with(".go") { "go" } else { "ts" };
+    let regen = regenerate(ci, svc, &manifests)
+        .iter()
+        .map(|c| format!("- {c}"))
+        .collect::<Vec<_>>()
+        .join("\n    ");
     if image.contains("${{") {
         return Err(format!(
             "[ci] image is written for GitHub (`{image}`), and for GitLab that expression is \
@@ -570,7 +605,7 @@ fn build_ci_gitlab(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> Result
 
     let mut gates = String::new();
     if !migrations_of(m).is_empty() {
-        let route = m.infra.migrations.clone().unwrap_or_default();
+        let route = from_repo_root(&manifests, &m.infra.migrations.clone().unwrap_or_default());
         gates.push_str(&format!(
             "    # gate: expand -> migrate -> contract. A `.contract.sql` in the same\n    \
              # deploy as the code that stops using the column breaks the rollback.\n    \
@@ -632,7 +667,7 @@ fn build_ci_gitlab(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> Result
              # the gate that matters: this manifest against ALL the others, and\n    \
              # against the contracts already published\n    \
              - axon verify {manifests}/\n    \
-             - axon build {manifests}/{svc}.toml {manifests}/ --lang {lang} > {contracts}\n    \
+             {regen}\n    \
              - git diff --exit-code || (echo \"generated code is out of date; run axon build\" && exit 1)\n\
 {gates}\n\
          test:\n  \

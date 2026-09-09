@@ -397,6 +397,11 @@ contracts_path = "services/{service}/src/contracts.ts"
 image          = "${{ vars.REGISTRY }}/{service}@${{ steps.imagen.outputs.digest }}"
 ```
 
+`contracts_path` also takes a list, for a repo that keeps the contract in more than
+one language: `["services/{service}/contracts.ts", "services/{service}/axon.go"]`. Each
+one is regenerated in the language its extension names, and the gate diffs all of them —
+the contract nobody lists is the one that rots.
+
 `image` is the one field that is not portable between forges: GitHub's `${{ }}` is
 literal text for GitLab, so the deploy would push an image whose tag is the expression
 itself and nothing would say so until somebody read the registry. Leave it out and each

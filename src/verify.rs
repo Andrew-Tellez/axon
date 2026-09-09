@@ -23,7 +23,9 @@ pub struct Ci {
     pub manifests_dir: String,
     pub service_dir: String,
     pub test_cmd: String,
-    pub contracts_path: String,
+    /// One path, or several: a repo that keeps the contract in two languages
+    /// needs both regenerated, or the one nobody lists is the one that rots.
+    pub contracts_path: Paths,
     /// Absent means "the forge's default", which differs between GitHub and
     /// GitLab: the expression syntax is not portable.
     pub image: Option<String>,
@@ -35,8 +37,26 @@ impl Default for Ci {
             manifests_dir: "manifests".into(),
             service_dir: "services/{service}".into(),
             test_cmd: "make -C services/{service} test".into(),
-            contracts_path: "services/{service}/src/contracts.ts".into(),
+            contracts_path: Paths::One("services/{service}/src/contracts.ts".into()),
             image: None,
+        }
+    }
+}
+
+/// `contracts_path` takes a string or a list, and the string stays the
+/// spelling for the usual case: one language, one file.
+#[derive(Debug, serde::Deserialize)]
+#[serde(untagged)]
+pub enum Paths {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Paths {
+    pub fn all(&self) -> Vec<&String> {
+        match self {
+            Paths::One(p) => vec![p],
+            Paths::Many(ps) => ps.iter().collect(),
         }
     }
 }
@@ -44,6 +64,15 @@ impl Default for Ci {
 impl Ci {
     pub fn path(&self, field: &str, service: &str) -> String {
         field.replace("{service}", service)
+    }
+
+    /// The contracts this repo keeps, with `{service}` already resolved.
+    pub fn contracts(&self, service: &str) -> Vec<String> {
+        self.contracts_path
+            .all()
+            .iter()
+            .map(|p| self.path(p, service))
+            .collect()
     }
 }
 
