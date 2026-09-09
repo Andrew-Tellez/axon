@@ -9061,3 +9061,46 @@ fn every_port_in_the_local_target_can_be_moved() {
         );
     }
 }
+
+/// Scopes without declared errors used to generate Go that did not compile:
+/// `RequireScopes` returns a `&Problem`, and the type was only emitted next
+/// to the failures. Generated code that does not build is not a contract.
+#[test]
+fn go_scopes_without_errors_still_compile() {
+    let dir = std::env::temp_dir().join("axon-go-scopes");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = dir.join("s.toml");
+    std::fs::write(
+        &manifest,
+        "service = \"inventory\"\nowner = \"inv-team\"\ntier = \"1\"\nversion = \"1.0.0\"\n\
+         transport = \"pubsub\"\n\n\
+         [methods.listProduct]\nhttp = \"GET /v1/products\"\nauth = \"required\"\n\
+         scopes = [\"inventory:read\"]\nin = { tenantId = \"string\" }\nout = { cursor = \"string\" }\n",
+    )
+    .unwrap();
+    let (code, err, ok) = axon(&["build", manifest.to_str().unwrap(), "--lang", "go"]);
+    assert!(ok, "{err}");
+    assert!(code.contains("&Problem{Status: 403"), "{code}");
+    assert!(
+        code.contains("type Problem struct"),
+        "RequireScopes returns a type nobody declared:\n{code}"
+    );
+
+    if !has("go") {
+        eprintln!("skipping go build: go is not installed");
+        return;
+    }
+    std::fs::write(dir.join("go.mod"), "module tmp/inv\n\ngo 1.22\n").unwrap();
+    std::fs::write(dir.join("axon.go"), code.as_bytes()).unwrap();
+    let out = Command::new("go")
+        .args(["build", "./..."])
+        .current_dir(&dir)
+        .output()
+        .expect("go build");
+    assert!(
+        out.status.success(),
+        "the generated Go does not compile:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

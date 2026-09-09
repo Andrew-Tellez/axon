@@ -226,21 +226,19 @@ func NewEnvelope(kind, source string, data any, cause *Envelope) (Envelope, erro
     )
 }
 
-/// RFC 7807 and the declared failures. In TypeScript an undeclared code does
-/// not compile because the type is a union of literals; Go has no such type,
-/// so the contract is a named string type with one constant per declared
-/// failure. A conversion can still bypass it — what cannot drift is the
-/// status and the `retriable` that come out of the manifest.
-fn failures(m: &Manifest) -> String {
-    let with: Vec<(&String, &Method)> = m
+/// The `Problem` type itself. Both the declared failures and the generated
+/// `RequireScopes` return one, so it is emitted when either exists: a
+/// manifest with scopes and no declared errors used to generate code that
+/// did not compile.
+fn problem(m: &Manifest) -> String {
+    let needed = m
         .methods
-        .iter()
-        .filter(|(_, me)| !me.errors.is_empty())
-        .collect();
-    if with.is_empty() {
+        .values()
+        .any(|me| !me.errors.is_empty() || !me.scopes.is_empty());
+    if !needed {
         return String::new();
     }
-    let mut o = String::from(
+    String::from(
         "// Problem is what travels on the wire when something declared fails:\n\
          // RFC 7807, with the code the manifest declares.\n\
          type Problem struct {\n\
@@ -263,8 +261,25 @@ fn failures(m: &Manifest) -> String {
          \t\treturn p.Retriable\n\
          \t}\n\
          \treturn false\n\
-         }\n\n",
-    );
+         }\n\n"
+    )
+}
+
+/// RFC 7807 and the declared failures. In TypeScript an undeclared code does
+/// not compile because the type is a union of literals; Go has no such type,
+/// so the contract is a named string type with one constant per declared
+/// failure. A conversion can still bypass it — what cannot drift is the
+/// status and the `retriable` that come out of the manifest.
+fn failures(m: &Manifest) -> String {
+    let with: Vec<(&String, &Method)> = m
+        .methods
+        .iter()
+        .filter(|(_, me)| !me.errors.is_empty())
+        .collect();
+    if with.is_empty() {
+        return String::new();
+    }
+    let mut o = String::new();
     for (name, me) in with {
         let t = format!("{}Error", exported(name));
         o.push_str(&format!(
@@ -581,8 +596,9 @@ fn machines(m: &Manifest) -> String {
 pub fn build(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     let pkg = m.service.replace(['-', '_'], "");
     let body = format!(
-        "{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}",
         types(m, all)?,
+        problem(m),
         failures(m),
         scopes(m),
         handlers(m),
