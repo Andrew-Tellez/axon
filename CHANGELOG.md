@@ -7,6 +7,49 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.18.0] — 2026-09-09
+
+### Añadido
+
+- **`[catalog.*]`: la lista declarada, en la tabla y en el tipo.** Monedas, estados,
+  motivos, países. La lista que nadie cree que valga la pena declarar, y que acaba escrita
+  tres veces —un enum en un servicio, un `CHECK` en una migración y un desplegable en el
+  front—: el día que alguien añade un valor, dos de las tres no se enteran.
+
+  ```toml
+  [catalog.currency]
+  key = "code"
+  fields = { code = "string", name = "string", decimals = "int" }
+  entries = [{ code = "MXN", name = "Peso mexicano", decimals = 2 }]
+  ```
+
+  `axon catalog` emite la tabla y su semilla como **migración repetible**, y `axon build`
+  el tipo unión —donde un valor fuera de la lista no compila—, la tabla congelada y su
+  búsqueda.
+
+  Lo que de verdad las mantiene iguales es el **DELETE de lo que ya no está declarado**. Sin
+  él, el código deja de ofrecer un valor que la base de datos sigue aceptando, y nadie ve la
+  diferencia. El demo lo mide: quita una moneda del manifiesto, vuelve a aplicar y comprueba
+  que desapareció de la tabla.
+
+  Las entradas van en el manifiesto a propósito: un catálogo cuyos valores solo existen en la
+  base de datos es un catálogo que nadie puede revisar —añadir uno es un `INSERT` que alguien
+  corrió, no un diff que alguien leyó— y el código tampoco puede conocerlos.
+
+  `verify` rechaza una entrada con hueco, un campo no declarado, una llave repetida, un tipo
+  que no encaja y un catálogo sin base de datos detrás.
+
+### Corregido
+
+- `docker compose up --wait` cuenta como muerto un contenedor que termina y al que nadie
+  espera, así que el job del catálogo tumbaba el arranque. Ahora la app y el pooler esperan a
+  **todos** los trabajos que tocan el esquema y no solo al último — que además es lo cierto:
+  el servicio lee una lista que su código da por sembrada.
+
+### Cambiado
+
+- El demo pasó a **28 secciones y 72 comprobaciones**; la suite, a **97 pruebas**.
+
 ## [0.17.0] — 2026-09-09
 
 ### Añadido
