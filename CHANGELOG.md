@@ -7,6 +7,45 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.19.0] — 2026-09-09
+
+### Añadido
+
+- **`[auth]`: la forma del token, sin el nombre de ningún proveedor.** axon no autentica a
+  nadie ni guarda una credencial. Lo que se declara es la **forma** que tiene que tener un
+  token verificado, para que el `auth` del edge, los `scopes` del método y el RLS que el
+  compilador ya genera dejen de ser tres esperanzas independientes que casualmente coinciden.
+
+  Quien emite el token —better-auth, Auth0, Keycloak, Cognito, treinta líneas de `jose`— es
+  un **adaptador**, igual que `Bus`, `Cache` u `Outbox`. Los nombres de claim son toda la
+  superficie específica de proveedor, y son datos.
+
+  Se niega solo lo que no puede ser una configuración legítima: `none` o un `HS*` en
+  `algorithms` (los dos fallan **abierto** y parecen un 200 normal), `revocation =
+  "immediate"` sobre verificación offline, `eventual` sin `max_token_age_s`, `tenant_column`
+  sin `tenant_claim` —el inquilino vendría de la petición, que es el llamante eligiendo qué
+  filas lee—, dos claims con el mismo nombre, `jwks` sin `jwks_uri`, y dos servicios leyendo
+  el mismo token de sitios distintos.
+
+- **`roles` y `plans` por endpoint.** El **requisito** es contrato y viaja en el OpenAPI y
+  en el guard generado; el **mapeo** de rol a scopes no se declara: es configuración mutable
+  del proveedor, y una segunda copia aquí se quedaría vieja en silencio. Los nombres se
+  comprueban contra `[catalog.role]` y `[catalog.plan]`.
+
+- **Impersonación**, porque decide dos cosas que el compilador ya razona: a qué inquilino se
+  ata el RLS y si la escritura dice quién lo hizo de verdad. `audit = false` se niega. El
+  `AuthContext` separa `subject` de `actor`, y `withTenant(ctx, tx)` es lo **único** que
+  emite `SET LOCAL axon.tenant` — sin sobrecarga que acepte un string suelto.
+
+### Notas
+
+- Lo que a propósito **no** se comprueba es la mitad del trabajo: un `audience` único por
+  servicio rompe Auth0 y Cognito, y un `issuer` escalar rompe cualquier migración de IdP.
+  Una regla que dispara sobre una configuración correcta silencia a toda la familia.
+- El diseño salió de un workflow de 12 agentes sobre la documentación de better-auth y de
+  tres críticas adversarias que recortaron la mitad de lo propuesto. La suite pasó a **99
+  pruebas**.
+
 ## [0.18.0] — 2026-09-09
 
 ### Añadido
