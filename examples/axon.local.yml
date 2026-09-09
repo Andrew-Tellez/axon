@@ -308,13 +308,14 @@ services:
     build:
       context: .
       dockerfile: services/orders/Dockerfile
-    depends_on: { broker: { condition: service_healthy }, trace: { condition: service_healthy }, pooler-orders: { condition: service_healthy } }
+    depends_on: { broker: { condition: service_healthy }, trace: { condition: service_healthy }, cache-orders: { condition: service_healthy }, pooler-orders: { condition: service_healthy } }
     ports: ["${AXON_PORT_orders:-8300}:8080"]
     env_file: [.env.local]
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/log/local.ndjson
       DATABASE_URL: postgres://postgres:local@pooler-orders:6432/orders
+      AXON_CACHE_URL: redis://cache-orders:6379
       AXON_FLAGS_URL: http://flags:8016
       OTEL_SERVICE_NAME: "orders"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://trace:4318"
@@ -389,6 +390,13 @@ services:
     # `while` and not a single `sleep`: a job that runs once and exits leaves
     # `up --wait` counting a container that died
     command: ["sh", "-c", "while :; do sleep 60; curl -fsS -m 10 -X POST http://checkout:8080/internal/saga/checkout/sweep || true; done"]
+  cache-orders:
+    image: valkey/valkey:8-alpine
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports: ["${AXON_CACHE_PORT_orders:-16399}:6379"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
   warehouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     environment: { CLICKHOUSE_DB: axon, CLICKHOUSE_USER: local, CLICKHOUSE_PASSWORD: local }

@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **66 checks against reality**: not against a mock,
+brings the whole system up and makes **70 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -177,6 +177,15 @@ axon: the warehouse has 0 differences against the manifest
   OK: the missing column is detected, and without it that field would be stored nowhere
   OK: restored whole after breaking it: 1 rows, all with their amount
   OK: 1 rows before and after; the loader is idempotent
+
+==> la cache, medida
+  una lectura y la llave que el manifiesto declara
+  OK: la entrada existe con el inquilino EN la llave, no solo el pedido
+  el mismo pedido, preguntado por otro inquilino
+  OK: entradas distintas por inquilino; sin el en la llave la segunda seria un acierto ajeno
+  OK: expira en 1635ms; el TTL sale del manifiesto y cabe en el max_staleness_ms
+  el interruptor, apagado
+  OK: con la bandera en off no se cachea nada; se apaga sin desplegar
 
 ==> el ingest de Vector, medido
   OK: 2 replicas subscribed to order.placed.v1, both in the queue group

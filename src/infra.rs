@@ -73,6 +73,15 @@ pub struct PoolerConfig {
     pub pool_size: Option<u32>,
 }
 
+/// The cache of one service, with the engine it asked for.
+#[derive(Debug, Serialize)]
+pub struct Cache {
+    pub service: String,
+    pub engine: String,
+    /// How many answers it holds, only so a renderer can say it out loud.
+    pub entries: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Secret {
     pub service: String,
@@ -237,7 +246,7 @@ pub fn plan_schema() -> serde_json::Value {
         "type": "object",
         "additionalProperties": false,
         "required": ["flags", "warehouse", "buckets", "routes", "topics", "subs", "stores",
-                     "crons", "secrets", "workloads"],
+                     "caches", "crons", "secrets", "workloads"],
         "properties": {
             "flags": {"type": "boolean",
                       "description": "there are feature flags declared: local brings up flagd"},
@@ -275,6 +284,10 @@ pub fn plan_schema() -> serde_json::Value {
                     "additionalProperties": false
                 }
             }), "one database per service. `shards` is the pooler's, not the engine's")),
+            "caches": array(object(serde_json::json!({
+                "service": str_, "engine": str_, "entries": uint
+            }), "one cache per service. Nothing in it survives losing it: no backup, \
+                 no replica, no PITR")),
             "crons": array(object(serde_json::json!({
                 "service": str_, "name": str_, "path": str_, "port": uint, "every_ms": uint
             }), "what has to be hit periodically: a saga's sweep, a snapshot prune")),
@@ -307,6 +320,10 @@ pub struct Plan {
     pub topics: Vec<Topic>,
     pub subs: Vec<Sub>,
     pub stores: Vec<Store>,
+    /// Services with a cache declared. A cache is not a store: nothing in it
+    /// survives losing it, and the renderers treat it that way —no backup, no
+    /// PITR, no replica.
+    pub caches: Vec<Cache>,
     pub crons: Vec<Cron>,
     pub secrets: Vec<Secret>,
     pub workloads: Vec<Workload>,
@@ -353,6 +370,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
     let mut buckets = Vec::new();
     let mut subs = Vec::new();
     let mut stores = Vec::new();
+    let mut caches = Vec::new();
     let mut crons = Vec::new();
     let mut secrets = Vec::new();
     let mut workloads = Vec::new();
@@ -390,6 +408,13 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 path: Saga::sweep_route(name),
                 port: m.infra.port.unwrap_or(8080),
                 every_ms: sg.timeout_ms.unwrap_or(60_000),
+            });
+        }
+        if m.cache.active() {
+            caches.push(Cache {
+                service: svc.clone(),
+                engine: m.cache.engine.clone().unwrap_or_default(),
+                entries: m.cache.entries.len(),
             });
         }
         if let Some(engine) = &m.infra.state {
@@ -469,6 +494,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
         topics,
         subs,
         stores,
+        caches,
         crons,
         secrets,
         workloads,
@@ -985,6 +1011,22 @@ fn gcp(p: &Plan) -> String {
             ));
         }
     }
+    for c in &p.caches {
+        // BASIC and one node: nothing here survives losing it by design, so
+        // paying for a replica of a cache is paying to keep wrong entries
+        // through a failover.
+        o.push(format!(
+            "resource \"google_redis_instance\" \"cache_{n}\" {{\n  \
+             name           = \"cache-{svc}\"\n  \
+             tier           = \"BASIC\"\n  \
+             memory_size_gb = 1\n  \
+             region         = var.region\n  \
+             # {entries} cached answer(s) declared in the manifest\n}}\n",
+            n = tfname(&c.service),
+            svc = c.service,
+            entries = c.entries
+        ));
+    }
     for b in &p.buckets {
         let n = tfname(&format!("{}-{}", b.service, b.name));
         o.push(format!(
@@ -1067,6 +1109,13 @@ fn aws(p: &Plan) -> String {
         o.push(
             "variable \"otlp_endpoint\" {\n  type        = string\n  \
              description = \"OTLP collector: the ADOT Collector into X-Ray, or whichever you use\"\n}\n"
+                .to_string(),
+        );
+    }
+    if !p.caches.is_empty() {
+        o.push(
+            "variable \"cache_node_type\" {\n  type        = string\n  \
+             description = \"ElastiCache node size, for example cache.t4g.micro\"\n}\n"
                 .to_string(),
         );
     }
@@ -1438,6 +1487,23 @@ fn aws(p: &Plan) -> String {
             s.service
         ));
     }
+    for c in &p.caches {
+        // One node and no snapshots: nothing here survives losing it by
+        // design, and a restored snapshot is a cache full of answers that were
+        // true yesterday.
+        o.push(format!(
+            "resource \"aws_elasticache_cluster\" \"cache_{n}\" {{\n  \
+             cluster_id           = \"cache-{svc}\"\n  \
+             engine               = \"valkey\"\n  \
+             node_type            = var.cache_node_type\n  \
+             num_cache_nodes      = 1\n  \
+             snapshot_retention_limit = 0\n  \
+             # {entries} cached answer(s) declared in the manifest\n}}\n",
+            n = tfname(&c.service),
+            svc = c.service,
+            entries = c.entries
+        ));
+    }
     for b in &p.buckets {
         let n = tfname(&format!("{}-{}", b.service, b.name));
         o.push(format!(
@@ -1791,6 +1857,69 @@ spec:
         if let Some(y) = k8s_pooler(s) {
             o.push(y);
         }
+    }
+    for c in &p.caches {
+        // No volume, one replica, and `Recreate`: a cache that survives is a
+        // cache whose wrong entries survive too, and the day the invalidation
+        // is wrong that is the difference between a restart and an incident.
+        o.push(format!(
+            "---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache-{svc}
+  labels: {{ app: cache-{svc} }}
+spec:
+  replicas: 1
+  strategy: {{ type: Recreate }}
+  selector:
+    matchLabels: {{ app: cache-{svc} }}
+  template:
+    metadata:
+      labels: {{ app: cache-{svc} }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {{ type: RuntimeDefault }}
+      automountServiceAccountToken: false
+      containers:
+        - name: valkey
+          image: valkey/valkey:8-alpine
+          args: [\"valkey-server\", \"--save\", \"\", \"--appendonly\", \"no\"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {{ drop: [\"ALL\"] }}
+          ports:
+            - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache-{svc}
+spec:
+  selector: {{ app: cache-{svc} }}
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+# Only its own service gets in. A cache reachable from elsewhere is somebody
+# else's data one key away.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cache-{svc}
+spec:
+  podSelector:
+    matchLabels: {{ app: cache-{svc} }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{ app: {svc} }}",
+            svc = c.service
+        ));
     }
     if !p.routes.is_empty() {
         o.push(
@@ -2310,6 +2439,16 @@ services:
         // With a pooler, the app does NOT see the nodes: it sees pgdog. If the
         // DATABASE_URL pointed at a node, the sharding would be skipped and
         // locally everything would work —with a quarter of the data.
+        // The cache the manifest declared, by the name the compose brings up.
+        // The app does not choose the host: two places naming it is two places
+        // that drift, and the one that drifts is the one nobody restarts.
+        let cache_env = match p.caches.iter().any(|c| c.service == *svc) {
+            true => {
+                deps.push(format!("cache-{svc}: {{ condition: service_healthy }}"));
+                format!("      AXON_CACHE_URL: redis://cache-{svc}:6379\n")
+            }
+            false => String::new(),
+        };
         let store = p.stores.iter().find(|s| s.service == *svc);
         let db_env = match (w.db, store.and_then(|s| s.shards)) {
             (false, _) => String::new(),
@@ -2364,7 +2503,7 @@ services:
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/log/local.ndjson
-{db_env}{secrets}    volumes: [\"./.axon:/out\"]
+{db_env}{cache_env}{secrets}    volumes: [\"./.axon:/out\"]
     # `{schedule}` on the target that has a scheduler; here it runs once at
     # startup, which is what makes it visible instead of theoretical.
 ",
@@ -2384,7 +2523,7 @@ services:
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/log/local.ndjson
-{db_env}{secrets}    volumes: [\"./.axon:/out\"]
+{db_env}{cache_env}{secrets}    volumes: [\"./.axon:/out\"]
     # The k8s target already probes `/healthz`; here it is what makes `up --wait`
     # actually wait. Without it compose returns as soon as the container STARTS, and
     # the first request lands before the process is listening —a reset that reads as
@@ -2422,6 +2561,24 @@ services:
             path = c.path,
         ));
         let _ = i;
+    }
+    for c in &p.caches {
+        // No volume on purpose: a cache that survives a restart hides the day
+        // its invalidation is wrong. Locally it comes up EMPTY, which is the
+        // state that finds the bug.
+        let port = ports(16379, 200, &[c.service.as_str()])[&c.service];
+        o.push_str(&format!(
+            "  cache-{svc}:
+    image: valkey/valkey:8-alpine
+    command: [\"valkey-server\", \"--save\", \"\", \"--appendonly\", \"no\"]
+    ports: [\"${{AXON_CACHE_PORT_{v}:-{port}}}:6379\"]
+    healthcheck:
+      test: [\"CMD\", \"valkey-cli\", \"ping\"]
+      interval: 2s
+",
+            svc = c.service,
+            v = tfname(&c.service),
+        ));
     }
     if p.topics.iter().any(|t| t.analytics) {
         // The warehouse in local is not decoration: without it the schema gets

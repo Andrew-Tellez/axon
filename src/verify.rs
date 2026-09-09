@@ -596,6 +596,303 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // ---- the cache ----
+    //
+    // A cache is not another storage engine: it is a derived copy, and the only
+    // hard part is knowing when it stopped being true. Every rule here exists
+    // because of a failure with NO symptom: the wrong answer, served fast,
+    // with every dashboard green.
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        let c = &m.cache;
+        if let Some(engine) = &c.engine {
+            if !CACHE_ENGINES.contains(&engine.as_str()) {
+                errors.push(format!(
+                    "{svc}: `[cache] engine = \"{engine}\"` is not supported. Native engines: \
+                     {}",
+                    CACHE_ENGINES.join(", ")
+                ));
+            }
+        }
+        if c.entries.is_empty() {
+            continue;
+        }
+        if !c.active() {
+            errors.push(format!(
+                "{svc}: declares {} cached answer(s) and no `[cache] engine`. The entries \
+                 describe a cache nothing brings up, and the code that reads them would go \
+                 to the database every time while the manifest says otherwise",
+                c.entries.len()
+            ));
+            continue;
+        }
+        // A cache is eventual by construction: between the write and the
+        // invalidation there is a window where the old answer is served. A
+        // service that promised `strong` and caches is not serving what it
+        // promised, and nothing in production says so.
+        if !m.cap.eventual() {
+            errors.push(format!(
+                "{svc}: `consistency = \"strong\"` and a cache. A cache is eventual by \
+                 construction —between the change and the invalidation the old answer is \
+                 served— so either the promise drops to `eventual` with a \
+                 `max_staleness_ms`, or the cache goes"
+            ));
+        }
+        for (name, e) in &c.entries {
+            let Some(method) = m.methods.get(&e.of) else {
+                errors.push(format!(
+                    "{svc}: `[cache.{name}] of = \"{}\"` names no declared method",
+                    e.of
+                ));
+                continue;
+            };
+            // A key field the method does not receive is a key two different
+            // requests share: one customer's answer served to another.
+            for k in &e.key {
+                if !method.input.contains_key(k) {
+                    errors.push(format!(
+                        "{svc}: `[cache.{name}] key` names `{k}`, which is not in the `in` of \
+                         `{}`. A key built from something the method does not receive is a key \
+                         two different requests can share",
+                        e.of
+                    ));
+                }
+            }
+            if e.key.is_empty() {
+                errors.push(format!(
+                    "{svc}: `[cache.{name}]` has no `key`. One entry for every call of `{}` is \
+                     one answer served to everybody",
+                    e.of
+                ));
+            }
+            // The tenant in the key, for the same reason it is in the route and
+            // in the RLS: without it the cache is a hole through both.
+            if let Some(tenant) = &m.infra.tenant_column {
+                let carries = e.key.iter().any(|k| normalize(k) == normalize(tenant));
+                if !carries
+                    && method
+                        .input
+                        .keys()
+                        .any(|k| normalize(k) == normalize(tenant))
+                {
+                    errors.push(format!(
+                        "{svc}: `[cache.{name}] key` does not carry `{tenant}`, and the service \
+                         is multi-tenant. The first tenant to ask warms the entry and the next \
+                         one is served their data, as a hit: the RLS and the router never see \
+                         the second query"
+                    ));
+                }
+            }
+            // Nothing makes it stale: it is not a cache, it is a copy that
+            // ages forever.
+            if e.ttl_ms.is_none() && e.invalidated_by.is_empty() {
+                errors.push(format!(
+                    "{svc}: `[cache.{name}]` has neither `ttl_ms` nor `invalidated_by`. \
+                     Nothing makes it stale, so the first answer is served forever"
+                ));
+            }
+            // The TTL is what keeps the promise `[cap]` made. Longer than the
+            // budget and the number in the manifest is a number nobody meets.
+            // `stale_ms` SPENDS staleness too: what is served during the
+            // refresh is as old as the reader sees it.
+            let stale = e.stale_ms.unwrap_or(0);
+            if let (Some(ttl), Some(budget)) = (e.ttl_ms, m.cap.max_staleness_ms) {
+                if ttl + stale > budget {
+                    errors.push(format!(
+                        "{svc}: `[cache.{name}]` serves an answer up to {} ms old (`ttl_ms` \
+                         {ttl}{}) against a declared `max_staleness_ms = {budget}`. The budget \
+                         is the promise and these are what keep it",
+                        ttl + stale,
+                        match e.stale_ms {
+                            Some(s) => format!(" + `stale_ms` {s}"),
+                            None => String::new(),
+                        }
+                    ));
+                }
+            }
+            if e.stale_ms.is_some() && e.ttl_ms.is_none() {
+                errors.push(format!(
+                    "{svc}: `[cache.{name}] stale_ms` with no `ttl_ms`. Nothing ever expires, \
+                     so nothing is ever served stale-while-revalidating: the field promises a \
+                     behaviour that cannot happen"
+                ));
+            }
+            // The switch. A cache behind a flag can be turned off the day its
+            // invalidation turns out to be wrong, without a deploy — and a
+            // `[rules.*]` over a metric can be the one that turns it off.
+            if let Some(flag) = &e.enabled_by {
+                match m.flags.get(flag) {
+                    None => errors.push(format!(
+                        "{svc}: `[cache.{name}] enabled_by = \"{flag}\"` names no declared flag"
+                    )),
+                    Some(f) if f.kind() != "boolean" => errors.push(format!(
+                        "{svc}: `[cache.{name}] enabled_by = \"{flag}\"` is a {} flag, and a \
+                         cache is on or off",
+                        f.kind()
+                    )),
+                    Some(f) => {
+                        if let Some(sticky) = &f.sticky_by {
+                            if !method
+                                .input
+                                .keys()
+                                .any(|k| normalize(k) == normalize(sticky))
+                            {
+                                errors.push(format!(
+                                    "{svc}: `[cache.{name}]` is gated by `{flag}`, pinned by \
+                                     `{sticky}`, and `{}` does not receive it. The decision \
+                                     would be taken per request, so the same entity would hit \
+                                     the cache on one call and not on the next",
+                                    e.of
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            let strategy = e.strategy.as_deref().unwrap_or("invalidate");
+            if !CACHE_STRATEGIES.contains(&strategy) {
+                errors.push(format!(
+                    "{svc}: `[cache.{name}] strategy = \"{strategy}\"` is not one of {}",
+                    CACHE_STRATEGIES.join(", ")
+                ));
+            }
+            // `refresh` rewrites the entry from the event instead of dropping
+            // it, which is only possible if the event carries the whole
+            // answer. That is checkable, so it is checked: otherwise the cache
+            // fills with holes and every hole is served as if it were data.
+            if strategy == "refresh" {
+                if e.invalidated_by.is_empty() {
+                    errors.push(format!(
+                        "{svc}: `[cache.{name}] strategy = \"refresh\"` with no \
+                         `invalidated_by`. There is no event to rewrite it from"
+                    ));
+                }
+                for ev in &e.invalidated_by {
+                    let Some(fields) = ms.iter().find_map(|o| o.emits.get(ev)) else {
+                        continue;
+                    };
+                    let missing: Vec<&String> = method
+                        .output
+                        .keys()
+                        .filter(|f| !fields.keys().any(|g| normalize(g) == normalize(f)))
+                        .collect();
+                    if let Some(f) = missing.first() {
+                        errors.push(format!(
+                            "{svc}: `[cache.{name}] strategy = \"refresh\"` rewrites the \
+                             answer of `{}` from `{ev}`, and that event does not carry `{f}`. \
+                             The entry would be rewritten with a hole, and a hole is served \
+                             exactly like data. Either the event carries it or the strategy is \
+                             `invalidate`",
+                            e.of
+                        ));
+                    }
+                }
+            }
+            // Personal data with no bound is personal data kept forever in a
+            // place nobody lists when they answer a deletion request.
+            let sensitive: Vec<&String> = method
+                .output
+                .keys()
+                .filter(|f| m.pii.iter().any(|p| normalize(p) == normalize(f)))
+                .collect();
+            if let Some(field) = sensitive.first() {
+                match e.ttl_ms {
+                    None => errors.push(format!(
+                        "{svc}: `[cache.{name}]` caches `{}`, whose answer carries `{field}` \
+                         —declared `pii`— with no `ttl_ms`. Personal data with no bound is \
+                         personal data kept forever somewhere nobody lists when a deletion \
+                         request arrives",
+                        e.of
+                    )),
+                    Some(_) => warnings.push(format!(
+                        "{svc}: `[cache.{name}]` caches `{field}`, which is declared `pii`. It \
+                         is bounded by its `ttl_ms`, and it is still a second copy of personal \
+                         data outside the database",
+                    )),
+                }
+            }
+            for ev in &e.invalidated_by {
+                let emitted = ms.iter().any(|o| o.emits.contains_key(ev));
+                if !emitted {
+                    errors.push(format!(
+                        "{svc}: `[cache.{name}] invalidated_by` names `{ev}`, which nobody \
+                         emits"
+                    ));
+                    continue;
+                }
+                // The invalidation has to be able to BUILD the key, and the
+                // key is built from the event. A field the event does not
+                // carry makes a key with a hole in it: the `del` runs, deletes
+                // nothing, and the stale answer is served until the TTL —
+                // which is the failure this whole block exists to prevent,
+                // reintroduced by the generated code itself.
+                if let Some(fields) = ms.iter().find_map(|o| o.emits.get(ev)) {
+                    for k in &e.key {
+                        if !fields.keys().any(|g| normalize(g) == normalize(k)) {
+                            errors.push(format!(
+                                "{svc}: `[cache.{name}]` is keyed by `{k}` and `{ev}` does not \
+                                 carry it, so the invalidation cannot build the key: it would \
+                                 delete nothing and the stale answer would be served until the \
+                                 `ttl_ms`. Either the event carries `{k}` or it is not what \
+                                 makes this entry stale"
+                            ));
+                        }
+                    }
+                }
+                // An invalidation this service cannot hear is worse than none:
+                // it reads as handled and never runs.
+                let visible = m.emits.contains_key(ev) || m.consumes.contains_key(ev);
+                if !visible {
+                    errors.push(format!(
+                        "{svc}: `[cache.{name}]` says `{ev}` makes it stale and this service \
+                         neither emits nor consumes it, so it cannot hear it. Declare it in \
+                         `[consumes]` or the invalidation is one nobody runs"
+                    ));
+                }
+            }
+            // And the compensation. This is the distributed-transaction case:
+            // a step succeeds, the cache is invalidated and warmed again with
+            // the new value, the saga fails and compensates — and the cache
+            // keeps serving the value of the attempt that was rolled back.
+            // `compensates` is declared, so this is derivable and not a guess.
+            for mac in m.machine.values() {
+                for t in mac.transitions.values() {
+                    let Some(emitted) = &t.emits else { continue };
+                    if !e.invalidated_by.contains(emitted) {
+                        continue;
+                    }
+                    for (undo_name, undo) in &mac.transitions {
+                        let compensates_this = undo.compensates.as_ref().is_some_and(|c| {
+                            mac.transitions
+                                .get(c)
+                                .is_some_and(|x| x.emits.as_ref() == Some(emitted))
+                        });
+                        if !compensates_this {
+                            continue;
+                        }
+                        match &undo.emits {
+                            Some(back) if !e.invalidated_by.contains(back) => {
+                                errors.push(format!(
+                                    "{svc}: `[cache.{name}]` is invalidated by `{emitted}` and \
+                                     not by `{back}`, which is what `{undo_name}` emits when it \
+                                     compensates it. After a rollback the cache keeps serving \
+                                     the value of the attempt that was undone"
+                                ));
+                            }
+                            None => warnings.push(format!(
+                                "{svc}: `{undo_name}` compensates what invalidates \
+                                 `[cache.{name}]` and emits nothing, so the compensation \
+                                 cannot invalidate anything. The cache keeps the value of the \
+                                 attempt that was undone until its `ttl_ms`"
+                            )),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ---- the engine has to exist ----
     for m in ms.iter().filter(|m| !m.external) {
         let Some(motor) = &m.infra.state else {

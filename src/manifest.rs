@@ -1045,6 +1045,92 @@ impl Metric {
     }
 }
 
+/// A cached answer.
+///
+/// A cache is not another storage engine: it is a **derived copy**, and the
+/// only hard part is knowing when it stopped being true. That is the one thing
+/// axon knows and a library cannot: the events are declared, so what makes a
+/// cached answer stale is derivable instead of remembered.
+///
+/// Everything here exists because of a failure that has no symptom. A cache
+/// with nothing to invalidate it serves the wrong answer forever and the
+/// dashboards stay green. A key without the tenant serves one customer's data
+/// to another and looks like a hit. A TTL longer than the declared staleness
+/// budget makes `[cap]` a lie.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cached {
+    /// The method whose answer is cached. It has to be declared, and it has to
+    /// be a read: caching a write is not a cache.
+    pub of: String,
+    /// The fields of that method's `in` the key is built from. They have to be
+    /// its own: a key made of something the method does not receive is a key
+    /// two different requests can share.
+    #[serde(default)]
+    pub key: Vec<String>,
+    /// How long a hit stays valid. Bounded by `[cap] max_staleness_ms`,
+    /// because that number is the promise and this one is what keeps it.
+    pub ttl_ms: Option<u32>,
+    /// The events after which the answer is no longer true.
+    ///
+    /// This service has to be able to SEE them —emit them or consume them— or
+    /// it cannot invalidate anything, and an invalidation nobody can run is
+    /// worse than none: it reads as handled.
+    #[serde(default)]
+    pub invalidated_by: Vec<String>,
+    /// What happens when one of those events arrives.
+    ///
+    /// `invalidate` drops the entry and the next reader pays for the reload.
+    /// `refresh` REWRITES it from the event itself, with no reload at all —
+    /// which is only possible if the event carries every field of the answer,
+    /// and that is checkable: `verify` names the field that is missing instead
+    /// of letting the cache fill with holes.
+    pub strategy: Option<String>,
+    /// Serve the expired answer while one reader refreshes it, up to this
+    /// long. It is what turns a stampede into one reload, and it SPENDS
+    /// staleness: `ttl_ms + stale_ms` is what has to fit the declared budget.
+    pub stale_ms: Option<u32>,
+    /// The declared flag that turns it on. The day the invalidation is wrong,
+    /// what you want is a switch you can flip without a deploy — and once the
+    /// cache is behind a flag, a `[rules.*]` over a metric can flip it: that
+    /// loop already exists and this is what plugs the cache into it.
+    ///
+    /// The flag has to be boolean and, if it is pinned by a field, the cached
+    /// method has to receive that field: a decision pinned to something the
+    /// method never sees is a decision taken per request.
+    pub enabled_by: Option<String>,
+    /// One reader reloads and the rest wait for it. `true` by default because
+    /// the alternative —every instance missing at once and hitting the
+    /// database together— is how a cache takes down what it was protecting.
+    #[serde(default = "yes")]
+    pub single_flight: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+pub const CACHE_STRATEGIES: [&str; 2] = ["invalidate", "refresh"];
+
+/// The cache engine. One per service, like the database: a shared cache is a
+/// shared blast radius and a shared key namespace.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Cache {
+    /// `valkey` is native. Absent means no cache.
+    pub engine: Option<String>,
+    /// The entries: `[cache.<name>]`.
+    #[serde(flatten)]
+    pub entries: IndexMap<String, Cached>,
+}
+
+impl Cache {
+    pub fn active(&self) -> bool {
+        self.engine.as_deref().is_some_and(|e| e != "none")
+    }
+}
+
+pub const CACHE_ENGINES: [&str; 2] = ["valkey", "none"];
+
 /// CQRS: a read model built by applying already declared events.
 ///
 /// What declaring it adds is not the code —a projection is a `switch`— but
@@ -1155,6 +1241,9 @@ pub struct Manifest {
     /// Read models. See `View`.
     #[serde(default)]
     pub view: IndexMap<String, View>,
+    /// Cached answers, with what makes them stale. See `Cache`.
+    #[serde(default)]
+    pub cache: Cache,
     /// Business metrics over the declared events. See `Metric`.
     #[serde(default)]
     pub metrics: IndexMap<String, Metric>,

@@ -187,6 +187,11 @@ step "the warehouse: schema, funnel and PII"
 
 # El camino de ingesta de k8s, contra contenedores. `vector validate` dice que
 # el archivo es valido; no dice que lleve un evento del broker a la bodega.
+# Declarar que algo se cachea no vale nada si nadie comprueba que la llave lleva
+# el inquilino y que el interruptor apaga de verdad.
+step "la cache, medida"
+./check-cache.sh
+
 step "el ingest de Vector, medido"
 ./check-vector.sh
 

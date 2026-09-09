@@ -5,6 +5,7 @@ import { connect, type NatsConnection, StringCodec } from "nats";
 import pg from "pg";
 import { appendFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import net from "node:net";
 // telemetry.ts imports the Envelope type from here; that import is types only,
 // so it is erased at compile time and there is no cycle at runtime.
 import { annotate, atEdge, inProducer, inSpan } from "./telemetry.ts";
@@ -302,4 +303,40 @@ export function serve(
       },
     );
   }).listen(port, () => console.log(`[${process.env.AXON_SERVICE}] listening on :${port}`));
+}
+
+// --- the cache ---------------------------------------------------------
+// RESP over a socket and not a client library: three commands is less code
+// than the dependency, and this file exists to show how little glue the
+// generated code needs. What axon declared is WHAT is cached and what makes it
+// stale; which client speaks to Valkey is nobody's contract.
+export function cache(): { get(k: string): Promise<string | null>; set(k: string, v: string, ttlMs: number): Promise<void>; del(k: string): Promise<void> } {
+  const url = new URL(process.env.AXON_CACHE_URL ?? "redis://localhost:6379");
+  const send = (...parts: string[]): Promise<string | null> =>
+    new Promise((resolve, reject) => {
+      const s = net.connect(Number(url.port || 6379), url.hostname);
+      // A cache that hangs must not hang the request: it is an optimisation,
+      // and an optimisation that takes the service down is a bug with a nicer
+      // name.
+      s.setTimeout(200, () => { s.destroy(); resolve(null); });
+      let buf = "";
+      s.on("error", () => resolve(null));
+      s.on("connect", () =>
+        s.write(`*${parts.length}\r\n${parts.map((p) => `$${Buffer.byteLength(p)}\r\n${p}\r\n`).join("")}`));
+      s.on("data", (d) => {
+        buf += d.toString();
+        if (!buf.endsWith("\r\n")) return;
+        s.end();
+        // `$-1` is RESP for "there is no such key": a miss, not a failure.
+        if (buf.startsWith("$-1")) return resolve(null);
+        if (buf.startsWith("$")) return resolve(buf.slice(buf.indexOf("\r\n") + 2, -2));
+        resolve(buf.slice(1, -2));
+      });
+      s.on("close", () => reject);
+    });
+  return {
+    get: (k) => send("GET", k),
+    set: async (k, v, ttlMs) => { await send("SET", k, v, "PX", String(Math.max(1, ttlMs))); },
+    del: async (k) => { await send("DEL", k); },
+  };
 }

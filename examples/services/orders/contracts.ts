@@ -246,6 +246,16 @@ export const manifest = {
       "rollout": null,
       "sticky_by": null,
       "kill_switch": false
+    },
+    "cache_orders": {
+      "owner": "orders-team",
+      "variants": {},
+      "default_variant": null,
+      "expires": null,
+      "default": true,
+      "rollout": null,
+      "sticky_by": null,
+      "kill_switch": true
     }
   },
   "analytics": {
@@ -282,6 +292,22 @@ export const manifest = {
   "saga": {},
   "aggregate": {},
   "view": {},
+  "cache": {
+    "engine": "valkey",
+    "order": {
+      "of": "getOrderV2",
+      "key": [
+        "tenantId",
+        "orderId"
+      ],
+      "ttl_ms": 2000,
+      "invalidated_by": [],
+      "strategy": null,
+      "stale_ms": null,
+      "enabled_by": "cache_orders",
+      "single_flight": true
+    }
+  },
   "metrics": {
     "orders_placed": {
       "on": [
@@ -427,6 +453,57 @@ export abstract class OrdersService {
   abstract getOrderV2(input: GetOrderV2In, e: Envelope<unknown>): Promise<GetOrderV2Out>;
 }
 
+/** The cache the service talks to. Three methods, and the adapter is
+ *  yours: axon declares what is cached and what makes it stale, not which
+ *  client library you use. */
+export interface Cache {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string, ttlMs: number): Promise<void>;
+  del(key: string): Promise<void>;
+}
+
+/** In-flight loads, so N callers of the same key make ONE load. Without
+ *  this every instance misses at once and they hit the database together,
+ *  which is how a cache takes down what it was there to protect. */
+const inFlight = new Map<string, Promise<unknown>>();
+
+/** The key of `order`: tenantId, orderId. Built here so two call sites cannot build
+ *  it two slightly different ways, which is a miss that looks like a cold
+ *  cache forever. */
+export function keyOrder(input: Pick<GetOrderV2In, "tenantId" | "orderId">): string {
+  return ["orders", "order", String(input.tenantId), String(input.orderId)].join(":");
+}
+
+/** `getOrderV2` through the cache. TTL 2000 ms.
+ *
+ *  It returns what the method returns: the caller cannot tell a hit from
+ *  a miss, which is the point. What makes it stale is declared —nothing but the TTL— and
+ *  wired into `dispatch`. */
+export async function cachedOrder(
+  cache: Cache,
+  flags: Flags,
+  input: GetOrderV2In,
+  load: () => Promise<GetOrderV2Out>,
+): Promise<GetOrderV2Out> {
+  // the switch: off means straight to the source, which is what you
+  // want the day the invalidation turns out to be wrong
+  if (!(await flagCacheOrders(flags))) return load();
+  const k = keyOrder(input);
+  const hit = await cache.get(k);
+  if (hit !== null) return JSON.parse(hit) as GetOrderV2Out;
+  // one loader per key: the rest await the same promise
+  const run = () => {
+    const already = inFlight.get(k) as Promise<GetOrderV2Out> | undefined;
+    if (already) return already;
+    const p = load().finally(() => inFlight.delete(k));
+    inFlight.set(k, p);
+    return p;
+  };
+  const value = await run();
+  await cache.set(k, JSON.stringify(value), 2000);
+  return value;
+}
+
 
 /** HTTP routes the manifest declares. Startup must fail if any of them
  *  has no handler: a 404 in production tells nobody. */
@@ -528,8 +605,13 @@ export interface Flags {
 export const flagFreeShipping = (flags: Flags): Promise<number> =>
   flags.evaluate("free_shipping", 0, {});
 
+/** `cache_orders`: OpenFeature boolean.
+ */
+export const flagCacheOrders = (flags: Flags): Promise<boolean> =>
+  flags.evaluate("cache_orders", true, {});
+
 /** The flags the manifest declares. A flag that is not here does not exist. */
-export const declaredFlags = ["free_shipping"] as const;
+export const declaredFlags = ["free_shipping", "cache_orders"] as const;
 
 
 /** Everything needed to reach another service. Implemented by whoever

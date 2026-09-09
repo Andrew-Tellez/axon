@@ -262,6 +262,9 @@ export const manifest = {
       "max_staleness_ms": 3000
     }
   },
+  "cache": {
+    "engine": null
+  },
   "metrics": {},
   "rules": {},
   "infra": {

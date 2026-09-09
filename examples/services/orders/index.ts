@@ -1,14 +1,16 @@
 // The business logic. The only thing a person writes.
 import { OrdersService, fail, problem, httpRoutes, manifest, type PlaceOrderIn, type PlaceOrderOut,
-         retiredRoutes,
+         retiredRoutes, cachedOrder, type Cache,
          type GetOrderIn, type GetOrderOut,
          type GetOrderV2In, type GetOrderV2Out, type Envelope } from "./contracts.ts";
 import { startTelemetry } from "../telemetry.ts";
-import { NotFound, bus, connectBroker, serve, waitForDb } from "../runtime.ts";
+import { NotFound, bus, cache, connectBroker, serve, waitForDb } from "../runtime.ts";
+import { startFlags, flags } from "../flags.ts";
 import type pg from "pg";
 
 class Orders extends OrdersService {
   #db: pg.Pool;
+  #cache: Cache = cache();
   constructor(b: any, db: pg.Pool) {
     // no inbox: `orders` emits and consumes nothing, and the generated code
     // only asks for what the manifest declares
@@ -72,7 +74,14 @@ class Orders extends OrdersService {
   /** The v2 of the same read: it returns the customer too, which is what the
    *  v1 did not give and forced a second call. It is the same row — versioning
    *  an endpoint is not duplicating the logic. */
+  /** Through the cache. The wrapper is generated: the key, the TTL, the
+   *  single-flight and the switch come from the manifest, and this method only
+   *  says how to load it when there is no hit. */
   async getOrderV2(input: GetOrderV2In): Promise<GetOrderV2Out> {
+    return cachedOrder(this.#cache, flags, input, () => this.#loadOrderV2(input));
+  }
+
+  async #loadOrderV2(input: GetOrderV2In): Promise<GetOrderV2Out> {
     const v1 = await this.getOrder(input);
     const { rows } = await this.#asTenant(input.tenantId, (c) =>
       c.query(`SELECT customer_id FROM "order" WHERE tenant_id = $1 AND id = $2`, [
@@ -103,6 +112,7 @@ class Orders extends OrdersService {
 }
 
 startTelemetry();
+await startFlags();
 const db = await waitForDb();
 const svc = new Orders(bus(await connectBroker()), db);
 serve(

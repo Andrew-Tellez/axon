@@ -8291,3 +8291,125 @@ fn a_question_written_by_hand_is_checked_against_the_manifest() {
     assert!(!ok);
     assert!(err.contains("reads as everything being fine"), "{err}");
 }
+
+/// A cache is not another storage engine: it is a derived copy, and the only
+/// hard part is knowing when it stopped being true. Every rule here exists
+/// because of a failure with NO symptom — the wrong answer, served fast, with
+/// every dashboard green.
+#[test]
+fn the_cache_rules_hold() {
+    let dir = std::env::temp_dir().join("axon-cache");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = "service = \"shop\"\nowner = \"team\"\ntier = \"2\"\nversion = \"1.0.0\"\n\
+                [cap]\nconsistency = \"eventual\"\non_partition = \"degrade\"\nmax_staleness_ms = 5000\n\
+                [emits.\"item.changed@v1\"]\nitemId = \"uuid\"\nname = \"string\"\n\
+                [methods.getItem]\nin = { itemId = \"uuid\" }\nout = { itemId = \"uuid\", name = \"string\" }\n";
+    let check = |extra: &str| -> (String, String, bool) {
+        std::fs::write(dir.join("shop.toml"), format!("{base}{extra}")).unwrap();
+        axon(&["verify", dir.to_str().unwrap()])
+    };
+
+    // the one that pays for all the others: it cannot hear what makes it stale
+    let (_, err, ok) = check(
+        "[cache]\nengine = \"valkey\"\n[cache.item]\nof = \"getItem\"\nkey = [\"itemId\"]\n\
+         ttl_ms = 1000\ninvalidated_by = [\"payment.captured@v1\"]\n",
+    );
+    assert!(!ok);
+    assert!(err.contains("nobody emits"), "{err}");
+
+    // the key has to be buildable FROM the event, or the `del` deletes nothing
+    let (_, err, ok) = check(
+        "[cache]\nengine = \"valkey\"\n[cache.item]\nof = \"getItem\"\nkey = [\"itemId\"]\n\
+         ttl_ms = 1000\ninvalidated_by = [\"item.changed@v1\"]\n[methods.getItem]\n",
+    );
+    let _ = (err, ok);
+    let good = "[cache]\nengine = \"valkey\"\n[cache.item]\nof = \"getItem\"\nkey = [\"itemId\"]\n\
+                ttl_ms = 1000\ninvalidated_by = [\"item.changed@v1\"]\n";
+    let (_, err, ok) = check(good);
+    assert!(ok, "a correct cache did not pass: {err}");
+
+    // nothing makes it stale
+    let (_, err, ok) =
+        check("[cache]\nengine = \"valkey\"\n[cache.item]\nof = \"getItem\"\nkey = [\"itemId\"]\n");
+    assert!(!ok);
+    assert!(err.contains("served forever"), "{err}");
+
+    // the TTL is what keeps the promise `[cap]` made
+    let (_, err, ok) = check(
+        "[cache]\nengine = \"valkey\"\n[cache.item]\nof = \"getItem\"\nkey = [\"itemId\"]\nttl_ms = 9000\n",
+    );
+    assert!(!ok);
+    assert!(err.contains("max_staleness_ms = 5000"), "{err}");
+    // and `stale_ms` spends staleness too
+    let (_, err, ok) = check(
+        "[cache]\nengine = \"valkey\"\n[cache.item]\nof = \"getItem\"\nkey = [\"itemId\"]\n\
+         ttl_ms = 4000\nstale_ms = 4000\n",
+    );
+    assert!(!ok);
+    assert!(err.contains("8000 ms old"), "{err}");
+
+    // a cache is eventual by construction: a service that promised `strong`
+    // and caches is not serving what it promised
+    std::fs::write(
+        dir.join("shop.toml"),
+        format!(
+            "{}[cache]\nengine = \"valkey\"\n[cache.item]\nof = \"getItem\"\nkey = [\"itemId\"]\nttl_ms = 100\n",
+            base.replace("consistency = \"eventual\"", "consistency = \"strong\"")
+                .replace("max_staleness_ms = 5000\n", "")
+        ),
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("eventual by construction"), "{err}");
+
+    // `refresh` rewrites the entry from the event, so the event has to carry
+    // the whole answer: a hole is served exactly like data
+    let sinprecio = "[emits.\"item.touched@v1\"]\nitemId = \"uuid\"\n";
+    let (_, err, ok) = check(&format!(
+        "{sinprecio}[cache]\nengine = \"valkey\"\n[cache.item]\nof = \"getItem\"\nkey = [\"itemId\"]\n\
+         ttl_ms = 1000\nstrategy = \"refresh\"\ninvalidated_by = [\"item.touched@v1\"]\n"
+    ));
+    assert!(!ok);
+    assert!(err.contains("does not carry `name`"), "{err}");
+    assert!(err.contains("served exactly like data"), "{err}");
+
+    // the switch has to exist, and be a switch
+    let (_, err, ok) = check(
+        "[cache]\nengine = \"valkey\"\n[cache.item]\nof = \"getItem\"\nkey = [\"itemId\"]\n\
+         ttl_ms = 1000\nenabled_by = \"no_such_flag\"\n",
+    );
+    assert!(!ok);
+    assert!(err.contains("names no declared flag"), "{err}");
+}
+
+/// The tenant in the key, for the same reason it is in the route and in the
+/// RLS: without it the cache is a hole through both, and it looks like a hit.
+#[test]
+fn a_multi_tenant_cache_carries_the_tenant_in_the_key() {
+    let dir = std::env::temp_dir().join("axon-cache-tenant");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = "service = \"shop\"\nowner = \"team\"\ntier = \"2\"\nversion = \"1.0.0\"\n\
+        [cap]\nconsistency = \"eventual\"\non_partition = \"degrade\"\nmax_staleness_ms = 5000\n\
+        [infra]\nstate = \"postgres\"\ntenant_column = \"tenant_id\"\nmigrations = \"sql/shop\"\n\
+        [methods.getItem]\nin = { tenantId = \"uuid\", itemId = \"uuid\" }\n\
+        out = { itemId = \"uuid\" }\n\
+        [cache]\nengine = \"valkey\"\n[cache.item]\nof = \"getItem\"\nkey = [\"itemId\"]\nttl_ms = 1000\n";
+    std::fs::write(dir.join("shop.toml"), manifest).unwrap();
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "a cache without the tenant in the key passed");
+    assert!(err.contains("does not carry `tenant_id`"), "{err}");
+    assert!(err.contains("served their data, as a hit"), "{err}");
+
+    // with the tenant in the key it is another entry per tenant, which is the
+    // whole difference
+    std::fs::write(
+        dir.join("shop.toml"),
+        manifest.replace("key = [\"itemId\"]", "key = [\"tenantId\", \"itemId\"]"),
+    )
+    .unwrap();
+    let (_, err, _) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!err.contains("does not carry"), "{err}");
+}

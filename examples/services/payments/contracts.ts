@@ -384,6 +384,9 @@ export const manifest = {
   "saga": {},
   "aggregate": {},
   "view": {},
+  "cache": {
+    "engine": null
+  },
   "metrics": {},
   "rules": {},
   "infra": {

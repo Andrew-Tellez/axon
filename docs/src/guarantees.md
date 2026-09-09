@@ -43,7 +43,7 @@ their own — a compiler that only verifies itself produces invalid output:
 
 ```sh
 cargo test --release      # 62 conformance checks
-cd examples && ./demo.sh  # 66 checks against real containers
+cd examples && ./demo.sh  # 70 checks against real containers
 ```
 
 Preview. The command surface is stable; the manifest format can still change before

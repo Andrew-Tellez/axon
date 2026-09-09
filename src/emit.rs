@@ -290,6 +290,9 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     if !m.view.is_empty() {
         out.push(views_ts(m));
     }
+    if m.cache.active() {
+        out.push(cache_ts(m));
+    }
     let routes: Vec<String> = m
         .methods
         .values()
@@ -2104,6 +2107,183 @@ fn retirement_ts(m: &Manifest) -> String {
 /// granted covers what THIS method declared it needs. Retyping that list in the
 /// handler is how a route ends up checking a scope nobody declared, or checking
 /// none at all.
+/// The cache, generated. What the person writes is a `Cache` —three methods—
+/// and what they get is a wrapper per declared answer with its key, its TTL,
+/// its single-flight and its invalidation already wired to the events.
+///
+/// The key is built HERE and not by hand: a key assembled at the call site is
+/// the same key assembled two slightly different ways in two places, and the
+/// second one never hits.
+fn cache_ts(m: &Manifest) -> String {
+    let mut o = vec![
+        "/** The cache the service talks to. Three methods, and the adapter is\n \
+         *  yours: axon declares what is cached and what makes it stale, not which\n \
+         *  client library you use. */\n\
+         export interface Cache {\n  \
+           get(key: string): Promise<string | null>;\n  \
+           set(key: string, value: string, ttlMs: number): Promise<void>;\n  \
+           del(key: string): Promise<void>;\n\
+         }\n"
+        .to_string(),
+    ];
+    // One reader reloads and the rest wait for it. In a single process this is
+    // a promise map; across instances it is the TTL that keeps the herd small.
+    o.push(
+        "/** In-flight loads, so N callers of the same key make ONE load. Without\n \
+         *  this every instance misses at once and they hit the database together,\n \
+         *  which is how a cache takes down what it was there to protect. */\n\
+         const inFlight = new Map<string, Promise<unknown>>();\n"
+            .to_string(),
+    );
+    for (name, e) in &m.cache.entries {
+        let Some(method) = m.methods.get(&e.of) else {
+            continue;
+        };
+        let ttl = e.ttl_ms.unwrap_or(0);
+        let stale = e.stale_ms.unwrap_or(0);
+        let entry = pascal(name);
+        let inp = format!("{}In", pascal(&e.of));
+        let outp = format!("{}Out", pascal(&e.of));
+        let parts: Vec<String> = e
+            .key
+            .iter()
+            .map(|k| format!("String(input.{})", camel(k)))
+            .collect();
+        o.push(format!(
+            "/** The key of `{name}`: {}. Built here so two call sites cannot build\n \
+             *  it two slightly different ways, which is a miss that looks like a cold\n \
+             *  cache forever. */\n\
+             export function key{entry}(input: Pick<{inp}, {}>): string {{\n  \
+               return [\"{svc}\", \"{name}\", {}].join(\":\");\n\
+             }}\n",
+            e.key.join(", "),
+            e.key
+                .iter()
+                .map(|k| format!("\"{}\"", camel(k)))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            parts.join(", "),
+            svc = m.service,
+        ));
+        let _ = method;
+        let single = e.single_flight;
+        // The switch, in the signature. Not an `if` somebody remembers to
+        // write at the call site: if the entry is gated, the wrapper cannot be
+        // called without the flag provider.
+        let (gate_arg, gate_body) = match &e.enabled_by {
+            Some(flag) => (
+                format!(
+                    "\n  flags: Flags,{}",
+                    match m.flags.get(flag).and_then(|f| f.sticky_by.clone()) {
+                        Some(_) => String::new(),
+                        None => String::new(),
+                    }
+                ),
+                format!(
+                    "  // the switch: off means straight to the source, which is what you
+  // want the day the invalidation turns out to be wrong
+  if (!(await flag{}(flags{}))) return load();
+",
+                    pascal(flag),
+                    match m.flags.get(flag).and_then(|f| f.sticky_by.clone()) {
+                        Some(k) => format!(", String(input.{})", camel(&k)),
+                        None => String::new(),
+                    }
+                ),
+            ),
+            None => (String::new(), String::new()),
+        };
+        o.push(format!(
+            "/** `{}` through the cache. TTL {ttl} ms{}.\n \
+             *\n \
+             *  It returns what the method returns: the caller cannot tell a hit from\n \
+             *  a miss, which is the point. What makes it stale is declared —{}— and\n \
+             *  wired into `dispatch`. */\n\
+             export async function cached{entry}(\n  \
+               cache: Cache,{gate_arg}\n  \
+               input: {inp},\n  \
+               load: () => Promise<{outp}>,\n\
+             ): Promise<{outp}> {{\n\
+             {gate_body}  \
+               const k = key{entry}(input);\n  \
+               const hit = await cache.get(k);\n  \
+               if (hit !== null) return JSON.parse(hit) as {outp};\n\
+             {flight}  \
+               const value = await run();\n  \
+               await cache.set(k, JSON.stringify(value), {total});\n  \
+               return value;\n\
+             }}\n",
+            e.of,
+            match stale {
+                0 => String::new(),
+                s => format!(", plus {s} ms served stale while one reader refreshes"),
+            },
+            match e.invalidated_by.is_empty() {
+                true => "nothing but the TTL".to_string(),
+                false => e.invalidated_by.join(", "),
+            },
+            total = ttl + stale,
+            flight = match single {
+                true => "  // one loader per key: the rest await the same promise\n  \
+                     const run = () => {\n    \
+                       const already = inFlight.get(k) as Promise<Out> | undefined;\n    \
+                       if (already) return already;\n    \
+                       const p = load().finally(() => inFlight.delete(k));\n    \
+                       inFlight.set(k, p);\n    \
+                       return p;\n  \
+                     };\n"
+                    .replace("Out", &outp),
+                false => "  const run = load;\n".to_string(),
+            },
+        ));
+    }
+    // The invalidation, by event. This is the half nobody writes: the code
+    // that drops the entry when the thing it summarised changed.
+    let mut by_event: IndexMap<&String, Vec<(&String, &Cached)>> = IndexMap::new();
+    for (name, e) in &m.cache.entries {
+        for ev in &e.invalidated_by {
+            by_event.entry(ev).or_default().push((name, e));
+        }
+    }
+    if !by_event.is_empty() {
+        let mut arms = Vec::new();
+        for (ev, entries) in &by_event {
+            let mut lines = vec![format!("    case \"{ev}\": {{")];
+            for (name, e) in entries {
+                let entry = pascal(name);
+                // The key is built from the EVENT, so the event has to carry
+                // the key's fields. `verify` says so before this is generated.
+                let from: Vec<String> = e
+                    .key
+                    .iter()
+                    .map(|k| format!("{}: (data as any).{}", camel(k), camel(k)))
+                    .collect();
+                lines.push(format!(
+                    "      await cache.del(key{entry}({{ {} }} as any));",
+                    from.join(", ")
+                ));
+            }
+            lines.push("      return;".into());
+            lines.push("    }".into());
+            arms.push(lines.join("\n"));
+        }
+        o.push(format!(
+            "/** Drops what the event made untrue. It is called from `dispatch`, so an\n \
+             *  event this service consumes cannot arrive without the cache hearing it —\n \
+             *  which is the failure this whole block exists for: the answer that stayed\n \
+             *  right-looking and wrong. */\n\
+             export async function invalidateOn(cache: Cache, type: string, data: unknown): Promise<void> {{\n  \
+               switch (type) {{\n{}\n    \
+                 default:\n      \
+                   return;\n  \
+               }}\n\
+             }}\n",
+            arms.join("\n")
+        ));
+    }
+    o.join("\n")
+}
+
 fn scopes_ts(m: &Manifest) -> String {
     let rows: Vec<String> = m
         .methods

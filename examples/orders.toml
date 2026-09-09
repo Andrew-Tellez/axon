@@ -202,3 +202,34 @@ above = 0.9               # el conteo no viene cayendo mas de 10%
 flag = "free_shipping"
 variant = "over_500"
 restore = "off"           # lo que sube solo tiene que poder bajar solo
+
+# La caché de la respuesta de `getOrderV2`.
+#
+# No es "otro motor": es una copia derivada, y lo unico dificil es saber cuando
+# dejo de ser cierta. Eso axon si lo sabe, porque los eventos estan declarados.
+[cache]
+engine = "valkey"
+
+[cache.order]
+of = "getOrderV2"
+# El tenant EN la llave. Sin el, el primer inquilino que pregunta calienta la
+# entrada y al siguiente se le sirve la ajena, como acierto: ni el RLS ni el
+# router ven esa segunda consulta.
+key = ["tenantId", "orderId"]
+# Cabe en el `max_staleness_ms` que el servicio ya prometio.
+ttl_ms = 2000
+# Sin `invalidated_by`, y no por pereza: la llave lleva el inquilino y el unico
+# evento que este servicio emite no lo trae, asi que la invalidacion construiria
+# una llave con un hueco y no borraria nada. `verify` lo dice con esas palabras
+# si se declara. Aqui el TTL es lo unico que la vuelve vieja, y es una decision
+# tomada, no un olvido.
+# El interruptor: el dia que la invalidacion este mal se apaga sin desplegar, y
+# una regla sobre una metrica puede ser la que lo apague.
+enabled_by = "cache_orders"
+
+# Interruptor de emergencia: se apaga entero o no sirve, y por eso no lleva
+# fecha de caducidad ni despliegue gradual.
+[flags.cache_orders]
+owner = "orders-team"
+kill_switch = true
+default = true

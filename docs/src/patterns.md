@@ -859,6 +859,69 @@ And a different type between the two is an error too: on the swap, the view chan
 with nothing saying so. A column too many in the shadow is only a warning — it is spare
 until the next swap, and after that it is the view that has it.
 
+## The cache, and the half nobody writes
+
+A cache is not another storage engine: it is a **derived copy**, and the only hard part is
+knowing when it stopped being true. That is the one thing axon knows and a library cannot,
+because the events are declared:
+
+```toml
+[cache]
+engine = "valkey"
+
+[cache.item]
+of = "getItem"                        # the answer that is cached
+key = ["tenantId", "itemId"]          # fields of that method's `in`
+ttl_ms = 2000
+invalidated_by = ["item.changed@v1"]  # what makes it stale
+enabled_by = "cache_items"            # the switch
+```
+
+Everything checked here exists because of a failure **with no symptom**: the wrong answer,
+served fast, with every dashboard green.
+
+| The rule | What it prevents |
+| --- | --- |
+| the tenant is in the key, if the service is multi-tenant | the first tenant warms the entry and the next is served their data **as a hit** — neither the RLS nor the router sees that second query |
+| the key is buildable from the event | the `del` runs, deletes nothing, and the stale answer is served until the TTL |
+| the service emits or consumes what invalidates it | an invalidation nobody can run, which reads as handled |
+| `ttl_ms + stale_ms` fits `[cap] max_staleness_ms` | the budget is the promise and these are what keep it |
+| `strong` and a cache is a contradiction | a cache is eventual by construction: between the change and the invalidation the old answer is served |
+| `pii` in the answer needs a bound | personal data kept forever somewhere nobody lists when a deletion request arrives |
+| `strategy = "refresh"` needs the whole answer in the event | the entry is rewritten with a hole, and a hole is served exactly like data |
+| the compensation invalidates too | after a rollback the cache keeps serving the value of the attempt that was undone |
+
+That last one is the distributed-transaction case, and it is derivable because
+`compensates` is declared: a step succeeds, the cache is invalidated and warmed with the
+new value, the saga fails and compensates — and nothing tells the cache.
+
+### What comes out
+
+`axon build` emits the key builder, the wrapper with its TTL and its single-flight, and
+`invalidateOn`, wired into `dispatch`. The key is built **there** and not at the call site:
+a key assembled two slightly different ways in two places is a miss that looks like a cold
+cache forever. What you write is a `Cache` with three methods — the example's adapter is
+RESP over a socket, about thirty lines, no dependency.
+
+### The switch, and the loop it plugs into
+
+`enabled_by` is a declared flag, so the day the invalidation turns out to be wrong the
+cache goes off **without a deploy**. And once it is behind a flag, the loop that already
+exists closes: a `[rules.*]` over a metric can be what turns it off.
+
+### Measured, not declared
+
+```console
+==> la cache, medida
+  OK: la entrada existe con el inquilino EN la llave, no solo el pedido
+  OK: entradas distintas por inquilino; sin el en la llave la segunda seria un acierto ajeno
+  OK: expira en 1635ms; el TTL sale del manifiesto y cabe en el max_staleness_ms
+  OK: con la bandera en off no se cachea nada; se apaga sin desplegar
+```
+
+Against the Valkey the `local` target brings up: the key is read back out of the engine,
+and the second tenant asking for the **same** item is checked to get its own entry.
+
 ## What is missing from event sourcing
 
 Nothing pending that is a correctness risk. What is left is convenience: today the shadow
