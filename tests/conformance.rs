@@ -9003,6 +9003,15 @@ fn init_writes_a_project_that_verifies_clean() {
     );
     assert!(!dockerfile.contains("SERVICE"), "the placeholder survived");
 
+    // the file that holds the values of the declared secrets does not go to
+    // git: an ignore list that forgets it is the one mistake that cannot be
+    // undone by a later commit
+    let ignore = std::fs::read_to_string(dir.join(".gitignore")).unwrap();
+    assert!(
+        ignore.lines().any(|l| l.trim() == ".env.local"),
+        "the secrets file is not ignored:\n{ignore}"
+    );
+
     // zero errors, which is the whole claim
     let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(ok, "the scaffold does not verify clean:\n{err}{out}");

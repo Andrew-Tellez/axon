@@ -211,4 +211,7 @@ test_cmd       = "node --test services/{service}"
 contracts_path = "services/{service}/contracts.ts"
 "#;
 
-const GITIGNORE: &str = "node_modules/\n.axon/\naxon.local.yml\n";
+// `.env.local` is the file that holds the values of the declared secrets, and
+// it was not in here: the one file this layout creates whose whole job is to
+// stay out of git.
+const GITIGNORE: &str = "node_modules/\n.axon/\naxon.local.yml\n.env.local\n";
