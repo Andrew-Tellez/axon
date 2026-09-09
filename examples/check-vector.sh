@@ -109,12 +109,16 @@ while [ "$i" -lt 5 ]; do
 done
 [ "$(delivered)" -gt "$before" ] || { echo "  FAILED: the broker never delivered it"; exit 1; }
 
+# Generous on purpose: the generated config gives every sink a 256 MB disk
+# buffer —five of them— and on a loaded runner creating those files takes a
+# while before the first row moves. Measuring the config as it is means
+# waiting for what the config asks for.
 i=0
 rows=0
-while [ "$i" -lt 60 ]; do
+while [ "$i" -lt 90 ]; do
   rows=$(ch -q "SELECT count(*) FROM axon.order_placed_v1 WHERE event_id = '$ID'")
   if [ "$rows" -ge 1 ]; then break; fi
-  i=$((i + 1)); sleep 1
+  i=$((i + 1)); sleep 2
 done
 if [ "$rows" -ne 1 ]; then
   echo "  FAILED: $rows rows for one event (the queue group does not deduplicate, or nothing arrived)"
@@ -123,7 +127,8 @@ if [ "$rows" -ne 1 ]; then
   # delivered it at all, which is the fork in the diagnosis —lost on the way in,
   # or lost between Vector and the warehouse.
   echo "  --- what the broker counted: $(delivered) delivered ---"
-  echo "  --- rows in the table: $(ch -q "SELECT count(*) FROM axon.order_placed_v1") ---"
+  echo "  --- rows in the table: $(ch -q "SELECT count(*) FROM axon.order_placed_v1"), \
+of them from this check: $(ch -q "SELECT count(*) FROM axon.order_placed_v1 WHERE event_id LIKE 'vector-%'") ---"
   echo "  --- vector 1 ---"; docker logs axon-vector-1 2>&1 | tail -40
   echo "  --- vector 2 ---"; docker logs axon-vector-2 2>&1 | tail -40
   exit 1
