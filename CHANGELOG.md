@@ -7,6 +7,36 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.14.0] — 2026-09-09
+
+### Añadido
+
+- **`axon analytics --metabase --check`: el drift del tablero, al revés.** axon emitía las
+  preguntas y las comparaba contra el manifiesto; la que escribe alguien **a mano** en
+  Metabase, contra una tabla que axon posee, era invisible. El día que la columna cambia esa
+  pregunta se rompe y nadie se entera hasta que la abre.
+
+  Ahora entra lo que devolvió el tablero —su propio `/api/card`, o la forma que axon emite—
+  y se cruza contra el esquema que genera, leído **del DDL mismo** y no de una segunda lista
+  que se separaría al primer cambio. Sin credenciales, como todo lo demás: quien tiene el
+  Metabase exporta, el compilador diffea.
+
+  El fallo más común no es un dedazo: es la columna **PII**. El manifiesto dice que ese
+  campo viaja hasheado, así que no existe con ese nombre, y la pregunta por el correo en
+  claro contesta con error para siempre. Por eso el mensaje dice cuál **sí** está: eso
+  convierte el error en el arreglo.
+
+  Y lo que se niega a contestar queda contado y nombrado como **no comprobado**: una
+  pregunta que no es nativa nombra tabla y campos por id numérico, y una que hace `JOIN` o
+  lee un CTE vuelve ambiguo un nombre suelto. Van en una línea por grupo y no una por
+  pregunta, porque un Metabase trae docenas de preguntas de ejemplo propias y cuarenta
+  avisos sobre la base de muestra de otro es como una regla deja de leerse.
+
+### Cambiado
+
+- El demo escribe una de esas preguntas contra el Metabase que ya aprovisiona y comprueba
+  que axon la nombra: **66 comprobaciones**. La suite pasó a **94 pruebas**.
+
 ## [0.13.1] — 2026-09-09
 
 ### Corregido
