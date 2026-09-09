@@ -7,6 +7,54 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.17.0] — 2026-09-09
+
+### Añadido
+
+- **`[cache]`: declarar una caché, y sobre todo lo que la vuelve mentira.** Una caché no es
+  otro motor de almacenamiento: es una **copia derivada**, y lo único difícil es saber
+  cuándo dejó de ser cierta. Eso es justo lo que axon sabe y una librería no, porque los
+  eventos están declarados.
+
+  ```toml
+  [cache.item]
+  of = "getItem"
+  key = ["tenantId", "itemId"]
+  ttl_ms = 2000
+  invalidated_by = ["item.changed@v1"]
+  enabled_by = "cache_items"
+  ```
+
+  Cada regla existe por un fallo **sin síntoma** —la respuesta equivocada, servida rápido,
+  con todos los tableros en verde—:
+
+  - el **inquilino en la llave** si el servicio es multi-inquilino: sin él, el primero que
+    pregunta calienta la entrada y al siguiente se le sirve la ajena *como acierto*, y ni el
+    RLS ni el router ven esa segunda consulta;
+  - la llave se tiene que poder **construir desde el evento**, o el `del` no borra nada y lo
+    viejo se sirve hasta el TTL. Esta la encontró el propio generador cayendo en ella:
+    escribía una llave con `undefined` dentro;
+  - el servicio tiene que **poder oír** lo que la invalida, o es una invalidación que nadie
+    corre y que se lee como resuelta;
+  - `ttl_ms + stale_ms` cabe en el `max_staleness_ms` declarado;
+  - `strong` y una caché es una contradicción;
+  - `pii` en la respuesta necesita cota;
+  - `strategy = "refresh"` reescribe la entrada desde el evento, así que el evento tiene que
+    traer la respuesta entera: un hueco se sirve igual que un dato;
+  - y **la compensación también invalida**. Ese es el caso de las transacciones
+    distribuidas, y es derivable porque `compensates` está declarado.
+
+  Sale generada la llave, el envoltorio con su TTL y su single-flight, y `invalidateOn`
+  enganchado al `dispatch`. Se levanta en los cuatro objetivos —valkey en local y k8s,
+  Memorystore en gcp, ElastiCache en aws—, sin volumen, sin réplica y sin snapshot: nada
+  aquí sobrevive a perderlo, y una caché restaurada es una caché llena de respuestas que
+  eran ciertas ayer.
+
+  Medida contra contenedores: el demo lee la llave del Valkey, comprueba que el segundo
+  inquilino pidiendo **el mismo** ítem recibe otra entrada, que el PTTL es el del manifiesto
+  y que con la bandera en off no se guarda nada. **27 secciones, 70 comprobaciones**, y la
+  suite en **96 pruebas**.
+
 ## [0.16.0] — 2026-09-09
 
 ### Añadido
