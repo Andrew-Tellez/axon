@@ -7,6 +7,22 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.13.1] — 2026-09-09
+
+### Corregido
+
+- **El demo esperaba con un `sleep` a que Vector se suscribiera.** El CI se cayó con
+  `0 rows for one event`: la línea «Vector has started» sale **antes** de que la suscripción
+  quede registrada, y un evento publicado al vacío se ve exactamente igual que una tubería
+  que no funciona. En mi máquina el margen alcanzaba; en el runner no.
+
+  Ahora la espera es contra `/subsz` del propio broker, que dice quién está suscrito: deja
+  de ser una carrera y comprueba de paso algo que antes se daba por hecho —que las dos
+  réplicas entraron al **mismo** grupo de cola—. Y cuando falla ya se ve por qué: la salida
+  del publicador y los logs de las dos réplicas.
+
+  El demo pasó a **65 comprobaciones**.
+
 ## [0.13.0] — 2026-09-09
 
 ### Añadido
