@@ -7,6 +7,18 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.24.1] — 2026-09-09
+
+### Corregido
+
+- **El andamio contestaba 404** a la ruta que el manifiesto declara, sin decir por qué. Ahora
+  contesta **501** con `problem+json` nombrando el método y el archivo: *«the manifest
+  declares GET /v1/things/{thingId}; implement it in services/pagos/index.ts»*. Un stub que
+  contestara 200 con datos inventados sería justo lo que este proyecto existe para evitar.
+- **Los pasos siguientes decían `docker compose up -d --wait`**, que después de cambiar el
+  código vuelve a correr la imagen vieja sin decir nada — lo vi depurando por qué mi propio
+  stub no aparecía. Ahora dicen `--build`.
+
 ## [0.24.0] — 2026-09-09
 
 ### Añadido
