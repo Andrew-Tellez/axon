@@ -7,6 +7,56 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.16.0] — 2026-09-09
+
+### Añadido
+
+- **El sharder también en `gcp` y `aws`, como sidecar.** Era la última celda de la tabla de
+  targets que decía «se niega». Ahora salen N instancias gestionadas —una **instancia** por
+  nodo, porque un shard que comparte motor con los otros tres comparte su techo, su CPU y su
+  caída— y pgdog al lado de la app.
+
+  Al lado y no como servicio propio: Cloud Run y ECS sirven HTTP, y el protocolo de Postgres
+  necesita un proceso que la app alcance en `localhost`. En Cloud Run son dos secretos y dos
+  volúmenes, porque un volumen toma sus archivos de UN secreto y pgdog lee dos. En ECS es la
+  misma forma que en k8s: un contenedor que escribe la configuración y termina, y el sharder
+  esperándolo con `dependsOn`.
+
+- **La negativa general se convirtió en una con números.** Esa forma cambia la aritmética:
+  con un sidecar el pool deja de ser uno y pasa a ser uno **por instancia**, y esa
+  multiplicación es lo que tumba una base de datos el día que escala.
+
+  ```console
+  $ axon infra manifests/ --target gcp
+  axon: orders: on `gcp` the sharder is a sidecar …, so the pool is one PER INSTANCE:
+  40 x 10 instances = 400, plus 2 reserved, over the limit of 100 per node. Lower
+  `[pooler] pool_size`, lower `max_instances`, or raise the node's `max_connections`
+  ```
+
+  Nombra el número, de dónde sale y las tres salidas. La anterior solo decía que no.
+
+  El `DATABASE_URL` sale de un secreto **distinto** (`<servicio>-pooler-url`) para que nadie
+  apunte el servicio a un nodo reusando la URL vieja: eso se salta el sharding y funciona,
+  contra un cuarto de los datos.
+
+  Las dos formas pasan por `terraform validate` con los providers reales en la suite: el
+  sidecar es un segundo contenedor, un volumen desde un secreto y un `dependsOn`, y un
+  atributo inexistente ahí solo se vería en el `apply`.
+
+### Corregido
+
+- **La comprobación del ingest de Vector era intermitente**, que es peor que no tenerla:
+  enseña a volver a lanzar el CI. NATS core es fire-and-forget, así que ahora se publica
+  hasta que el **contador del broker** dice que entregó —y solo se repite cuando no entregó
+  nada, así una segunda copia seguiría saliendo como una segunda fila y fallando—. Y la
+  espera por la fila es la que el propio archivo generado pide: cinco sinks con 256 MB de
+  buffer en disco tardan en arrancar en un runner cargado.
+
+  Dos cosas que aparecieron al escribirlo: `subsz` contesta con el JSON indentado, así que
+  el contador leía siempre 0 y el diagnóstico decía lo contrario de lo que pasaba; y
+  `[ cond ] && break` bajo `set -e` aborta el script sin mensaje cuando la condición es
+  falsa — estaba en cuatro bucles.
+
 ## [0.15.0] — 2026-09-09
 
 ### Añadido
