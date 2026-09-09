@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **62 checks against reality**: not against a mock,
+brings the whole system up and makes **64 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -177,6 +177,13 @@ axon: the warehouse has 0 differences against the manifest
   OK: the missing column is detected, and without it that field would be stored nowhere
   OK: restored whole after breaking it: 1 rows, all with their amount
   OK: 1 rows before and after; the loader is idempotent
+
+==> el ingest de Vector, medido
+  one real envelope, published to the broker
+  OK: 1 row from 2 replicas; the queue group delivers the event once
+  and the PII, which is what nobody was checking
+  OK: the same hash as the SQL loader, and no address reaches the warehouse
+  OK: trace_id out of the traceparent, and the money in its two columns
 
 ==> la cadena real, leida del almacen de trazas
   92 spans leidos de Jaeger, sin tocar el log de envelopes

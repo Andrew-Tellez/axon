@@ -185,6 +185,11 @@ python3 check-apply.py "localhost:${AXON_FLAGS_PORT:-8016}"
 step "the warehouse: schema, funnel and PII"
 ./check-warehouse.sh
 
+# El camino de ingesta de k8s, contra contenedores. `vector validate` dice que
+# el archivo es valido; no dice que lleve un evento del broker a la bodega.
+step "el ingest de Vector, medido"
+./check-vector.sh
+
 step "la cadena real, leida del almacen de trazas"
 ./check-spans.sh
 

@@ -38,7 +38,7 @@ error  `[analytics] warehouse = "clickhouse"` has no ingest path on `gcp`. The s
 | `gcp` + `bigquery` | a Pub/Sub subscription that writes **straight** into the table, with `use_table_schema` and its own DLQ |
 | `aws` + `snowflake` or `clickhouse` | one Firehose per event into S3, with the **same date partitioning** as the generated schema. From there the warehouse loads with its own tooling —Snowpipe, an external table— because that step lives on the warehouse's side, not the provider's |
 | `local` + `clickhouse` | a ClickHouse and a loader for the envelope log the target itself already writes |
-| `k8s` + `clickhouse` | a **Vector** that consumes from the broker and writes into the warehouse, with the config generated and validated by `vector validate` |
+| `k8s` + `clickhouse` | a **Vector** that consumes from the broker and writes into the warehouse, with the config generated, validated by `vector validate` and **measured against containers** |
 
 And one warehouse per platform: `verify` requires every exporting service to declare the
 same one. Split across two, the funnel —which is what makes exporting useful— cannot be
@@ -479,8 +479,40 @@ it is a warning and not an error, so a repo that already exists is not blocked o
 The demo reads it back out of `system.tables` and compares it against the manifest: it is
 not enough for the DDL to say it, it has to be **in** the table.
 
+### And measured, not just validated
+
+`vector validate` says the file is valid. It does not say it carries an event from the
+broker to the warehouse, and least of all that it hashes what it has to. The generated
+config names the containers the `local` target already brings up
+(`nats://broker:4222`, `http://warehouse:8123`), so the demo runs it **as it is**, with
+nothing rewritten:
+
+```console
+==> el ingest de Vector, medido
+  one real envelope, published to the broker
+  OK: 1 row from 2 replicas; the queue group delivers the event once
+  and the PII, which is what nobody was checking
+  OK: the same hash as the SQL loader, and no address reaches the warehouse
+  OK: trace_id out of the traceparent, and the money in its two columns
+```
+
+**Two replicas on purpose.** The queue group was a comment in a generated file until
+something measured it: taking `queue` out and repeating the run gives **2 rows for one
+event**, which is the funnel counting every flow twice with nothing looking wrong.
+
+**And the hash against the other path's.** The same table is filled by the SQL loader,
+which hashes with its own expression (`lower(hex(SHA256(salt || email)))` in ClickHouse)
+while Vector hashes with VRL (`sha2(..., variant: "SHA-256")`). Two ingest paths with
+different hashes for the same person are two columns nobody can join — and neither of
+them would look wrong on its own. The demo compares them.
+
+The image comes out of the generator, not out of the script: two places naming a version
+drift apart, and what would be measured then is a different Vector from the one the k8s
+manifest deploys.
+
 ## What is missing
 
-And `k8s`'s ingest is validated but not measured against containers: the local target is
-filled from the envelope log, so Vector's path does not go through the demo. Bringing it up
-there —broker, Vector and ClickHouse— is what would put it at the level of the rest.
+The **other** direction of the Metabase drift: axon emits the questions and compares them
+against the manifest, but a question somebody writes by hand in the dashboard, against a
+table axon owns, is invisible to it. The day a column changes, that question breaks and
+nothing says so until somebody opens it.
