@@ -7,6 +7,32 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.23.0] — 2026-09-09
+
+### Corregido
+
+Cinco mensajes que tenían razón y no servían, encontrados **usando la CLI en un proyecto
+vacío** — que es la única forma de encontrarlos: quien conoce el repo de ejemplos no ve
+ninguno.
+
+- **`migrations` se resuelve desde el directorio del manifiesto**, así que la distribución
+  más natural —`manifests/` al lado de `sql/`— no lee ninguna. Con un `[crud.*]` eso era un
+  aviso, o sea que la mitad de lo que se compra declarando un CRUD no estaba pasando, **en
+  silencio**. Ahora es error, y dice desde dónde miró y que un layout con `manifests/`
+  necesita `../sql/...`.
+- **«no numeric prefix» sobre un archivo llamado `V1__product.sql`** se lee como un fallo de
+  axon. Ahora nombra la forma que espera (`001_<nombre>.sql`), de dónde sale, y que las dos
+  convenciones no se pueden mezclar en un directorio.
+- **El compose construye `services/<svc>/Dockerfile`** y sin nada ahí docker falla con un
+  `lstat` que no nombra nada. axon escribió esa ruta, así que ahora `verify` lo avisa.
+- **Ese compose moría por un `.env.local`** que un proyecto sin secretos declarados no tiene
+  por qué tener: ahora va con `required: false`.
+- **Un manifiesto que no menciona analytics** recibía un error sobre un almacén que nunca
+  pidió. El rechazo está bien —las tablas se quedarían vacías— pero ahora dice que exportar
+  viene **activado por defecto**, que es la parte que faltaba.
+
+La prueba nueva reproduce el proyecto desde cero y comprueba los cinco. La suite: **104**.
+
 ## [0.22.0] — 2026-09-09
 
 ### Añadido
