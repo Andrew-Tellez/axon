@@ -29,6 +29,7 @@ history that was deleted, a scope with a typo. It exits 1 on errors, and with
 ```sh
 axon build manifests/payments.toml manifests/     # contracts, base class, resilient clients
 axon build http://payments:8080 manifests/        # ...from what the peer serves RIGHT NOW
+axon build manifests/payments.toml manifests/ --lang go   # the same manifest, in idiomatic Go
 axon test manifests/payments.toml manifests/      # testkit: doubles, fixtures, three suites
 axon openapi manifests/                           # OpenAPI 3.1 for the whole platform
 axon openapi manifests/ --api-version 2026-01-15  # ...as it was at that version

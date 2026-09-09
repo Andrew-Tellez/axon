@@ -8,6 +8,7 @@ mod carga;
 mod color;
 mod dbsec;
 mod emit;
+mod gen_go;
 mod import;
 mod infra;
 mod manifest;
@@ -340,6 +341,8 @@ fn run() -> Result<ExitCode, String> {
             };
             if lang == "ts" {
                 println!("{}", emit::build_ts(&m, &all)?);
+            } else if lang == "go" {
+                print!("{}", gen_go::build(&m, &all)?);
             } else {
                 // a native target; the rest through a plugin
                 let bin = format!("axon-gen-{lang}");

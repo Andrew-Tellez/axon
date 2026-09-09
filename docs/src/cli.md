@@ -25,9 +25,10 @@ that follows from the declared CAP side, the clients of each `[[depends]]` with 
 policy running (timeout, backoff with jitter, breaker), and —if there are `pii` fields—
 the list and a recursive `redact()`.
 
-A `--lang` other than `ts` looks for `axon-gen-<lang>` on the `PATH` and passes it
-`{"manifest": ..., "peers": [...]}` on stdin. `plugins/axon-gen-go` is the reference
-generator.
+`--lang go` is native too, and it is the same manifest coming out as idiomatic Go: an
+interface the person implements instead of inheritance, `ctx` first and `error` last,
+`OrderID` and not `OrderId`. A `--lang` beyond those two looks for `axon-gen-<lang>` on
+the `PATH` and passes it `{"manifest": ..., "peers": [...]}` on stdin.
 
 ## `axon test <manifest> <sources> [--lang ts] [--contracts ./contracts.ts]`
 A testkit that **compiles on its own**: in-memory doubles of `Bus`, `Inbox` and `Outbox`,

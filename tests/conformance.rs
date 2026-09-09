@@ -902,93 +902,126 @@ fn import_asyncapi_3_and_2() {
     assert!(err.contains("no `tier`"), "{err}");
 }
 
-/// The plugin protocol has to hold up a real generator, not just a
-/// three-line check. This one is written in Go, knows nothing about axon, and
-/// its output has to compile.
+/// The claim underneath the whole project is that the manifest is not
+/// TypeScript in disguise. A second NATIVE generator is what makes that
+/// checkable: same manifest, another language, and the language's own tools
+/// —`gofmt` and `go vet`— saying whether what came out is real Go.
 #[test]
-fn plugin_gen_go() {
-    if !has("go") {
-        eprintln!("salteado: go no esta instalado");
-        return;
-    }
-    let dir = std::env::temp_dir().join("axon-gen-go");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+fn the_go_generator_is_native_and_idiomatic() {
+    let (code, err, ok) = axon(&[
+        "build",
+        "examples/payments.toml",
+        "examples",
+        "--lang",
+        "go",
+    ]);
+    assert!(ok, "{err}");
 
-    // the plugin is compiled and put on the PATH, as any user would
-    let bin = dir.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let build = Command::new("go")
-        .args([
-            "build",
-            "-o",
-            bin.join("axon-gen-go").to_str().unwrap(),
-            ".",
-        ])
-        .current_dir("plugins/axon-gen-go")
-        .output()
-        .expect("go build");
-    assert!(
-        build.status.success(),
-        "{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-
-    let path = format!(
-        "{}:{}",
-        bin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let out = Command::new(env!("CARGO_BIN_EXE_axon"))
-        .args([
-            "build",
-            "examples/payments.toml",
-            "examples",
-            "--lang",
-            "go",
-        ])
-        .env("PATH", &path)
-        .output()
-        .expect("axon");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let code = String::from_utf8_lossy(&out.stdout);
-
-    // a consumed event's schema is owned by its emitter: without `peers` in
-    // the protocol, the plugin could not declare this type
-    assert!(code.contains("type OrderPlacedV1 struct"), "{code}");
+    // Go's conventions, not TypeScript's translated: an interface the person
+    // implements instead of inheritance, `ctx` first and `error` last
     assert!(
         code.contains("OrderID string `json:\"orderId\"`"),
-        "it does not use Go's convention"
+        "it does not use Go's initialisms:\n{code}"
     );
+    assert!(
+        code.contains("type PaymentsHandlers interface {"),
+        "it inherits instead of implementing an interface"
+    );
+    assert!(
+        code.contains("CapturePayment(ctx context.Context, in CapturePaymentIn, e Envelope) (CapturePaymentOut, error)"),
+        "{code}"
+    );
+    // a consumed event's schema is owned by its emitter, and `uses` narrows it:
+    // what this service did not declare reading does not exist on this side
+    let consumed = code
+        .split("type OrderPlacedV1 struct {")
+        .nth(1)
+        .and_then(|t| t.split('}').next())
+        .unwrap_or_default()
+        .to_string();
+    assert!(consumed.contains("OrderID"), "{consumed}");
+    assert!(
+        !consumed.contains("CustomerEmail"),
+        "`uses` did not narrow the consumed event:\n{consumed}"
+    );
+    // the declared failures, with the retriable that comes out of the manifest
+    assert!(
+        code.contains(
+            "CapturePaymentIssuerUnavailable CapturePaymentError = \"issuer_unavailable\""
+        ),
+        "{code}"
+    );
+    assert!(
+        code.contains("Retriable: true"),
+        "the declared retriable did not travel:\n{code}"
+    );
+    assert!(code.contains("Code: \"insufficient_scope\""), "no scopes");
+    assert!(
+        code.contains("return s.outbox.Stage(ctx, e)"),
+        "outbox declared and not honoured"
+    );
+    assert!(code.contains("s.inbox.Once(ctx, e.ID"), "no deduplication");
     assert!(
         code.contains("func PaymentNext(state PaymentState"),
         "no state machine"
     );
-    assert!(
-        code.contains("return s.outbox.Stage(ctx, e)"),
-        "outbox declarado y no respetado"
-    );
-    assert!(code.contains("s.inbox.Once(ctx, e.ID"), "no deduplication");
 
-    // and it compiles
-    let pkg = dir.join("payments");
-    std::fs::create_dir_all(&pkg).unwrap();
-    std::fs::write(pkg.join("go.mod"), "module tmp/payments\n\ngo 1.22\n").unwrap();
-    std::fs::write(pkg.join("axon.go"), code.as_bytes()).unwrap();
-    let vet = Command::new("go")
-        .args(["vet", "./..."])
-        .current_dir(&pkg)
-        .output()
-        .expect("go vet");
+    // and a service that reads NOTHING of an answer says so in the type
+    let (co, _, ok) = axon(&[
+        "build",
+        "examples/checkout.toml",
+        "examples",
+        "--lang",
+        "go",
+    ]);
+    assert!(ok);
     assert!(
-        vet.status.success(),
-        "the generated Go does not pass vet:\n{}",
-        String::from_utf8_lossy(&vet.stderr)
+        co.contains("type PaymentsRefundPaymentResult struct{}"),
+        "`uses = []` is a declaration too:\n{co}"
     );
+
+    if !has("go") {
+        eprintln!("skipping gofmt and vet: go is not installed");
+        return;
+    }
+    let dir = std::env::temp_dir().join("axon-go-native");
+    let _ = std::fs::remove_dir_all(&dir);
+    for (svc, src) in [("payments", &code), ("checkout", &co)] {
+        let pkg = dir.join(svc);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("go.mod"), format!("module tmp/{svc}\n\ngo 1.22\n")).unwrap();
+        std::fs::write(pkg.join("axon.go"), src.as_bytes()).unwrap();
+
+        // Formatted, not formattable: a generator should not leave code
+        // somebody has to run gofmt over. `-l` lists what is not.
+        let fmt = Command::new("gofmt")
+            .args(["-l", "axon.go"])
+            .current_dir(&pkg)
+            .output()
+            .expect("gofmt");
+        assert!(
+            String::from_utf8_lossy(&fmt.stdout).trim().is_empty(),
+            "{svc}: the generated Go is not gofmt-clean:\n{}",
+            String::from_utf8_lossy(
+                &Command::new("gofmt")
+                    .args(["-d", "axon.go"])
+                    .current_dir(&pkg)
+                    .output()
+                    .expect("gofmt")
+                    .stdout
+            )
+        );
+        let vet = Command::new("go")
+            .args(["vet", "./..."])
+            .current_dir(&pkg)
+            .output()
+            .expect("go vet");
+        assert!(
+            vet.status.success(),
+            "{svc}: the generated Go does not pass vet:\n{}",
+            String::from_utf8_lossy(&vet.stderr)
+        );
+    }
 }
 
 /// The example service's code has to typecheck too, not only what is

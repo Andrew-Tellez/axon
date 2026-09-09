@@ -55,21 +55,20 @@ FALLO en workloads/0: Additional properties are not allowed ('invented' was unex
 FALLO en workloads/0: 'kind' is a required property
 ```
 
-## `axon-gen-go`, the reference generator
+## Where the reference generator went
 
-[`plugins/axon-gen-go`](https://github.com/Andrew-Tellez/axon/tree/main/plugins/axon-gen-go)
-is a complete generator written **in Go** — it imports nothing from axon, its only
-contract is the JSON on stdin. It works as a template for any other language:
+`axon-gen-go` used to live here, as a complete generator written in Go that imported
+nothing from axon. Being a plugin was the point for a while: it proved the protocol holds
+a real generator and not just a three-line check.
 
-```sh
-go build -o ~/.local/bin/axon-gen-go ./plugins/axon-gen-go
-axon build manifests/payments.toml manifests/ --lang go > payments/axon.go
-```
+What it could not prove is the claim underneath the whole project — that the manifest is
+not TypeScript in disguise — because nobody runs a generator they have to build first. So
+Go became **native**: `axon build --lang go`, no `PATH`, no `go build`. Two
+implementations of the same generator would have drifted, so there is only one.
 
-It produces idiomatic Go, not translated TypeScript: a handler interface instead of
-inheritance, `ctx` first and `error` last, `OrderID` and not `OrderId`, and the output
-goes through `go/format` before coming out — a generator should not leave code somebody
-has to format afterwards. The suite checks that what it generates passes `go vet`.
+The protocol did not change, and neither did the door: what that plugin read on stdin is
+what a plugin reads today, and the shape below is still the whole contract.
 
-It receives `{manifest, peers}` because a consumed event's schema is declared by its
-emitter: without the other manifests, no generator can type what its service receives.
+A generator receives `{manifest, peers}` because a consumed event's schema is declared by
+its **emitter**: without the other manifests, no generator can type what its service
+receives.

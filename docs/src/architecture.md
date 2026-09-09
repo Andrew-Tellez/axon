@@ -57,6 +57,7 @@ flowchart TB
 
   MAN --> VER["verify.rs<br/><i>the rules</i>"]
   MAN --> EMIT["emit.rs<br/><i>TypeScript, CI,<br/>diagrams</i>"]
+  MAN --> GGO["gen_go.rs<br/><i>the same manifest,<br/>as idiomatic Go</i>"]
   MAN --> INF["infra.rs<br/><i>the neutral plan<br/>+ 4 renderers</i>"]
   MAN --> BI["bi.rs<br/><i>warehouse: 3 dialects,<br/>funnels, metrics, drift</i>"]
   MAN --> DBS["dbsec.rs<br/><i>RLS, masked views,<br/>pg_anon</i>"]
@@ -254,7 +255,7 @@ No ABI, no dynamic loading, no version matching: `git`'s and `protoc`'s model.
 sequenceDiagram
   autonumber
   participant U as axon
-  participant P as axon-gen-go
+  participant P as axon-gen-rb
   U->>P: spawn (found on the PATH)
   U->>P: stdin · {manifest, peers}
   Note over P: peers, because a consumed<br/>event's schema is owned<br/>by its emitter

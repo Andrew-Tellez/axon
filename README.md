@@ -160,7 +160,7 @@ verified against itself.
 | **Terraform** | `--target gcp` and `--target aws` | `terraform validate` with the **real providers**, and with no warnings |
 | **`tsc`** | the TypeScript from `axon build` and `axon test` | `tsc --strict --noEmit`, plus the example service's typecheck |
 | **Node 24+** | runs the testkit with no build step, using type stripping | `node --test` against the real example service |
-| **Go** | `axon-gen-go`, the reference plugin generator | `go vet` over what it emits, and `go/format` before emitting |
+| **Go** | `axon build --lang go`, native alongside TypeScript | `gofmt -l` and `go vet` over what it emits, in the language's own tools |
 | **Postgres** | migrations, RLS, masked views | the RLS is **applied to a real Postgres** and checked to see that it isolates |
 | **`kubectl`** | `--target k8s` | a parse of the 16 objects it emits |
 | **k6** | `axon load`: load with the manifest's thresholds | it runs in the demo, and `--check` diffs the measured against the declared |
