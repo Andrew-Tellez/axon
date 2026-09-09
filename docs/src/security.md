@@ -119,6 +119,23 @@ carry no `aud` at all), and a single scalar `issuer` breaks every IdP migration,
 the longest-lived event in an auth system's life. A rule that fires on a correct setup
 gets the whole family silenced, and the good ones go with it.
 
+### The verifier, emitted from the block
+
+```sh
+axon auth manifests/orders.toml > services/orders/verifier.ts
+```
+
+Standard JOSE, and every value that decides whether a token is accepted comes out of the
+manifest: the issuers, the key set, the closed list of algorithms, the max age, the claim
+names. Changing provider is changing the TOML — the file itself does not name one.
+
+Passing the algorithm list to the library is not a detail: without it, the library trusts
+the token's own header about how to verify the token, which is how `none` and the
+HMAC-over-a-published-key trick get in.
+
+It refuses where it would have to guess: `introspection` is the issuer's API and its
+credential, and `adapter` is you saying you bring your own.
+
 ### Roles and plans per endpoint, and the line axon does not cross
 
 ```toml

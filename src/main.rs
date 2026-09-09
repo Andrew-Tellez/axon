@@ -217,6 +217,13 @@ enum Cmd {
         #[arg(long = "service", short = 's')]
         service: Option<String>,
     },
+    /// the verifier for what `[auth]` declares. Emitted, not linked: a file you
+    /// can read beats a dependency that hides which claim it trusted
+    Auth {
+        manifest: String,
+        #[arg(long, default_value = "ts", value_parser = ["ts"])]
+        lang: String,
+    },
     /// the declared lists: table, seed and type from one place
     Catalog {
         sources: Vec<String>,
@@ -881,6 +888,11 @@ fn run() -> Result<ExitCode, String> {
                     false => pooler::build(&ms, &target, solo)?,
                 }
             )
+        }
+        Cmd::Auth { manifest, lang } => {
+            let _ = lang;
+            let m = manifest::load_any(&manifest)?;
+            print!("{}", emit::verifier_ts(&m)?)
         }
         Cmd::Catalog { sources, service } => {
             let ms = manifest::discover(&sources)?;

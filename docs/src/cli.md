@@ -259,6 +259,17 @@ In 2.x the direction is from outside the app: `publish` is what others publish t
 
 What AsyncAPI does not declare comes out as `TODO` and `verify` treats it as absent.
 
+## `axon auth <manifest> [--lang ts]`
+The verifier for what `[auth]` declares: standard JOSE, driven by the manifest — the
+issuers, the key set, the accepted algorithms and the name of every claim. The same file
+works against better-auth's JWT plugin, Auth0, Keycloak or Cognito by changing the
+**manifest**, not the code.
+
+Emitted and not linked, like everything else here: a generated file somebody can read and
+edit beats a dependency that hides which claim it trusted. It refuses where it would have
+to guess — `verify = "introspection"` is the issuer's API and its credential, and
+`verify = "adapter"` is you saying you bring your own.
+
 ## `axon catalog <sources> [--service <name>]`
 The declared lists —currencies, statuses, reasons— as one repeatable migration: the table,
 the upsert of every entry, and the **delete of what is no longer declared**. That last one

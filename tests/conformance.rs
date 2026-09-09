@@ -8614,3 +8614,50 @@ fn impersonation_without_a_trail_is_refused() {
     assert!(ts.contains("export function requireImpersonator"), "{ts}");
     assert!(ts.contains("impersonationAudit"), "{ts}");
 }
+
+/// The verifier is emitted, not linked, and it is driven by the manifest: the
+/// same file works against better-auth's JWT plugin, Auth0, Keycloak or
+/// Cognito by changing the TOML. That is what "agnostic" has to mean to be
+/// worth anything.
+#[test]
+fn the_verifier_comes_out_of_the_manifest_and_names_no_provider() {
+    let (ts, err, ok) = axon(&["auth", "examples/orders.toml"]);
+    assert!(ok, "{err}");
+    // everything that decides whether a token is accepted comes from the block
+    assert!(ts.contains("issuer: [\"https://auth.demo.mx\"]"), "{ts}");
+    assert!(ts.contains("audience: \"orders\""), "{ts}");
+    assert!(ts.contains("algorithms: [\"EdDSA\",\"ES256\"]"), "{ts}");
+    assert!(ts.contains("maxTokenAge: 900"), "{ts}");
+    // and the claim names, which are the only provider-specific surface
+    assert!(ts.contains("payload[\"org_id\"]"), "{ts}");
+    assert!(
+        ts.contains("payload[\"act\"]"),
+        "the actor claim did not travel"
+    );
+    // RFC 8693 puts the actor in an object with its own `sub`
+    assert!(ts.contains("{ sub?: string }"), "{ts}");
+
+    // the same manifest with another provider's shape: only the TOML changes
+    let dir = std::env::temp_dir().join("axon-verifier");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let keycloak = std::fs::read_to_string("examples/orders.toml")
+        .unwrap()
+        .replace("https://auth.demo.mx", "https://kc.acme.mx/realms/acme")
+        .replace(
+            "roles_claim   = \"roles\"",
+            "roles_claim   = \"realm_roles\"",
+        )
+        .replace("\"EdDSA\", \"ES256\"", "\"RS256\"");
+    std::fs::write(dir.join("orders.toml"), keycloak).unwrap();
+    let (ts, err, ok) = axon(&["auth", dir.join("orders.toml").to_str().unwrap()]);
+    assert!(ok, "{err}");
+    assert!(ts.contains("kc.acme.mx/realms/acme"), "{ts}");
+    assert!(ts.contains("payload[\"realm_roles\"]"), "{ts}");
+    assert!(ts.contains("algorithms: [\"RS256\"]"), "{ts}");
+
+    // and it refuses where it would have to guess
+    let (_, err, ok) = axon(&["auth", "examples/stripe.external.toml"]);
+    assert!(!ok);
+    assert!(err.contains("declares no `[auth]`"), "{err}");
+}
