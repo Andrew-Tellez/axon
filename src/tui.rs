@@ -336,8 +336,18 @@ fn draw_graph(f: &mut Frame, area: Rect, app: &App) {
         lo_y = lo_y.min(n.y);
         hi_y = hi_y.max(n.y);
     }
-    let span_x = (hi_x - lo_x).max(0.001);
-    let span_y = (hi_y - lo_y).max(0.001);
+    // An axis can collapse —one service, or several in a row— and then every
+    // node maps to the low edge and the picture ends up parked in a corner
+    // instead of where it is. A collapsed axis is centred.
+    let fit = |v: f64, lo: f64, span: f64, scale: f64| {
+        if span < 1e-6 {
+            0.0
+        } else {
+            (v - lo) / span * scale - scale / 2.0
+        }
+    };
+    let span_x = hi_x - lo_x;
+    let span_y = hi_y - lo_y;
     let nodes: Vec<Node> = app
         .nodes
         .iter()
@@ -345,8 +355,8 @@ fn draw_graph(f: &mut Frame, area: Rect, app: &App) {
             name: n.name.clone(),
             side: n.side.clone(),
             external: n.external,
-            x: (n.x - lo_x) / span_x * 1.7 - 0.85,
-            y: (n.y - lo_y) / span_y * 1.5 - 0.75,
+            x: fit(n.x, lo_x, span_x, 1.7),
+            y: fit(n.y, lo_y, span_y, 1.5),
             vx: 0.0,
             vy: 0.0,
         })
@@ -453,11 +463,15 @@ fn draw_graph(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(canvas, area);
 }
 
+/// How many panels Tab cycles through. It is a constant so the key that
+/// advances it and the array it indexes cannot disagree.
+const PANELS: usize = 3;
+
 /// The panels: the drawing answers "what shape is it" and these answer "and
 /// how is it". Tab cycles them, because three lines of state is what fits and
 /// hiding the rest behind a key beats truncating all of it.
 fn draw_panels(f: &mut Frame, area: Rect, app: &App) {
-    let panels: [(&str, Vec<String>); 3] = [
+    let panels: [(&str, Vec<String>); PANELS] = [
         (
             "state",
             vec![
@@ -482,7 +496,7 @@ fn draw_panels(f: &mut Frame, area: Rect, app: &App) {
             },
         ),
     ];
-    let (name, lines) = &panels[app.panel % panels.len()];
+    let (name, lines) = &panels[app.panel];
     let body: Vec<TextLine> = lines
         .iter()
         .map(|l| TextLine::from(Span::styled(l.clone(), Style::default().fg(Color::Gray))))
@@ -523,11 +537,9 @@ pub fn frames(ms: &[Manifest], root: &std::path::Path, n: u64) -> Result<String,
     let mut term = Terminal::new(backend).map_err(|e| e.to_string())?;
     let mut out = String::new();
     for _ in 0..n.max(1) {
-        // the same steps per frame as the live loop, so what a test looks at is
-        // what a person sees
-        for _ in 0..4 {
-            app.tick();
-        }
+        // one step per frame, the same as the live loop, so what a test looks
+        // at is what a person sees
+        app.tick();
         term.draw(|f| draw(f, &app)).map_err(|e| e.to_string())?;
         let buffer = term.backend().buffer();
         for y in 0..buffer.area.height {
@@ -556,7 +568,7 @@ pub fn run(ms: &[Manifest], root: &std::path::Path) -> Result<(), String> {
                     if k.kind == KeyEventKind::Press {
                         match k.code {
                             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                            KeyCode::Tab => app.panel += 1,
+                            KeyCode::Tab => app.panel = (app.panel + 1) % PANELS,
                             KeyCode::Char(' ') => app.paused = !app.paused,
                             // Re-reading is deliberate and not on a timer: a
                             // picture that changes under you while you look at
