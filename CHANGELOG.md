@@ -7,6 +7,37 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.24.0] — 2026-09-09
+
+### Añadido
+
+- **`axon init <servicio>`: la causa, no el mensaje.** En 0.23.0 arreglé lo que los cinco
+  hallazgos *decían*. Tres tenían causa, y era la misma: la distribución del proyecto. `init`
+  escribe uno que verifica limpio y **arranca** —el manifiesto en la raíz, para que
+  `migrations` no necesite `../`; su migración; el Dockerfile que el compose construye; la
+  policy; el `.env.local`—. Comprobado: cuatro contenedores sanos y el edge contestando. Se
+  niega a escribir sobre un proyecto existente.
+
+- **Las dos convenciones de migración.** axon aceptaba una y le decía a todo repo que ya
+  usaba la de Flyway que no tenía prefijo numérico, sobre un archivo llamado `V1__x.sql`.
+  Ahora se aceptan `001_<nombre>.sql` y `V1__<nombre>.sql`, y **las banderas que el pipeline
+  le pasa a Flyway salen de la que el repo usa**. Lo que se niega es mezclarlas: en un
+  directorio no tienen orden definido, y Flyway solo ve las que casan con el prefijo que le
+  dieron — la mitad no se aplicaría nunca.
+
+### Corregido
+
+- **El orden de las migraciones se lee de la versión, no del nombre.** `V10__` va antes que
+  `V2__` como texto: la décima correría segunda, y el fallo sería una columna que todavía no
+  existe.
+- **El puerto del broker era fijo**, así que dos proyectos axon en una máquina chocaban con
+  un error que se lee como «el broker está roto» y es «algo ya tiene el 4222». Hay una prueba
+  que recorre el compose entero exigiendo que **todo** puerto se pueda mover.
+
+### Cambiado
+
+- La suite pasó a **106 pruebas**.
+
 ## [0.23.0] — 2026-09-09
 
 ### Corregido
