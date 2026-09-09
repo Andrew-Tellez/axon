@@ -76,6 +76,14 @@ pub struct PoolerConfig {
     pub pool_size: Option<u32>,
 }
 
+/// The search index of one service.
+#[derive(Debug, Serialize)]
+pub struct Search2 {
+    pub service: String,
+    pub engine: String,
+    pub indexes: usize,
+}
+
 /// The cache of one service, with the engine it asked for.
 #[derive(Debug, Serialize)]
 pub struct Cache {
@@ -249,7 +257,7 @@ pub fn plan_schema() -> serde_json::Value {
         "type": "object",
         "additionalProperties": false,
         "required": ["flags", "warehouse", "buckets", "routes", "topics", "subs", "stores",
-                     "caches", "crons", "secrets", "workloads"],
+                     "caches", "searches", "crons", "secrets", "workloads"],
         "properties": {
             "flags": {"type": "boolean",
                       "description": "there are feature flags declared: local brings up flagd"},
@@ -287,6 +295,10 @@ pub fn plan_schema() -> serde_json::Value {
                     "additionalProperties": false
                 }
             }), "one database per service. `shards` is the pooler's, not the engine's")),
+            "searches": array(object(serde_json::json!({
+                "service": str_, "engine": str_, "indexes": uint
+            }), "one search index per service. Rebuilt from the rows it points at: \
+                 nothing in it survives losing it")),
             "caches": array(object(serde_json::json!({
                 "service": str_, "engine": str_, "entries": uint
             }), "one cache per service. Nothing in it survives losing it: no backup, \
@@ -327,6 +339,9 @@ pub struct Plan {
     /// survives losing it, and the renderers treat it that way —no backup, no
     /// PITR, no replica.
     pub caches: Vec<Cache>,
+    /// Services with a search index. Like the cache, nothing in it survives
+    /// losing it: it is rebuilt from the rows it points at.
+    pub searches: Vec<Search2>,
     pub crons: Vec<Cron>,
     pub secrets: Vec<Secret>,
     pub workloads: Vec<Workload>,
@@ -374,6 +389,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
     let mut subs = Vec::new();
     let mut stores = Vec::new();
     let mut caches = Vec::new();
+    let mut searches = Vec::new();
     let mut crons = Vec::new();
     let mut secrets = Vec::new();
     let mut workloads = Vec::new();
@@ -411,6 +427,13 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 path: Saga::sweep_route(name),
                 port: m.infra.port.unwrap_or(8080),
                 every_ms: sg.timeout_ms.unwrap_or(60_000),
+            });
+        }
+        if m.search.active() {
+            searches.push(Search2 {
+                service: svc.clone(),
+                engine: m.search.engine.clone().unwrap_or_default(),
+                indexes: m.search.indexes.len(),
             });
         }
         if m.cache.active() {
@@ -499,6 +522,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
         subs,
         stores,
         caches,
+        searches,
         crons,
         secrets,
         workloads,
@@ -541,6 +565,22 @@ pub fn render(p: &Plan, target: &str) -> Result<String, String> {
                     svc = s.service
                 ));
             }
+        }
+    }
+    // No managed Meilisearch exists on either cloud, and rendering an
+    // OpenSearch domain instead would be axon choosing a different engine than
+    // the one declared —with a different query language, a different filter
+    // syntax and a different failure mode— behind the manifest's back.
+    if matches!(target, "gcp" | "aws") {
+        if let Some(s) = p.searches.first() {
+            return Err(format!(
+                "{}: `[search] engine = \"{}\"` is not rendered on `{target}`: there is no \
+                 managed one, and emitting another engine would be choosing a different query \
+                 language behind the manifest's back. It comes up on `local` and on `k8s`, and \
+                 `--target plan` carries the indexes so you can render it with your own \
+                 template",
+                s.service, s.engine
+            ));
         }
     }
     // Sharding IS rendered on k8s, but only if its configuration generated. A
@@ -1862,6 +1902,68 @@ spec:
             o.push(y);
         }
     }
+    for s in &p.searches {
+        o.push(format!(
+            "---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: search-{svc}
+  labels: {{ app: search-{svc} }}
+spec:
+  replicas: 1
+  strategy: {{ type: Recreate }}
+  selector:
+    matchLabels: {{ app: search-{svc} }}
+  template:
+    metadata:
+      labels: {{ app: search-{svc} }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {{ type: RuntimeDefault }}
+      automountServiceAccountToken: false
+      containers:
+        - name: meilisearch
+          image: getmeili/meilisearch:v1.11
+          env:
+            - name: MEILI_MASTER_KEY
+              valueFrom:
+                secretKeyRef: {{ name: search-{svc}, key: MEILI_MASTER_KEY }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {{ drop: [\"ALL\"] }}
+          ports:
+            - containerPort: 7700
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: search-{svc}
+spec:
+  selector: {{ app: search-{svc} }}
+  ports:
+    - port: 7700
+      targetPort: 7700
+---
+# Only its own service gets in. An index reachable from elsewhere is a list of
+# somebody else's rows one query away.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: search-{svc}
+spec:
+  podSelector:
+    matchLabels: {{ app: search-{svc} }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{ app: {svc} }}",
+            svc = s.service
+        ));
+    }
     for c in &p.caches {
         // No volume, one replica, and `Recreate`: a cache that survives is a
         // cache whose wrong entries survive too, and the day the invalidation
@@ -2486,6 +2588,13 @@ services:
             }
             false => String::new(),
         };
+        let search_env = match p.searches.iter().any(|s| s.service == *svc) {
+            true => {
+                deps.push(format!("search-{svc}: {{ condition: service_healthy }}"));
+                format!("      AXON_SEARCH_URL: http://search-{svc}:7700\n")
+            }
+            false => String::new(),
+        };
         let store = p.stores.iter().find(|s| s.service == *svc);
         let db_env = match (w.db, store.and_then(|s| s.shards)) {
             (false, _) => String::new(),
@@ -2545,7 +2654,7 @@ services:
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/log/local.ndjson
-{db_env}{cache_env}{secrets}    volumes: [\"./.axon:/out\"]
+{db_env}{cache_env}{search_env}{secrets}    volumes: [\"./.axon:/out\"]
     # `{schedule}` on the target that has a scheduler; here it runs once at
     # startup, which is what makes it visible instead of theoretical.
 ",
@@ -2565,7 +2674,7 @@ services:
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/log/local.ndjson
-{db_env}{cache_env}{secrets}    volumes: [\"./.axon:/out\"]
+{db_env}{cache_env}{search_env}{secrets}    volumes: [\"./.axon:/out\"]
     # The k8s target already probes `/healthz`; here it is what makes `up --wait`
     # actually wait. Without it compose returns as soon as the container STARTS, and
     # the first request lands before the process is listening —a reset that reads as
@@ -2603,6 +2712,24 @@ services:
             path = c.path,
         ));
         let _ = i;
+    }
+    for s in &p.searches {
+        // No volume either: an index is rebuilt from the rows it points at, and
+        // one that survives a restart is one whose wrong documents survive too.
+        let port = ports(17700, 200, &[s.service.as_str()])[&s.service];
+        o.push_str(&format!(
+            "  search-{svc}:
+    image: getmeili/meilisearch:v1.11
+    environment: {{ MEILI_MASTER_KEY: local, MEILI_NO_ANALYTICS: \"true\", MEILI_ENV: development }}
+    ports: [\"${{AXON_SEARCH_PORT_{v}:-{port}}}:7700\"]
+    healthcheck:
+      test: [\"CMD\", \"curl\", \"-fsS\", \"http://127.0.0.1:7700/health\"]
+      interval: 2s
+      retries: 30
+",
+            svc = s.service,
+            v = tfname(&s.service),
+        ));
     }
     for c in &p.caches {
         // No volume on purpose: a cache that survives a restart hides the day

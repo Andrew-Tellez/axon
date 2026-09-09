@@ -8786,3 +8786,86 @@ fn a_hand_written_method_wins_over_the_crud() {
         "it printed the override as if axon had generated it:\n{toml}"
     );
 }
+
+/// A search index is the same shape as a cache —a derived copy the events
+/// reindex— and the rules are stricter, because the failure is worse: a stale
+/// cache serves one wrong answer to whoever asked for that key; an index
+/// LISTS, and nobody asked for those rows by name.
+#[test]
+fn the_search_rules_hold() {
+    let dir = std::env::temp_dir().join("axon-search");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/V1__item.sql"),
+        "CREATE TABLE item (id uuid PRIMARY KEY, tenant_id uuid NOT NULL, name text NOT NULL, \
+         customer_email text NOT NULL);\n",
+    )
+    .unwrap();
+    let base = "service = \"shop\"\nowner = \"t\"\ntier = \"2\"\nversion = \"1.0.0\"\n\
+        pii = [\"customer_email\"]\n\
+        [cap]\nconsistency = \"eventual\"\non_partition = \"degrade\"\nmax_staleness_ms = 5000\n\
+        [infra]\nstate = \"postgres\"\nmigrations = \"sql/shop\"\ntenant_column = \"tenant_id\"\n\
+        [analytics]\nexport = false\n\
+        [emits.\"item.changed@v1\"]\nitemId = \"uuid\"\nname = \"string\"\n";
+    let good = "[search]\nengine = \"meilisearch\"\n[search.items]\nof = \"item\"\n\
+        key = \"itemId\"\nkey_column = \"id\"\nfields = [\"name\"]\n\
+        filter_by = [\"tenantId\"]\nreindexed_by = [\"item.changed@v1\"]\n";
+    let check = |extra: &str| -> (String, String, bool) {
+        std::fs::write(dir.join("shop.toml"), format!("{base}{extra}")).unwrap();
+        axon(&["verify", dir.to_str().unwrap()])
+    };
+    let (_, err, ok) = check(good);
+    assert!(ok, "a correct index did not pass: {err}");
+
+    // the one that is worse than the cache's: a search LISTS
+    let (_, err, ok) = check(&good.replace("filter_by = [\"tenantId\"]", "filter_by = []"));
+    assert!(!ok);
+    assert!(err.contains("A search is not a lookup: it LISTS"), "{err}");
+
+    // nothing reindexes it: it lists what was true the day it was built
+    let (_, err, ok) =
+        check(&good.replace("reindexed_by = [\"item.changed@v1\"]", "reindexed_by = []"));
+    assert!(!ok);
+    assert!(err.contains("the day it was built"), "{err}");
+
+    // the reindex has to know WHICH document
+    let (_, err, ok) = check(&good.replace("key = \"itemId\"", "key = \"sku\""));
+    assert!(!ok);
+    assert!(err.contains("cannot say which document changed"), "{err}");
+
+    // a column that does not exist
+    let (_, err, ok) = check(&good.replace("fields = [\"name\"]", "fields = [\"colour\"]"));
+    assert!(!ok);
+    assert!(err.contains("has no such column"), "{err}");
+
+    // personal data in a second copy outside the database: allowed, and never
+    // silent —looking a customer up by e-mail is a real need
+    let (_, err, ok) = check(&good.replace(
+        "fields = [\"name\"]",
+        "fields = [\"name\", \"customerEmail\"]",
+    ));
+    assert!(!ok);
+    assert!(err.contains("one nobody saw"), "{err}");
+    let (_, err, ok) = check(&good.replace(
+        "fields = [\"name\"]",
+        "fields = [\"name\", \"customerEmail\"]\npii_indexed = [\"customerEmail\"]",
+    ));
+    assert!(ok, "naming the decision did not allow it: {err}");
+
+    // and the generated query cannot be called without the filter
+    std::fs::write(dir.join("shop.toml"), format!("{base}{good}")).unwrap();
+    let (ts, _, ok) = axon(&["build", dir.join("shop.toml").to_str().unwrap()]);
+    assert!(ok);
+    assert!(ts.contains("filter: { tenantId: string }"), "{ts}");
+    // gone from the database is gone from the index
+    assert!(ts.contains("if (!row) return search.remove"), "{ts}");
+
+    // it comes up where axon can bring it up, and says so where it cannot
+    let (yml, _, ok) = axon(&["infra", dir.to_str().unwrap(), "--target", "local"]);
+    assert!(ok);
+    assert!(yml.contains("getmeili/meilisearch"), "{yml}");
+    let (_, err, ok) = axon(&["infra", dir.to_str().unwrap(), "--target", "aws"]);
+    assert!(!ok);
+    assert!(err.contains("behind the manifest's back"), "{err}");
+}

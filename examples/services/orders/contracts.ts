@@ -411,6 +411,9 @@ export const manifest = {
       "audit": true
     }
   },
+  "search": {
+    "engine": null
+  },
   "metrics": {
     "orders_placed": {
       "on": [

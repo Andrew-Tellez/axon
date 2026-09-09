@@ -859,6 +859,59 @@ And a different type between the two is an error too: on the swap, the view chan
 with nothing saying so. A column too many in the shadow is only a warning — it is spare
 until the next swap, and after that it is the view that has it.
 
+## The search index: the same copy, listed instead of looked up
+
+A search index is a cache with a worse failure. A stale cache serves one wrong answer to
+whoever asked for that key. A stale or unfiltered index **lists** rows — somebody else's,
+or rows that no longer exist — and nobody asked for them by name, so nothing about the
+answer looks wrong.
+
+```toml
+[search]
+engine = "meilisearch"
+
+[search.items]
+of         = "item"                     # the table, which has to be in a migration
+key        = "itemId"                   # the field the events use
+key_column = "id"                       # what it is called in the table
+fields     = ["name"]
+filter_by  = ["tenantId"]               # every query, always
+reindexed_by = ["item.changed@v1"]
+```
+
+| The rule | What it prevents |
+| --- | --- |
+| the tenant is in `filter_by` | a query that answers with **other tenants' rows**, as a list |
+| the key is a field the event carries | a reindex that cannot say which document changed |
+| something reindexes it | an index that lists what was true the day it was built |
+| every field is a column | a document with holes, built against a table that never had it |
+| `pii` indexed only if named in `pii_indexed` | a second copy of personal data outside the database that nobody decided to make |
+| `strong` and an index is a contradiction | between the write and the reindex it lists what was true before |
+
+The `pii` one is the interesting shape: looking a customer up by e-mail is a **real need**,
+so it is not forbidden. It is named — the way `tenant_exempt` names a table — and then it
+is a decision somebody took instead of one nobody saw.
+
+### What comes out
+
+The filter is **in the signature** and not a parameter with a default:
+
+```ts
+searchItems(search, "blue chair", { tenantId }, 20)   // no tenant, no compile
+```
+
+It returns **ids**. What the row says is the database's answer, not the index's: an index
+that also serves the content is a second source of truth, and the day it lags it disagrees
+with the row it points at. And `reindexItems` loads from the row rather than building the
+document from the event — an event carries what *changed*, and a document built from it
+holds whatever the last event happened to mention. If the row is gone, the document goes:
+a document that survives its row is a search result that 404s when somebody opens it.
+
+It comes up on `local` and on `k8s`. On `gcp` and `aws` it **refuses**, and the reason is
+worth stating: there is no managed Meilisearch, and rendering an OpenSearch domain instead
+would be axon choosing a different query language, a different filter syntax and a
+different failure mode behind the manifest's back.
+
 ## The CRUD, and the five rules it inherits
 
 The five endpoints with no business logic, that every service rewrites anyway: create,

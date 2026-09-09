@@ -415,6 +415,9 @@ export const manifest = {
     "roles_claim": "roles",
     "impersonation": null
   },
+  "search": {
+    "engine": null
+  },
   "metrics": {},
   "rules": {},
   "infra": {

@@ -1054,6 +1054,71 @@ impl Metric {
     }
 }
 
+/// A search index.
+///
+/// The same shape as a cache and for the same reason: it is a **derived copy**,
+/// and the only hard part is knowing when it stopped matching. The events are
+/// declared, so what has to reindex it is derivable instead of remembered.
+///
+/// What makes it worse than a cache, and why the rules are stricter: a stale
+/// cache serves one wrong answer to whoever asked for that key. A stale or
+/// unfiltered index LISTS rows — somebody else's rows, or rows that no longer
+/// exist — and the caller never asked for them by name, so nothing about the
+/// answer looks wrong.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Indexed {
+    /// The table the documents come from. It has to exist in the migrations.
+    pub of: String,
+    /// The document's id, in the name the events use. It is what a reindex
+    /// says changed, so it has to be a field the event carries.
+    pub key: String,
+    /// The column that id maps to, when the table calls it something else.
+    /// `id` for a `key = "itemId"`, the same way a `[crud.*]` does it.
+    pub key_column: Option<String>,
+    /// What is searchable. Every one has to be a column.
+    #[serde(default)]
+    pub fields: Vec<String>,
+    /// What every query MUST filter by. In a multi-tenant service the tenant
+    /// goes here or the search returns other people's rows.
+    #[serde(default)]
+    pub filter_by: Vec<String>,
+    /// The events after which a document is no longer what it says.
+    #[serde(default)]
+    pub reindexed_by: Vec<String>,
+    /// Personal data that goes into the index ON PURPOSE.
+    ///
+    /// Support looking a customer up by e-mail is a real need, and an index is
+    /// a second copy of that data outside the database, usually unencrypted
+    /// and often replicated. So it is not forbidden and it is not silent: the
+    /// field is named here, the way `tenant_exempt` names a table.
+    #[serde(default)]
+    pub pii_indexed: Vec<String>,
+}
+
+/// The search engine. One per service, like the database and the cache.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Search {
+    /// `meilisearch` is native. Absent means no search.
+    pub engine: Option<String>,
+    #[serde(flatten)]
+    pub indexes: IndexMap<String, Indexed>,
+}
+
+impl Search {
+    pub fn active(&self) -> bool {
+        self.engine.as_deref().is_some_and(|e| e != "none")
+    }
+}
+
+impl Indexed {
+    pub fn key_column(&self) -> String {
+        self.key_column.clone().unwrap_or_else(|| self.key.clone())
+    }
+}
+
+pub const SEARCH_ENGINES: [&str; 2] = ["meilisearch", "none"];
+
 /// A CRUD, declared once.
 ///
 /// The five endpoints that have no business logic and that every service
@@ -1583,6 +1648,9 @@ pub struct Manifest {
     /// The five endpoints with no business logic. See `Crud`.
     #[serde(default, skip_serializing)]
     pub crud: IndexMap<String, Crud>,
+    /// Search indexes, with what reindexes them. See `Search`.
+    #[serde(default)]
+    pub search: Search,
     /// Business metrics over the declared events. See `Metric`.
     #[serde(default)]
     pub metrics: IndexMap<String, Metric>,

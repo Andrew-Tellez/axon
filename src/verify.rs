@@ -1365,6 +1365,152 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // ---- the search index ----
+    //
+    // Same shape as the cache and stricter, because the failure is worse: a
+    // stale cache serves one wrong answer to whoever asked for that key; a
+    // stale or unfiltered index LISTS rows —somebody else's, or rows that no
+    // longer exist— and nobody asked for them by name, so nothing about the
+    // answer looks wrong.
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        let s = &m.search;
+        if let Some(engine) = &s.engine {
+            if !SEARCH_ENGINES.contains(&engine.as_str()) {
+                errors.push(format!(
+                    "{svc}: `[search] engine = \"{engine}\"` is not supported. Native: {}",
+                    SEARCH_ENGINES.join(", ")
+                ));
+            }
+        }
+        if s.indexes.is_empty() {
+            continue;
+        }
+        if !s.active() {
+            errors.push(format!(
+                "{svc}: declares {} index(es) and no `[search] engine`. Nothing brings one up, \
+                 and the code that queries it would answer with an error",
+                s.indexes.len()
+            ));
+            continue;
+        }
+        if !m.cap.eventual() {
+            errors.push(format!(
+                "{svc}: `consistency = \"strong\"` and a search index. An index is eventual by \
+                 construction —between the write and the reindex it lists what was true \
+                 before— so either the promise drops to `eventual` or the index goes"
+            ));
+        }
+        let tables = crud_schemas.get(svc);
+        for (name, ix) in &s.indexes {
+            let table = tables.and_then(|t| t.get(&ix.of));
+            match (tables, table) {
+                (Some(_), None) => {
+                    errors.push(format!(
+                        "{svc}: `[search.{name}] of = \"{}\"` is in no migration. The index \
+                         would be declared over a table that does not exist",
+                        ix.of
+                    ));
+                    continue;
+                }
+                (None, _) => warnings.push(format!(
+                    "{svc}: `[search.{name}]` and no migrations were read, so nothing can check \
+                     that `{}` and its columns exist",
+                    ix.of
+                )),
+                _ => {}
+            }
+            let has = |col: &str| table.is_none_or(|t| t.has(&crate::bi::snake(col)));
+            if !has(&ix.key_column()) {
+                errors.push(format!(
+                    "{svc}: `[search.{name}]` is keyed by `{}` and `{}` has no such column. The \
+                     document id would be undefined, and every reindex would write a new \
+                     document instead of replacing one",
+                    ix.key_column(),
+                    ix.of
+                ));
+            }
+            if ix.fields.is_empty() {
+                errors.push(format!(
+                    "{svc}: `[search.{name}]` indexes no field. An index of ids answers no \
+                     search anybody would run"
+                ));
+            }
+            for f in ix.fields.iter().chain(ix.filter_by.iter()) {
+                if !has(f) {
+                    errors.push(format!(
+                        "{svc}: `[search.{name}]` indexes `{f}` and `{}` has no such column",
+                        ix.of
+                    ));
+                }
+            }
+            // The tenant in the FILTER, and it is not the same as the cache's
+            // key: a cache with the wrong key misses, an index without the
+            // filter answers — with the other tenant's rows, listed.
+            if let Some(col) = &m.infra.tenant_column {
+                let carries = ix.filter_by.iter().any(|f| normalize(f) == normalize(col));
+                if !carries {
+                    errors.push(format!(
+                        "{svc}: `[search.{name}] filter_by` does not carry `{col}` and the \
+                         service is multi-tenant. A search is not a lookup: it LISTS, so \
+                         without the filter the answer is other tenants' rows and nothing \
+                         about it looks wrong"
+                    ));
+                }
+            }
+            // Personal data in a second copy outside the database. Allowed —
+            // looking a customer up by e-mail is a real need— and never silent.
+            for f in &ix.fields {
+                let sensitive = m.pii.iter().any(|p| normalize(p) == normalize(f));
+                if sensitive && !ix.pii_indexed.iter().any(|p| normalize(p) == normalize(f)) {
+                    errors.push(format!(
+                        "{svc}: `[search.{name}]` indexes `{f}`, which is declared `pii`, and \
+                         does not say so. An index is a second copy of personal data outside \
+                         the database: name it in `pii_indexed` and it is a decision somebody \
+                         took, leave it out and it is one nobody saw"
+                    ));
+                }
+            }
+            for f in &ix.pii_indexed {
+                if !ix.fields.contains(f) {
+                    warnings.push(format!(
+                        "{svc}: `[search.{name}] pii_indexed` names `{f}`, which is not \
+                         indexed. It reads as a decision that is not being taken"
+                    ));
+                }
+            }
+            if ix.reindexed_by.is_empty() {
+                errors.push(format!(
+                    "{svc}: `[search.{name}]` has no `reindexed_by`. Nothing updates it, so it \
+                     lists what was true the day it was built"
+                ));
+            }
+            for ev in &ix.reindexed_by {
+                let Some(fields) = ms.iter().find_map(|o| o.emits.get(ev)) else {
+                    errors.push(format!(
+                        "{svc}: `[search.{name}] reindexed_by` names `{ev}`, which nobody emits"
+                    ));
+                    continue;
+                };
+                if !m.emits.contains_key(ev) && !m.consumes.contains_key(ev) {
+                    errors.push(format!(
+                        "{svc}: `[search.{name}]` says `{ev}` reindexes it and this service \
+                         neither emits nor consumes it, so it cannot hear it"
+                    ));
+                }
+                // The reindex has to know WHICH document: without the key in
+                // the event it would rewrite nothing, or everything.
+                if !fields.keys().any(|g| normalize(g) == normalize(&ix.key)) {
+                    errors.push(format!(
+                        "{svc}: `[search.{name}]` is keyed by `{}` and `{ev}` does not carry \
+                         it, so the reindex cannot say which document changed",
+                        ix.key
+                    ));
+                }
+            }
+        }
+    }
+
     // ---- the engine has to exist ----
     for m in ms.iter().filter(|m| !m.external) {
         let Some(motor) = &m.infra.state else {

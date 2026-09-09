@@ -296,6 +296,9 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     if !m.catalog.is_empty() {
         out.push(crate::catalog::build_ts(m));
     }
+    if m.search.active() {
+        out.push(search_ts(m));
+    }
     let routes: Vec<String> = m
         .methods
         .values()
@@ -2540,6 +2543,136 @@ export const verifier: AuthVerifier = {{
             None => "null".to_string(),
         },
     ))
+}
+
+/// The search index, generated.
+///
+/// One interface, a typed query per index and the reindex wired to the events.
+/// The filter is not a parameter with a default: it is in the signature, so a
+/// query that does not carry the tenant does not compile. A search LISTS, and
+/// an index queried without its filter answers with somebody else's rows.
+fn search_ts(m: &Manifest) -> String {
+    let mut o = vec![
+        "/** The index the service talks to. Three methods, and the adapter is\n \
+         *  yours: axon declares what is indexed and what reindexes it, not which\n \
+         *  client you use. */\n\
+         export interface Search {\n  \
+           index(index: string, id: string, doc: Record<string, unknown>): Promise<void>;\n  \
+           remove(index: string, id: string): Promise<void>;\n  \
+           query(index: string, text: string, filter: Record<string, string>, limit: number): Promise<readonly string[]>;\n\
+         }\n"
+            .to_string(),
+    ];
+    for (name, ix) in &m.search.indexes {
+        let entry = pascal(name);
+        let filters: Vec<String> = ix
+            .filter_by
+            .iter()
+            .map(|f| format!("{}: string", camel(f)))
+            .collect();
+        let pairs: Vec<String> = ix
+            .filter_by
+            .iter()
+            .map(|f| format!("\"{f}\": filter.{}", camel(f)))
+            .collect();
+        o.push(format!(
+            "/** Searches `{name}` over {fields}.\n \
+             *\n \
+             *  The filter is in the SIGNATURE and not a parameter with a default:\n \
+             *  {why}\n \
+             *\n \
+             *  It returns ids. What the row says is the database's answer, not the\n \
+             *  index's: an index that also serves the content is a second source of\n \
+             *  truth, and the day it lags it disagrees with the row it points at. */\n\
+             export function search{entry}(\n  \
+               search: Search,\n  \
+               text: string,\n  \
+               filter: {{ {filters} }},\n  \
+               limit = 20,\n\
+             ): Promise<readonly string[]> {{\n  \
+               return search.query(\"{name}\", text, {{ {pairs} }}, limit);\n\
+             }}\n",
+            fields = ix.fields.join(", "),
+            filters = filters.join("; "),
+            pairs = pairs.join(", "),
+            why = match ix.filter_by.is_empty() {
+                true => "nothing was declared, so nothing is enforced here.".to_string(),
+                false => format!(
+                    "a query with no {} answers with somebody else's rows,\n \
+                     *  and a list nobody asked for by name does not look wrong.",
+                    ix.filter_by.join(" or no ")
+                ),
+            }
+        ));
+    }
+    // The reindex, by event. This is the half nobody writes: the code that
+    // makes the index stop saying what stopped being true.
+    let mut by_event: IndexMap<&String, Vec<(&String, &Indexed)>> = IndexMap::new();
+    for (name, ix) in &m.search.indexes {
+        for ev in &ix.reindexed_by {
+            by_event.entry(ev).or_default().push((name, ix));
+        }
+    }
+    if !by_event.is_empty() {
+        let mut arms = Vec::new();
+        for (ev, indexes) in &by_event {
+            let mut lines = vec![format!("    case \"{ev}\": {{")];
+            for (name, ix) in indexes {
+                // The document is loaded from the DATABASE and not built from
+                // the event: an event carries what changed, and an index built
+                // from it holds whatever the last event happened to mention.
+                lines.push(format!(
+                    "      // loaded from the row, not built from the event: an event carries\n      \
+                     // what changed, and a document built from it holds whatever the last\n      \
+                     // one happened to mention\n      \
+                     await reindex{}(search, String((data as any).{}));",
+                    pascal(name),
+                    camel(&ix.key)
+                ));
+            }
+            lines.push("      return;".into());
+            lines.push("    }".into());
+            arms.push(lines.join("\n"));
+        }
+        for (name, ix) in &m.search.indexes {
+            let entry = pascal(name);
+            let doc: Vec<String> = ix
+                .fields
+                .iter()
+                .chain(ix.filter_by.iter())
+                .map(|f| format!("\"{f}\""))
+                .collect();
+            o.push(format!(
+                "/** Rebuilds one document of `{name}`. What it puts in the index is\n \
+                 *  exactly {doc} — the declared fields and the declared filters, and\n \
+                 *  nothing else: every extra field is a second copy of data somebody has\n \
+                 *  to remember to delete. */\n\
+                 export type {entry}Loader = (id: string) => Promise<Record<string, unknown> | null>;\n\n\
+                 export async function reindex{entry}(search: Search, id: string, load?: {entry}Loader) {{\n  \
+                   const row = load ? await load(id) : null;\n  \
+                   // gone from the database is gone from the index: a document that\n  \
+                   // survives its row is a search result that 404s when somebody opens it\n  \
+                   if (!row) return search.remove(\"{name}\", id);\n  \
+                   const doc: Record<string, unknown> = {{}};\n  \
+                   for (const f of [{doc}]) doc[f] = row[f];\n  \
+                   return search.index(\"{name}\", id, doc);\n\
+                 }}\n",
+                doc = doc.join(", ")
+            ));
+        }
+        o.push(format!(
+            "/** Reindexes what the event made untrue. Called from `dispatch`, so an\n \
+             *  event this service consumes cannot arrive without the index hearing it. */\n\
+             export async function reindexOn(search: Search, type: string, data: unknown): Promise<void> {{\n  \
+               switch (type) {{\n{}\n    \
+                 default:\n      \
+                   return;\n  \
+               }}\n\
+             }}\n",
+            arms.join("\n")
+        ));
+    }
+    o.join("\n")
 }
 
 fn scopes_ts(m: &Manifest) -> String {
