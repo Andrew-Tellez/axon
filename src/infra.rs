@@ -257,7 +257,7 @@ pub fn plan_schema() -> serde_json::Value {
         "type": "object",
         "additionalProperties": false,
         "required": ["flags", "warehouse", "buckets", "routes", "topics", "subs", "stores",
-                     "caches", "searches", "crons", "secrets", "workloads"],
+                     "caches", "searches", "crons", "secrets", "workloads", "declared_analytics"],
         "properties": {
             "flags": {"type": "boolean",
                       "description": "there are feature flags declared: local brings up flagd"},
@@ -299,6 +299,9 @@ pub fn plan_schema() -> serde_json::Value {
                 "service": str_, "engine": str_, "indexes": uint
             }), "one search index per service. Rebuilt from the rows it points at: \
                  nothing in it survives losing it")),
+            "declared_analytics": {"type": "boolean",
+                      "description": "somebody wrote an `[analytics]` block: without one the \
+                                      export is on and the warehouse is the default"},
             "caches": array(object(serde_json::json!({
                 "service": str_, "engine": str_, "entries": uint
             }), "one cache per service. Nothing in it survives losing it: no backup, \
@@ -330,6 +333,9 @@ pub struct Plan {
     /// One per platform: the events of one flow have to land in the same place
     /// or the funnel cannot be assembled.
     pub warehouse: Option<String>,
+    /// Whether anybody wrote `[analytics]` at all. The refusal above reads very
+    /// differently when the warehouse is a default nobody chose.
+    pub declared_analytics: bool,
     pub buckets: Vec<Store2>,
     pub routes: Vec<Route>,
     pub topics: Vec<Topic>,
@@ -389,6 +395,10 @@ pub fn plan(ms: &[Manifest]) -> Plan {
     let mut subs = Vec::new();
     let mut stores = Vec::new();
     let mut caches = Vec::new();
+    let declared_analytics = ms
+        .iter()
+        .filter(|m| !m.external)
+        .any(|m| std::fs::read_to_string(&m.origin).is_ok_and(|t| t.contains("[analytics]")));
     let mut searches = Vec::new();
     let mut crons = Vec::new();
     let mut secrets = Vec::new();
@@ -523,6 +533,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
         stores,
         caches,
         searches,
+        declared_analytics,
         crons,
         secrets,
         workloads,
@@ -610,14 +621,24 @@ pub fn render(p: &Plan, target: &str) -> Result<String, String> {
         if target != "plan" && !has_ingest(target, warehouse) {
             return Err(format!(
                 "`[analytics] warehouse = \"{warehouse}\"` has no ingest path on \
-                 `{target}`. The schema gets generated all the same and the tables would stay empty \
-                 without a single error. Wired combinations: {}. Or `export = false` if \
-                 this environment does not export.",
+                 `{target}`. The schema gets generated all the same and the tables would stay \
+                 empty without a single error. Wired combinations: {}. Or `export = false` if \
+                 this environment does not export.{}",
                 INGEST
                     .iter()
                     .map(|(t, b)| format!("{t}+{b}"))
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                // Found using the CLI on an empty project: a manifest that
+                // never mentions analytics is told about a warehouse it never
+                // asked for, which reads as a bug instead of as a default.
+                match p.declared_analytics {
+                    true => "",
+                    false =>
+                        " No `[analytics]` block declares this: exporting is ON by \
+                              default —events are worth counting— and `bigquery` is the \
+                              default warehouse.",
+                }
             ));
         }
     }
@@ -2650,7 +2671,11 @@ services:
       dockerfile: services/{svc}/Dockerfile
     depends_on: {{ {deps} }}
     restart: \"no\"
-    env_file: [.env.local]
+    # `required: false`: this file holds the secrets the manifest declares and
+    # NOT their values, so a project that declares none has no reason to have
+    # it. Without this, its absence stops the entire compose with an lstat
+    # error that says nothing about what is missing.
+    env_file: [{{ path: .env.local, required: false }}]
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/log/local.ndjson
@@ -2670,7 +2695,11 @@ services:
       dockerfile: services/{svc}/Dockerfile
     depends_on: {{ {deps} }}
     ports: [\"${{AXON_PORT_{v}:-{host}}}:{port}\"]
-    env_file: [.env.local]
+    # `required: false`: this file holds the secrets the manifest declares and
+    # NOT their values, so a project that declares none has no reason to have
+    # it. Without this, its absence stops the entire compose with an lstat
+    # error that says nothing about what is missing.
+    env_file: [{{ path: .env.local, required: false }}]
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/log/local.ndjson

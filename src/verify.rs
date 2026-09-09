@@ -1279,10 +1279,17 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 continue;
             }
             let Some(tables) = crud_schemas.get(svc) else {
-                warnings.push(format!(
-                    "{svc}: `[crud.{name}]` and no migrations were read, so nothing can check \
-                     that `{}` and its columns exist",
-                    c.table
+                errors.push(format!(
+                    "{svc}: `[crud.{name}]` and NO migrations were read, so nothing checks that \
+                     `{}` and its columns exist —which is most of what declaring a CRUD buys. \
+                     `migrations` is relative to the manifest's own directory —`{}` from `{}`— \
+                     so a `manifests/` layout needs `../sql/...`",
+                    c.table,
+                    m.infra.migrations.clone().unwrap_or_default(),
+                    m.origin
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .display()
                 ));
                 continue;
             };
@@ -1413,10 +1420,20 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     ));
                     continue;
                 }
-                (None, _) => warnings.push(format!(
-                    "{svc}: `[search.{name}]` and no migrations were read, so nothing can check \
-                     that `{}` and its columns exist",
-                    ix.of
+                // Half of what declaring an index buys is that its columns are
+                // checked. Not reading the migrations makes that silent, which
+                // is worse than not having the feature: it reads as checked.
+                (None, _) => errors.push(format!(
+                    "{svc}: `[search.{name}]` and NO migrations were read, so nothing checks \
+                     that `{}` and its columns exist. `migrations` is relative to the \
+                     manifest's own directory —`{}` from `{}`— so a `manifests/` layout needs \
+                     `../sql/...`",
+                    ix.of,
+                    m.infra.migrations.clone().unwrap_or_default(),
+                    m.origin
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .display()
                 )),
                 _ => {}
             }
@@ -1509,6 +1526,36 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 }
             }
         }
+    }
+
+    // ---- the code the compose expects ----
+    //
+    // Found by using the CLI on an empty project: `axon infra --target local`
+    // emits a compose that builds `services/<svc>/Dockerfile`, and with no
+    // service written yet docker fails with an `lstat` that says nothing.
+    // axon knows the path —it is the one it wrote— so it is the one that
+    // should say it.
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        let dir = pol.ci.path(&pol.ci.service_dir, svc);
+        // Relative to the manifest's own directory, like the migrations: what
+        // is being checked is a repo layout, and the manifest is what locates
+        // it.
+        let root = m.origin.parent().unwrap_or(std::path::Path::new("."));
+        let candidates = [root.join(&dir), root.join("..").join(&dir)];
+        if candidates.iter().any(|c| c.join("Dockerfile").is_file()) {
+            continue;
+        }
+        // Only when there IS something to bring up: a job or a service with no
+        // methods and no consumers has nothing to build yet.
+        if m.methods.is_empty() && m.consumes.is_empty() {
+            continue;
+        }
+        warnings.push(format!(
+            "{svc}: there is no `{dir}/Dockerfile`, and that is what the compose \
+             `axon infra --target local` writes tries to build. Until it exists, `docker \
+             compose up` fails with a path error that names nothing"
+        ));
     }
 
     // ---- the engine has to exist ----
@@ -3738,7 +3785,11 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             };
             if !numerado {
                 warnings.push(format!(
-                    "{}/{name}: no numeric prefix, so the order is not deterministic",
+                    "{}/{name}: no numeric prefix, so the order is not deterministic. axon \
+                     expects `001_<name>.sql` —three digits and an underscore— which is what the \
+                     generated pipeline passes to Flyway (`-sqlMigrationPrefix=` \
+                     `-sqlMigrationSeparator=_`). Flyway's own `V1__` is a different \
+                     convention and the two cannot be mixed in one directory",
                     m.service
                 ));
             }

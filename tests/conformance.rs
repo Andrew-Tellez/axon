@@ -8869,3 +8869,89 @@ fn the_search_rules_hold() {
     assert!(!ok);
     assert!(err.contains("behind the manifest's back"), "{err}");
 }
+
+/// Found by using the CLI on an empty project, which is the only way to find
+/// this kind of thing: three messages that were right and useless.
+#[test]
+fn what_using_it_from_zero_found() {
+    let dir = std::env::temp_dir().join("axon-desde-cero");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("manifests")).unwrap();
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/V1__item.sql"),
+        "CREATE TABLE item (id uuid PRIMARY KEY, name text NOT NULL);\n",
+    )
+    .unwrap();
+    let manifest = |migrations: &str| {
+        format!(
+            "service = \"shop\"\nowner = \"t\"\ntier = \"2\"\nversion = \"1.0.0\"\n\
+             [cap]\nconsistency = \"eventual\"\non_partition = \"degrade\"\nmax_staleness_ms = 5000\n\
+             [infra]\nstate = \"postgres\"\nmigrations = \"{migrations}\"\n\
+             [api]\nscopes = [\"items:read\", \"items:write\"]\n\
+             [crud.item]\ntable = \"item\"\nkey = \"id\"\npath = \"/v1/items\"\n\
+             fields = {{ name = \"string\" }}\nread_scope = \"items:read\"\n\
+             write_scope = \"items:write\"\n"
+        )
+    };
+    // 1. The natural layout —`manifests/` next to `sql/`— resolves the
+    // migrations from the MANIFEST, so it reads nothing. That used to be a
+    // warning, and half of what declaring a CRUD buys was silently not
+    // happening.
+    std::fs::write(dir.join("manifests/shop.toml"), manifest("sql/shop")).unwrap();
+    let (_, err, ok) = axon(&["verify", dir.join("manifests").to_str().unwrap()]);
+    assert!(!ok, "it read no migrations and said the CRUD was fine");
+    assert!(err.contains("NO migrations were read"), "{err}");
+    assert!(
+        err.contains("needs `../sql/...`"),
+        "the message does not say the fix: {err}"
+    );
+
+    std::fs::write(dir.join("manifests/shop.toml"), manifest("../sql/shop")).unwrap();
+    let (out, err, ok) = axon(&["verify", dir.join("manifests").to_str().unwrap()]);
+    assert!(ok, "{err}{out}");
+
+    // 2. `V1__item.sql` is Flyway's convention and axon wants its own. The
+    // message said "no numeric prefix" over a file whose name starts with a
+    // number, which reads as a bug in axon.
+    let (out, _, _) = axon(&["verify", dir.join("manifests").to_str().unwrap()]);
+    let all = out;
+    assert!(
+        all.contains("001_<name>.sql"),
+        "it does not name the shape it wants:\n{all}"
+    );
+    assert!(all.contains("cannot be mixed"), "{all}");
+
+    // 3. The compose builds `services/<svc>/Dockerfile`, and with nothing
+    // there docker fails with an `lstat` that names nothing. axon wrote the
+    // path, so axon is the one that can say it.
+    assert!(all.contains("services/shop/Dockerfile"), "{all}");
+    assert!(all.contains("names nothing"), "{all}");
+
+    // 4. A manifest that never mentions analytics was told about a warehouse
+    // it never asked for, which reads as a bug instead of as a default.
+    let (_, err, ok) = axon(&[
+        "infra",
+        dir.join("manifests").to_str().unwrap(),
+        "--target",
+        "local",
+    ]);
+    assert!(!ok);
+    assert!(err.contains("exporting is ON by default"), "{err}");
+
+    // 5. And the compose no longer dies over an env file that a project with
+    // no declared secrets has no reason to have.
+    let with_analytics = manifest("../sql/shop") + "[analytics]\nexport = false\n";
+    std::fs::write(dir.join("manifests/shop.toml"), with_analytics).unwrap();
+    let (yml, err, ok) = axon(&[
+        "infra",
+        dir.join("manifests").to_str().unwrap(),
+        "--target",
+        "local",
+    ]);
+    assert!(ok, "{err}");
+    assert!(
+        yml.contains("{ path: .env.local, required: false }"),
+        "{yml}"
+    );
+}
