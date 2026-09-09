@@ -7,6 +7,35 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.22.0] — 2026-09-09
+
+### Añadido
+
+- **`[search]`: el índice, con lo que lo vuelve mentira.** Misma forma que la caché y reglas
+  más duras, porque el fallo es peor: una caché vieja sirve **una** respuesta equivocada a
+  quien pidió esa llave; un índice viejo o sin filtro **lista** filas —de otro inquilino, o
+  filas que ya no existen— y nadie las pidió por su nombre, así que nada en la respuesta se
+  ve mal.
+
+  Se niega sin el inquilino en `filter_by`, si la llave no es un campo que el evento traiga
+  —el reindex no podría decir qué documento cambió—, si nada lo reindexa, si un campo no es
+  columna, y si se indexa un campo `pii` **sin nombrarlo**: buscar un cliente por su correo
+  es una necesidad real, así que no se prohíbe; se nombra en `pii_indexed`, como
+  `tenant_exempt` nombra una tabla, y entonces es una decisión que alguien tomó.
+
+  El filtro va **en la firma**: una consulta sin inquilino no compila. Devuelve **ids** — un
+  índice que además sirve el contenido es una segunda fuente de verdad que contradice a la
+  fila el día que se atrasa. Y el reindex carga desde la fila, no construye el documento
+  desde el evento; si la fila ya no está, el documento se borra.
+
+  Se levanta en `local` y en `k8s`. En `gcp` y `aws` **se niega**: no hay Meilisearch
+  gestionado, y emitir un dominio de OpenSearch sería axon eligiendo otro lenguaje de
+  consulta a espaldas del manifiesto.
+
+### Cambiado
+
+- La suite pasó a **103 pruebas**.
+
 ## [0.21.0] — 2026-09-09
 
 ### Añadido
