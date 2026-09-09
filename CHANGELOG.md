@@ -7,6 +7,35 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.13.0] — 2026-09-09
+
+### Añadido
+
+- **El ingest de Vector, medido contra contenedores.** Era el último generador que se
+  quedaba en «valida»: `vector validate` dice que el archivo está bien formado, no que lleve
+  un evento del broker a la bodega, y menos que hashee lo que tiene que hashear. El archivo
+  generado ya nombra los contenedores que levanta el target local, así que el demo lo corre
+  **tal cual**, sin reescribir nada, y la imagen sale del generador y no del script: dos
+  lugares nombrando una versión se separan, y lo que se mediría entonces es otro Vector que
+  el que despliega el manifiesto de k8s.
+
+  **Dos réplicas a propósito.** El grupo de cola era un comentario en un archivo generado
+  hasta que algo lo midió: quitando `queue` y repitiendo salen **2 filas para un evento**,
+  que es el embudo contando cada flujo dos veces sin que nada se vea mal.
+
+  **Y el hash contra el del otro camino.** La misma tabla la llena el cargador SQL con su
+  propia expresión (`lower(hex(SHA256(salt || email)))`) mientras Vector hashea con VRL
+  (`sha2(…, variant: "SHA-256")`). Dos ingestas con hashes distintos para la misma persona
+  son dos columnas que nadie puede juntar, y ninguna de las dos se ve mal por separado.
+
+  Su propia fila se borra antes y después: ese evento no tiene cobro detrás, y dejarla haría
+  que el embudo de la **siguiente** corrida contara un flujo que no convirtió. Comprobado
+  corriendo el demo dos veces seguidas.
+
+### Cambiado
+
+- El demo pasó a **26 secciones y 64 comprobaciones** contra contenedores reales.
+
 ## [0.12.0] — 2026-09-08
 
 ### Añadido
