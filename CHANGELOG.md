@@ -7,6 +7,15 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.24.3] — 2026-09-09
+
+### Corregido
+
+- **El gate de contratos del pipeline regeneraba siempre TypeScript.** `axon ci` emite un paso
+  que regenera el codigo y falla si hay diff; pedia `--lang ts` sin mirar qué guarda el repo,
+  así que un servicio en Go se comparaba contra un archivo que no usa — un gate que pasa
+  siempre. Ahora el lenguaje sale de la extensión de `contracts_path`, en GitHub y en GitLab.
+
 ## [0.24.2] — 2026-09-09
 
 ### Corregido
