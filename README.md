@@ -71,7 +71,7 @@ the diagram is stale: somebody broke the manifest, and CI says so before the mer
 
 `examples/` ships three services that really run —one over four Postgres nodes with
 [pgdog](https://pgdog.dev) in front, and another coordinating a saga. `./demo.sh` brings
-the whole system up and makes **64 checks against reality**:
+the whole system up and makes **65 checks against reality**:
 
 ```console
 $ cd examples && ./demo.sh
@@ -139,7 +139,7 @@ $ cd examples && ./demo.sh
   axon: 0 thresholds breached
 ```
 
-It runs in CI on every push. The whole run —26 sections, 64 checks— and what happens when
+It runs in CI on every push. The whole run —26 sections, 65 checks— and what happens when
 you run it **twice in a row** are in
 [The demo, measured](https://andrew-tellez.github.io/axon/demo.html).
 
@@ -156,7 +156,7 @@ verified against itself.
 
 | Tool | What for | How the generated output is verified |
 | --- | --- | --- |
-| **Docker** | `--target local`: broker, Postgres per service, MinIO, Jaeger, flagd, the edge and your services | `./demo.sh` brings the system up and makes 64 checks against reality |
+| **Docker** | `--target local`: broker, Postgres per service, MinIO, Jaeger, flagd, the edge and your services | `./demo.sh` brings the system up and makes 65 checks against reality |
 | **Terraform** | `--target gcp` and `--target aws` | `terraform validate` with the **real providers**, and with no warnings |
 | **`tsc`** | the TypeScript from `axon build` and `axon test` | `tsc --strict --noEmit`, plus the example service's typecheck |
 | **Node 24+** | runs the testkit with no build step, using type stripping | `node --test` against the real example service |
@@ -197,7 +197,7 @@ every release. It is written in Spanish for now.
 | | |
 | --- | --- |
 | [Your first manifest](https://andrew-tellez.github.io/axon/getting-started.html) | Ten minutes, from zero to verified |
-| [The demo, measured](https://andrew-tellez.github.io/axon/demo.html) | The 64 checks against real containers, and what running it twice proves |
+| [The demo, measured](https://andrew-tellez.github.io/axon/demo.html) | The 65 checks against real containers, and what running it twice proves |
 | [Architecture](https://andrew-tellez.github.io/axon/architecture.html) | High and low level design, in diagrams: the modules, and one declaration rendered on four targets |
 | [Manifest reference](https://andrew-tellez.github.io/axon/manifest.html) | Every field and why it exists |
 | [Patterns](https://andrew-tellez.github.io/axon/patterns.html) | Declared, not remembered: outbox, idempotent inbox, **saga**, **event sourcing**, **CQRS** |

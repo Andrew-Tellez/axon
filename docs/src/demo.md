@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **64 checks against reality**: not against a mock,
+brings the whole system up and makes **65 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -179,6 +179,7 @@ axon: the warehouse has 0 differences against the manifest
   OK: 1 rows before and after; the loader is idempotent
 
 ==> el ingest de Vector, medido
+  OK: 2 replicas subscribed to order.placed.v1, both in the queue group
   one real envelope, published to the broker
   OK: 1 row from 2 replicas; the queue group delivers the event once
   and the PII, which is what nobody was checking

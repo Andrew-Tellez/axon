@@ -489,12 +489,18 @@ nothing rewritten:
 
 ```console
 ==> el ingest de Vector, medido
+  OK: 2 replicas subscribed to order.placed.v1, both in the queue group
   one real envelope, published to the broker
   OK: 1 row from 2 replicas; the queue group delivers the event once
   and the PII, which is what nobody was checking
   OK: the same hash as the SQL loader, and no address reaches the warehouse
   OK: trace_id out of the traceparent, and the money in its two columns
 ```
+
+Nothing here waits on a `sleep`: the broker's own `/subsz` says who is subscribed, which
+is both the gate before publishing —an event published into the void looks exactly like a
+pipeline that does not work— and the proof that both replicas joined the **same** queue
+group.
 
 **Two replicas on purpose.** The queue group was a comment in a generated file until
 something measured it: taking `queue` out and repeating the run gives **2 rows for one

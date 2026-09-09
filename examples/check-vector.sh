@@ -49,23 +49,34 @@ for n in 1 2; do
     "$IMG" --config /etc/vector/vector.yaml >/dev/null
 done
 
-# Subscribed before publishing: NATS core delivers to whoever is listening, and
-# an event published into the void is not a failure of the pipeline.
+# Waiting for "Vector has started" is not enough: the log line comes before the
+# subscription is registered, and an event published into the void looks
+# exactly like a pipeline that does not work. The broker itself says who is
+# subscribed, so that is what is waited on — and it doubles as the check that
+# both replicas joined the SAME queue group.
+subs() {
+  $COMPOSE exec -T broker wget -qO- "http://127.0.0.1:8222/subsz?subs=1" 2>/dev/null \
+    | tr -d " \n" | grep -o "\"subject\":\"order.placed.v1\",\"qgroup\":\"axon-warehouse\"" \
+    | wc -l | tr -d " "
+}
 i=0
-while [ "$i" -lt 60 ]; do
-  a=$(docker logs axon-vector-1 2>&1 | grep -c "Vector has started" || true)
-  b=$(docker logs axon-vector-2 2>&1 | grep -c "Vector has started" || true)
-  [ "$a" -ge 1 ] && [ "$b" -ge 1 ] && break
+while [ "$i" -lt 90 ]; do
+  [ "$(subs)" -ge 2 ] && break
   i=$((i + 1)); sleep 1
 done
-[ "$i" -lt 60 ] || { echo "  FAILED: Vector did not start"; docker logs axon-vector-1; exit 1; }
-sleep 2   # the subscription lands a moment after the log line
+if [ "$(subs)" -lt 2 ]; then
+  echo "  FAILED: only $(subs) of 2 replicas subscribed to order.placed.v1"
+  docker logs axon-vector-1 2>&1 | tail -20
+  docker logs axon-vector-2 2>&1 | tail -20
+  exit 1
+fi
+echo "  OK: 2 replicas subscribed to order.placed.v1, both in the queue group"
 
 echo "  one real envelope, published to the broker"
 docker run --rm --network "$NET" natsio/nats-box:0.14.5 \
   nats pub order.placed.v1 -s nats://broker:4222 \
   "{\"id\":\"$ID\",\"type\":\"order.placed@v1\",\"source\":\"orders\",\"time\":\"2026-09-08T12:00:00Z\",\"traceparent\":\"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\",\"correlationId\":\"$ID\",\"causationId\":null,\"data\":{\"orderId\":\"o-$ID\",\"customerId\":\"c-1\",\"customerEmail\":\"$EMAIL\",\"total\":{\"amount\":2500,\"currency\":\"MXN\"}}}" \
-  >/dev/null 2>&1
+  > .axon/nats-pub.log 2>&1
 
 i=0
 rows=0
@@ -76,7 +87,9 @@ while [ "$i" -lt 60 ]; do
 done
 if [ "$rows" -ne 1 ]; then
   echo "  FAILED: $rows rows for one event (the queue group does not deduplicate, or nothing arrived)"
+  echo "  --- what the publisher said ---"; cat .axon/nats-pub.log
   docker logs axon-vector-1 2>&1 | tail -20
+  docker logs axon-vector-2 2>&1 | tail -20
   exit 1
 fi
 echo "  OK: 1 row from 2 replicas; the queue group delivers the event once"
