@@ -7,6 +7,38 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.21.0] — 2026-09-09
+
+### Añadido
+
+- **`[crud.*]`: los cinco endpoints sin lógica.** Crear, leer, actualizar, borrar y listar
+  — lo que todo servicio reescribe y no tiene decisión dentro. A mano son cinco rutas, cinco
+  scopes, cinco entradas en el OpenAPI y cinco ocasiones de olvidar el inquilino en el
+  `WHERE`.
+
+  Se expanden a `[methods.*]` **normales antes de que nadie lea el manifiesto**, así que
+  `verify`, el OpenAPI, el testkit, el edge y el cliente generado funcionan sin maquinaria
+  nueva. Y por eso heredan todas las reglas que ya existen — dos de las cuales cambiaron el
+  diseño en cuanto las corrí: el `create` toma la **llave del llamante** (axon se niega a una
+  mutación no idempotente, y un id generado en el servidor es lo que hace ese fallo
+  imposible de arreglar) y el `list` **pagina por cursor**.
+
+  Lo que hace que valga la pena declararlo es que el compilador ya lee las migraciones con un
+  parser SQL de verdad: se niega si la tabla no está en ninguna migración, si un campo no es
+  columna (`money` son dos), si la llave no la cubre un `PRIMARY KEY` o `UNIQUE` —la lectura
+  devolvería *una de* varias filas y el update escribiría en *todas*—, si la tabla no lleva
+  el `tenant_column` sin estar exenta, o si leer y escribir comparten scope.
+
+- **`axon crud <manifiesto> --expand`**: imprime lo que un `[crud.*]` genera, como TOML listo
+  para pegar. El override es uno solo —se declara el método a mano y gana **entero**—, y en
+  un endpoint sobrescrito imprime lo que *habría* generado diciéndolo. Sin override parcial a
+  propósito: dos declaraciones del mismo endpoint con reglas de mezcla es una pregunta que
+  nadie puede contestar a las tres de la mañana.
+
+### Cambiado
+
+- La suite pasó a **102 pruebas**.
+
 ## [0.20.0] — 2026-09-09
 
 ### Añadido
