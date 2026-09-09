@@ -9104,3 +9104,39 @@ fn go_scopes_without_errors_still_compile() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// The pipeline's contract gate regenerates the code and fails on a diff. It
+/// asked for TypeScript no matter what the repo keeps, so a Go service was
+/// compared against a file it does not use: a gate that always passes.
+#[test]
+fn the_ci_gate_regenerates_the_language_the_repo_keeps() {
+    let dir = std::env::temp_dir().join("axon-ci-lang");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("manifests")).unwrap();
+    std::fs::write(
+        dir.join("manifests/payments.toml"),
+        "service = \"payments\"\nowner = \"pay-team\"\ntier = \"0\"\nversion = \"1.0.0\"\n\
+         transport = \"pubsub\"\n\n\
+         [methods.capturePayment]\nhttp = \"POST /v1/payments\"\nauth = \"required\"\n\
+         in = { orderId = \"uuid\" }\nout = { paymentId = \"uuid\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("manifests/axon.policy.toml"),
+        "[ci]\ncontracts_path = \"services/{service}/axon.go\"\n",
+    )
+    .unwrap();
+    for forge in ["github", "gitlab"] {
+        let (yml, err, ok) = axon(&[
+            "ci",
+            dir.join("manifests/payments.toml").to_str().unwrap(),
+            "--forge",
+            forge,
+        ]);
+        assert!(ok, "{forge}: {err}");
+        assert!(
+            yml.contains("--lang go > services/payments/axon.go"),
+            "{forge}: the gate regenerates a language the repo does not keep:\n{yml}"
+        );
+    }
+}

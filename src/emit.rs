@@ -405,6 +405,10 @@ fn build_ci_github(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String
             .replace("{service}", svc),
         ci.manifests_dir.clone(),
     );
+    // The gate regenerates what the repo actually keeps. It was hardcoded to
+    // TypeScript, so a Go service was diffed against a language it does not
+    // use: the check passed by generating a file nobody reads.
+    let lang = if contracts.ends_with(".go") { "go" } else { "ts" };
 
     let mut gates = String::new();
     if !migrations_of(m).is_empty() {
@@ -497,7 +501,7 @@ jobs:
       - run: axon verify {manifests}/
       - name: generated code up to date
         run: |
-          axon build {manifests}/{svc}.toml {manifests}/ --lang ts > {contracts}
+          axon build {manifests}/{svc}.toml {manifests}/ --lang {lang} > {contracts}
           git diff --exit-code || {{
             echo "::error::generated code is out of date; run axon build"
             exit 1
@@ -552,6 +556,10 @@ fn build_ci_gitlab(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> Result
             .replace("{service}", svc),
         ci.manifests_dir.clone(),
     );
+    // The gate regenerates what the repo actually keeps. It was hardcoded to
+    // TypeScript, so a Go service was diffed against a language it does not
+    // use: the check passed by generating a file nobody reads.
+    let lang = if contracts.ends_with(".go") { "go" } else { "ts" };
     if image.contains("${{") {
         return Err(format!(
             "[ci] image is written for GitHub (`{image}`), and for GitLab that expression is \
@@ -624,7 +632,7 @@ fn build_ci_gitlab(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> Result
              # the gate that matters: this manifest against ALL the others, and\n    \
              # against the contracts already published\n    \
              - axon verify {manifests}/\n    \
-             - axon build {manifests}/{svc}.toml {manifests}/ --lang ts > {contracts}\n    \
+             - axon build {manifests}/{svc}.toml {manifests}/ --lang {lang} > {contracts}\n    \
              - git diff --exit-code || (echo \"generated code is out of date; run axon build\" && exit 1)\n\
 {gates}\n\
          test:\n  \
