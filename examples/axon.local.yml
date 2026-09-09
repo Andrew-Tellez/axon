@@ -47,6 +47,18 @@ services:
       -sqlMigrationPrefix= -sqlMigrationSeparator=_
       -validateMigrationNaming=true
       migrate
+  catalog-db-orders-0:
+    image: flyway/flyway:10-alpine
+    depends_on: { migrate-db-orders-0: { condition: service_completed_successfully } }
+    volumes: ["./sql-catalog/orders:/flyway/sql:ro"]
+    command: >
+      -url=jdbc:postgresql://db-orders-0:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -table=axon_catalog_history
+      -baselineOnMigrate=true
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
   policies-db-orders-0:
     image: flyway/flyway:10-alpine
     depends_on: { migrate-db-orders-0: { condition: service_completed_successfully } }
@@ -81,6 +93,18 @@ services:
     command: >
       -url=jdbc:postgresql://db-orders-1:5432/orders
       -user=postgres -password=local -connectRetries=10
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+  catalog-db-orders-1:
+    image: flyway/flyway:10-alpine
+    depends_on: { migrate-db-orders-1: { condition: service_completed_successfully } }
+    volumes: ["./sql-catalog/orders:/flyway/sql:ro"]
+    command: >
+      -url=jdbc:postgresql://db-orders-1:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -table=axon_catalog_history
+      -baselineOnMigrate=true
       -sqlMigrationPrefix= -sqlMigrationSeparator=_
       -validateMigrationNaming=true
       migrate
@@ -121,6 +145,18 @@ services:
       -sqlMigrationPrefix= -sqlMigrationSeparator=_
       -validateMigrationNaming=true
       migrate
+  catalog-db-orders-2:
+    image: flyway/flyway:10-alpine
+    depends_on: { migrate-db-orders-2: { condition: service_completed_successfully } }
+    volumes: ["./sql-catalog/orders:/flyway/sql:ro"]
+    command: >
+      -url=jdbc:postgresql://db-orders-2:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -table=axon_catalog_history
+      -baselineOnMigrate=true
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
   policies-db-orders-2:
     image: flyway/flyway:10-alpine
     depends_on: { migrate-db-orders-2: { condition: service_completed_successfully } }
@@ -158,6 +194,18 @@ services:
       -sqlMigrationPrefix= -sqlMigrationSeparator=_
       -validateMigrationNaming=true
       migrate
+  catalog-db-orders-3:
+    image: flyway/flyway:10-alpine
+    depends_on: { migrate-db-orders-3: { condition: service_completed_successfully } }
+    volumes: ["./sql-catalog/orders:/flyway/sql:ro"]
+    command: >
+      -url=jdbc:postgresql://db-orders-3:5432/orders
+      -user=postgres -password=local -connectRetries=10
+      -table=axon_catalog_history
+      -baselineOnMigrate=true
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
   policies-db-orders-3:
     image: flyway/flyway:10-alpine
     depends_on: { migrate-db-orders-3: { condition: service_completed_successfully } }
@@ -179,7 +227,7 @@ services:
     # Pinned by digest: pgdog only publishes the `main` tag, which moves. A
     # moving tag in a generated file changes the binary without changing the diff.
     image: ghcr.io/pgdogdev/pgdog:main@sha256:16c85d1c6471de9aefbb2eceae1c48080786d74f9aa8bcadd32fe183c26184a3
-    depends_on: { policies-db-orders-0: { condition: service_completed_successfully }, policies-db-orders-1: { condition: service_completed_successfully }, policies-db-orders-2: { condition: service_completed_successfully }, policies-db-orders-3: { condition: service_completed_successfully } }
+    depends_on: { migrate-db-orders-0: { condition: service_completed_successfully }, catalog-db-orders-0: { condition: service_completed_successfully }, policies-db-orders-0: { condition: service_completed_successfully }, migrate-db-orders-1: { condition: service_completed_successfully }, catalog-db-orders-1: { condition: service_completed_successfully }, policies-db-orders-1: { condition: service_completed_successfully }, migrate-db-orders-2: { condition: service_completed_successfully }, catalog-db-orders-2: { condition: service_completed_successfully }, policies-db-orders-2: { condition: service_completed_successfully }, migrate-db-orders-3: { condition: service_completed_successfully }, catalog-db-orders-3: { condition: service_completed_successfully }, policies-db-orders-3: { condition: service_completed_successfully } }
     # the image's workdir is /pgdog, that is where it reads its config from
     volumes: ["./.axon/pgdog/orders:/pgdog:ro"]
     ports: ["${AXON_POOLER_PORT_orders:-16814}:6432"]
@@ -347,7 +395,7 @@ services:
     build:
       context: .
       dockerfile: services/payments/Dockerfile
-    depends_on: { broker: { condition: service_healthy }, trace: { condition: service_healthy }, crear-buckets: { condition: service_completed_successfully }, db-payments: { condition: service_healthy }, policies-db-payments: { condition: service_completed_successfully } }
+    depends_on: { broker: { condition: service_healthy }, trace: { condition: service_healthy }, crear-buckets: { condition: service_completed_successfully }, db-payments: { condition: service_healthy }, migrate-db-payments: { condition: service_completed_successfully }, policies-db-payments: { condition: service_completed_successfully } }
     ports: ["${AXON_PORT_payments:-8278}:8080"]
     env_file: [.env.local]
     environment:

@@ -293,6 +293,9 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     if m.cache.active() {
         out.push(cache_ts(m));
     }
+    if !m.catalog.is_empty() {
+        out.push(crate::catalog::build_ts(m));
+    }
     let routes: Vec<String> = m
         .methods
         .values()

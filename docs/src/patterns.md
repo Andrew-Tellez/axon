@@ -859,6 +859,51 @@ And a different type between the two is an error too: on the swap, the view chan
 with nothing saying so. A column too many in the shadow is only a warning — it is spare
 until the next swap, and after that it is the view that has it.
 
+## The catalog: one list in three places
+
+Currencies, statuses, reasons, countries. The list nobody thinks is worth declaring, so it
+ends up written three times —an enum in one service, a `CHECK` in a migration, a dropdown
+in the front— and the day somebody adds a value, two of the three do not hear about it.
+
+```toml
+[catalog.currency]
+key = "code"
+fields = { code = "string", name = "string", decimals = "int" }
+entries = [
+  { code = "MXN", name = "Peso mexicano", decimals = 2 },
+  { code = "USD", name = "US Dollar", decimals = 2 },
+]
+```
+
+Out of that come the three places, from one declaration:
+
+- **the table and its seed** (`axon catalog`), as a repeatable migration: regenerated whole
+  whenever somebody adds a value, which as a versioned migration would be a checksum
+  mismatch and nothing applied;
+- **the delete of what is no longer declared**, which is the part that keeps them the same
+  list — without it the code stops offering a value the database still accepts, and nobody
+  sees the difference;
+- **the type** (`axon build`): a union where a value off the list does not compile, the
+  frozen table, and a lookup.
+
+The entries live in the manifest on purpose. A catalog whose values exist only in the
+database is a catalog nobody can review — adding one is an `INSERT` somebody ran, instead
+of a diff somebody read — and the code cannot know them either.
+
+What `verify` refuses: an entry with a hole (a `NULL` where the generated type promises a
+value), a field that is not declared (it would be dropped in silence), a repeated key (the
+upsert makes the second one win quietly), a value whose type does not fit (a row that fails
+to insert the day somebody applies it, not the day somebody writes it), and a catalog in a
+service with no database — half of what declaring it buys is that the database knows it
+too.
+
+```console
+==> el catalogo declarado, en la tabla y en el tipo
+  OK: las 3 monedas declaradas estan en la tabla, sembradas por el job que el target emite
+  una moneda retirada del manifiesto
+  OK: el valor retirado desaparece de la tabla; sin eso el codigo deja de ofrecerlo y la base lo sigue aceptando
+```
+
 ## The cache, and the half nobody writes
 
 A cache is not another storage engine: it is a **derived copy**, and the only hard part is

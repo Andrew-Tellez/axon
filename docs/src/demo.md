@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **70 checks against reality**: not against a mock,
+brings the whole system up and makes **72 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -177,6 +177,11 @@ axon: the warehouse has 0 differences against the manifest
   OK: the missing column is detected, and without it that field would be stored nowhere
   OK: restored whole after breaking it: 1 rows, all with their amount
   OK: 1 rows before and after; the loader is idempotent
+
+==> el catalogo declarado, en la tabla y en el tipo
+  OK: las 3 monedas declaradas estan en la tabla, sembradas por el job que el target emite
+  una moneda retirada del manifiesto
+  OK: el valor retirado desaparece de la tabla; sin eso el codigo deja de ofrecerlo y la base lo sigue aceptando
 
 ==> la cache, medida
   una lectura y la llave que el manifiesto declara

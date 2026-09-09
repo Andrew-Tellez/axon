@@ -265,6 +265,7 @@ export const manifest = {
   "cache": {
     "engine": null
   },
+  "catalog": {},
   "metrics": {},
   "rules": {},
   "infra": {

@@ -1045,6 +1045,42 @@ impl Metric {
     }
 }
 
+/// A catalog: a small, fixed list that several services have to agree on.
+///
+/// Currencies, statuses, reasons, countries. The list nobody thinks is worth
+/// declaring, so it ends up written three times —an enum in one service, a
+/// `CHECK` in a migration, a dropdown in the front— and the day somebody adds
+/// a value, two of the three do not hear about it.
+///
+/// Declared, the list is ONE: the table, its seed, and a union type that makes
+/// an invented value not compile. And because it is in the manifest, adding a
+/// value is a diff somebody reviews instead of an `INSERT` somebody ran.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Catalog {
+    /// The field that identifies each entry. It has to be one of `fields`, and
+    /// it is what the rest of the schema points at.
+    pub key: String,
+    /// The columns, with the same types as everywhere else in the manifest.
+    #[serde(default)]
+    pub fields: Fields,
+    /// The rows. In the manifest on purpose: a catalog whose values live only
+    /// in the database is a catalog nobody can review, and the code cannot
+    /// know them either.
+    #[serde(default)]
+    pub entries: Vec<IndexMap<String, toml::Value>>,
+    /// The table. `catalog_<name>` by default.
+    pub table: Option<String>,
+}
+
+impl Catalog {
+    pub fn table(&self, name: &str) -> String {
+        self.table
+            .clone()
+            .unwrap_or_else(|| format!("catalog_{}", name.to_lowercase()))
+    }
+}
+
 /// A cached answer.
 ///
 /// A cache is not another storage engine: it is a **derived copy**, and the
@@ -1244,6 +1280,9 @@ pub struct Manifest {
     /// Cached answers, with what makes them stale. See `Cache`.
     #[serde(default)]
     pub cache: Cache,
+    /// Fixed lists several services have to agree on. See `Catalog`.
+    #[serde(default)]
+    pub catalog: IndexMap<String, Catalog>,
     /// Business metrics over the declared events. See `Metric`.
     #[serde(default)]
     pub metrics: IndexMap<String, Metric>,
@@ -1343,11 +1382,13 @@ pub struct Fragment {
     pub aggregate: IndexMap<String, Aggregate>,
     pub view: IndexMap<String, View>,
     pub metrics: IndexMap<String, Metric>,
+    pub catalog: IndexMap<String, Catalog>,
 }
 
 /// The blocks a fragment may carry. Anything else is the service's, and saying
 /// so by name beats a generic "unknown field".
-const FRAGMENT_BLOCKS: [&str; 11] = [
+const FRAGMENT_BLOCKS: [&str; 12] = [
+    "catalog",
     "pii",
     "emits",
     "consumes",
@@ -1382,7 +1423,7 @@ fn merge(m: &mut Manifest, f: Fragment, from: &Path) -> Result<(), String> {
             }
         )*};
     }
-    tables!(emits, consumes, methods, flags, machine, saga, aggregate, view, metrics);
+    tables!(emits, consumes, methods, flags, machine, saga, aggregate, view, metrics, catalog);
     for d in f.depends {
         if m.depends
             .iter()

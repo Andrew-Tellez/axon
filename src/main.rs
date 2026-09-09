@@ -5,6 +5,7 @@ mod baseline;
 mod bi;
 mod cap;
 mod carga;
+mod catalog;
 mod color;
 mod dbsec;
 mod emit;
@@ -213,6 +214,14 @@ enum Cmd {
         users: bool,
         /// which service. Each one carries its own pgdog.toml, so it can only
         /// be omitted when a single one declares a pooler.
+        #[arg(long = "service", short = 's')]
+        service: Option<String>,
+    },
+    /// the declared lists: table, seed and type from one place
+    Catalog {
+        sources: Vec<String>,
+        /// which service. Each one's catalogs go in its own migration
+        /// directory, so it can only be omitted when a single one declares any.
         #[arg(long = "service", short = 's')]
         service: Option<String>,
     },
@@ -872,6 +881,10 @@ fn run() -> Result<ExitCode, String> {
                     false => pooler::build(&ms, &target, solo)?,
                 }
             )
+        }
+        Cmd::Catalog { sources, service } => {
+            let ms = manifest::discover(&sources)?;
+            print!("{}", catalog::build(&ms, service.as_deref())?)
         }
         Cmd::Rls { sources, target } => {
             let ms = manifest::discover(&sources)?;

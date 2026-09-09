@@ -259,6 +259,15 @@ In 2.x the direction is from outside the app: `publish` is what others publish t
 
 What AsyncAPI does not declare comes out as `TODO` and `verify` treats it as absent.
 
+## `axon catalog <sources> [--service <name>]`
+The declared lists —currencies, statuses, reasons— as one repeatable migration: the table,
+the upsert of every entry, and the **delete of what is no longer declared**. That last one
+is what keeps the two lists the same: a value removed from the manifest has to leave the
+table, or the code stops offering it and the database keeps accepting it.
+
+`axon build` emits the other half: a union type where a value off the list does not
+compile, the frozen table and a lookup. See [The catalog](./patterns.md#the-catalog-one-list-in-three-places).
+
 ## `axon rls <sources> [--target sql|pg_anon]`
 Data access policies: per-row RLS and per-column masked views. It comes from crossing the
 real schema (read from the migrations) with the manifest's `pii` fields.

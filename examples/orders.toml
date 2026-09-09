@@ -233,3 +233,19 @@ enabled_by = "cache_orders"
 owner = "orders-team"
 kill_switch = true
 default = true
+
+# La lista que nadie cree que valga la pena declarar, y que acaba escrita tres
+# veces: un enum en el servicio, un CHECK en la migracion y un desplegable en el
+# front. El dia que alguien anade un valor, dos de las tres no se enteran.
+#
+# Declarada es UNA: la tabla, su semilla y un tipo union donde un valor
+# inventado no compila. Y anadir uno es un diff que alguien revisa, no un
+# INSERT que alguien corrio.
+[catalog.currency]
+key = "code"
+fields = { code = "string", name = "string", decimals = "int" }
+entries = [
+  { code = "MXN", name = "Peso mexicano", decimals = 2 },
+  { code = "USD", name = "US Dollar", decimals = 2 },
+  { code = "CLP", name = "Peso chileno", decimals = 0 },
+]

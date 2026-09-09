@@ -95,6 +95,29 @@ fn pendiente(v: &Option<String>) -> bool {
     }
 }
 
+/// Whether a TOML value fits a declared type. The manifest's vocabulary is
+/// small on purpose, and a catalog entry typed wrong is a row that fails to
+/// insert the day somebody applies it, not the day somebody writes it.
+fn fits(v: &toml::Value, kind: &str) -> bool {
+    match kind {
+        "int" => v.is_integer(),
+        "float" => v.is_float() || v.is_integer(),
+        "bool" => v.is_bool(),
+        // string, uuid, timestamp: all text on the wire and in the row
+        _ => v.is_str(),
+    }
+}
+
+fn kind_of(v: &toml::Value) -> &'static str {
+    match v {
+        toml::Value::Integer(_) => "int",
+        toml::Value::Float(_) => "float",
+        toml::Value::Boolean(_) => "bool",
+        toml::Value::String(_) => "string",
+        _ => "something else",
+    }
+}
+
 pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     let (mut errors, mut warnings) = (Vec::new(), Vec::new());
 
@@ -889,6 +912,81 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // ---- catalogs ----
+    //
+    // The list nobody thinks is worth declaring: currencies, statuses,
+    // reasons. It ends up written three times —an enum, a CHECK, a dropdown—
+    // and the day somebody adds a value two of the three do not hear about it.
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        for (name, cat) in &m.catalog {
+            if !cat.fields.contains_key(&cat.key) {
+                errors.push(format!(
+                    "{svc}: `[catalog.{name}] key = \"{}\"` is not one of its `fields`",
+                    cat.key
+                ));
+                continue;
+            }
+            if cat.entries.is_empty() {
+                warnings.push(format!(
+                    "{svc}: `[catalog.{name}]` has no entries. The table and the type come out \
+                     empty, and an empty union type makes every value invalid"
+                ));
+            }
+            let mut seen: Vec<String> = Vec::new();
+            for (i, entry) in cat.entries.iter().enumerate() {
+                // Every entry carries every field: a hole in a catalog is a
+                // NULL where the code declared a value, and the union type
+                // would say otherwise.
+                for (field, kind) in &cat.fields {
+                    match entry.get(field) {
+                        None => errors.push(format!(
+                            "{svc}: `[catalog.{name}]` entry {i} has no `{field}`. A catalog \
+                             with holes is a NULL where the generated type promises a value"
+                        )),
+                        Some(v) if !fits(v, kind) => errors.push(format!(
+                            "{svc}: `[catalog.{name}]` entry {i}: `{field}` is `{}` and the \
+                             field is declared `{kind}`",
+                            kind_of(v)
+                        )),
+                        _ => {}
+                    }
+                }
+                // An unknown field is a value somebody meant to declare and
+                // that nothing will store: it is not in the table.
+                for field in entry.keys() {
+                    if !cat.fields.contains_key(field) {
+                        errors.push(format!(
+                            "{svc}: `[catalog.{name}]` entry {i} carries `{field}`, which is \
+                             not one of its `fields`: it would be dropped in silence"
+                        ));
+                    }
+                }
+                if let Some(k) = entry.get(&cat.key) {
+                    let k = k
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| k.to_string());
+                    if seen.contains(&k) {
+                        errors.push(format!(
+                            "{svc}: `[catalog.{name}]` repeats the key `{k}`. The seed is an \
+                             upsert, so the second one silently wins"
+                        ));
+                    }
+                    seen.push(k);
+                }
+            }
+            // A catalog needs somewhere to live: it is a table.
+            if m.infra.state.is_none() {
+                errors.push(format!(
+                    "{svc}: `[catalog.{name}]` with no `[infra] state`. The list has nowhere to \
+                     be seeded, and half of what declaring it buys is that the database knows \
+                     it too"
+                ));
             }
         }
     }

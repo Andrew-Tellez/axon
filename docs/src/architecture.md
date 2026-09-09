@@ -61,6 +61,7 @@ flowchart TB
   MAN --> INF["infra.rs<br/><i>the neutral plan<br/>+ 4 renderers</i>"]
   MAN --> BI["bi.rs<br/><i>warehouse: 3 dialects,<br/>funnels, metrics, drift</i>"]
   MAN --> DBS["dbsec.rs<br/><i>RLS, masked views,<br/>pg_anon</i>"]
+  MAN --> CAT["catalog.rs<br/><i>the declared lists:<br/>table, seed and type</i>"]
   MAN --> POOL["pooler.rs<br/><i>pgdog.toml + users</i>"]
   MAN --> CAP["cap.rs<br/><i>CAP consequences</i>"]
   MAN --> VERS["versions.rs<br/><i>the API's<br/>maintenance cycle</i>"]

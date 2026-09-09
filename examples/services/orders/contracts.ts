@@ -308,6 +308,34 @@ export const manifest = {
       "single_flight": true
     }
   },
+  "catalog": {
+    "currency": {
+      "key": "code",
+      "fields": {
+        "code": "string",
+        "name": "string",
+        "decimals": "int"
+      },
+      "entries": [
+        {
+          "code": "MXN",
+          "name": "Peso mexicano",
+          "decimals": 2
+        },
+        {
+          "code": "USD",
+          "name": "US Dollar",
+          "decimals": 2
+        },
+        {
+          "code": "CLP",
+          "name": "Peso chileno",
+          "decimals": 0
+        }
+      ],
+      "table": null
+    }
+  },
   "metrics": {
     "orders_placed": {
       "on": [
@@ -504,6 +532,19 @@ export async function cachedOrder(
   return value;
 }
 
+/** `currency`: the declared list. A value that is not on it does not
+ *  compile, so the code cannot offer what the database will reject. */
+export type Currency = "MXN" | "USD" | "CLP";
+
+export const currencyCatalog : ReadonlyArray<{ code: Currency; name: string; decimals: number }> = Object.freeze([
+  { code: "MXN", name: "Peso mexicano", decimals: 2 },
+  { code: "USD", name: "US Dollar", decimals: 2 },
+  { code: "CLP", name: "Peso chileno", decimals: 0 },
+]);
+
+/** Lookup by `code`. Frozen: a catalog somebody can mutate at runtime is a
+ *  catalog that stops matching the table. */
+export const findCurrency = (k: Currency) => currencyCatalog.find((e) => e.code === k)!;
 
 /** HTTP routes the manifest declares. Startup must fail if any of them
  *  has no handler: a 404 in production tells nobody. */

@@ -73,6 +73,11 @@ mkdir -p .axon/pgdog/orders
 "$AXON" pooler . --service orders --target local > .axon/pgdog/orders/pgdog.toml
 "$AXON" pooler . --service orders --target local --users > .axon/pgdog/orders/users.toml
 
+# La lista declarada: la tabla, su semilla y el tipo salen del manifiesto, y el
+# job de Flyway que el target ya emite la aplica.
+mkdir -p sql-catalog/orders
+"$AXON" catalog . --service orders > sql-catalog/orders/R__catalog.sql
+
 step "bringing up the broker, the databases, the migrations and the services"
 # `--remove-orphans`: a service that changes name leaves the old container
 # running, and that one keeps holding its port. The new compose comes up just the
@@ -189,6 +194,9 @@ step "the warehouse: schema, funnel and PII"
 # el archivo es valido; no dice que lleve un evento del broker a la bodega.
 # Declarar que algo se cachea no vale nada si nadie comprueba que la llave lleva
 # el inquilino y que el interruptor apaga de verdad.
+step "el catalogo declarado, en la tabla y en el tipo"
+./check-catalog.sh
+
 step "la cache, medida"
 ./check-cache.sh
 

@@ -8413,3 +8413,84 @@ fn a_multi_tenant_cache_carries_the_tenant_in_the_key() {
     let (_, err, _) = axon(&["verify", dir.to_str().unwrap()]);
     assert!(!err.contains("does not carry"), "{err}");
 }
+
+/// A catalog: the list nobody thinks is worth declaring —currencies,
+/// statuses, reasons— and that ends up written three times: an enum, a CHECK
+/// and a dropdown. Declared, it is ONE list, and that is checkable.
+#[test]
+fn a_catalog_is_one_list_in_three_places() {
+    let (sql, err, ok) = axon(&["catalog", "examples", "--service", "orders"]);
+    assert!(ok, "{err}");
+    assert!(
+        sql.contains("CREATE TABLE IF NOT EXISTS \"catalog_currency\""),
+        "{sql}"
+    );
+    // an upsert, so applying it twice is not an error
+    assert!(sql.contains("ON CONFLICT (code) DO UPDATE SET"), "{sql}");
+    // and the explicit delete, which is what keeps the two lists the same: a
+    // value removed from the manifest has to leave the table, or the code
+    // stops offering it and the database keeps accepting it
+    assert!(
+        sql.contains("DELETE FROM \"catalog_currency\" WHERE code NOT IN ('MXN', 'USD', 'CLP')"),
+        "{sql}"
+    );
+    // a person writes `O'Brien`: the literals are quoted, not concatenated
+    let dir = std::env::temp_dir().join("axon-catalog");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let base = "service = \"shop\"\nowner = \"t\"\ntier = \"2\"\nversion = \"1.0.0\"\n\
+                [infra]\nstate = \"postgres\"\nmigrations = \"sql/shop\"\n";
+    let write = |extra: &str| {
+        std::fs::write(dir.join("shop.toml"), format!("{base}{extra}")).unwrap();
+    };
+    write(
+        "[catalog.reason]\nkey = \"code\"\nfields = { code = \"string\", label = \"string\" }\n\
+         entries = [{ code = \"x\", label = \"O'Brien\" }]\n",
+    );
+    let (sql, _, ok) = axon(&["catalog", dir.to_str().unwrap()]);
+    assert!(ok);
+    assert!(
+        sql.contains("'O''Brien'"),
+        "the quote was not escaped:\n{sql}"
+    );
+
+    // a hole is a NULL where the generated type promises a value
+    write(
+        "[catalog.reason]\nkey = \"code\"\nfields = { code = \"string\", label = \"string\" }\n\
+         entries = [{ code = \"x\" }]\n",
+    );
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("has no `label`"), "{err}");
+
+    // a field nothing will store
+    write(
+        "[catalog.reason]\nkey = \"code\"\nfields = { code = \"string\" }\n\
+         entries = [{ code = \"x\", note = \"hi\" }]\n",
+    );
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("dropped in silence"), "{err}");
+
+    // the seed is an upsert, so a repeated key silently wins
+    write(
+        "[catalog.reason]\nkey = \"code\"\nfields = { code = \"string\" }\n\
+         entries = [{ code = \"x\" }, { code = \"x\" }]\n",
+    );
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("repeats the key"), "{err}");
+
+    // and a type that does not fit is a row that fails to insert the day
+    // somebody applies it, not the day somebody writes it
+    write(
+        "[catalog.reason]\nkey = \"code\"\nfields = { code = \"string\", n = \"int\" }\n\
+         entries = [{ code = \"x\", n = \"two\" }]\n",
+    );
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(
+        err.contains("is `string` and the field is declared `int`"),
+        "{err}"
+    );
+}

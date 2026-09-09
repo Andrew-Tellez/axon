@@ -44,6 +44,9 @@ pub struct Store {
     /// nobody sets is comparing against the engine's default, which is usually
     /// much lower.
     pub max_connections: Option<u32>,
+    /// The service declares catalogs: `axon catalog` emits their seed, and it
+    /// is applied after the schema in its own history.
+    pub catalogs: bool,
     /// The service has access policies to apply after migrating: `axon rls`.
     /// They go separately because a policy is not a schema change.
     pub policies: bool,
@@ -271,7 +274,7 @@ pub fn plan_schema() -> serde_json::Value {
                 "service": str_, "engine": str_, "outbox": bool_, "ha": bool_,
                 "backup_retention_days": uint, "pitr": bool_, "read_replicas": uint,
                 "pool_size": uint_or_null, "max_connections": uint_or_null,
-                "policies": bool_, "shards": uint_or_null,
+                "catalogs": bool_, "policies": bool_, "shards": uint_or_null,
                 "pooler": {
                     "type": ["object", "null"],
                     "description": "the sharder's two files, generated, with the variables                                     the deploy has to substitute into them",
@@ -428,6 +431,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 read_replicas: m.infra.read_replicas.unwrap_or(0),
                 pool_size: m.infra.pool_size,
                 max_connections: m.infra.max_connections,
+                catalogs: !m.catalog.is_empty(),
                 policies: m.infra.tenant_column.is_some() || !m.pii.is_empty(),
                 shards: m.pooler.active().then_some(m.pooler.shards.max(1)),
                 pooler: m.pooler.active().then(|| pooler_config(ms, svc)).flatten(),
@@ -2296,6 +2300,26 @@ services:
       migrate
 "
             ));
+            // The catalogs, in their own history too: the file is regenerated
+            // whole every time somebody adds a value to a list, so it cannot
+            // share a history with the schema's versioned migrations.
+            if s.catalogs {
+                o.push_str(&format!(
+                    "  catalog-{host}:
+    image: flyway/flyway:10-alpine
+    depends_on: {{ migrate-{host}: {{ condition: service_completed_successfully }} }}
+    volumes: [\"./sql-catalog/{svc}:/flyway/sql:ro\"]
+    command: >
+      -url=jdbc:postgresql://{host}:5432/{svc}
+      -user=postgres -password=local -connectRetries=10
+      -table=axon_catalog_history
+      -baselineOnMigrate=true
+      -sqlMigrationPrefix= -sqlMigrationSeparator=_
+      -validateMigrationNaming=true
+      migrate
+"
+                ));
+            }
             // The policies go in their own job with their own history: they are
             // applied AFTER the schema, and regenerating them is not a schema
             // change to be versioned against the same history.
@@ -2327,11 +2351,24 @@ services:
         // against an empty database it does not know which node to send it to.
         if s.shards.is_some() {
             let port = 16432 + (motores[&nodes(s)[0].1] - 15432);
-            let ultimo = if s.policies { "policies" } else { "migrate" };
+            // The pooler comes up after EVERY job that touches the schema:
+            // pgdog parses the query against it, and against a half-migrated
+            // database it does not know which node to send it to. Every one of
+            // them, and not the last: `docker compose up --wait` counts a job
+            // nobody waits for as a container that died.
+            let jobs: Vec<&str> = ["migrate"]
+                .into_iter()
+                .chain(s.catalogs.then_some("catalog"))
+                .chain(s.policies.then_some("policies"))
+                .collect();
             let espera: Vec<String> = nodes(s)
                 .iter()
-                .map(|(_, h)| {
-                    format!("{ultimo}-{h}: {{ condition: service_completed_successfully }}")
+                .flat_map(|(_, h)| {
+                    jobs.iter()
+                        .map(|j| {
+                            format!("{j}-{h}: {{ condition: service_completed_successfully }}")
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .collect();
             o.push_str(&format!(
@@ -2458,13 +2495,18 @@ services:
             }
             (true, None) => {
                 deps.push(format!("db-{svc}: {{ condition: service_healthy }}"));
-                let ultimo = match store.is_some_and(|s| s.policies) {
-                    true => "policies",
-                    false => "migrate",
-                };
-                deps.push(format!(
-                    "{ultimo}-db-{svc}: {{ condition: service_completed_successfully }}"
-                ));
+                // Every job that touches the schema, not the last one: the
+                // service reads a catalog its code assumes is seeded, and a
+                // job nobody waits for is a container `up --wait` calls dead.
+                for j in ["migrate"]
+                    .into_iter()
+                    .chain(store.is_some_and(|s| s.catalogs).then_some("catalog"))
+                    .chain(store.is_some_and(|s| s.policies).then_some("policies"))
+                {
+                    deps.push(format!(
+                        "{j}-db-{svc}: {{ condition: service_completed_successfully }}"
+                    ));
+                }
                 format!("      DATABASE_URL: postgres://postgres:local@db-{svc}:5432/{svc}\n")
             }
         };
