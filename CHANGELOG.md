@@ -7,6 +7,22 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.25.0] — 2026-09-09
+
+### Añadido
+
+- **`[ci] contracts_path` acepta una lista.** Un repo que guarda el contrato en dos
+  lenguajes tenía uno solo en el gate; el otro no se comparaba contra nada y se quedaba
+  viejo sin que nadie se enterara. Cada ruta se regenera en el lenguaje que nombra su
+  extensión. La forma de una sola cadena sigue siendo la de siempre.
+
+### Corregido
+
+- **La ruta de migraciones en el pipeline se salía del checkout.** `migrations` es relativa
+  al manifiesto —así se lee en todos lados— y el pipeline corre desde la raíz del repo, así
+  que un `"../sql/inventory"` se emitía tal cual: `filesystem:./../sql/inventory`. Ahora se
+  resuelve contra `manifests_dir` antes de escribirla.
+
 ## [0.24.3] — 2026-09-09
 
 ### Corregido
