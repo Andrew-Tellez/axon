@@ -7,6 +7,15 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.25.1] — 2026-09-09
+
+### Corregido
+
+- **El `.gitignore` que escribe `axon init` no cubría `.env.local`**, que es el único archivo
+  de ese layout cuyo trabajo entero es quedarse fuera de git: ahí van los valores de los
+  secretos que el manifiesto declara. Salió rehaciendo prueba-axon desde cero, en el primer
+  `git add -A`.
+
 ## [0.25.0] — 2026-09-09
 
 ### Añadido
