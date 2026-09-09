@@ -409,13 +409,19 @@ fn build_ci_github(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String
     let mut gates = String::new();
     if !migrations_of(m).is_empty() {
         let route = m.infra.migrations.clone().unwrap_or_default();
+        // The flags come from the naming the repo uses, not from the one axon
+        // prefers: handing a Flyway repo axon's convention is what made its
+        // own naming look like a mistake.
+        let flags = crate::manifest::migration_style(&migrations_of(m))
+            .0
+            .flyway_flags();
         gates.push_str(&format!(
             "      # gate: expand -> migrate -> contract. A `.contract.sql` in the same
       # deploy as the code that stops using the column breaks the rollback.
       - name: migraciones (dry-run)
         run: |
           flyway -url=$DB_URL -locations=filesystem:./{route} \\
-            -sqlMigrationPrefix= -sqlMigrationSeparator=_ \\
+            {flags} \\
             -validateMigrationNaming=true validate
 "
         ));
@@ -561,8 +567,11 @@ fn build_ci_gitlab(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> Result
             "    # gate: expand -> migrate -> contract. A `.contract.sql` in the same\n    \
              # deploy as the code that stops using the column breaks the rollback.\n    \
              - flyway -url=$DB_URL -locations=filesystem:./{route}\n        \
-               -sqlMigrationPrefix= -sqlMigrationSeparator=_\n        \
-               -validateMigrationNaming=true validate\n"
+               {flags}\n        \
+               -validateMigrationNaming=true validate\n",
+            flags = crate::manifest::migration_style(&migrations_of(m))
+                .0
+                .flyway_flags()
         ));
     }
 

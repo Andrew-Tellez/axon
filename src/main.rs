@@ -12,6 +12,7 @@ mod emit;
 mod gen_go;
 mod import;
 mod infra;
+mod init;
 mod manifest;
 mod pact;
 mod plugin;
@@ -216,6 +217,15 @@ enum Cmd {
         /// be omitted when a single one declares a pooler.
         #[arg(long = "service", short = 's')]
         service: Option<String>,
+    },
+    /// a project that verifies clean and comes up: manifest, migration,
+    /// Dockerfile and policy, in the layout the rest of the CLI expects
+    Init {
+        /// the service's name: lowercase and dashes
+        service: String,
+        /// where to write it. The current directory by default
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
     },
     /// the verifier for what `[auth]` declares. Emitted, not linked: a file you
     /// can read beats a dependency that hides which claim it trusted
@@ -895,6 +905,9 @@ fn run() -> Result<ExitCode, String> {
                     false => pooler::build(&ms, &target, solo)?,
                 }
             )
+        }
+        Cmd::Init { service, path } => {
+            print!("{}", init::run(&path, &service)?)
         }
         Cmd::Auth { manifest, lang } => {
             let _ = lang;

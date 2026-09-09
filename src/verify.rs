@@ -1558,6 +1558,24 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         ));
     }
 
+    // ---- one convention per directory ----
+    //
+    // Both are supported, and mixing them is the failure: `001_a.sql` and
+    // `V2__b.sql` in one directory have no defined order, and Flyway itself
+    // will only see one of the two depending on the flags it was given.
+    for m in ms.iter().filter(|m| !m.external) {
+        let files = crate::manifest::migrations_of(m);
+        let (_, mixed) = crate::manifest::migration_style(&files);
+        if mixed {
+            errors.push(format!(
+                "{}: its migrations mix `001_<name>.sql` with Flyway's `V1__<name>.sql`. In \
+                 one directory the two have no defined order, and Flyway sees only the ones \
+                 that match the prefix it was given: half of them would never be applied",
+                m.service
+            ));
+        }
+    }
+
     // ---- the engine has to exist ----
     for m in ms.iter().filter(|m| !m.external) {
         let Some(motor) = &m.infra.state else {
@@ -3777,19 +3795,13 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     m.service
                 ));
             }
-            // `001_x.sql`: three digits and an underscore. A regex for this
-            // would be a whole dependency for three characters.
-            let numerado = {
-                let b = name.as_bytes();
-                b.len() > 3 && b[..3].iter().all(u8::is_ascii_digit) && b[3] == b'_'
-            };
-            if !numerado {
+            // Two conventions are supported —`001_name.sql` and Flyway's own
+            // `V1__name.sql`— and what is refused is MIXING them, which is the
+            // actual failure: in one directory they have no defined order.
+            if migration_version(&name).is_none() {
                 warnings.push(format!(
-                    "{}/{name}: no numeric prefix, so the order is not deterministic. axon \
-                     expects `001_<name>.sql` —three digits and an underscore— which is what the \
-                     generated pipeline passes to Flyway (`-sqlMigrationPrefix=` \
-                     `-sqlMigrationSeparator=_`). Flyway's own `V1__` is a different \
-                     convention and the two cannot be mixed in one directory",
+                    "{}/{name}: it follows neither `001_<name>.sql` nor Flyway's \
+                     `V1__<name>.sql`, so its order is whatever the filesystem says",
                     m.service
                 ));
             }

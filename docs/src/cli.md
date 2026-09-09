@@ -269,6 +269,19 @@ whether to override.
 There is no partial override on purpose. Two declarations of the same endpoint with merge
 rules is a question nobody can answer at three in the morning.
 
+## `axon init <service> [--path .]`
+A project that verifies clean and comes up: the manifest, its migration, the Dockerfile the
+compose builds, the policy and the `.env.local`, in the layout the rest of the CLI expects.
+
+It exists because of what running the CLI on an empty directory found: the first three
+failures were all **layout**. `migrations` resolves from the manifest, so `manifests/` next
+to `sql/` reads nothing; the compose builds `services/<svc>/Dockerfile`, which did not
+exist; and the `.env.local` it referenced had no reason to exist either. Three messages can
+explain that — a scaffold makes it not happen.
+
+It refuses to write over an existing project, which is the one case where clobbering is
+unforgivable.
+
 ## `axon auth <manifest> [--lang ts]`
 The verifier for what `[auth]` declares: standard JOSE, driven by the manifest — the
 issuers, the key set, the accepted algorithms and the name of every claim. The same file

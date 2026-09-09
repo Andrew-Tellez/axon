@@ -1,5 +1,13 @@
 # Your first manifest
 
+```sh
+axon init billing      # the whole layout, and it verifies clean
+```
+
+What follows explains every piece of what that writes. If you would rather read than
+scaffold, keep going: the file it produces is the one below.
+
+
 Ten minutes, without writing any business code yet. At the end you will have a verified
 service, its infrastructure and its diagrams — all derived from one file.
 

@@ -2252,6 +2252,87 @@ pub fn destructive(text: &str, origin: &str) -> bool {
     })
 }
 
+/// How a migration directory names its files.
+///
+/// axon used to accept one convention —`001_name.sql`— and tell every repo
+/// that already used Flyway's own that it had no numeric prefix, over a file
+/// called `V1__name.sql`. Reading that as a bug in axon is the correct
+/// reading, and it was found by running the CLI on an empty project.
+///
+/// Both are supported now, and what is refused is MIXING them, which is the
+/// actual failure: two conventions in one directory have no defined order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Style {
+    /// `001_name.sql`: what axon's own examples use.
+    Padded,
+    /// `V1__name.sql`: Flyway's default prefix and separator.
+    Flyway,
+    /// Neither, so the order is whatever the filesystem says.
+    Unknown,
+}
+
+impl Style {
+    /// The Flyway flags this convention needs. axon used to hardcode its own
+    /// and hand them to every repo, which is what made the other convention
+    /// look like a mistake instead of a choice.
+    pub fn flyway_flags(&self) -> &'static str {
+        match self {
+            Style::Padded => "-sqlMigrationPrefix= -sqlMigrationSeparator=_",
+            // Flyway's defaults: prefix `V`, separator `__`. Passing them
+            // explicitly beats relying on a default that a version bump can
+            // change under a pipeline nobody re-read.
+            _ => "-sqlMigrationPrefix=V -sqlMigrationSeparator=__",
+        }
+    }
+}
+
+/// The version in a migration's name, whichever convention it follows.
+///
+/// It is parsed and not compared as text because `V10__` sorts before `V2__`
+/// as a string: the tenth migration would run second, and the failure is a
+/// column that does not exist yet.
+pub fn migration_version(name: &str) -> Option<(Style, u32)> {
+    let stem = name.trim_end_matches(".sql");
+    if let Some(rest) = stem.strip_prefix('V') {
+        if let Some((num, _)) = rest.split_once("__") {
+            if let Ok(n) = num.replace('.', "").parse::<u32>() {
+                return Some((Style::Flyway, n));
+            }
+        }
+    }
+    let digits: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if !digits.is_empty() && stem.as_bytes().get(digits.len()) == Some(&b'_') {
+        if let Ok(n) = digits.parse::<u32>() {
+            return Some((Style::Padded, n));
+        }
+    }
+    None
+}
+
+/// The convention a directory follows, and whether it follows one at all.
+pub fn migration_style(files: &[PathBuf]) -> (Style, bool) {
+    let mut seen: Vec<Style> = Vec::new();
+    for f in files {
+        let name = f.file_name().map(|n| n.to_string_lossy().to_string());
+        let style = name
+            .as_deref()
+            .and_then(migration_version)
+            .map(|(s, _)| s)
+            .unwrap_or(Style::Unknown);
+        if !seen.contains(&style) {
+            seen.push(style);
+        }
+    }
+    let mixed = seen.iter().filter(|s| **s != Style::Unknown).count() > 1;
+    (
+        seen.iter()
+            .find(|s| **s != Style::Unknown)
+            .copied()
+            .unwrap_or(Style::Unknown),
+        mixed,
+    )
+}
+
 pub fn migrations_of(m: &Manifest) -> Vec<PathBuf> {
     let Some(path) = &m.infra.migrations else {
         return vec![];
@@ -2269,7 +2350,19 @@ pub fn migrations_of(m: &Manifest) -> Vec<PathBuf> {
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|e| e == "sql"))
             .collect();
-        files.sort();
+        // Sorted by the VERSION and not by the name: `V10__` sorts before
+        // `V2__` as text, so the tenth migration would run second and the
+        // failure is a column that does not exist yet.
+        files.sort_by_key(|f| {
+            let name = f
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            (
+                migration_version(&name).map(|(_, n)| n).unwrap_or(u32::MAX),
+                name,
+            )
+        });
         files
     } else if full.exists() {
         vec![full]

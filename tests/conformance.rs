@@ -8911,16 +8911,31 @@ fn what_using_it_from_zero_found() {
     let (out, err, ok) = axon(&["verify", dir.join("manifests").to_str().unwrap()]);
     assert!(ok, "{err}{out}");
 
-    // 2. `V1__item.sql` is Flyway's convention and axon wants its own. The
-    // message said "no numeric prefix" over a file whose name starts with a
-    // number, which reads as a bug in axon.
+    // 2. `V1__item.sql` is Flyway's own convention, and axon used to tell any
+    // repo that already used it that it had "no numeric prefix" — over a file
+    // whose name starts with a number. Fixed at the root: both are accepted,
+    // the generated Flyway flags follow whichever the repo uses, and what is
+    // refused is MIXING them, which is the actual failure.
     let (out, _, _) = axon(&["verify", dir.join("manifests").to_str().unwrap()]);
     let all = out;
     assert!(
-        all.contains("001_<name>.sql"),
-        "it does not name the shape it wants:\n{all}"
+        !all.contains("numeric prefix") && !all.contains("follows neither"),
+        "Flyway's own naming is still reported as wrong:\n{all}"
     );
-    assert!(all.contains("cannot be mixed"), "{all}");
+    let (ci, _, _) = axon(&["ci", dir.join("manifests/shop.toml").to_str().unwrap()]);
+    assert!(
+        ci.contains("-sqlMigrationPrefix=V -sqlMigrationSeparator=__"),
+        "the pipeline hands Flyway axon's convention instead of the repo's:\n{ci}"
+    );
+    std::fs::write(
+        dir.join("sql/shop/002_other.sql"),
+        "CREATE TABLE other (id uuid PRIMARY KEY);\n",
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", dir.join("manifests").to_str().unwrap()]);
+    assert!(!ok, "two conventions in one directory passed");
+    assert!(err.contains("would never be applied"), "{err}");
+    std::fs::remove_file(dir.join("sql/shop/002_other.sql")).unwrap();
 
     // 3. The compose builds `services/<svc>/Dockerfile`, and with nothing
     // there docker fails with an `lstat` that names nothing. axon wrote the
@@ -8954,4 +8969,82 @@ fn what_using_it_from_zero_found() {
         yml.contains("{ path: .env.local, required: false }"),
         "{yml}"
     );
+}
+
+/// `axon init`: the answer to what using the CLI on an empty directory found.
+/// Three of those five failures were layout, and three messages can explain a
+/// layout. A scaffold makes it not happen.
+#[test]
+fn init_writes_a_project_that_verifies_clean() {
+    let dir = std::env::temp_dir().join("axon-init");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (out, err, ok) = axon(&["init", "billing", "--path", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    assert!(out.contains("wrote billing.toml"), "{out}");
+
+    // the layout is the one the rest of the CLI expects: the manifest at the
+    // root, so `migrations` needs no `../`
+    for f in [
+        "billing.toml",
+        "sql/billing/001_billing.sql",
+        "services/billing/Dockerfile",
+        "services/billing/index.ts",
+        ".env.local",
+        "axon.policy.toml",
+    ] {
+        assert!(dir.join(f).is_file(), "{f} was not written");
+    }
+    // and the Dockerfile names the service, not a placeholder
+    let dockerfile = std::fs::read_to_string(dir.join("services/billing/Dockerfile")).unwrap();
+    assert!(
+        dockerfile.contains("services/billing/index.ts"),
+        "{dockerfile}"
+    );
+    assert!(!dockerfile.contains("SERVICE"), "the placeholder survived");
+
+    // zero errors, which is the whole claim
+    let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "the scaffold does not verify clean:\n{err}{out}");
+    assert!(out.contains("0 errors"), "{out}");
+    // no warning about the three things it was written to prevent
+    for gone in ["NO migrations were read", "Dockerfile", "no numeric prefix"] {
+        assert!(
+            !out.contains(gone),
+            "the scaffold still trips `{gone}`:\n{out}"
+        );
+    }
+
+    // it builds, and the compose it emits is well-formed
+    let (ts, err, ok) = axon(&[
+        "build",
+        dir.join("billing.toml").to_str().unwrap(),
+        dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "{err}");
+    assert!(ts.contains("class BillingService"), "{ts}");
+    let (yml, err, ok) = axon(&["infra", dir.to_str().unwrap(), "--target", "local"]);
+    assert!(ok, "{err}");
+    let doc: Result<serde_yaml_ng::Value, _> = serde_yaml_ng::from_str(&yml);
+    assert!(doc.is_ok(), "the compose is not YAML: {:?}", doc.err());
+
+    // and it refuses to write over an existing project, which is the one case
+    // where clobbering is unforgivable
+    let (_, err, ok) = axon(&["init", "billing", "--path", dir.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("never over one"), "{err}");
+}
+
+/// Two axon projects on one machine collided on the broker's port, which reads
+/// as "the broker is broken" and is really "something else already has 4222".
+#[test]
+fn every_port_in_the_local_target_can_be_moved() {
+    let (yml, _, ok) = axon(&["infra", "examples", "--target", "local"]);
+    assert!(ok);
+    for line in yml.lines().filter(|l| l.trim_start().starts_with("ports:")) {
+        assert!(
+            line.contains("${"),
+            "a port nobody can move: {line}\nTwo projects on one machine cannot both run"
+        );
+    }
 }
