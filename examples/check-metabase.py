@@ -114,3 +114,38 @@ print(f"    metabase {via_bi:.0f}  ·  clickhouse {via_ch:.0f}")
 if via_bi != via_ch:
     sys.exit(f"  FALLO: el tablero y la vista no coinciden ({via_bi} vs {via_ch})")
 print("  OK: la pregunta contesta lo mismo que la vista; la metrica se define en un solo lugar")
+
+# --- y el drift al reves ---------------------------------------------------
+# axon emite las preguntas y las compara contra el manifiesto. La que escribe
+# alguien A MANO en el tablero, contra una tabla que axon posee, era invisible:
+# el dia que la columna cambia esa pregunta se rompe y nadie se entera hasta que
+# la abre. Aqui se escribe una de esas —la mas real de todas: la que pregunta por
+# el correo en claro, que el manifiesto declara PII y por eso no existe con ese
+# nombre— y se comprueba que axon la nombra.
+print("  una pregunta escrita a mano contra una tabla de axon")
+A_MANO = "quien compro (a mano)"
+if A_MANO not in by_name:
+    st, card = api("/card", {
+        "name": A_MANO, "display": "table", "visualization_settings": {},
+        "dataset_query": {"type": "native", "database": dbid,
+                          "native": {"query": "SELECT customer_email, count(*) "
+                                              "FROM axon.order_placed_v1 GROUP BY customer_email"}},
+    })
+    if st not in (200, 202):
+        sys.exit(f"  FALLO: no se pudo crear la pregunta a mano: {card}")
+
+st, todas = api("/card")
+if st != 200:
+    sys.exit(f"  FALLO: no se pudieron exportar las preguntas: {todas}")
+open(".axon/metabase-cards.json", "w").write(json.dumps(todas))
+
+r = subprocess.run(["../target/release/axon", "analytics", ".", "--metabase",
+                    "--check", ".axon/metabase-cards.json"],
+                   capture_output=True, text=True)
+salida = r.stdout + r.stderr
+if r.returncode == 0:
+    sys.exit(f"  FALLO: la pregunta a mano lee una columna que no existe y paso limpia:\n{salida}")
+if "customer_email_hash" not in salida:
+    sys.exit(f"  FALLO: la nombra pero no dice que hay en su lugar:\n{salida}")
+print("    " + [l for l in salida.splitlines() if "reads `" in l][0][:200])
+print("  OK: nombra la pregunta escrita a mano y dice que columna hay en su lugar")

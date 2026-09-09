@@ -181,11 +181,17 @@ $ axon tui manifests/ --frames 1
 └───────────── [tab] panel  [space] pause  [r] re-read  [q] quit  ·  frame 4 ┘
 ```
 
-## `axon analytics <sources> --metabase`
+## `axon analytics <sources> --metabase [--check <export.json>]`
 Emits what a BI tool needs to read what the manifest declares: the connection to the
 warehouse and one question per declared metric and per funnel that has a view. Emitted,
-not applied — axon holds no credentials. See
-[Warehouse and business metrics](./analytics.md#something-to-read-it-with).
+not applied — axon holds no credentials.
+
+With `--check`, the other direction: what came back from the Metabase —its own
+`/api/card` export— crossed against the schema axon generates. A question somebody wrote
+**by hand** against an axon table names a column that no longer exists, and until now
+nothing said so until somebody opened it. What it cannot read —a question that is not
+native, one that joins or reads a CTE— is counted and named as not checked, never quietly
+passed. See [Warehouse and business metrics](./analytics.md#the-drift-the-other-way).
 
 ## `axon rules <sources> [--check <tsv>]`
 Without `--check` it emits the SQL that evaluates every declared `[rules.*]`: one row per

@@ -1443,6 +1443,325 @@ pub fn metabase(ms: &[Manifest], dataset: &str) -> serde_json::Value {
 /// leaves no record is the worst possible version of this, and the one line it
 /// appends is what somebody reads at 3am when the lever is somewhere nobody
 /// remembers putting it.
+/// The columns of everything axon owns in the warehouse, read from the DDL it
+/// generates and not from a second list. A list kept in step by hand drifts on
+/// the first change, and what drifts here is the answer to "does this column
+/// exist".
+fn owned(ms: &[Manifest], d: &Dialect, dataset: &str) -> IndexMap<String, Vec<String>> {
+    use sqlparser::ast::{CreateTable, CreateView, Statement};
+    let mut out: IndexMap<String, Vec<String>> = IndexMap::new();
+    // `TTL` and `ALTER … MODIFY TTL` are valid ClickHouse and the parser does
+    // not know them: a warehouse extension, not a mistake. The TTL line becomes
+    // the `;` it carried —it is the last line of the CREATE, and without it the
+    // statements stop being separable— and the ALTER goes away whole. What is
+    // read here is the column list; the retention is checked in the table
+    // itself, elsewhere.
+    let ddl: String = build(ms, d)
+        .replace("@dataset", dataset)
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("ALTER TABLE"))
+        .map(|l| match l.trim_start().starts_with("TTL ") {
+            true => ";",
+            false => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let dialect = sqlparser::dialect::ClickHouseDialect {};
+    let name_of = |o: &sqlparser::ast::ObjectName| -> String {
+        o.0.last()
+            .map(|p| p.to_string().trim_matches(['"', '`']).to_string())
+            .unwrap_or_default()
+            .rsplit('.')
+            .next()
+            .unwrap_or_default()
+            .to_lowercase()
+    };
+    for stmt in ddl.split(";\n") {
+        let stmt = stmt.trim();
+        if stmt.is_empty() {
+            continue;
+        }
+        let Ok(parsed) = sqlparser::parser::Parser::parse_sql(&dialect, stmt) else {
+            continue;
+        };
+        for s in parsed {
+            match s {
+                Statement::CreateTable(CreateTable { name, columns, .. }) => {
+                    out.insert(
+                        name_of(&name),
+                        columns.iter().map(|c| c.name.to_string()).collect(),
+                    );
+                }
+                // A view's columns are the aliases of its projection: that is
+                // what the dashboard sees, and the only place it is written.
+                Statement::CreateView(CreateView { name, query, .. }) => {
+                    let mut cols = Vec::new();
+                    if let sqlparser::ast::SetExpr::Select(sel) = &*query.body {
+                        for item in &sel.projection {
+                            match item {
+                                sqlparser::ast::SelectItem::ExprWithAlias { alias, .. } => {
+                                    cols.push(alias.to_string())
+                                }
+                                sqlparser::ast::SelectItem::UnnamedExpr(
+                                    sqlparser::ast::Expr::Identifier(i),
+                                ) => cols.push(i.to_string()),
+                                sqlparser::ast::SelectItem::UnnamedExpr(
+                                    sqlparser::ast::Expr::CompoundIdentifier(p),
+                                ) => {
+                                    if let Some(last) = p.last() {
+                                        cols.push(last.to_string())
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    out.insert(name_of(&name), cols);
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// A question written by hand, reduced to what can be checked: which tables it
+/// reads and which columns it names.
+struct Question {
+    name: String,
+    native: bool,
+    sql: String,
+}
+
+/// Reads what came back from a Metabase. Two shapes arrive here: the one axon
+/// itself emits and the one `/api/card` returns, and telling the user to
+/// convert between them would be asking them to do by hand exactly what this
+/// exists to avoid.
+fn questions(v: &serde_json::Value) -> Vec<Question> {
+    let list = match v.get("cards").and_then(|c| c.as_array()) {
+        Some(c) => c.clone(),
+        None => v.as_array().cloned().unwrap_or_default(),
+    };
+    list.iter()
+        .map(|c| {
+            let name = c
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("(no name)")
+                .to_string();
+            // axon's own shape carries the SQL straight; Metabase's wraps it,
+            // and an MBQL question carries no SQL at all.
+            let q = c.get("dataset_query");
+            let kind = q
+                .and_then(|q| q.get("type"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("native");
+            let sql = c
+                .get("sql")
+                .and_then(|s| s.as_str())
+                .or_else(|| q?.get("native")?.get("query")?.as_str())
+                .unwrap_or_default()
+                .to_string();
+            Question {
+                name,
+                native: kind == "native" && !sql.is_empty(),
+                sql,
+            }
+        })
+        .collect()
+}
+
+/// What a question reads: the tables it comes FROM, and the columns it names
+/// for each one. Read from the token stream, so a word inside a string literal
+/// is not mistaken for a column — a rule with false positives gets silenced
+/// along with everything else it says.
+///
+/// Returns `None` when it will not answer: a CTE, a join or a subquery makes a
+/// bare name ambiguous from here, and reporting an ambiguous name as missing is
+/// exactly how this stops being read.
+fn reads(sql: &str) -> Option<(String, Vec<String>)> {
+    use sqlparser::keywords::Keyword;
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let dialect = sqlparser::dialect::ClickHouseDialect {};
+    let raw = Tokenizer::new(&dialect, sql).tokenize().ok()?;
+    let toks: Vec<&Token> = raw
+        .iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_)))
+        .collect();
+    let (mut tables, mut cols) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < toks.len() {
+        let Token::Word(w) = toks[i] else {
+            i += 1;
+            continue;
+        };
+        match w.keyword {
+            // Anything that makes a bare name ambiguous: it does not answer
+            Keyword::WITH | Keyword::JOIN => return None,
+            Keyword::FROM => {
+                // `axon.order_placed_v1` is three tokens, and the table is the
+                // last one; a subquery opens with a parenthesis instead
+                let mut j = i + 1;
+                let mut last = None;
+                while let Some(Token::Word(t)) = toks.get(j) {
+                    last = Some(t.value.to_lowercase());
+                    match toks.get(j + 1) {
+                        Some(Token::Period) => j += 2,
+                        _ => break,
+                    }
+                }
+                match last {
+                    Some(t) => tables.push(t),
+                    None => return None, // a subquery
+                }
+                i = j + 1;
+                continue;
+            }
+            // the name after AS is being defined, not read
+            Keyword::AS => i += 2,
+            Keyword::NoKeyword => {
+                let call = matches!(toks.get(i + 1), Some(Token::LParen));
+                let qualifier = matches!(toks.get(i + 1), Some(Token::Period));
+                if !call && !qualifier {
+                    cols.push(w.value.to_lowercase());
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    match tables.len() {
+        1 => Some((tables.remove(0), cols)),
+        _ => None,
+    }
+}
+
+/// The other direction of the drift. axon emits the questions and compares
+/// them against the manifest; a question somebody writes BY HAND in the
+/// dashboard, against a table axon owns, was invisible to it. The day the
+/// column changes that question breaks, and nothing says so until somebody
+/// opens it.
+///
+/// No credentials here either: whoever has the Metabase exports its questions
+/// and the compiler crosses them against what it generates.
+pub fn metabase_review(
+    ms: &[Manifest],
+    dataset: &str,
+    exported: &str,
+) -> Result<(Vec<String>, Vec<String>, String), String> {
+    let v: serde_json::Value =
+        serde_json::from_str(exported).map_err(|e| format!("the export is not JSON: {e}"))?;
+    let d = dialect("clickhouse").expect("clickhouse is a native dialect");
+    let owned = owned(ms, &d, dataset);
+    let mine: Vec<String> = metabase(ms, dataset)["cards"]
+        .as_array()
+        .map(|c| {
+            c.iter()
+                .filter_map(|c| Some(c.get("name")?.as_str()?.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let (mut errors, mut warnings, mut out) = (Vec::new(), Vec::new(), Vec::new());
+    let qs = questions(&v);
+    if qs.is_empty() {
+        return Err(
+            "the export carries no questions. Comparing against an empty file gives 0 \
+             differences and that reads as everything being fine"
+                .into(),
+        );
+    }
+    let (mut hand, mut unchecked) = (0, 0);
+    // One line each and not one per question: a Metabase ships with dozens of
+    // example questions of its own, and forty warnings about somebody else's
+    // sample database is how a rule stops being read.
+    let (mut mbql, mut ambiguous): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    for q in &qs {
+        if mine.contains(&q.name) {
+            continue; // axon's own: it is generated from the manifest
+        }
+        hand += 1;
+        if !q.native {
+            unchecked += 1;
+            mbql.push(q.name.clone());
+            continue;
+        }
+        let Some((tabla, cols)) = reads(&q.sql) else {
+            unchecked += 1;
+            ambiguous.push(q.name.clone());
+            continue;
+        };
+        let Some(declared) = owned.get(&tabla) else {
+            out.push(format!("  {} reads `{tabla}`, which is not axon's", q.name));
+            continue;
+        };
+        let mut missing: Vec<String> = Vec::new();
+        for c in &cols {
+            if declared.iter().any(|d| d.eq_ignore_ascii_case(c)) || missing.contains(c) {
+                continue;
+            }
+            missing.push(c.clone());
+        }
+        out.push(format!(
+            "  {}  ·  {tabla}  ·  {}",
+            q.name,
+            match missing.is_empty() {
+                true => "ok".to_string(),
+                false => format!("reads {}", missing.join(", ")),
+            }
+        ));
+        for c in missing {
+            // The commonest case is not a typo: it is the PII column, which the
+            // manifest says travels hashed and therefore never exists by that
+            // name. Saying which one is there turns the error into the fix.
+            let near = declared
+                .iter()
+                .find(|d| d.starts_with(&c) || c.starts_with(d.as_str()));
+            errors.push(format!(
+                "`{}`: reads `{tabla}.{c}`, and that column is not in what the manifest \
+                 generates{}. The question answers with an error and nothing says so until \
+                 somebody opens it",
+                q.name,
+                match near {
+                    Some(n) => format!(" —what is there is `{n}`"),
+                    None => String::new(),
+                }
+            ));
+        }
+    }
+    let some = |v: &[String]| match v.len() {
+        0..=3 => v.join(", "),
+        _ => format!("{}, and {} more", v[..3].join(", "), v.len() - 3),
+    };
+    if !mbql.is_empty() {
+        warnings.push(format!(
+            "{} question(s) are not native and are NOT checked: they name their table and \
+             their fields by numeric id, and from outside the Metabase those ids say nothing \
+             ({})",
+            mbql.len(),
+            some(&mbql)
+        ));
+    }
+    if !ambiguous.is_empty() {
+        warnings.push(format!(
+            "{} question(s) join, or read a subquery or a CTE, and are NOT checked: a bare \
+             name is ambiguous from here and reporting it as missing would be wrong ({})",
+            ambiguous.len(),
+            some(&ambiguous)
+        ));
+    }
+    out.insert(
+        0,
+        format!(
+            "{} question(s) exported  ·  {} generated by axon  ·  {hand} written by hand, \
+             {unchecked} of them not checkable",
+            qs.len(),
+            qs.len() - hand
+        ),
+    );
+    Ok((errors, warnings, out.join("\n")))
+}
+
 pub fn apply(
     proposals: &[Proposal],
     flags: &mut serde_json::Value,

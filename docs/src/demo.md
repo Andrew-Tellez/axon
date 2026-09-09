@@ -2,7 +2,7 @@
 
 `examples/` ships three services that really run — `orders`, `payments` and `checkout`,
 in TypeScript on Node 24, with no build step — plus one external contract. `./demo.sh`
-brings the whole system up and makes **65 checks against reality**: not against a mock,
+brings the whole system up and makes **66 checks against reality**: not against a mock,
 and not against axon's own asserts.
 
 ```sh
@@ -224,6 +224,9 @@ ok 0 interactions, 1 messages, 0 errors, 0 warnings
   OK: 4 preguntas creadas, cada una apuntando a la vista que declara el manifiesto
     metabase 334700  ·  clickhouse 334700
   OK: la pregunta contesta lo mismo que la vista; la metrica se define en un solo lugar
+  una pregunta escrita a mano contra una tabla de axon
+    error `quien compro (a mano)`: reads `order_placed_v1.customer_email`, and that column is not in what the manifest generates —what is there is `customer_email_hash`. The question answers with an error
+  OK: nombra la pregunta escrita a mano y dice que columna hay en su lugar
 
 ==> declared vs measured capacity
 info: orders: 96 requests measured at 2.4/s

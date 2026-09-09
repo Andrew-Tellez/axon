@@ -124,6 +124,8 @@ enum Cmd {
         introspect: bool,
         /// compares the declared against the warehouse dump. A new field the
         /// table does not have loads as nothing, and nobody sees an error.
+        /// With `--metabase`, compares the questions somebody exported from
+        /// the dashboard instead.
         #[arg(long)]
         check: Option<PathBuf>,
         /// emits the Vector config: the ingest path for a cluster, where there
@@ -543,12 +545,46 @@ fn run() -> Result<ExitCode, String> {
                 return Ok(ExitCode::SUCCESS);
             }
             if metabase {
+                // With `--check`, the other direction: what came back from the
+                // Metabase, crossed against what axon generates. A question
+                // written by hand against an axon table was invisible until now.
+                let Some(route) = check else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&bi::metabase(&ms, &dataset))
+                            .map_err(|e| e.to_string())?
+                    );
+                    return Ok(ExitCode::SUCCESS);
+                };
+                let exported = std::fs::read_to_string(&route)
+                    .map_err(|e| format!("{}: {e}", route.display()))?;
+                let (errors, warnings, report) = bi::metabase_review(&ms, &dataset, &exported)?;
+                println!("{report}");
+                for a in &warnings {
+                    println!("{}  {}", color::yellow("warn"), highlight(a));
+                }
+                for e in &errors {
+                    eprintln!("{} {}", color::red("error"), highlight(e));
+                }
                 println!(
-                    "{}",
-                    serde_json::to_string_pretty(&bi::metabase(&ms, &dataset))
-                        .map_err(|e| e.to_string())?
+                    "{} {}",
+                    if errors.is_empty() {
+                        color::green("ok")
+                    } else {
+                        color::red("fail")
+                    },
+                    color::grey(&format!(
+                        "{} question(s) against axon tables, {} errors, {} warnings",
+                        report.lines().count().saturating_sub(1),
+                        errors.len(),
+                        warnings.len()
+                    ))
                 );
-                return Ok(ExitCode::SUCCESS);
+                return Ok(if errors.is_empty() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                });
             }
             if introspect || check.is_some() {
                 let d =

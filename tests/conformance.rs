@@ -8054,3 +8054,94 @@ fn a_foreign_pact_also_covers_the_topics() {
     assert!(out.contains("0 interactions, 1 messages"), "{out}");
     assert!(out.contains("order.placed@v1  ·  reads orderId"), "{out}");
 }
+
+/// The drift the other way. axon emits the questions and compares them against
+/// the manifest; the one somebody writes BY HAND in the dashboard, against a
+/// table axon owns, was invisible to it — and the day the column changes that
+/// question breaks with nothing saying so until somebody opens it.
+#[test]
+fn a_question_written_by_hand_is_checked_against_the_manifest() {
+    let dir = std::env::temp_dir().join("axon-mb");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let check = |cards: serde_json::Value| -> (String, String, bool) {
+        let f = dir.join("cards.json");
+        std::fs::write(&f, cards.to_string()).unwrap();
+        axon(&[
+            "analytics",
+            "examples",
+            "--metabase",
+            "--check",
+            f.to_str().unwrap(),
+        ])
+    };
+    let native = |name: &str, sql: &str| {
+        serde_json::json!({
+            "name": name,
+            "dataset_query": {"type": "native", "native": {"query": sql}}
+        })
+    };
+
+    // the real case, and not a made-up one: the question asks for the address
+    // the manifest declares as PII, so it never exists by that name
+    let (_, err, ok) = check(serde_json::json!([native(
+        "quien compro",
+        "SELECT customer_email, count(*) FROM axon.order_placed_v1 GROUP BY customer_email"
+    )]));
+    assert!(
+        !ok,
+        "a question against a column that does not exist passed clean"
+    );
+    assert!(
+        err.contains("reads `order_placed_v1.customer_email`"),
+        "{err}"
+    );
+    // saying which column IS there is what turns the error into the fix
+    assert!(err.contains("`customer_email_hash`"), "{err}");
+
+    // a question that is right stays quiet, and the views count as much as the
+    // tables: that is where a dashboard reads from
+    let (out, err, ok) = check(serde_json::json!([
+        native(
+            "gmv a mano",
+            "SELECT sum(total_amount) FROM axon.order_placed_v1 WHERE total_currency = 'MXN'"
+        ),
+        native(
+            "desde la vista",
+            "SELECT bucket, value FROM axon.metric_gmv ORDER BY bucket"
+        ),
+    ]));
+    assert!(ok, "{err}{out}");
+    assert!(out.contains("metric_gmv  ·  ok"), "{out}");
+
+    // a table that is not axon's is not axon's business
+    let (out, _, ok) = check(serde_json::json!([native(
+        "ajena",
+        "SELECT x FROM otro.sistema"
+    )]));
+    assert!(ok);
+    assert!(out.contains("which is not axon's"), "{out}");
+
+    // What it will NOT answer, and says so instead of guessing: a Metabase
+    // ships with dozens of its own example questions, and a wrong warning
+    // about somebody else's sample database is how a rule stops being read.
+    let (out, _, ok) = check(serde_json::json!([
+        serde_json::json!({"name": "por arrastre", "dataset_query": {"type": "query", "query": {"source-table": 42}}}),
+        native(
+            "con join",
+            "SELECT a.order_id FROM axon.order_placed_v1 a JOIN axon.payment_captured_v1 b ON a.order_id = b.order_id"
+        ),
+    ]));
+    assert!(
+        ok,
+        "it invented an answer about what it cannot read:\n{out}"
+    );
+    assert!(out.contains("2 of them not checkable"), "{out}");
+    assert!(out.contains("are not native"), "{out}");
+    assert!(out.contains("read a subquery or a CTE"), "{out}");
+
+    // and an empty export is not a clean report
+    let (_, err, ok) = check(serde_json::json!([]));
+    assert!(!ok);
+    assert!(err.contains("reads as everything being fine"), "{err}");
+}
