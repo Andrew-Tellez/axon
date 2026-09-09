@@ -87,9 +87,16 @@ while [ "$i" -lt 60 ]; do
 done
 if [ "$rows" -ne 1 ]; then
   echo "  FAILED: $rows rows for one event (the queue group does not deduplicate, or nothing arrived)"
-  echo "  --- what the publisher said ---"; cat .axon/nats-pub.log
-  docker logs axon-vector-1 2>&1 | tail -20
-  docker logs axon-vector-2 2>&1 | tail -20
+  echo "  --- what the publisher said ---"; tail -3 .axon/nats-pub.log
+  # What the BROKER counted: `msgs` per subscription says whether NATS
+  # delivered it at all, which is the fork in the diagnosis —lost on the way in,
+  # or lost between Vector and the warehouse.
+  echo "  --- what the broker counted ---"
+  $COMPOSE exec -T broker wget -qO- "http://127.0.0.1:8222/subsz?subs=1" 2>/dev/null \
+    | tr "}" "\n" | grep "order.placed.v1" | grep "axon-warehouse" || true
+  echo "  --- rows in the table: $(ch -q "SELECT count(*) FROM axon.order_placed_v1") ---"
+  echo "  --- vector 1 ---"; docker logs axon-vector-1 2>&1 | tail -40
+  echo "  --- vector 2 ---"; docker logs axon-vector-2 2>&1 | tail -40
   exit 1
 fi
 echo "  OK: 1 row from 2 replicas; the queue group delivers the event once"
