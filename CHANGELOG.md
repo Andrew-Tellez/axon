@@ -7,6 +7,32 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.20.0] — 2026-09-09
+
+### Añadido
+
+- **`axon auth <manifiesto>`: el verificador, emitido desde el bloque.** JOSE estándar, y
+  todo lo que decide si un token se acepta sale del manifiesto —los issuers, el juego de
+  claves, la lista cerrada de algoritmos, la edad máxima y el nombre de cada claim—. El
+  mismo archivo sirve contra el plugin JWT de better-auth, Auth0, Keycloak o Cognito
+  cambiando el **manifiesto** y no el código; hay una prueba que lo mide con la forma de
+  Keycloak (otro issuer, `realm_roles`, RS256).
+
+  Pasarle la lista de algoritmos a la librería no es un detalle: sin ella la librería se cree
+  la cabecera del propio token sobre cómo verificar el token, que es por donde entran `none`
+  y el truco del HMAC sobre una clave publicada.
+
+  Emitido y no enlazado: un archivo generado que alguien puede leer y editar es mejor que una
+  dependencia que esconde de qué claim se fio. Y se niega donde tendría que adivinar —
+  `introspection` es la API del emisor y su credencial, y `adapter` es que traes el tuyo.
+
+### Notas
+
+- El servidor MCP de better-auth estuvo caído durante la investigación: **5 de las 8 áreas
+  quedaron bloqueadas**, incluida la de JWT/JWKS. El verificador se apoya en los RFC (7515,
+  7517, 7519, 8693) y no en afirmaciones sobre un proveedor que no se pudo leer.
+- La suite pasó a **100 pruebas**.
+
 ## [0.19.0] — 2026-09-09
 
 ### Añadido
