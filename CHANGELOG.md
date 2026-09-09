@@ -7,6 +7,42 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.15.0] — 2026-09-09
+
+### Añadido
+
+- **El generador de Go es nativo: `axon build --lang go`.** Era un plugin, y serlo fue el
+  punto durante un tiempo —demostraba que el protocolo aguanta un generador de verdad y no
+  solo un check de tres líneas—. Lo que no podía demostrar es la afirmación que sostiene el
+  proyecto entero, que **el manifiesto no es TypeScript disfrazado**, porque nadie corre un
+  generador que primero tiene que compilar.
+
+  No es el plugin portado tal cual: gana las tres cosas que el generador de TS ya tenía y
+  que no eran comodidad sino garantías.
+
+  - **`uses` estrecha de verdad.** El tipo del evento consumido lleva SOLO los campos que
+    ese servicio declaró que lee; los demás no existen de ese lado. Y `uses = []` sale como
+    un struct vacío, que es exactamente lo que hace una compensación que no mira la
+    respuesta.
+  - **Los fallos declarados**, con el `retriable` saliendo del manifiesto. En TypeScript un
+    código no declarado no compila porque el tipo es una unión de literales; Go no tiene ese
+    tipo, así que el contrato es un tipo `string` con nombre y una constante por fallo. Una
+    conversión se lo puede saltar, y el comentario generado lo dice en vez de fingir: lo que
+    no puede desviarse es el status y el `retriable`.
+  - **Los scopes**, con el `insufficient_scope` de la RFC 6750 y no un 403 pelado.
+
+  Idiomático y no traducido: una interfaz que la persona implementa en vez de herencia,
+  `ctx` primero y `error` último, `OrderID` y no `OrderId`. Y la salida sale **ya
+  formateada**, no formateable: la suite corre `gofmt -l` y `go vet` de verdad sobre dos
+  servicios. Alinear como alinea gofmt no es cosmética — es la diferencia entre que el
+  arnés sirva y que no.
+
+### Eliminado
+
+- `plugins/axon-gen-go`. Dos implementaciones del mismo generador se separan. El protocolo
+  no cambió y la puerta sigue igual: `axon-gen-<lang>` para cualquier otro lenguaje, con el
+  mismo `{manifest, peers}` por stdin. `plugins.md` cuenta a dónde se fue y por qué.
+
 ## [0.14.0] — 2026-09-09
 
 ### Añadido
