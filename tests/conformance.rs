@@ -3884,6 +3884,63 @@ fn openapi_requires_an_idempotency_key() {
     assert!(json.contains("/v1/payments"));
 }
 
+/// Every `{...}` of a route is declared as a parameter.
+///
+/// Without it the document is not incomplete, it is invalid: the spec demands
+/// one parameter object per template, every validator refuses it, and a
+/// generated client ends up with a method whose id has nowhere to go. It went
+/// unnoticed because a document that parses as JSON looks fine until somebody
+/// feeds it to a tool that reads OpenAPI and not JSON.
+#[test]
+fn every_route_declares_the_parameters_of_its_own_path() {
+    let (json, err, ok) = axon(&["openapi", "examples"]);
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let mut seen = 0;
+    for (path, item) in v["paths"].as_object().unwrap() {
+        let expected: Vec<&str> = path
+            .split('{')
+            .skip(1)
+            .filter_map(|s| s.split_once('}'))
+            .map(|(n, _)| n)
+            .collect();
+        if expected.is_empty() {
+            continue;
+        }
+        for (verb, op) in item.as_object().unwrap() {
+            seen += 1;
+            let declared: Vec<&str> = op["parameters"]
+                .as_array()
+                .map(|ps| {
+                    ps.iter()
+                        .filter(|p| p["in"] == "path")
+                        .map(|p| p["name"].as_str().unwrap())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for name in &expected {
+                assert!(
+                    declared.contains(name),
+                    "`{verb} {path}` does not declare `{{{name}}}`: {op}"
+                );
+            }
+            // and typed from `in`, not left as a string: an id is a uuid and
+            // a client that sends anything else gets a 400 nobody predicted
+            for p in op["parameters"].as_array().unwrap() {
+                if p["in"] != "path" {
+                    continue;
+                }
+                assert_eq!(p["required"], true, "a path parameter is optional: {p}");
+                assert_eq!(
+                    p["schema"]["format"], "uuid",
+                    "the type is not the one `in` declares: {p}"
+                );
+            }
+        }
+    }
+    assert!(seen >= 3, "only {seen} templated routes were checked");
+}
+
 /// A pair of manifests with a two-step saga, one with a compensation and the
 /// last one without. The coordinator test and the Terraform one both use it:
 /// the saga is the only thing that makes the sweep's resources appear in the IaC.

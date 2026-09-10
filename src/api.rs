@@ -2,24 +2,46 @@
 use crate::manifest::*;
 use serde_json::{json, Map, Value};
 
+fn field(t: &str) -> Value {
+    match t {
+        "uuid" => json!({"type": "string", "format": "uuid"}),
+        "timestamp" => json!({"type": "string", "format": "date-time"}),
+        "int" => json!({"type": "integer"}),
+        "float" => json!({"type": "number"}),
+        "bool" => json!({"type": "boolean"}),
+        "money" => json!({"type": "object", "required": ["amount", "currency"],
+            "properties": {"amount": {"type": "integer"}, "currency": {"type": "string"}}}),
+        _ => json!({"type": "string"}),
+    }
+}
+
 fn schema(fields: &Fields) -> Value {
     let mut props = Map::new();
     for (k, t) in fields {
-        props.insert(
-            k.clone(),
-            match t.as_str() {
-                "uuid" => json!({"type": "string", "format": "uuid"}),
-                "timestamp" => json!({"type": "string", "format": "date-time"}),
-                "int" => json!({"type": "integer"}),
-                "float" => json!({"type": "number"}),
-                "bool" => json!({"type": "boolean"}),
-                "money" => json!({"type": "object", "required": ["amount", "currency"],
-                    "properties": {"amount": {"type": "integer"}, "currency": {"type": "string"}}}),
-                _ => json!({"type": "string"}),
-            },
-        );
+        props.insert(k.clone(), field(t));
     }
     json!({"type": "object", "required": fields.keys().collect::<Vec<_>>(), "properties": props})
+}
+
+/// The `{...}` of a route, as the parameters OpenAPI requires it to declare.
+///
+/// A template with no parameter object is not a document with a detail
+/// missing: it is invalid, every validator says so, and a generated client
+/// gets a method that cannot be called because the id has nowhere to go. The
+/// type comes from `in`, which is where the route's own placeholder is
+/// declared; one that is not in `in` is still a parameter, and a string is
+/// what a segment of a URL is when nobody said otherwise.
+fn path_params(path: &str, input: &Fields) -> Vec<Value> {
+    path.split('{')
+        .skip(1)
+        .filter_map(|seg| seg.split_once('}'))
+        .map(|(name, _)| {
+            json!({
+                "name": name, "in": "path", "required": true,
+                "schema": field(input.get(name).map(String::as_str).unwrap_or("string")),
+            })
+        })
+        .collect()
 }
 
 /// A single document for every service: the platform's catalogue.
@@ -112,13 +134,17 @@ pub fn openapi_at(ms: &[Manifest], at: Option<&str>) -> Value {
                         {"schema": {"$ref": "#/components/schemas/Problem"}}}
                 });
             }
+            let mut params = path_params(path, input);
             if meth.mutating() {
                 op["requestBody"] = body;
-                op["parameters"] = json!([{
+                params.push(json!({
                     "name": "Idempotency-Key", "in": "header", "required": true,
                     "schema": {"type": "string", "format": "uuid"},
                     "description": "Retrying with the same key does not duplicate the effect."
-                }]);
+                }));
+            }
+            if !params.is_empty() {
+                op["parameters"] = json!(params);
             }
             paths
                 .entry(path.to_string())
