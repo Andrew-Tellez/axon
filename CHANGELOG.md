@@ -7,6 +7,20 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.25.2] — 2026-09-10
+
+### Corregido
+
+- **El dibujo de `axon tui` se iba a la esquina cuando un eje se colapsaba** —un solo
+  servicio, o varios alineados—: el span se forzaba a `0.001` en vez de tratarse como lo
+  que es, y todos los nodos caían sobre la arista baja. Un eje colapsado ahora se centra.
+- **`--frames` no renderizaba lo que ve una persona**: daba cuatro pasos de simulación por
+  frame contra el uno del bucle vivo, así que la animación corría a 4× en la única salida
+  que un test puede mirar, y `--frames 1` imprimía `frame 4`.
+- **`[tab]` acumulaba sin cota** y el módulo que lo salvaba vivía en el índice, lejos de la
+  tecla. El número de paneles es ahora una constante que comparten el array y la tecla que
+  lo recorre.
+
 ## [0.25.1] — 2026-09-09
 
 ### Corregido

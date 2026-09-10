@@ -1,6 +1,6 @@
 [package]
 name = "axon"
-version = "0.25.1"
+version = "0.25.2"
 edition = "2021"
 description = "Compilador manifiesto-primero para microservicios event-driven"
 repository = "https://github.com/Andrew-Tellez/axon"
