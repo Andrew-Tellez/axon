@@ -700,27 +700,32 @@ fn build_ci_gitlab(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> Result
 
 // ---------- diagramas ----------
 
+/// Every free text goes quoted, including a node's own name. An event is
+/// called `order.placed@v1` and mermaid 11 reads a bare `@` as the sigil of
+/// its own edge- and node-id syntax (`e1@-->`, `A@{...}`): the diagram then
+/// fails to parse on the line that names the event, which is every line that
+/// matters. Quoting is also what lets a dot, a slash or a brace through.
 pub fn build_graph(ms: &[Manifest]) -> String {
     let mut out = vec!["graph LR".to_string()];
     for m in ms {
         let n = tfname(&m.service);
         out.push(if m.external {
-            format!("  {n}([{}])", m.service)
+            format!("  {n}([\"{}\"])", m.service)
         } else {
-            format!("  {n}[{}]", m.service)
+            format!("  {n}[\"{}\"]", m.service)
         });
     }
     for m in ms {
         let src = tfname(&m.service);
         for ev in m.emits.keys() {
-            out.push(format!("  {src} -- {ev} --> {}(({ev}))", tfname(ev)));
+            out.push(format!("  {src} -->|\"{ev}\"| {}((\"{ev}\"))", tfname(ev)));
         }
         for ev in m.consumes.keys() {
-            out.push(format!("  {}(({ev})) --> {src}", tfname(ev)));
+            out.push(format!("  {}((\"{ev}\")) --> {src}", tfname(ev)));
         }
         for d in &m.depends {
             out.push(format!(
-                "  {src} -. {} .-> {}",
+                "  {src} -.->|\"{}\"| {}",
                 d.method,
                 tfname(d.target())
             ));

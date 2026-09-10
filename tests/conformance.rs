@@ -3076,23 +3076,33 @@ fn the_diagrams_and_the_registry_carry_the_relationships() {
     // the emitter reaches its event, and the event reaches its consumer: those
     // two edges together are the chain nobody can read from five repos
     assert!(
-        graph.contains("orders -- order.placed@v1 --> order_placed_v1((order.placed@v1))"),
+        graph.contains("orders -->|\"order.placed@v1\"| order_placed_v1((\"order.placed@v1\"))"),
         "the emitter's edge is missing:\n{graph}"
     );
     assert!(
-        graph.contains("order_placed_v1((order.placed@v1)) --> payments"),
+        graph.contains("order_placed_v1((\"order.placed@v1\")) --> payments"),
         "the consumer's edge is missing:\n{graph}"
     );
     // a synchronous call is a different edge from an event: reading them the
     // same way is how a distributed monolith looks like an event-driven system
     assert!(
-        graph.contains("payments -. getOrder .-> orders"),
+        graph.contains("payments -.->|\"getOrder\"| orders"),
         "the synchronous dependency is missing:\n{graph}"
     );
-    // and an external service is drawn as external, because you cannot change it
-    assert!(graph.contains("stripe([stripe])"), "{graph}");
+    // every text quoted, node names included: an event is called
+    // `order.placed@v1` and mermaid 11 reads a bare `@` as the sigil of its
+    // own edge-id syntax, so the diagram dies to parse on the very lines that
+    // name the events. A diagram that does not render says nothing at all.
     assert!(
-        graph.contains("payments -. charges.create .-> stripe"),
+        !graph
+            .lines()
+            .any(|l| l.contains('@') && !l.contains('"')),
+        "an unquoted `@` reaches mermaid:\n{graph}"
+    );
+    // and an external service is drawn as external, because you cannot change it
+    assert!(graph.contains("stripe([\"stripe\"])"), "{graph}");
+    assert!(
+        graph.contains("payments -.->|\"charges.create\"| stripe"),
         "{graph}"
     );
 
