@@ -33,37 +33,36 @@ pub fn run(root: &Path, service: &str) -> Result<String, String> {
              container name, a topic prefix, a database and a directory"
         ));
     }
+    // Every file, listed before any of it is written. The refusal to clobber
+    // was already right and fired too late: it hit `.env.local` with the
+    // manifest, the service directory and the migration already on disk, and a
+    // project written by halves is worse than one not written at all.
+    let files: Vec<(String, String)> = vec![
+        // The manifest sits at the ROOT and not in `manifests/`, and that is
+        // the whole point: `migrations` resolves from the manifest's own
+        // directory, so the layout that needs no `../` is the one that gets
+        // written.
+        (format!("{service}.toml"), manifest(service)),
+        (format!("sql/{service}/001_{service}.sql"), schema(service)),
+        (
+            format!("services/{service}/Dockerfile"),
+            DOCKERFILE.replace("SERVICE", service),
+        ),
+        (format!("services/{service}/index.ts"), index_ts(service)),
+        (".env.local".into(), ENV_LOCAL.into()),
+        ("axon.policy.toml".into(), POLICY.into()),
+        (".gitignore".into(), GITIGNORE.into()),
+    ];
+    if let Some((rel, _)) = files.iter().find(|(rel, _)| root.join(rel).exists()) {
+        return Err(format!(
+            "{rel} already exists. `init` writes a project from scratch and never over one, \
+             so nothing was written"
+        ));
+    }
     let mut made = Vec::new();
-    // The manifest sits at the ROOT and not in `manifests/`, and that is the
-    // whole point: `migrations` resolves from the manifest's own directory, so
-    // the layout that needs no `../` is the one that gets written.
-    write(
-        root,
-        &format!("{service}.toml"),
-        &manifest(service),
-        &mut made,
-    )?;
-    write(
-        root,
-        &format!("sql/{service}/001_{service}.sql"),
-        &schema(service),
-        &mut made,
-    )?;
-    write(
-        root,
-        &format!("services/{service}/Dockerfile"),
-        &DOCKERFILE.replace("SERVICE", service),
-        &mut made,
-    )?;
-    write(
-        root,
-        &format!("services/{service}/index.ts"),
-        &index_ts(service),
-        &mut made,
-    )?;
-    write(root, ".env.local", ENV_LOCAL, &mut made)?;
-    write(root, "axon.policy.toml", POLICY, &mut made)?;
-    write(root, ".gitignore", GITIGNORE, &mut made)?;
+    for (rel, body) in &files {
+        write(root, rel, body, &mut made)?;
+    }
     Ok(format!(
         "{}\n\nWhat to do next, in this order:\n  \
          axon verify .                     # 0 errors: the layout is the one the CLI expects\n  \
