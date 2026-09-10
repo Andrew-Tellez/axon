@@ -7,6 +7,39 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.27.0] — 2026-09-10
+
+### Añadido
+
+- **El panel de servicios de `axon tui` dice qué es cada servicio, no cuánto tiene.**
+  Contaba `5 methods` y nombraba `postgres`: con un servicio alcanza, con cinco no dice
+  nada, y lo que alguien mira una topología para saber es qué puerta está abierta. Ahora
+  es un bloque por servicio: la base con la columna de inquilino, el shard, las réplicas y
+  el pool; la caché y el índice con de qué son; los buckets; el cron de un
+  `runtime = "job"`, que antes no aparecía en ninguna parte; cada topic que emite **con
+  quién está del otro lado** —incluidas la view y el aggregate del mismo servicio, que son
+  consumidores que ninguna arista dibuja—; cada suscripción con el handler al que entra;
+  una línea por ruta expuesta, marcada con su `sunset` si se está muriendo; a quién llama
+  con su presupuesto, **quién lo llama**, los pactos que hay contra él y sus banderas.
+- **Un panel nuevo, `contracts`: la relación que existe ENTRE los servicios.** Cada evento
+  con cuáles de sus campos lee cada consumidor, cada llamada con su timeout, sus reintentos
+  y qué lee de la respuesta, y los pactos de `pacts/` de quien no tiene manifiesto. Es lo
+  único que un cambio puede romper en el repo de otro, y era lo único que no se podía leer
+  en un solo lugar.
+- **`--frames N` recorre los paneles, uno por cuadro.** Renderizar siempre el primero
+  dejaba los otros cuatro como una proyección que nadie puede verificar, que es justo lo
+  que esa bandera existe para evitar: `--frames 5` es la TUI entera como texto. Y el panel
+  crece hasta media pantalla en vez de quedarse en seis filas fijas.
+
+### Corregido
+
+- **`axon init` abortaba a la mitad y dejaba el proyecto escrito por partes.** Sobre un
+  directorio que ya tenía un proyecto, escribía el manifiesto, `services/<svc>/` y la
+  migración y *luego* se negaba al llegar a `.env.local`. La negativa era correcta —`init`
+  escribe un proyecto desde cero y nunca encima de otro— pero llegaba tarde, y un proyecto
+  escrito por mitades es peor que uno no escrito. Ahora lista los siete archivos, comprueba
+  los siete y sólo entonces escribe: la negativa dice que no se escribió nada.
+
 ## [0.26.1] — 2026-09-10
 
 ### Corregido
