@@ -60,6 +60,27 @@ in the generated code: a service with an outbox has to ask for the transaction, 
 without an outbox does not — asking there would be noise, because there is no transaction
 to share.
 
+### The two tables axon names itself
+
+`outbox` and `inbox_seen` are not a convention you may rename. `verify` exempts them from
+the tenant rule by that exact name, the pooler reserves connections for the relay that
+drains `outbox`, and `rls` leaves both out of the policies. So declaring the pattern and
+never writing the migration is an **error**:
+
+```
+error orders: `[patterns] outbox = true` and the migrations create no `outbox` table.
+      The event is staged in the same transaction as the state change, and there is
+      nowhere to stage it
+```
+
+It is the one combination that applies clean and breaks on the first insert, in the path
+whose whole reason to exist is that no event gets lost. The same goes for a service with
+`[consumes.*]` and no `inbox_seen`: the broker delivers at least once, and with nowhere
+to record what was already seen the handler runs again on every redelivery.
+
+A service with no `[infra] state` is not asked for either one: there are no migrations
+to look at.
+
 ## Saga
 
 A saga is a sequence of steps across different services, each with its compensation,

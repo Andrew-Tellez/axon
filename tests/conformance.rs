@@ -1982,6 +1982,91 @@ test("the trace and the idempotency key travel with the call", () => {
 }
 
 /// CAP: the partition is not a choice, what to do while it lasts is.
+/// The two tables axon names itself have to exist.
+///
+/// `outbox` and `inbox_seen` are not a convention somebody may rename: the
+/// tenant rule exempts them by that exact name, the pooler reserves
+/// connections for the relay that drains `outbox`, and `rls` leaves them out
+/// of the policies. Declaring the pattern and never creating the table is the
+/// one combination that applies clean and breaks on the first insert —in the
+/// path whose whole reason to exist is that no event gets lost.
+#[test]
+fn the_tables_a_pattern_needs_have_to_exist() {
+    let dir = std::env::temp_dir().join("axon-own-tables");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    let write = |ddl: &str| {
+        std::fs::write(
+            dir.join("sql/001_init.expand.sql"),
+            format!("CREATE TABLE thing (\n  id uuid PRIMARY KEY\n);\n{ddl}"),
+        )
+        .unwrap()
+    };
+    std::fs::write(
+        dir.join("a.toml"),
+        r#"
+service = "a"
+owner = "x"
+tier = "1"
+[cap]
+consistency = "strong"
+on_partition = "reject"
+[infra]
+state = "postgres"
+migrations = "sql"
+[patterns]
+outbox = true
+[emits."a.happened@v1"]
+id = "uuid"
+[consumes."a.happened@v1"]
+handler = "onHappened"
+uses = ["id"]
+"#,
+    )
+    .unwrap();
+
+    // neither table: both are missing, and each says which pattern needs it
+    write("");
+    let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "a declared outbox with no table passes: {err}");
+    assert!(err.contains("no `outbox` table"), "{err}");
+    assert!(err.contains("no `inbox_seen` table"), "{err}");
+
+    // with both, it verifies clean: the rule asks for what it names and
+    // nothing else
+    write(
+        "CREATE TABLE outbox (\n  id uuid PRIMARY KEY\n);\n\
+         CREATE TABLE inbox_seen (\n  id uuid PRIMARY KEY\n);\n",
+    );
+    let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "{err}{out}");
+
+    // and a service with no state of its own is not asked for a table it has
+    // nowhere to create: there are no migrations to look at
+    std::fs::write(
+        dir.join("a.toml"),
+        r#"
+service = "a"
+owner = "x"
+tier = "1"
+[cap]
+consistency = "strong"
+on_partition = "reject"
+[patterns]
+outbox = true
+[emits."a.happened@v1"]
+id = "uuid"
+[consumes."a.happened@v1"]
+handler = "onHappened"
+uses = ["id"]
+"#,
+    )
+    .unwrap();
+    std::fs::remove_file(dir.join("sql/001_init.expand.sql")).unwrap();
+    let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(ok, "a stateless service is asked for a table: {err}{out}");
+}
+
 #[test]
 fn the_cap_side_is_verified() {
     let dir = std::env::temp_dir().join("axon-cap");
@@ -4733,6 +4818,15 @@ CREATE TABLE view_saldos_checkpoint (
   stream_id  uuid NOT NULL,
   position   bigint NOT NULL,
   PRIMARY KEY (view_name, stream_id)
+);
+
+-- The handover to the bus. The manifest declares `outbox = true`, and the
+-- generated code stages the event here in the same transaction as the append.
+CREATE TABLE outbox (
+  id           uuid PRIMARY KEY,
+  type         text NOT NULL,
+  data         jsonb NOT NULL,
+  published_at timestamptz
 );
 ";
 

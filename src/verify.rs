@@ -381,6 +381,43 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
     }
 
+    // The two tables axon names itself. `outbox` and `inbox_seen` are not a
+    // convention the user may rename: `verify` exempts them from the tenant
+    // rule by that exact name, the pooler reserves connections for the relay
+    // that reads `outbox`, and `rls` leaves them out of the policies. Declaring
+    // the pattern and not creating the table is the one combination that
+    // applies clean and breaks on the first insert, in the path that exists so
+    // that no event gets lost.
+    for m in ms.iter().filter(|m| !m.external) {
+        // No parsed schema means no migrations to look at —a service with no
+        // state of its own— and there is nothing to be missing.
+        let Some(tables) = esquemas.get(&m.service) else {
+            continue;
+        };
+        let missing = |t: &str| !tables.contains_key(t);
+        if m.patterns.outbox && missing("outbox") {
+            errors.push(format!(
+                "{}: `[patterns] outbox = true` and the migrations create no `outbox` \
+                 table. The event is staged in the same transaction as the state change, \
+                 and there is nowhere to stage it",
+                m.service
+            ));
+        }
+        if !m.consumes.is_empty() && missing("inbox_seen") {
+            errors.push(format!(
+                "{}: consumes {} and the migrations create no `inbox_seen` table. The \
+                 broker delivers at least once, and with nowhere to record what was already \
+                 seen the handler runs again on every redelivery",
+                m.service,
+                m.consumes
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+
     // ---- export to the warehouse ----
     for m in ms.iter().filter(|m| !m.external) {
         if !WAREHOUSES.contains(&m.analytics.warehouse.as_str()) {
