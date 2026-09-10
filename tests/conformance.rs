@@ -6481,6 +6481,18 @@ fn the_drawing_shows_the_system_it_describes() {
         out.contains("[CP]") && out.contains("[AP]"),
         "the CAP side each one declares is not in the drawing"
     );
+    // and the tag is decoded where it is used: `[AP]` alone reads as a status
+    // —something up, something healthy— and it is a decision about what a
+    // partition does. The legend under the drawing, and the two declared
+    // fields in words next to each service.
+    assert!(
+        out.contains("stays up, serves stale"),
+        "the drawing does not say what its own tags mean:\n{out}"
+    );
+    assert!(
+        out.contains("AP · eventual ≤5000ms · rejects"),
+        "the panel does not spell out the declared criterion:\n{out}"
+    );
     // the verdict, which is the one thing that has to be readable without
     // knowing where to look
     assert!(out.contains("errors"), "{out}");

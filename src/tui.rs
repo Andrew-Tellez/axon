@@ -323,12 +323,26 @@ fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
         let mut lines = vec![format!(
             "{}  ·  {}{}{}",
             m.service,
+            // `AP` is a tag, not a name: next to it, the two declared
+            // fields in words —what a read promises and what a partition
+            // does. On the same line because the panel is a screenful and a
+            // row per service is a service pushed off the bottom.
             if m.external {
                 "external".to_string()
-            } else if m.cap.eventual() {
-                "AP".to_string()
             } else {
-                "CP".to_string()
+                format!(
+                    "{} · {}{} · {}",
+                    if m.cap.eventual() { "AP" } else { "CP" },
+                    if m.cap.eventual() { "eventual" } else { "strong" },
+                    match (m.cap.eventual(), m.cap.max_staleness_ms) {
+                        (true, Some(ms)) => format!(" ≤{ms}ms"),
+                        // `eventual` with no budget is not a guarantee:
+                        // anybody can read anything and nobody is wrong.
+                        (true, None) => ", no budget".to_string(),
+                        _ => " reads".to_string(),
+                    },
+                    if m.cap.degrades() { "degrades" } else { "rejects" },
+                )
             },
             m.tier
                 .as_deref()
@@ -709,7 +723,25 @@ fn draw_graph(f: &mut Frame, area: Rect, app: &App) {
                         Style::default().fg(app.status.verdict_color),
                     ))
                     .right_aligned(),
-                ),
+                )
+                // The tag next to every node, spelled out once. `[AP]` is not
+                // a name, and a reader who has to guess reads it as a status.
+                // ponytail: a static line — those three are the only sides
+                // `topology` can produce.
+                .title_bottom(TextLine::from(vec![
+                    Span::styled(" [AP] ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        "stays up, serves stale  ·  ",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled("[CP] ", Style::default().fg(Color::Blue)),
+                    Span::styled(
+                        "refuses rather than lie  ·  ",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled("[ext] ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("external, not ours ", Style::default().fg(Color::DarkGray)),
+                ])),
         )
         .marker(Marker::Braille)
         .x_bounds([-1.15, 1.15])
