@@ -6507,6 +6507,48 @@ fn the_drawing_shows_the_system_it_describes() {
     assert_ne!(two.lines().last(), None, "the frame came out empty");
 }
 
+/// Every healthcheck of the local target gives the container time to come up.
+///
+/// Compose gives three tries by default, and with `interval: 2s` that is six
+/// seconds: less than what `initdb` plus the restart Postgres does after it
+/// takes on a cold runner. Then a database that came up perfectly is declared
+/// unhealthy, everything that depends on it never starts, and the log says
+/// "is unhealthy" about a container whose own log says "ready to accept
+/// connections". It cost a red `demo.sh` in CI.
+#[test]
+fn every_healthcheck_waits_long_enough_to_be_believed() {
+    let (yml, err, ok) = axon(&["infra", "examples", "--target", "local"]);
+    assert!(ok, "{err}");
+    // one block per container: a service name is the only key at two spaces
+    let mut name = String::new();
+    let mut block = String::new();
+    let mut blocks: Vec<(String, String)> = Vec::new();
+    for line in yml.lines().chain(["  end:"]) {
+        let is_service = line.starts_with("  ")
+            && !line.starts_with("   ")
+            && line.ends_with(':')
+            && !line.trim_start().starts_with('#');
+        if is_service {
+            blocks.push((std::mem::take(&mut name), std::mem::take(&mut block)));
+            name = line.trim().trim_end_matches(':').to_string();
+        } else {
+            block.push_str(line);
+            block.push('\n');
+        }
+    }
+    let mut seen = 0;
+    for (name, block) in blocks.iter().filter(|(_, b)| b.contains("healthcheck:")) {
+        seen += 1;
+        assert!(
+            block.contains("retries:"),
+            "the healthcheck of `{name}` trusts the default three tries:\n{block}"
+        );
+    }
+    // and the walk itself has to have found them: a parser that finds nothing
+    // passes this test without looking at anything
+    assert!(seen > 5, "only {seen} healthchecks were found:\n{yml}");
+}
+
 /// The BI tool of the local target, and what gets emitted for it.
 ///
 /// A metric declared in the manifest and retyped in a dashboard is two

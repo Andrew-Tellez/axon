@@ -2400,6 +2400,7 @@ services:
     healthcheck:
       test: [\"CMD\", \"wget\", \"-qO-\", \"http://localhost:8222/healthz\"]
       interval: 2s
+      retries: 30
 ",
     );
     for s in p.stores.iter() {
@@ -2428,6 +2429,11 @@ services:
     healthcheck:
       test: [\"CMD-SHELL\", \"pg_isready -U postgres\"]
       interval: 2s
+      # `initdb` plus the restart it does after it takes more than the three
+      # tries compose gives by default, and then a database that came up fine
+      # is declared unhealthy and everything that depends on it never starts.
+      # On a cold CI runner that is the normal case, not the rare one.
+      retries: 30
   migrate-{host}:
     image: flyway/flyway:10-alpine
     depends_on: {{ {host}: {{ condition: service_healthy }} }}
@@ -2553,6 +2559,7 @@ services:
     healthcheck:
       test: [\"CMD\", \"wget\", \"-qO-\", \"http://localhost:14269/\"]
       interval: 2s
+      retries: 30
 ",
     );
     if !p.buckets.is_empty() {
@@ -2565,6 +2572,7 @@ services:
     healthcheck:
       test: [\"CMD\", \"mc\", \"ready\", \"local\"]
       interval: 2s
+      retries: 30
 ",
         );
         o.push_str("  crear-buckets:\n    image: minio/mc:latest\n    depends_on: { objetos: { condition: service_healthy } }\n    entrypoint: >\n      /bin/sh -c \"mc alias set local http://objetos:9000 local locallocal");
@@ -2790,6 +2798,7 @@ services:
     healthcheck:
       test: [\"CMD\", \"valkey-cli\", \"ping\"]
       interval: 2s
+      retries: 30
 ",
             svc = c.service,
             v = tfname(&c.service),
