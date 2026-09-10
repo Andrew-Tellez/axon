@@ -7,6 +7,18 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.26.1] — 2026-09-10
+
+### Corregido
+
+- **Los healthchecks del target local no esperaban lo que tarda arrancar.** Compose da tres
+  intentos por defecto, y con `interval: 2s` eso son seis segundos: menos de lo que tarda
+  `initdb` más el reinicio que hace Postgres después en un runner frío. Una base que arrancó
+  perfecto se declaraba unhealthy y todo lo que dependía de ella nunca arrancaba, con un log
+  que dice `is unhealthy` de un contenedor cuyo propio log dice `ready to accept connections`.
+  Ahora postgres, el broker, trace, objetos y la caché declaran `retries: 30`, como ya hacían
+  el pooler, los servicios, search y el warehouse.
+
 ## [0.26.0] — 2026-09-10
 
 ### Añadido
