@@ -157,16 +157,32 @@ stopped happening is reported so the list shrinks. See
 
 ## `axon tui <sources> [--frames N]`
 The system as it is, drawn and animated: the topology as a force-directed graph —what
-talks together ends up together— with the verdict, the versions, and what changed against
-the baseline in the panels. `tab` cycles the panels, `space` pauses, `r` re-reads and `q`
-quits.
+talks together ends up together— with five panels under it. `tab` cycles them, `space`
+pauses, `r` re-reads and `q` quits.
 
 An event and a call are drawn differently on purpose: the first travels on its own and
 carries a pulse, the second is somebody waiting. A dependency on a version that is dying
 is marked in the drawing, not only in `verify`.
 
+The panels are what an edge cannot draw:
+
+- `services` — one block per service: the store with the column it is keyed by, its
+  replicas and its pool; the cache and the index with what they are of; the buckets; the
+  cron of a `runtime = "job"`; every topic it emits **with whoever is on the other end**,
+  a read model or an aggregate included; every subscription with the handler it lands in;
+  one line per exposed route, marked with its sunset when it is retiring; who it calls
+  with the budget, **who calls it**, the pacts in `pacts/` against it, and its flags.
+- `contracts` — what exists BETWEEN two services, which is the only thing a change can
+  break in somebody else's repo: each event with which of its fields every consumer
+  reads, each call with its timeout, its retries and what it reads of the answer, and the
+  pacts of consumers that have no manifest.
+- `state` — the versions and what changed against the baseline.
+- `errors` and `warnings` — the verdict of `verify`, in full.
+
 With `--frames N` it renders N frames to stdout through ratatui's own test backend and
-exits — which is what makes the picture checkable in CI, and usable in a pipe.
+exits — which is what makes the picture checkable in CI, and usable in a pipe. Each frame
+shows the next panel, in the order `tab` walks them, so `--frames 5` is the whole TUI as
+text: a panel that is never rendered is a projection nobody can check.
 
 ```console
 $ axon tui manifests/ --frames 1
@@ -176,10 +192,13 @@ $ axon tui manifests/ --frames 1
 │ payments [CP]⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀ checkout [AP]                            │
 │                     stripe [ext]                                           │
 └────────────────────────────────────────────────────────────────────────────┘
-┌ state ─────────────────────────────────────────────────────────────────────┐
-│versions  path · getOrder deprecated · sunset 2027-12-31                    │
-│changed   nothing new since the last baseline                               │
-└───────────── [tab] panel  [space] pause  [r] re-read  [q] quit  ·  frame 4 ┘
+┌ services ───────────────────────────────────────────────────────── 1/28 ↑↓ ┐
+│checkout  ·  AP  ·  tier 1  ·  commerce-team                                │
+│  db      postgres · pool 4/100 · outbox                                    │
+│  emits   checkout.started@v1 → view conversion, aggregate checkout         │
+│  http    POST /v1/checkouts  checkout                                      │
+│  calls   payments.capturePayment (8000ms) · payments.refundPayment (8000ms)│
+└───────────── [tab] panel  [space] pause  [r] re-read  [q] quit  ·  frame 1 ┘
 ```
 
 ## `axon analytics <sources> --metabase [--check <export.json>]`

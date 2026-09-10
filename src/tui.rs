@@ -12,6 +12,7 @@
 //! stdout through ratatui's own test backend and exits: the picture is a
 //! projection like any other, and a projection nobody verifies drifts.
 use crate::manifest::{today, Manifest};
+use indexmap::IndexMap;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -181,6 +182,11 @@ struct Status {
     /// who talks to whom; a topic nobody consumes yet, or a database, is state
     /// that no edge can show.
     services: Vec<String>,
+    /// Every contract between two services, as one line: the event with who
+    /// reads which of its fields, and the call with its budget. The panel of
+    /// services answers what each one is; this answers what is BETWEEN them,
+    /// which is the only thing a change can break in somebody else's repo.
+    contracts: Vec<String>,
 }
 
 fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
@@ -275,36 +281,314 @@ fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
             }
         }
     };
-    // What each service declares, as a line. A single-service project draws a
-    // graph with no edges, and then the picture alone says almost nothing.
-    let services = ms
-        .iter()
-        .map(|m| {
+    // The pacts sitting in `pacts/`, by provider. A consumer with no manifest
+    // is invisible to every other projection —it declares nothing, it is in
+    // nobody's `depends`— and its pact is the only place it says what it
+    // reads. There is no broker to ask: the files are right there, and
+    // `axon pact --check` is what crosses one against the provider.
+    let mut pacts: IndexMap<String, Vec<String>> = IndexMap::new();
+    if let Ok(dir) = std::fs::read_dir(root.join("pacts")) {
+        let mut files: Vec<_> = dir.flatten().map(|e| e.path()).collect();
+        files.sort();
+        for f in files
+            .iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "json"))
+        {
+            let Some(p) = std::fs::read_to_string(f)
+                .ok()
+                .and_then(|t| crate::pact::parse(&t).ok())
+            else {
+                continue;
+            };
             let mut bits = Vec::new();
-            if !m.emits.is_empty() {
-                bits.push(format!("emits {}", keys(m.emits.keys())));
+            if !p.expectations.is_empty() {
+                bits.push(format!("{} routes", p.expectations.len()));
             }
-            if !m.consumes.is_empty() {
-                bits.push(format!("consumes {}", keys(m.consumes.keys())));
+            if !p.messages.is_empty() {
+                bits.push(format!("{} topics", p.messages.len()));
             }
-            if !m.methods.is_empty() {
-                bits.push(format!("{} methods", m.methods.len()));
+            pacts.entry(p.provider.clone()).or_default().push(format!(
+                "{} ({})",
+                p.consumer,
+                bits.join(", ")
+            ));
+        }
+    }
+    // What each service declares, as a block. The drawing answers "who talks
+    // to whom"; this answers what an edge cannot draw: which routes are
+    // exposed, which topics it is subscribed to and what it stores. A
+    // single-service project draws a graph with no edges, and then the picture
+    // alone says almost nothing.
+    let services = ms.iter().flat_map(|m| {
+        let mut lines = vec![format!(
+            "{}  ·  {}{}{}",
+            m.service,
+            if m.external {
+                "external".to_string()
+            } else if m.cap.eventual() {
+                "AP".to_string()
+            } else {
+                "CP".to_string()
+            },
+            m.tier
+                .as_deref()
+                .map(|t| format!("  ·  tier {t}"))
+                .unwrap_or_default(),
+            m.owner
+                .as_deref()
+                .map(|o| format!("  ·  {o}"))
+                .unwrap_or_default(),
+        )];
+        let mut row = |k: &str, v: String| lines.push(format!("  {k:<8}{v}"));
+        // A job is not a service that happens to be small: it has no port, no
+        // instances and no routes, and when it runs is the only thing about it
+        // worth reading. A cron nobody can see is infrastructure living in
+        // somebody's crontab.
+        if m.infra.is_job() {
+            row(
+                "job",
+                match m.infra.schedule.as_deref() {
+                    Some(cron) => format!("cron {cron}"),
+                    None => "triggered by hand · no schedule".to_string(),
+                },
+            );
+        }
+        // The stores, each with what it is keyed by: a Postgres with no tenant
+        // column and one with it are two different systems.
+        if let Some(state) = m.infra.state.as_deref() {
+            let mut bits = vec![state.to_string()];
+            if let Some(t) = &m.infra.tenant_column {
+                bits.push(format!("tenant {t}"));
             }
-            if let Some(state) = m.infra.state.as_deref() {
-                bits.push(state.to_string());
+            if let Some(s) = &m.infra.shard_key {
+                bits.push(format!("shard {s}"));
             }
-            if let Some(e) = m.cache.engine.as_deref().filter(|_| m.cache.active()) {
-                bits.push(e.to_string());
+            if let Some(r) = m.infra.read_replicas.filter(|r| *r > 0) {
+                bits.push(format!("{r} read replicas"));
             }
-            if let Some(e) = m.search.engine.as_deref().filter(|_| m.search.active()) {
-                bits.push(e.to_string());
+            if let (Some(p), Some(mx)) = (m.infra.pool_size, m.infra.max_connections) {
+                bits.push(format!("pool {p}/{mx}"));
             }
-            if bits.is_empty() {
-                bits.push("nothing declared".into());
+            if m.patterns.outbox {
+                bits.push("outbox".into());
             }
-            format!("{}  {}", m.service, bits.join("  ·  "))
-        })
-        .collect();
+            row("db", bits.join(" · "));
+        }
+        if let Some(e) = m.cache.engine.as_deref().filter(|_| m.cache.active()) {
+            let of: Vec<String> = m
+                .cache
+                .entries
+                .iter()
+                .map(|(n, c)| match c.ttl_ms {
+                    Some(t) => format!("{n} of {} · {t}ms", c.of),
+                    None => format!("{n} of {}", c.of),
+                })
+                .collect();
+            row("cache", format!("{e} · {}", of.join(" · ")));
+        }
+        if let Some(e) = m.search.engine.as_deref().filter(|_| m.search.active()) {
+            let idx: Vec<String> = m
+                .search
+                .indexes
+                .iter()
+                .map(|(n, i)| format!("{n} of {}", i.of))
+                .collect();
+            row("search", format!("{e} · {}", idx.join(" · ")));
+        }
+        for (name, b) in &m.infra.buckets {
+            row(
+                "bucket",
+                format!("{name}{}", if b.public { " · public" } else { "" }),
+            );
+        }
+        // Each topic with whoever is on the other end. An event with no
+        // consumer is not a bug, but it is the difference between a topic that
+        // is load-bearing and one nobody wired up yet, and that difference is
+        // invisible in a list of names.
+        for ev in m.emits.keys() {
+            let mut to: Vec<String> = ms
+                .iter()
+                .filter(|o| o.consumes.contains_key(ev))
+                .map(|o| o.service.clone())
+                .collect();
+            // A read model or an aggregate built from the event is a consumer
+            // too, and it is the one a topology drawn from `consumes` alone
+            // never shows: it lives inside the same service.
+            for (name, v) in ms.iter().flat_map(|o| o.view.iter()) {
+                if v.on.iter().any(|e| e == ev) {
+                    to.push(format!("view {name}"));
+                }
+            }
+            for (name, a) in ms.iter().flat_map(|o| o.aggregate.iter()) {
+                if a.events.iter().any(|e| e == ev) {
+                    to.push(format!("aggregate {name}"));
+                }
+            }
+            row(
+                "emits",
+                match to.is_empty() {
+                    true => format!("{ev} → nobody consumes it"),
+                    false => format!("{ev} → {}", to.join(", ")),
+                },
+            );
+        }
+        // The subscriptions, with the handler each one lands in: a topic and
+        // the function that answers it are the same fact, and reading them
+        // apart is how a consumer nobody wired up looks fine.
+        if !m.consumes.is_empty() {
+            row(
+                "subs",
+                m.consumes
+                    .iter()
+                    .map(|(t, c)| format!("{t} → {}", c.handler))
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            );
+        }
+        // The routes, as they are served. The count alone said nothing: what
+        // somebody looks at a topology for is which door is open.
+        for (name, me) in &m.methods {
+            let Some(http) = me.http.as_deref() else {
+                continue;
+            };
+            row(
+                "http",
+                format!(
+                    "{http}  {name}{}",
+                    if me.retiring() {
+                        format!(" ⚠ sunset {}", me.sunset.as_deref().unwrap_or("undated"))
+                    } else {
+                        String::new()
+                    }
+                ),
+            );
+        }
+        let rpc = m.methods.iter().filter(|(_, me)| me.http.is_none()).count();
+        if rpc > 0 {
+            row("rpc", format!("{rpc} methods with no route"));
+        }
+        if !m.depends.is_empty() {
+            row(
+                "calls",
+                m.depends
+                    .iter()
+                    .map(|d| {
+                        format!(
+                            "{}.{}{}",
+                            d.target(),
+                            d.method,
+                            d.timeout_ms
+                                .map(|t| format!(" ({t}ms)"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            );
+        }
+        // And the other direction, which is the one nobody has: who is behind
+        // this service. It is what decides whether a change here is a change
+        // in one repo or in four.
+        let callers: Vec<String> = ms
+            .iter()
+            .flat_map(|o| {
+                o.depends
+                    .iter()
+                    .filter(|d| d.target() == m.service)
+                    .map(|d| format!("{}.{}", o.service, d.method))
+            })
+            .collect();
+        if !callers.is_empty() {
+            row("callers", callers.join(" · "));
+        }
+        if let Some(list) = pacts.get(&m.service) {
+            row("pacts", list.join(" · "));
+        }
+        if !m.flags.is_empty() {
+            row("flags", keys(m.flags.keys()).replace(' ', " · "));
+        }
+        if lines.len() == 1 {
+            lines.push("  nothing declared".into());
+        }
+        lines
+    });
+    let services = services.collect();
+    // The contracts, one line each. An event is a contract with everybody who
+    // consumes it —and `uses` is the only honest answer to which of its fields
+    // are load-bearing—; a call is a contract with a budget attached. Both
+    // live BETWEEN two services, which is why neither repo alone can tell you
+    // whether a change to it is safe.
+    let mut contracts: Vec<String> = Vec::new();
+    for m in ms {
+        for (ev, fields) in &m.emits {
+            let mut readers: Vec<String> = ms
+                .iter()
+                .filter_map(|o| {
+                    let c = o.consumes.get(ev)?;
+                    Some(match c.uses.as_deref() {
+                        Some([]) => format!("{} reads nothing", o.service),
+                        Some(u) => format!("{} reads {}", o.service, u.join(", ")),
+                        None => format!("{} undeclared", o.service),
+                    })
+                })
+                .collect();
+            // The consumer inside the same service: a read model or an
+            // aggregate built from the event. It reads the whole thing, and it
+            // breaks the same way when a field goes.
+            for (name, v) in ms.iter().flat_map(|o| o.view.iter()) {
+                if v.on.iter().any(|e| e == ev) {
+                    readers.push(format!("view {name}"));
+                }
+            }
+            for (name, a) in ms.iter().flat_map(|o| o.aggregate.iter()) {
+                if a.events.iter().any(|e| e == ev) {
+                    readers.push(format!("aggregate {name}"));
+                }
+            }
+            contracts.push(format!(
+                "event  {ev}  ·  {} → {}  ·  {} fields",
+                m.service,
+                match readers.is_empty() {
+                    true => "nobody".to_string(),
+                    false => readers.join(" | "),
+                },
+                fields.len()
+            ));
+        }
+        for d in &m.depends {
+            let dying = ms
+                .iter()
+                .find(|o| o.service == d.target())
+                .and_then(|o| o.methods.get(&d.method))
+                .is_some_and(|me| me.retiring());
+            contracts.push(format!(
+                "call   {}.{}  ·  {} → {}  ·  {}{}{}{}",
+                d.target(),
+                d.method,
+                m.service,
+                d.target(),
+                d.timeout_ms
+                    .map(|ms_| format!("{ms_}ms"))
+                    .unwrap_or_else(|| "no budget".into()),
+                match d.retries {
+                    0 => String::new(),
+                    r => format!(" · {r} retries"),
+                },
+                match d.uses.as_deref() {
+                    Some([]) => " · reads nothing".to_string(),
+                    Some(u) => format!(" · reads {}", u.join(", ")),
+                    None => " · reads undeclared".to_string(),
+                },
+                if dying { "  ⚠ deprecated" } else { "" },
+            ));
+        }
+    }
+    for (provider, list) in &pacts {
+        contracts.push(format!("pact   {provider}  ·  {}", list.join(" · ")));
+    }
+    if contracts.is_empty() {
+        contracts.push("nothing crosses a service boundary yet".into());
+    }
     Status {
         verdict,
         verdict_color,
@@ -313,6 +597,7 @@ fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
         versions,
         changed,
         services,
+        contracts,
     }
 }
 
@@ -523,7 +808,7 @@ fn wrapped_height(lines: &[String], width: usize) -> usize {
 
 /// How many panels Tab cycles through. It is a constant so the key that
 /// advances it and the array it indexes cannot disagree.
-const PANELS: usize = 4;
+const PANELS: usize = 5;
 
 /// The panels: the drawing answers "what shape is it" and these answer "and
 /// how is it". Tab cycles them, because three lines of state is what fits and
@@ -531,6 +816,7 @@ const PANELS: usize = 4;
 fn draw_panels(f: &mut Frame, area: Rect, app: &App) {
     let panels: [(&str, Vec<String>); PANELS] = [
         ("services", app.status.services.clone()),
+        ("contracts", app.status.contracts.clone()),
         (
             "state",
             vec![
@@ -609,8 +895,14 @@ fn draw_panels(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw(f: &mut Frame, app: &App) {
+    // The panel takes what it needs, up to half the screen: with a route, a
+    // topic and a store per service it is no longer three lines of state, and
+    // six rows of a thirty-line answer is a scrollbar where a view should be.
+    // The graph keeps its floor —below eight rows the drawing stops being one.
+    let want = (app.status.services.len().max(app.status.contracts.len()) as u16 + 2)
+        .clamp(6, f.area().height / 2);
     let [top, bottom] =
-        Layout::vertical([Constraint::Min(8), Constraint::Length(6)]).areas(f.area());
+        Layout::vertical([Constraint::Min(8), Constraint::Length(want)]).areas(f.area());
     draw_graph(f, top, app);
     draw_panels(f, bottom, app);
 }
@@ -622,10 +914,15 @@ pub fn frames(ms: &[Manifest], root: &std::path::Path, n: u64) -> Result<String,
     let backend = ratatui::backend::TestBackend::new(78, 24);
     let mut term = Terminal::new(backend).map_err(|e| e.to_string())?;
     let mut out = String::new();
-    for _ in 0..n.max(1) {
+    for i in 0..n.max(1) {
         // one step per frame, the same as the live loop, so what a test looks
         // at is what a person sees
         app.tick();
+        // and one panel per frame, in the order Tab walks them: with a single
+        // panel rendered forever the other four are a projection nobody can
+        // check, which is the thing this flag exists to prevent. `--frames 5`
+        // is the whole TUI as text.
+        app.panel = (i as usize) % PANELS;
         term.draw(|f| draw(f, &app)).map_err(|e| e.to_string())?;
         let buffer = term.backend().buffer();
         for y in 0..buffer.area.height {

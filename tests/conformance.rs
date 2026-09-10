@@ -6489,10 +6489,24 @@ fn the_drawing_shows_the_system_it_describes() {
         out.contains("getOrder") && out.contains('⚠'),
         "the deprecated call is not marked:\n{out}"
     );
-    // and the panel of state: the topics and the stores each service declares,
-    // which no edge can show —an event nobody consumes yet has nowhere to go
-    assert!(out.contains("emits order.placed@v1"), "{out}");
-    assert!(out.contains("postgres") && out.contains("valkey"), "{out}");
+    // and the panel of state: what no edge can draw. Every topic with whoever
+    // is on the other end —an event nobody consumes yet has nowhere to go—,
+    // the routes as they are served, and the stores with what they are keyed
+    // by, which is the difference between two Postgres that are not the same
+    // system.
+    // A read model built from the event is a consumer too, and it is the one
+    // a topology drawn from `consumes` alone never shows: it lives inside the
+    // same service.
+    assert!(
+        out.contains("checkout.started@v1 → view conversion"),
+        "{out}"
+    );
+    assert!(out.contains("postgres · tenant tenant_id"), "{out}");
+    assert!(out.contains("outbox"), "{out}");
+    assert!(
+        out.contains("POST /v1/checkouts"),
+        "the exposed routes are not in the panel:\n{out}"
+    );
     assert!(out.contains("[q] quit"), "{out}");
 
     // two frames are two frames: the animation is what makes it a TUI and not
