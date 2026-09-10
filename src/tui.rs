@@ -18,7 +18,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line as TextLine, Span};
 use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::time::Duration;
 struct Node {
@@ -177,6 +177,10 @@ struct Status {
     warnings: Vec<String>,
     versions: String,
     changed: String,
+    /// One line per service: its topics and what it runs on. The drawing says
+    /// who talks to whom; a topic nobody consumes yet, or a database, is state
+    /// that no edge can show.
+    services: Vec<String>,
 }
 
 fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
@@ -271,6 +275,36 @@ fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
             }
         }
     };
+    // What each service declares, as a line. A single-service project draws a
+    // graph with no edges, and then the picture alone says almost nothing.
+    let services = ms
+        .iter()
+        .map(|m| {
+            let mut bits = Vec::new();
+            if !m.emits.is_empty() {
+                bits.push(format!("emits {}", keys(m.emits.keys())));
+            }
+            if !m.consumes.is_empty() {
+                bits.push(format!("consumes {}", keys(m.consumes.keys())));
+            }
+            if !m.methods.is_empty() {
+                bits.push(format!("{} methods", m.methods.len()));
+            }
+            if let Some(state) = m.infra.state.as_deref() {
+                bits.push(state.to_string());
+            }
+            if let Some(e) = m.cache.engine.as_deref().filter(|_| m.cache.active()) {
+                bits.push(e.to_string());
+            }
+            if let Some(e) = m.search.engine.as_deref().filter(|_| m.search.active()) {
+                bits.push(e.to_string());
+            }
+            if bits.is_empty() {
+                bits.push("nothing declared".into());
+            }
+            format!("{}  {}", m.service, bits.join("  ·  "))
+        })
+        .collect();
     Status {
         verdict,
         verdict_color,
@@ -278,7 +312,14 @@ fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
         warnings: report.warnings,
         versions,
         changed,
+        services,
     }
+}
+
+/// `a b c` — the topic names as they are declared, so what the panel shows is
+/// what somebody would grep the manifest for.
+fn keys<'a>(k: impl Iterator<Item = &'a String>) -> String {
+    k.cloned().collect::<Vec<_>>().join(" ")
 }
 
 /// Everything one frame needs. Kept apart from the drawing so `--frames` and
@@ -290,6 +331,11 @@ struct App {
     panel: usize,
     frame: u64,
     paused: bool,
+    /// First visible line of the panel, and how far it can go. The ceiling
+    /// depends on the wrapped height, which only the drawing knows, so it is
+    /// written there and read by the key that moves the scroll.
+    scroll: usize,
+    max_scroll: std::cell::Cell<usize>,
 }
 
 impl App {
@@ -309,6 +355,8 @@ impl App {
             panel: 0,
             frame: 0,
             paused: false,
+            scroll: 0,
+            max_scroll: std::cell::Cell::new(0),
         }
     }
     fn tick(&mut self) {
@@ -463,15 +511,26 @@ fn draw_graph(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(canvas, area);
 }
 
+/// How tall the text is once wrapped. `Paragraph` knows, but only behind an
+/// unstable feature, and the arithmetic is the same: a line takes as many rows
+/// as it has widths, and an empty one still takes one.
+fn wrapped_height(lines: &[String], width: usize) -> usize {
+    lines
+        .iter()
+        .map(|l| l.chars().count().div_ceil(width.max(1)).max(1))
+        .sum()
+}
+
 /// How many panels Tab cycles through. It is a constant so the key that
 /// advances it and the array it indexes cannot disagree.
-const PANELS: usize = 3;
+const PANELS: usize = 4;
 
 /// The panels: the drawing answers "what shape is it" and these answer "and
 /// how is it". Tab cycles them, because three lines of state is what fits and
 /// hiding the rest behind a key beats truncating all of it.
 fn draw_panels(f: &mut Frame, area: Rect, app: &App) {
     let panels: [(&str, Vec<String>); PANELS] = [
+        ("services", app.status.services.clone()),
         (
             "state",
             vec![
@@ -484,7 +543,7 @@ fn draw_panels(f: &mut Frame, area: Rect, app: &App) {
             if app.status.errors.is_empty() {
                 vec!["no errors: everything declared agrees".into()]
             } else {
-                app.status.errors.iter().take(3).cloned().collect()
+                app.status.errors.clone()
             },
         ),
         (
@@ -492,7 +551,7 @@ fn draw_panels(f: &mut Frame, area: Rect, app: &App) {
             if app.status.warnings.is_empty() {
                 vec!["no warnings".into()]
             } else {
-                app.status.warnings.iter().take(3).cloned().collect()
+                app.status.warnings.clone()
             },
         ),
     ];
@@ -501,10 +560,24 @@ fn draw_panels(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|l| TextLine::from(Span::styled(l.clone(), Style::default().fg(Color::Gray))))
         .collect();
+    // The inside of the block, which is what the text has to fit in: the
+    // borders take a column and a row on each side.
+    let inner_w = area.width.saturating_sub(2).max(1) as usize;
+    let inner_h = area.height.saturating_sub(2).max(1) as usize;
+    let max_scroll = wrapped_height(lines, inner_w).saturating_sub(inner_h);
+    app.max_scroll.set(max_scroll);
+    let scroll = app.scroll.min(max_scroll);
     let keys = if app.paused {
         "[tab] panel  [space] run  [r] re-read  [q] quit"
     } else {
         "[tab] panel  [space] pause  [r] re-read  [q] quit"
+    };
+    // The scroll is only mentioned when there IS something below: a hint for a
+    // key that does nothing is worse than no hint.
+    let more = if max_scroll > 0 {
+        format!(" {}/{} ↑↓ ", scroll + 1, max_scroll + 1)
+    } else {
+        String::new()
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -512,6 +585,10 @@ fn draw_panels(f: &mut Frame, area: Rect, app: &App) {
             format!(" {name} "),
             Style::default().add_modifier(Modifier::BOLD),
         ))
+        .title_top(
+            TextLine::from(Span::styled(more, Style::default().fg(Color::DarkGray)))
+                .right_aligned(),
+        )
         .title_bottom(
             TextLine::from(Span::styled(
                 format!(" {keys}  ·  frame {} ", app.frame),
@@ -519,7 +596,16 @@ fn draw_panels(f: &mut Frame, area: Rect, app: &App) {
             ))
             .right_aligned(),
         );
-    f.render_widget(Paragraph::new(body).block(block), area);
+    f.render_widget(
+        Paragraph::new(body)
+            .block(block)
+            // Wrapped and not clipped: a truncated line hides what it says
+            // without saying that it is hiding it. `trim: false` keeps the
+            // indentation of a wrapped continuation.
+            .wrap(Wrap { trim: false })
+            .scroll((scroll as u16, 0)),
+        area,
+    );
 }
 
 fn draw(f: &mut Frame, app: &App) {
@@ -568,7 +654,18 @@ pub fn run(ms: &[Manifest], root: &std::path::Path) -> Result<(), String> {
                     if k.kind == KeyEventKind::Press {
                         match k.code {
                             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                            KeyCode::Tab => app.panel = (app.panel + 1) % PANELS,
+                            KeyCode::Tab => {
+                                app.panel = (app.panel + 1) % PANELS;
+                                // Another panel is another text: keeping the
+                                // offset lands you in the middle of it.
+                                app.scroll = 0;
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                app.scroll = (app.scroll + 1).min(app.max_scroll.get())
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                app.scroll = app.scroll.saturating_sub(1)
+                            }
                             KeyCode::Char(' ') => app.paused = !app.paused,
                             // Re-reading is deliberate and not on a timer: a
                             // picture that changes under you while you look at
@@ -584,4 +681,22 @@ pub fn run(ms: &[Manifest], root: &std::path::Path) -> Result<(), String> {
     })();
     ratatui::restore();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrapped_height;
+
+    /// The scroll ceiling comes out of this: get it wrong and the panel either
+    /// hides its last line forever or scrolls past the end into blank rows.
+    #[test]
+    fn the_wrapped_height_counts_the_rows_a_panel_takes() {
+        let lines = vec!["abcdef".to_string(), String::new(), "abcd".to_string()];
+        // 6 chars over 4 columns is two rows, the empty line still takes one,
+        // and an exact fit takes exactly one
+        assert_eq!(wrapped_height(&lines, 4), 4);
+        assert_eq!(wrapped_height(&lines, 6), 3);
+        // a zero width would divide by zero instead of saying so
+        assert_eq!(wrapped_height(&["ab".to_string()], 0), 2);
+    }
 }

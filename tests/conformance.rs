@@ -6489,8 +6489,10 @@ fn the_drawing_shows_the_system_it_describes() {
         out.contains("getOrder") && out.contains('⚠'),
         "the deprecated call is not marked:\n{out}"
     );
-    // and the panel of state
-    assert!(out.contains("versions"), "{out}");
+    // and the panel of state: the topics and the stores each service declares,
+    // which no edge can show —an event nobody consumes yet has nowhere to go
+    assert!(out.contains("emits order.placed@v1"), "{out}");
+    assert!(out.contains("postgres") && out.contains("valkey"), "{out}");
     assert!(out.contains("[q] quit"), "{out}");
 
     // two frames are two frames: the animation is what makes it a TUI and not
