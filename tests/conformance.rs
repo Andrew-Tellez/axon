@@ -3320,6 +3320,34 @@ fn the_diagrams_and_the_registry_carry_the_relationships() {
     );
 }
 
+/// The dataset and the table are two identifiers, and each one is quoted on
+/// its own.
+///
+/// Quoting the pair whole —`"dataset.table"`— is ONE identifier that happens
+/// to contain a dot. In BigQuery the backtick form means both things, so it
+/// read fine there for as long as nobody applied it anywhere else. Measured
+/// against a ClickHouse 24: `CREATE TABLE "bench.demo"` lands in `default`
+/// under the literal name `bench.demo`, and `SELECT FROM bench.demo` answers
+/// `UNKNOWN_TABLE`. The schema applies with no error, and the dataset it was
+/// aimed at stays empty — the exact outcome `[analytics] warehouse` exists to
+/// prevent.
+#[test]
+fn the_dataset_and_the_table_are_two_identifiers() {
+    for (target, q) in [("bigquery", '`'), ("snowflake", '"'), ("clickhouse", '"')] {
+        let (ddl, err, ok) = axon(&["analytics", "examples", "--target", target]);
+        assert!(ok, "{target}: {err}");
+        assert!(
+            ddl.contains(&format!("{q}@dataset{q}.{q}")),
+            "{target}: the dataset is not quoted apart:\n{ddl}"
+        );
+        assert!(
+            !ddl.contains(&format!("{q}@dataset.")),
+            "{target}: a table lands in the default database under a dotted \
+             name:\n{ddl}"
+        );
+    }
+}
+
 /// A declared metric is a view next to the funnels, in the dialect of each
 /// warehouse, and it has to be valid SQL in all three: a `sum` over a `money`
 /// field adds up its amount column, and the time bucket is a different function
@@ -3334,7 +3362,9 @@ fn the_declared_metrics_are_valid_sql() {
         let (ddl, err, ok) = axon(&["analytics", "examples", "--target", target]);
         assert!(ok, "{target}: {err}");
         assert!(
-            ddl.contains(&format!("VIEW {quote}@dataset.metric_gmv{quote}")),
+            ddl.contains(&format!(
+                "VIEW {quote}@dataset{quote}.{quote}metric_gmv{quote}"
+            )),
             "{target}: no metric view:\n{ddl}"
         );
         // the bucket is per dialect: the three truncate a timestamp differently
@@ -3638,7 +3668,7 @@ fn the_warehouse_schemas_are_valid_sql() {
 
     // the funnel comes from the declared chain, with the business latency
     assert!(
-        ddl.contains("CREATE OR REPLACE VIEW `@dataset.funnel_order_placed_v1`"),
+        ddl.contains("CREATE OR REPLACE VIEW `@dataset`.`funnel_order_placed_v1`"),
         "{ddl}"
     );
     assert!(ddl.contains("AS step_1_order_placed_v1"), "{ddl}");
@@ -6859,7 +6889,7 @@ fn the_local_target_brings_up_something_to_read_the_warehouse_with() {
     let (schema, _, _) = axon(&["analytics", "examples", "--target", "clickhouse"]);
     for view in &names {
         assert!(
-            schema.contains(&format!("@dataset.{view}")),
+            schema.contains(&format!("\"@dataset\".\"{view}\"")),
             "the question points at `{view}`, which the schema does not create"
         );
     }

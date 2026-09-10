@@ -61,6 +61,23 @@ fn quote_double(s: &str) -> String {
     format!("\"{s}\"")
 }
 
+/// `dataset.table`, with each half quoted SEPARATELY.
+///
+/// Quoting the whole thing is one identifier that happens to contain a dot,
+/// not a table inside a dataset. In BigQuery the backtick form means both, so
+/// it went unnoticed; in Snowflake and ClickHouse it does not. Measured
+/// against a ClickHouse 24: `CREATE TABLE "bench.demo"` lands in `default`
+/// under the literal name `bench.demo`, and `SELECT FROM bench.demo` then
+/// answers `UNKNOWN_TABLE`. The schema applies with no error and the dataset
+/// it was aimed at stays empty, which is the one failure this module exists
+/// to avoid.
+fn qualify(d: &Dialect, name: &str) -> String {
+    name.split('.')
+        .map(d.quote)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn type_bigquery(t: &str) -> String {
     match t {
         "int" => "INT64",
@@ -755,7 +772,7 @@ pub fn build(ms: &[Manifest], d: &Dialect) -> String {
         }
         o.push(format!(
             "CREATE TABLE IF NOT EXISTS {} (\n{}\n)\n{};",
-            (d.quote)(&format!("@dataset.{}", table(e.name))),
+            qualify(d, &format!("@dataset.{}", table(e.name))),
             cols.join(",\n"),
             (d.tail)(e.keeps)
         ));
@@ -764,7 +781,7 @@ pub fn build(ms: &[Manifest], d: &Dialect) -> String {
         // day somebody declares it the schema applies with no error and the
         // table keeps growing forever. Found by applying it twice.
         if let Some(days) = e.keeps {
-            let name = (d.quote)(&format!("@dataset.{}", table(e.name)));
+            let name = qualify(d, &format!("@dataset.{}", table(e.name)));
             match d.name {
                 "clickhouse" => o.push(format!(
                     "ALTER TABLE {name} MODIFY TTL toDateTime(event_time) + INTERVAL {days} DAY;"
@@ -795,8 +812,8 @@ pub fn build(ms: &[Manifest], d: &Dialect) -> String {
                    -- applied is a decision taken by whoever ran the DDL\nAS\n  \
                    DELETE FROM {tabla}\n  WHERE event_time < DATEADD(day, -{days}, CURRENT_TIMESTAMP());",
                 e.name,
-                task = (d.quote)(&format!("@dataset.retain_{}", table(e.name))),
-                tabla = (d.quote)(&format!("@dataset.{}", table(e.name))),
+                task = qualify(d, &format!("@dataset.retain_{}", table(e.name))),
+                tabla = qualify(d, &format!("@dataset.{}", table(e.name))),
             ));
         }
     }
@@ -864,7 +881,7 @@ fn metrics(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
                     format!(
                         "    SELECT {} FROM {}",
                         cols.join(", "),
-                        (d.quote)(&format!("@dataset.{}", table(e)))
+                        qualify(d, &format!("@dataset.{}", table(e)))
                     )
                 })
                 .collect();
@@ -872,7 +889,7 @@ fn metrics(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
             // them, with the same columns in every branch because they come from
             // the same schema.
             let source = match mt.on.as_slice() {
-                [one] => (d.quote)(&format!("@dataset.{}", table(one))),
+                [one] => qualify(d, &format!("@dataset.{}", table(one))),
                 _ => format!("(\n{}\n)", froms.join("\n    UNION ALL\n")),
             };
             let group: Vec<String> = std::iter::once("bucket".to_string())
@@ -895,7 +912,7 @@ fn metrics(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
                 },
                 on = mt.on.join(", "),
                 svc = m.service,
-                view = (d.quote)(&format!("@dataset.{}", Metric::view(name))),
+                view = qualify(d, &format!("@dataset.{}", Metric::view(name))),
                 select = select.join(",\n"),
                 group = group.join(", "),
             ));
@@ -967,7 +984,7 @@ fn funnels(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
             .map(|e| {
                 format!(
                     "    SELECT correlation_id, event_type, event_time FROM {}",
-                    (d.quote)(&format!("@dataset.{}", table(e)))
+                    qualify(d, &format!("@dataset.{}", table(e)))
                 )
             })
             .collect();
@@ -1007,7 +1024,7 @@ fn funnels(ms: &[Manifest], evs: &[Event], d: &Dialect) -> Vec<String> {
              -- latency, not a request\'s.\n\
              CREATE OR REPLACE VIEW {} AS\n\
              SELECT\n  correlation_id,\n{},\n{}\nFROM (\n{}\n)\nGROUP BY correlation_id;",
-            (d.quote)(&format!("@dataset.funnel_{}", table(root))),
+            qualify(d, &format!("@dataset.funnel_{}", table(root))),
             steps.join(",\n"),
             saltos.join(",\n"),
             union.join("\n    UNION ALL\n")
@@ -1118,7 +1135,7 @@ pub fn rules_sql(ms: &[Manifest], d: &Dialect) -> String {
             let Some(window) = pinned(&r.metric, &r.segment) else {
                 continue;
             };
-            let view = (d.quote)(&format!("@dataset.{}", Metric::view(&r.metric)));
+            let view = qualify(d, &format!("@dataset.{}", Metric::view(&r.metric)));
             if let Some(sql) = condition_sql(
                 d,
                 name,
@@ -1145,7 +1162,7 @@ pub fn rules_sql(ms: &[Manifest], d: &Dialect) -> String {
                 let Some(gwindow) = pinned(&g.metric, &g.segment) else {
                     continue;
                 };
-                let gview = (d.quote)(&format!("@dataset.{}", Metric::view(&g.metric)));
+                let gview = qualify(d, &format!("@dataset.{}", Metric::view(&g.metric)));
                 if let Some(sql) = condition_sql(
                     d,
                     name,

@@ -54,7 +54,7 @@ nobody will notice until somebody asks about a number that does not add up.
 ## One table per event
 
 ```sql
-CREATE TABLE IF NOT EXISTS `@dataset.order_placed_v1` (
+CREATE TABLE IF NOT EXISTS `@dataset`.`order_placed_v1` (
   event_id STRING NOT NULL,
   event_type STRING NOT NULL,
   source STRING NOT NULL,
@@ -109,7 +109,7 @@ This is what no other tool can do: **a funnel is normally assembled by guessing 
 events relate.** Here it is written in the manifest, so the view is derived.
 
 ```sql
-CREATE OR REPLACE VIEW `@dataset.funnel_order_placed_v1` AS
+CREATE OR REPLACE VIEW `@dataset`.`funnel_order_placed_v1` AS
 SELECT
   correlation_id,
   MIN(IF(event_type = 'order.placed@v1',     event_time, NULL)) AS step_1_order_placed_v1,
@@ -120,9 +120,9 @@ SELECT
     MILLISECOND
   ) AS ms_to_payment_captured_v1
 FROM (
-    SELECT correlation_id, event_type, event_time FROM `@dataset.order_placed_v1`
+    SELECT correlation_id, event_type, event_time FROM `@dataset`.`order_placed_v1`
     UNION ALL
-    SELECT correlation_id, event_type, event_time FROM `@dataset.payment_captured_v1`
+    SELECT correlation_id, event_type, event_time FROM `@dataset`.`payment_captured_v1`
 )
 GROUP BY correlation_id;
 ```
@@ -350,12 +350,12 @@ same thing in the three warehouses. A quantile does not: it changes name per dia
 a metric that means something slightly different in each is worse than no metric.
 
 ```sql
-CREATE OR REPLACE VIEW `@dataset.metric_gmv` AS
+CREATE OR REPLACE VIEW `@dataset`.`metric_gmv` AS
 SELECT
   TIMESTAMP_TRUNC(event_time, DAY) AS bucket,
   total_currency,
   sum(total_amount) AS value
-FROM `@dataset.order_placed_v1`
+FROM `@dataset`.`order_placed_v1`
 GROUP BY bucket, total_currency;
 ```
 
