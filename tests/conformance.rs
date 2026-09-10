@@ -192,6 +192,64 @@ fn the_examples_are_clean() {
     assert!(out.contains("0 errors"), "{out}");
 }
 
+/// What the tool GENERATES is in one language.
+///
+/// The code thinks in Spanish —`eventos`, `duenio`, `informe`— and that is
+/// nobody's business but this repo's. What ships is not: a sequence diagram
+/// that answers `respuesta`, an ER with `%% servicio:` and a NetworkPolicy
+/// commented `# nadie` are read by whoever inherits the generated file, and
+/// they landed there one at a time because each looked like an internal
+/// string until it was in somebody's diagram.
+///
+/// The word list is short and unambiguous on purpose: a false positive on a
+/// generator is a test nobody trusts. It is a leak detector, not a grammar.
+#[test]
+fn what_the_tool_generates_speaks_one_language() {
+    // ponytail: the eight commands that write a file somebody else reads.
+    // The rest are reports, and a report is read once by whoever ran it.
+    let outputs = [
+        vec!["graph", "examples"],
+        vec!["classes", "examples"],
+        vec!["er", "examples"],
+        vec!["states", "examples"],
+        vec!["seq", "order.placed@v1", "examples"],
+        vec!["openapi", "examples"],
+        vec!["analytics", "examples"],
+        vec!["infra", "examples", "--target", "k8s"],
+        vec!["build", "examples/payments.toml", "examples"],
+        vec!["ci", "examples/payments.toml"],
+    ];
+    const SPANISH: [&str; 12] = [
+        "respuesta",
+        "servicio",
+        "externo",
+        "ningun",
+        "nadie",
+        "archivo",
+        "manifiesto",
+        "consulta",
+        "evento ",
+        "esquema",
+        "pedido",
+        "usuario",
+    ];
+    for args in outputs {
+        let (out, err, ok) = axon(&args);
+        assert!(ok, "{args:?}: {err}");
+        for line in out.lines() {
+            let low = line.to_lowercase();
+            for w in SPANISH {
+                assert!(
+                    !low.contains(w),
+                    "`axon {}` ships Spanish to whoever reads the file: `{}`",
+                    args.join(" "),
+                    line.trim()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn traceability_is_not_optional() {
     let (ts, _, _) = axon(&["build", "examples/payments.toml", "examples"]);
@@ -548,7 +606,7 @@ fn environments_are_deltas() {
 fn the_expected_and_the_real_sequence() {
     let (seq, _, _) = axon(&["seq", "order.placed@v1", "examples"]);
     assert!(seq.contains("orders->>payments: order.placed@v1"));
-    assert!(seq.contains("charges.create (externo)"));
+    assert!(seq.contains("charges.create (external)"));
     let log = std::env::temp_dir().join("axon-test.ndjson");
     std::fs::write(&log, concat!(
         r#"{"id":"1","type":"order.placed@v1","source":"orders","time":"01","correlationId":"c","causationId":null}"#, "\n",

@@ -795,7 +795,7 @@ pub fn build_classes(ms: &[Manifest]) -> String {
 pub fn build_er(ms: &[Manifest]) -> String {
     let mut out = vec!["erDiagram".to_string()];
     for (svc, tables) in schemas(ms) {
-        out.push(format!("  %% servicio: {svc}"));
+        out.push(format!("  %% service: {svc}"));
         for (t, cols) in &tables {
             for c in &cols.cols {
                 if let Some(fk) = &c.fk {
@@ -1404,12 +1404,12 @@ fn walk(
             }
             let tgt = d.target();
             let tag = if *external.get(tgt).unwrap_or(&false) {
-                " (externo)"
+                " (external)"
             } else {
                 ""
             };
             out.push(format!("  {dst}->>{tgt}: {}{tag}", d.method));
-            out.push(format!("  {tgt}-->>{dst}: respuesta"));
+            out.push(format!("  {tgt}-->>{dst}: response"));
         }
         for nxt in m.emits.keys() {
             out.push(format!(

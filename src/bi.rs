@@ -701,7 +701,7 @@ pub fn build(ms: &[Manifest], d: &Dialect) -> String {
         "-- or substituted before applying.".to_string(),
     ];
     if evs.is_empty() {
-        o.push("\n-- Ningun servicio exporta eventos.".into());
+        o.push("\n-- No service exports events.".into());
         o.push(String::new());
         return o.join("\n");
     }

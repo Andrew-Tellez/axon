@@ -2134,7 +2134,7 @@ spec:
         let rules = if !froms.is_empty() {
             froms.as_str()
         } else {
-            " []   # nadie: este servicio solo reacciona a eventos"
+            " []   # nobody: this service only reacts to events"
         };
         o.push(format!(
             "---\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: {svc}\nspec:\n  \
