@@ -261,7 +261,7 @@ fn problem(m: &Manifest) -> String {
          \t\treturn p.Retriable\n\
          \t}\n\
          \treturn false\n\
-         }\n\n"
+         }\n\n",
     )
 }
 
