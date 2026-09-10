@@ -7,6 +7,23 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.26.0] — 2026-09-10
+
+### Añadido
+
+- **`axon tui` dice qué declara cada servicio, no sólo con quién habla.** El dibujo sólo
+  tiene aristas, así que un evento que nadie consume todavía —o una base de datos, o una
+  caché— no aparecía en ninguna parte, y un proyecto de un solo servicio salía como un nodo
+  suelto sin nada alrededor. El panel `services` es ahora el que abre: una línea por
+  servicio con lo que emite, lo que consume, cuántos métodos tiene y sobre qué corre.
+
+### Corregido
+
+- **Los paneles truncaban en silencio.** Se quedaban con las tres o cuatro primeras líneas
+  y cortaban cada una al ancho, sin decir que estaban escondiendo algo. Ahora el texto se
+  envuelve, `↑↓` (o `j`/`k`) lo recorren, `[tab]` resetea el offset al cambiar de panel y
+  el `1/3 ↑↓` de la esquina sólo aparece cuando hay algo debajo.
+
 ## [0.25.2] — 2026-09-10
 
 ### Corregido
