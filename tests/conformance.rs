@@ -7314,6 +7314,60 @@ fn a_job_is_not_a_container_on_any_target() {
     );
 }
 
+/// What axon writes, axon reads. The document it emits goes back in through
+/// the importer and the manifest that comes out PARSES.
+///
+/// The two halves drift apart on their own: the day the exporter learned to
+/// declare `{tenantId}` as a path parameter, the importer started reading it
+/// twice —once from the path, once from the body, which is what a well-formed
+/// document looks like— and wrote a TOML with a duplicate key. It looked
+/// perfect and no parser accepted it.
+#[test]
+fn what_the_exporter_writes_the_importer_reads() {
+    let dir = std::env::temp_dir().join("axon-round-trip");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (api, err, ok) = axon(&["openapi", "examples"]);
+    assert!(ok, "{err}");
+    let doc = dir.join("api.json");
+    std::fs::write(&doc, &api).unwrap();
+
+    let (toml, err, ok) = axon(&["import", "openapi", doc.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    let back = dir.join("back.toml");
+    std::fs::write(&back, &toml).unwrap();
+
+    // it parses as TOML, which is the whole point: a manifest nobody can read
+    // is not a manifest
+    let parsed: toml::Value = toml::from_str(&toml).unwrap_or_else(|e| {
+        panic!("the imported manifest does not parse: {e}\n{toml}");
+    });
+    // and the parameter of the path is there ONCE, with the type the document
+    // gave it
+    let m = parsed["methods"].as_table().unwrap();
+    let with_path = m
+        .values()
+        .find(|v| {
+            v.get("http")
+                .and_then(|h| h.as_str())
+                .is_some_and(|h| h.contains('{'))
+        })
+        .expect("no templated route survived the round trip");
+    let input = with_path["in"].as_table().unwrap();
+    assert!(
+        input.keys().any(|k| k.ends_with("Id") || k.ends_with("id")),
+        "the path parameter did not survive: {with_path:?}"
+    );
+
+    // axon itself reads it back: the TODOs are what the document does not say,
+    // so it does not verify clean, but it LOADS
+    let (_, err, _) = axon(&["verify", back.to_str().unwrap()]);
+    assert!(
+        !err.contains("TOML parse error"),
+        "axon cannot read what axon wrote: {err}"
+    );
+}
+
 /// `axon import openapi`: the format an existing HTTP service already has,
 /// without anybody deciding to. A NestJS repo has one from its decorators.
 ///

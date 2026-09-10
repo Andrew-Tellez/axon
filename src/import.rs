@@ -146,6 +146,16 @@ fn operation(
         }
     }
     input.extend(body_fields(doc, op.pointer("/requestBody")));
+    // The same field can arrive twice: `{tenantId}` is a path parameter AND a
+    // property of the body, which is what a well-formed document looks like.
+    // For axon it is one field —`in` says what the method needs, not how it
+    // travels— and emitting it twice writes a TOML with a duplicate key, which
+    // is a manifest that does not parse. First one wins: the path is the more
+    // specific declaration.
+    {
+        let mut seen = std::collections::HashSet::new();
+        input.retain(|(n, _)| seen.insert(n.clone()));
+    }
 
     let responses = op.get("responses").and_then(Value::as_object);
     let mut output = Vec::new();
