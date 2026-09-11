@@ -792,6 +792,29 @@ pub fn build_classes(ms: &[Manifest]) -> String {
     out.join("\n")
 }
 
+/// The entity's id, and the label that says which database it lives in.
+///
+/// One database per service means two services can both own an `inbox_seen`,
+/// and they are two different tables. Named by the table alone they are ONE
+/// entity in mermaid, which merges them and draws the columns twice —which is
+/// how the drawing ends up describing a schema nobody has. The id carries the
+/// service, and the alias keeps the name a person reads.
+fn entity(svc: &str, table: &str) -> String {
+    format!(
+        "{}_{}[\"{svc}.{table}\"]",
+        svc.to_uppercase().replace('-', "_"),
+        table.to_uppercase()
+    )
+}
+
+fn entity_id(svc: &str, table: &str) -> String {
+    format!(
+        "{}_{}",
+        svc.to_uppercase().replace('-', "_"),
+        table.to_uppercase()
+    )
+}
+
 pub fn build_er(ms: &[Manifest]) -> String {
     let mut out = vec!["erDiagram".to_string()];
     for (svc, tables) in schemas(ms) {
@@ -799,17 +822,19 @@ pub fn build_er(ms: &[Manifest]) -> String {
         for (t, cols) in &tables {
             for c in &cols.cols {
                 if let Some(fk) = &c.fk {
+                    // An FK never crosses the service boundary —`verify`
+                    // blocks it— so both ends are in this service.
                     out.push(format!(
                         "  {} ||--o{{ {} : {}",
-                        fk.to_uppercase(),
-                        t.to_uppercase(),
+                        entity_id(&svc, fk),
+                        entity_id(&svc, t),
                         c.name
                     ));
                 }
             }
         }
         for (t, cols) in &tables {
-            out.push(format!("  {} {{", t.to_uppercase()));
+            out.push(format!("  {} {{", entity(&svc, t)));
             for c in &cols.cols {
                 let tag = if c.pk {
                     " PK"

@@ -282,10 +282,65 @@ fn traceability_is_not_optional() {
     assert!(ts.contains(r#"case "order.placed@v1""#));
 }
 
+/// Two services owning a table of the same name are two tables.
+///
+/// One database per service means both `orders` and `notifier` own an
+/// `inbox_seen`. Named by the table alone they are ONE entity in mermaid: it
+/// merges them and draws the columns twice, so the picture describes a schema
+/// nobody has. The id carries the service; the alias keeps the name readable
+/// and says which database it lives in, which the `%%` comment never told
+/// anybody because a comment does not render.
+#[test]
+fn two_services_with_the_same_table_are_two_entities() {
+    let (er, err, ok) = axon(&["er", "examples"]);
+    assert!(ok, "{err}");
+    // the example has an `inbox_seen` and an `outbox` in more than one service
+    let mut collisions = 0;
+    for t in ["INBOX_SEEN", "OUTBOX"] {
+        let owners: Vec<&str> = er
+            .lines()
+            .filter(|l| l.contains(&format!("_{t}[")))
+            .collect();
+        if owners.len() < 2 {
+            continue;
+        }
+        collisions += 1;
+        let ids: std::collections::BTreeSet<&str> = owners
+            .iter()
+            .map(|l| l.trim().split('[').next().unwrap())
+            .collect();
+        assert_eq!(
+            ids.len(),
+            owners.len(),
+            "`{t}` is declared {} times under {} ids: mermaid merges them:\n{owners:?}",
+            owners.len(),
+            ids.len()
+        );
+    }
+    // and the case was really exercised: with no table shared by two services
+    // this test has an opinion about nothing
+    assert!(
+        collisions > 0,
+        "no table of the example is owned by two services any more:\n{er}"
+    );
+    // and every entity says which database it is in
+    for l in er.lines().filter(|l| l.trim_end().ends_with('{')) {
+        assert!(
+            l.contains("[\""),
+            "an entity with no alias does not say whose it is: `{}`",
+            l.trim()
+        );
+    }
+}
+
 #[test]
 fn migrations_folded_into_the_er_diagram() {
     let (er, _, _) = axon(&["er", "examples"]);
-    assert!(er.contains("ORDER ||--o{ ORDER_ITEM : order_id"));
+    // the entity id carries the service: one database per service means two
+    // of them can own a table of the same name, and named by the table alone
+    // mermaid merges them into one
+    assert!(er.contains("ORDERS_ORDER ||--o{ ORDERS_ORDER_ITEM : order_id"));
+    assert!(er.contains(r#"ORDERS_ORDER["orders.order"] {"#), "{er}");
     assert!(
         er.contains("text provider_ref"),
         "ADD COLUMN was not folded"
@@ -341,7 +396,7 @@ CREATE INDEX ledger_entry_account_idx ON "ledger_entry" (account_id, posted_at D
         "table-level FK not resolved:\n{er}"
     );
     assert!(
-        er.contains("ACCOUNT ||--o{ LEDGER_ENTRY : account_id"),
+        er.contains("LEDGER_ACCOUNT ||--o{ LEDGER_LEDGER_ENTRY : account_id"),
         "{er}"
     );
     // a type has to fit in one token or it breaks mermaid's ER diagram
@@ -452,7 +507,7 @@ fn a_later_rename_counts() {
     let (er, err, ok) = axon(&["er", dir.to_str().unwrap()]);
     assert!(ok, "{err}");
     assert!(
-        er.contains("POINT {"),
+        er.contains(r#"S_POINT["s.point"] {"#),
         "the renamed table does not show up:\n{er}"
     );
     assert!(
@@ -3237,9 +3292,7 @@ fn the_diagrams_and_the_registry_carry_the_relationships() {
     // own edge-id syntax, so the diagram dies to parse on the very lines that
     // name the events. A diagram that does not render says nothing at all.
     assert!(
-        !graph
-            .lines()
-            .any(|l| l.contains('@') && !l.contains('"')),
+        !graph.lines().any(|l| l.contains('@') && !l.contains('"')),
         "an unquoted `@` reaches mermaid:\n{graph}"
     );
     // and an external service is drawn as external, because you cannot change it
@@ -6786,7 +6839,10 @@ fn the_kubernetes_manifests_are_valid() {
         eprintln!("salteado: sin red para los esquemas");
         return;
     }
-    assert!(out.status.success(), "the manifests are not valid:\n{printed}");
+    assert!(
+        out.status.success(),
+        "the manifests are not valid:\n{printed}"
+    );
     // and nothing went through unchecked: a skipped resource is a resource
     // nobody validated, reported as a success
     assert!(

@@ -447,6 +447,13 @@ The schema for `er` and for the cross-service FK check is read with a PostgreSQL
 parser, not with regular expressions. A file that does not parse aborts the command with
 the file and the error: axon prefers failing to guessing columns.
 
+Every entity in `er` is named `SERVICE_TABLE` and labelled `service.table`. One database
+per service means two services can both own an `inbox_seen`, and they are two different
+tables: named by the table alone mermaid merges them into one entity and draws the
+columns twice, so the picture describes a schema nobody has. The label is also the only
+thing that says which database a table lives in — the `%% service:` comment does not
+render.
+
 # Debugging
 
 ## `axon trace [log] [--correlation <id>] [--seq]`
