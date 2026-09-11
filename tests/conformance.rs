@@ -2285,6 +2285,146 @@ fn otel_on_all_four_targets() {
     assert!(!ts.contains("${hex(8)}-01`"), "the envelope pins the flags");
 }
 
+/// The warehouse schema, applied to a real ClickHouse.
+///
+/// The last generator that was verified with a grep, and the one that had
+/// already shown what a grep cannot see: the dataset and the table were quoted
+/// as ONE identifier, so every table landed in `default` under a literal
+/// dotted name and the database it was aimed at stayed empty. It applied with
+/// no error — generating the schema and carrying nothing is the exact outcome
+/// `[analytics] warehouse` exists to prevent, and no assert over the text was
+/// ever going to catch it.
+///
+/// What is checked is what a person does with the file: substitute the
+/// dataset, apply it, and query the tables by name.
+#[test]
+fn the_warehouse_schema_applies_and_the_tables_are_where_they_say() {
+    let (ddl, err, ok) = axon(&["analytics", "examples", "--target", "clickhouse"]);
+    assert!(ok, "{err}");
+    if !has("docker") {
+        eprintln!("salteado: falta docker");
+        return;
+    }
+    let name = "axon-test-warehouse";
+    let _ = Command::new("docker").args(["rm", "-f", name]).output();
+    let arranque = Command::new("docker")
+        .args([
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            name,
+            "-e",
+            "CLICKHOUSE_SKIP_USER_SETUP=1",
+            "clickhouse/clickhouse-server:24-alpine",
+        ])
+        .output()
+        .expect("docker run");
+    if !arranque.status.success() {
+        eprintln!("salteado: no arranco clickhouse");
+        return;
+    }
+    struct Limpieza(&'static str);
+    impl Drop for Limpieza {
+        fn drop(&mut self) {
+            let _ = Command::new("docker").args(["rm", "-f", self.0]).output();
+        }
+    }
+    let _l = Limpieza(name);
+
+    // one shot at the client, with the SQL on stdin: the same shape the demo
+    // uses, so what the test applies is what a person applies
+    let ch = |sql: &str| -> (String, String, bool) {
+        let mut hijo = Command::new("docker")
+            .args([
+                "exec",
+                "-i",
+                name,
+                "clickhouse-client",
+                "--multiquery",
+                "--format",
+                "TSV",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("clickhouse-client");
+        use std::io::Write;
+        hijo.stdin
+            .as_mut()
+            .unwrap()
+            .write_all(sql.as_bytes())
+            .unwrap();
+        let out = hijo.wait_with_output().unwrap();
+        (
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            out.status.success(),
+        )
+    };
+    let mut listo = false;
+    for _ in 0..120 {
+        if ch("SELECT 1").2 {
+            listo = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert!(listo, "clickhouse no arranco");
+
+    // `@dataset` is a parameter of the generated file; here the database is
+    // `bench`. Quoted apart, the marker is `"@dataset".`
+    let aplicado = ddl.replace("\"@dataset\".", "bench.");
+    // Quoted whole —`"@dataset.table"`— the marker does not match, and what
+    // gets applied names one identifier with a dot inside: the table lands in
+    // `default` and the dataset stays empty. It is caught here and not by the
+    // database, because the database accepts it.
+    assert!(
+        !aplicado.contains("@dataset"),
+        "the dataset is not an identifier of its own, so nothing can substitute \
+         it into a database: the table would land in `default` under a dotted \
+         name:\n{ddl}"
+    );
+    let (_, err, ok) = ch("CREATE DATABASE bench");
+    assert!(ok, "{err}");
+    let (_, err, ok) = ch(&aplicado);
+    assert!(ok, "the generated schema does not apply:\n{err}");
+
+    // and it landed where it says: nothing in `default`, and every table of
+    // the schema queryable BY NAME —which is what a dotted identifier breaks
+    let (sueltas, _, _) = ch("SELECT count() FROM system.tables \
+         WHERE database = 'default' AND name LIKE '%\\_v1'");
+    assert_eq!(
+        sueltas, "0",
+        "a table landed in `default` instead of the dataset"
+    );
+    let (tablas, err, ok) =
+        ch("SELECT name FROM system.tables WHERE database = 'bench' ORDER BY name FORMAT TSV");
+    assert!(ok, "{err}");
+    let creadas: Vec<&str> = tablas.lines().collect();
+    assert!(
+        creadas.len() >= 5,
+        "only {} objects in the dataset:\n{tablas}",
+        creadas.len()
+    );
+    // one event table and one declared view: a view over a table that is not
+    // there answers with an error, and that is how a funnel nobody can read
+    // looks
+    for t in &creadas {
+        let (_, err, ok) = ch(&format!("SELECT count() FROM bench.{t}"));
+        assert!(ok, "`bench.{t}` is not queryable by name:\n{err}");
+    }
+    assert!(
+        creadas.iter().any(|t| t.starts_with("funnel_")),
+        "no funnel view:\n{tablas}"
+    );
+    assert!(
+        creadas.iter().any(|t| t.starts_with("metric_")),
+        "no metric view:\n{tablas}"
+    );
+}
+
 /// pg_anon's dictionary: every `pii` field gets a rule, and every rule really
 /// applies to a column of its type. A function that does not exist —or a
 /// missing cast— makes the dump fail halfway through.
