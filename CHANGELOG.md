@@ -7,6 +7,57 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.29.0] — 2026-09-11
+
+Tres reglas que salieron de mutar los manifiestos del ejemplo y del banco de pruebas, una
+por una, y ver qué pasaba limpio. De sesenta y dos mutaciones, cincuenta y nueve ya las
+cazaba `verify`; estas tres son las que no.
+
+### Añadido
+
+- **Un presupuesto de cero no es un presupuesto.** Faltar `timeout_ms` ya era error; un
+  `timeout_ms = 0` pasaba limpio, y no es «sin límite»: es un límite en el que no cabe
+  nada. El cliente generado corre la llamada contra un `setTimeout(.., 0)`, que dispara
+  en el tick siguiente, así que **toda** llamada termina en `TimedOut` antes de que la
+  petición salga. Typechequea, despliega, y la dependencia se ve caída. Es error en los
+  dos lados: en la llamada, donde el cliente corre el reloj, y en el método, porque lo
+  que promete es contra lo que presupuestan sus llamantes.
+- **Un cero de retención de backups no es una ausencia.** Había regla para un `tier = "0"`
+  sin `backup_retention_days` y para menos de siete días en un tier 0. Un
+  `backup_retention_days = 0` en cualquier otro tier era silencio, y no es lo mismo que no
+  declararlo: ausente toma el default de la plataforma, un cero es alguien que lo
+  escribió. Warning y no error —una base de scratch tiene derecho a no tener backups—,
+  pero dicho una vez, porque lo que no tiene derecho a pasar es que nadie se entere el día
+  que importa.
+
+### Seguridad
+
+- **Un juego de claves servido en `http://` es una verificación contra las claves de
+  otro.** `[auth]` ya rechazaba `none`, un HMAC donde hay claves publicadas, una
+  revocación que el mecanismo no puede cumplir y un tenant que no viene del token. No
+  miraba de **dónde** salen las claves. Sobre http en claro, quien esté en el camino sirve
+  su propio juego y desde ahí acuña tokens que el servicio acepta: la firma cuadra, contra
+  el juego equivocado, y nada se ve roto mientras pasa. Lo mismo con el
+  `introspection_url`, cuya *respuesta* es la decisión. `localhost` es la excepción que el
+  target local necesita y no está en el camino de nadie.
+
+### Corregido
+
+- **El `demo.sh` del ejemplo volvió a ser re-ejecutable.** `check-rules.sh` borraba solo
+  sus propias filas sembradas y `check-apply.py` siembra con otra etiqueta. Una corrida
+  que muere a la mitad dejaba esas filas, y la siguiente las sumaba en los mismos días:
+  los importes al doble, una caída que deja de parecer una caída, y el fallo acusando a la
+  regla en vez de al residuo. Dejaba de ser re-ejecutable justo después de fallar, que es
+  cuando más falta hace.
+
+### Pruebas
+
+- **El esquema del warehouse se aplica a un ClickHouse de verdad.** Era el último
+  generador que se verificaba con un grep, y el que ya había mostrado lo que un grep no
+  ve. Se comprueba lo que una persona hace con el archivo: sustituir el dataset, aplicarlo
+  y **consultar las tablas por nombre** —lo que un identificador con punto rompe—, que
+  ninguna caiga en `default`, y que el embudo y la métrica declarados existan como vistas.
+
 ## [0.28.1] — 2026-09-11
 
 ### Corregido
