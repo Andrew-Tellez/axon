@@ -1904,7 +1904,23 @@ pub fn load_any(source: &str) -> Result<Manifest, String> {
     }
 }
 
+/// The manifests of every source given. With NO source, the current directory.
+///
+/// Reading nothing used to be the answer: `axon verify` with no argument found
+/// `axon.baseline.json` —which lives in the same directory— and concluded that
+/// every published event and method had been deleted, ten errors about a repo
+/// where nothing is wrong. `axon graph` answered `graph LR`, `axon discover`
+/// answered `{}` and `axon pact` said there is no manifest for the provider,
+/// each of them looking like a verdict about the project instead of what it
+/// was: nobody told it where to look. The directory is what every other tool
+/// assumes and what the baseline was already being read from.
 pub fn discover(sources: &[String]) -> Result<Vec<Manifest>, String> {
+    let here = [".".to_string()];
+    let sources = if sources.is_empty() {
+        &here[..]
+    } else {
+        sources
+    };
     let mut out = Vec::new();
     for s in sources {
         if s.starts_with("http://") || s.starts_with("https://") {

@@ -282,6 +282,51 @@ fn traceability_is_not_optional() {
     assert!(ts.contains(r#"case "order.placed@v1""#));
 }
 
+/// With no source, the current directory.
+///
+/// Reading nothing used to be an answer, and the worst one: `axon verify` with
+/// no argument found `axon.baseline.json` —which lives in that same directory—
+/// and concluded that every published event and method had been deleted. Ten
+/// errors, exit 1, about a repo where nothing is wrong. `graph` answered
+/// `graph LR`, `discover` answered `{}` and `pact` said the provider has no
+/// manifest: four verdicts about the project, when what happened is that
+/// nobody said where to look.
+#[test]
+fn with_no_source_it_reads_the_current_directory() {
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_axon"))
+            .args(args)
+            .current_dir("examples")
+            .output()
+            .expect("axon");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.success(),
+        )
+    };
+    // the same answer with and without the argument
+    for args in [vec!["graph"], vec!["discover"], vec!["classes"]] {
+        let (bare, _, ok) = run(&args);
+        assert!(ok, "`axon {}` failed", args[0]);
+        let explicit = run(&[args[0], "."]).0;
+        assert_eq!(bare, explicit, "`axon {}` reads nothing", args[0]);
+        assert!(
+            bare.lines().count() > 3,
+            "`axon {}` answered about an empty project:\n{bare}",
+            args[0]
+        );
+    }
+    // and verify does not invent a retirement out of a baseline with no
+    // manifests beside it
+    let (out, err, ok) = run(&["verify"]);
+    assert!(ok, "`axon verify` with no source fails:\n{err}{out}");
+    assert!(
+        !err.contains("no longer exists") && !out.contains("no longer exists"),
+        "the baseline was read without the manifests:\n{err}{out}"
+    );
+}
+
 /// Two services owning a table of the same name are two tables.
 ///
 /// One database per service means both `orders` and `notifier` own an

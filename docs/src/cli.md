@@ -8,6 +8,10 @@ takes its `*.toml` except the ones starting with `axon.` (those are the tool's o
 configuration). A URL without `.json` resolves to `<url>/.well-known/axon.json`; a
 service that is down is reported and does not break the rest.
 
+**With no source, the current directory.** `axon verify` and `axon verify .` are the same
+command. Everything but `build` and `test` takes only sources, and for those two an empty
+list means "no peers", which they say so themselves.
+
 # Code and contracts
 
 ## `axon build <manifest> [sources...] [--lang ts]`
