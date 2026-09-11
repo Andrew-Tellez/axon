@@ -2639,6 +2639,17 @@ fn the_database_scaling_is_verified() {
     assert!(msg.contains("with no `backup_retention_days`"), "{msg}");
     assert!(msg.contains("is not a backup"), "{msg}");
 
+    // a zero is not an absence: absent takes the platform's default, and a
+    // zero is somebody having written it. It does not fail the build —a
+    // scratch database is allowed to have no backups— but it says so once,
+    // because otherwise nobody finds out on the day it matters
+    let (msg, ok) = escribir(
+        "service = \"s\"\nowner = \"x\"\ntier = \"2\"\n[infra]\nstate = \"postgres\"\n\
+         backup_retention_days = 0\n",
+    );
+    assert!(ok, "a zero fails the build: {msg}");
+    assert!(msg.contains("Nothing to restore from"), "{msg}");
+
     // a tier 0 with no failover is not a tier 0
     let (msg, ok) = escribir(
         "service = \"s\"\nowner = \"x\"\ntier = \"0\"\n[infra]\nstate = \"postgres\"\n\

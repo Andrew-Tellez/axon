@@ -179,6 +179,7 @@ has to be fixed cannot end up underneath.
 | Read replicas under a `strong` promise | error |
 | `tier = "0"` with no `ha` or no `backup_retention_days` | error |
 | `pitr` with no backups | error |
+| `backup_retention_days = 0` with a database of its own | warning — a zero is not an absence: absent takes the platform's default and a zero is somebody having written it. A scratch database is allowed to have none; it is said once so nobody finds out on the day it matters |
 
 ## Feature flags
 

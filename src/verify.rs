@@ -1767,6 +1767,16 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 "{svc}: {d} days of backups on a tier 0. A logical delete gets discovered after \
                  the weekend, not a minute later"
             )),
+            // `0` is not the same as absent: absent takes the platform's
+            // default, and a zero is somebody having written it. It is a
+            // decision —a scratch database is allowed to have no backups— but
+            // it is one nobody can discover on the day it matters, so it gets
+            // said out loud once.
+            Some(0) => warnings.push(format!(
+                "{svc}: `backup_retention_days = 0` with a database of its own. Nothing to \
+                 restore from: not a mistake if the data is disposable, and unrecoverable if \
+                 it is not"
+            )),
             _ => {}
         }
         if inf.pitr == Some(true) && inf.backup_retention_days.is_none() {
