@@ -66,8 +66,12 @@ def served():
 # sumarian en el mismo dia, que es como una caida deja de parecer una caida.
 ch("ALTER TABLE axon.order_placed_v1 DELETE WHERE source IN ('apply-demo','rules-demo') SETTINGS mutations_sync = 2")
 subprocess.run([AXON, "flags", "."], stdout=open(FLAGS, "w"), check=True)
-subprocess.run(f"{AXON} rules . | sed 's/\"@dataset\\.\\([a-z0-9_]*\\)\"/axon.\\1/g' > .axon/rules.sql",
+subprocess.run(f"{AXON} rules . | sed 's/\"@dataset\"\\./axon./g' > .axon/rules.sql",
                shell=True, check=True)
+# Un `sed` que no sustituye nada es silencioso: el `@dataset` sobrevive y
+# ClickHouse contesta con un error de sintaxis que no nombra lo que se rompio.
+if "@dataset" in open(".axon/rules.sql").read():
+    sys.exit("  FALLO: `@dataset` sobrevivio a la sustitucion en .axon/rules.sql")
 time.sleep(1)
 print(f"  flagd sirve `{FLAG}` = {served()} antes de nada")
 

@@ -26,6 +26,10 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: npm ci --prefix examples/services || npm i --prefix examples/services
+      # the external validators of the suite: mermaid, redocly and flagd's
+      # schema. Without them those tests SKIP, and a test that always skips is
+      # one nobody is running and everybody believes
+      - run: npm ci --prefix tests/js || npm i --prefix tests/js
       - run: cargo test --release
       # axon verifies itself: its own examples pass its own rules
       - run: cargo run --release -- verify examples

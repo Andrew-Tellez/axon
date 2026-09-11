@@ -3,10 +3,14 @@ services:
   broker:
     image: nats:2-alpine
     command: ["-js", "-m", "8222"]
-    ports: ["4222:4222", "8222:8222"]
+    # Overridable like every other port here. Two axon projects on one machine
+    # collided on this one, which reads as "the broker is broken" and is really
+    # "something else already has 4222".
+    ports: ["${AXON_BROKER_PORT:-4222}:4222", "${AXON_BROKER_MON_PORT:-8222}:8222"]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 2s
+      retries: 30
   db-checkout:
     image: postgres:16-alpine
     # the same ceiling as in production: exhausting connections locally is the
@@ -17,6 +21,11 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
+      # `initdb` plus the restart it does after it takes more than the three
+      # tries compose gives by default, and then a database that came up fine
+      # is declared unhealthy and everything that depends on it never starts.
+      # On a cold CI runner that is the normal case, not the rare one.
+      retries: 30
   migrate-db-checkout:
     image: flyway/flyway:10-alpine
     depends_on: { db-checkout: { condition: service_healthy } }
@@ -37,6 +46,11 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
+      # `initdb` plus the restart it does after it takes more than the three
+      # tries compose gives by default, and then a database that came up fine
+      # is declared unhealthy and everything that depends on it never starts.
+      # On a cold CI runner that is the normal case, not the rare one.
+      retries: 30
   migrate-db-orders-0:
     image: flyway/flyway:10-alpine
     depends_on: { db-orders-0: { condition: service_healthy } }
@@ -86,6 +100,11 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
+      # `initdb` plus the restart it does after it takes more than the three
+      # tries compose gives by default, and then a database that came up fine
+      # is declared unhealthy and everything that depends on it never starts.
+      # On a cold CI runner that is the normal case, not the rare one.
+      retries: 30
   migrate-db-orders-1:
     image: flyway/flyway:10-alpine
     depends_on: { db-orders-1: { condition: service_healthy } }
@@ -135,6 +154,11 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
+      # `initdb` plus the restart it does after it takes more than the three
+      # tries compose gives by default, and then a database that came up fine
+      # is declared unhealthy and everything that depends on it never starts.
+      # On a cold CI runner that is the normal case, not the rare one.
+      retries: 30
   migrate-db-orders-2:
     image: flyway/flyway:10-alpine
     depends_on: { db-orders-2: { condition: service_healthy } }
@@ -184,6 +208,11 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
+      # `initdb` plus the restart it does after it takes more than the three
+      # tries compose gives by default, and then a database that came up fine
+      # is declared unhealthy and everything that depends on it never starts.
+      # On a cold CI runner that is the normal case, not the rare one.
+      retries: 30
   migrate-db-orders-3:
     image: flyway/flyway:10-alpine
     depends_on: { db-orders-3: { condition: service_healthy } }
@@ -247,6 +276,11 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
+      # `initdb` plus the restart it does after it takes more than the three
+      # tries compose gives by default, and then a database that came up fine
+      # is declared unhealthy and everything that depends on it never starts.
+      # On a cold CI runner that is the normal case, not the rare one.
+      retries: 30
   migrate-db-payments:
     image: flyway/flyway:10-alpine
     depends_on: { db-payments: { condition: service_healthy } }
@@ -287,6 +321,7 @@ services:
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:14269/"]
       interval: 2s
+      retries: 30
   objetos:
     image: minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
@@ -295,6 +330,7 @@ services:
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 2s
+      retries: 30
   crear-buckets:
     image: minio/mc:latest
     depends_on: { objetos: { condition: service_healthy } }
@@ -327,7 +363,11 @@ services:
       dockerfile: services/checkout/Dockerfile
     depends_on: { broker: { condition: service_healthy }, trace: { condition: service_healthy }, db-checkout: { condition: service_healthy }, migrate-db-checkout: { condition: service_completed_successfully } }
     ports: ["${AXON_PORT_checkout:-8201}:8080"]
-    env_file: [.env.local]
+    # `required: false`: this file holds the secrets the manifest declares and
+    # NOT their values, so a project that declares none has no reason to have
+    # it. Without this, its absence stops the entire compose with an lstat
+    # error that says nothing about what is missing.
+    env_file: [{ path: .env.local, required: false }]
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/log/local.ndjson
@@ -358,7 +398,11 @@ services:
       dockerfile: services/orders/Dockerfile
     depends_on: { broker: { condition: service_healthy }, trace: { condition: service_healthy }, cache-orders: { condition: service_healthy }, pooler-orders: { condition: service_healthy } }
     ports: ["${AXON_PORT_orders:-8300}:8080"]
-    env_file: [.env.local]
+    # `required: false`: this file holds the secrets the manifest declares and
+    # NOT their values, so a project that declares none has no reason to have
+    # it. Without this, its absence stops the entire compose with an lstat
+    # error that says nothing about what is missing.
+    env_file: [{ path: .env.local, required: false }]
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/log/local.ndjson
@@ -397,7 +441,11 @@ services:
       dockerfile: services/payments/Dockerfile
     depends_on: { broker: { condition: service_healthy }, trace: { condition: service_healthy }, crear-buckets: { condition: service_completed_successfully }, db-payments: { condition: service_healthy }, migrate-db-payments: { condition: service_completed_successfully }, policies-db-payments: { condition: service_completed_successfully } }
     ports: ["${AXON_PORT_payments:-8278}:8080"]
-    env_file: [.env.local]
+    # `required: false`: this file holds the secrets the manifest declares and
+    # NOT their values, so a project that declares none has no reason to have
+    # it. Without this, its absence stops the entire compose with an lstat
+    # error that says nothing about what is missing.
+    env_file: [{ path: .env.local, required: false }]
     environment:
       AXON_BROKER_URL: nats://broker:4222
       AXON_TRACE_LOG: /out/log/local.ndjson
@@ -445,6 +493,7 @@ services:
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 2s
+      retries: 30
   warehouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     environment: { CLICKHOUSE_DB: axon, CLICKHOUSE_USER: local, CLICKHOUSE_PASSWORD: local }

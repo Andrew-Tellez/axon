@@ -333,7 +333,11 @@ fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
                 format!(
                     "{} · {}{} · {}",
                     if m.cap.eventual() { "AP" } else { "CP" },
-                    if m.cap.eventual() { "eventual" } else { "strong" },
+                    if m.cap.eventual() {
+                        "eventual"
+                    } else {
+                        "strong"
+                    },
                     match (m.cap.eventual(), m.cap.max_staleness_ms) {
                         (true, Some(ms)) => format!(" ≤{ms}ms"),
                         // `eventual` with no budget is not a guarantee:
@@ -341,7 +345,11 @@ fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
                         (true, None) => ", no budget".to_string(),
                         _ => " reads".to_string(),
                     },
-                    if m.cap.degrades() { "degrades" } else { "rejects" },
+                    if m.cap.degrades() {
+                        "degrades"
+                    } else {
+                        "rejects"
+                    },
                 )
             },
             m.tier

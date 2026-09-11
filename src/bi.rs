@@ -72,10 +72,7 @@ fn quote_double(s: &str) -> String {
 /// it was aimed at stays empty, which is the one failure this module exists
 /// to avoid.
 fn qualify(d: &Dialect, name: &str) -> String {
-    name.split('.')
-        .map(d.quote)
-        .collect::<Vec<_>>()
-        .join(".")
+    name.split('.').map(d.quote).collect::<Vec<_>>().join(".")
 }
 
 fn type_bigquery(t: &str) -> String {

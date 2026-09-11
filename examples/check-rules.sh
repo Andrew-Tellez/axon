@@ -15,10 +15,17 @@ ch() { $COMPOSE exec -T warehouse clickhouse-client --user local --password loca
 # El esquema, por si este chequeo corre solo: las vistas de las metricas son
 # CREATE OR REPLACE, asi que aplicarlas otra vez no cuesta nada y evita que la
 # regla lea una vista que todavia no existe.
-"$AXON" analytics . --target clickhouse | sed 's/"@dataset\.\([a-z0-9_]*\)"/axon.\1/g' > .axon/warehouse.sql
+"$AXON" analytics . --target clickhouse | sed 's/"@dataset"\./axon./g' > .axon/warehouse.sql
 ch --multiquery < .axon/warehouse.sql
 
-"$AXON" rules . | sed 's/"@dataset\.\([a-z0-9_]*\)"/axon.\1/g' > .axon/rules.sql
+"$AXON" rules . | sed 's/"@dataset"\./axon./g' > .axon/rules.sql
+# A `sed` that matches nothing is silent: the `@dataset` survives, ClickHouse
+# answers with a syntax error twenty lines further down, and what it names is
+# not what broke. It broke here.
+for f in .axon/warehouse.sql .axon/rules.sql; do
+  [ -f "$f" ] || continue
+  ! grep -q '@dataset' "$f" || { echo "  FAILED: \`@dataset\` survived the substitution in $f"; exit 1; }
+done
 echo "  declarado: $(grep -c '^SELECT' .axon/rules.sql) serie(s) —el disparador y sus guardas— contra las vistas de las metricas"
 
 # Dos filas por dia SIEMPRE: el conteo de ordenes se mantiene y lo que cambia

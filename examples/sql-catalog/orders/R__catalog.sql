@@ -11,6 +11,30 @@
 -- list the database enforces stop being the same list —which is the whole
 -- reason for declaring it.
 
+CREATE TABLE IF NOT EXISTS "catalog_role" (
+  name text NOT NULL PRIMARY KEY,
+  description text NOT NULL
+);
+INSERT INTO "catalog_role" (name, description)
+VALUES
+  ('admin', 'Todo'),
+  ('support', 'Lee y puede actuar en nombre de un cliente')
+ON CONFLICT (name) DO UPDATE SET
+  description = EXCLUDED.description;
+DELETE FROM "catalog_role" WHERE name NOT IN ('admin', 'support');
+
+CREATE TABLE IF NOT EXISTS "catalog_plan" (
+  code text NOT NULL PRIMARY KEY,
+  name text NOT NULL
+);
+INSERT INTO "catalog_plan" (code, name)
+VALUES
+  ('free', 'Gratis'),
+  ('pro', 'Pro')
+ON CONFLICT (code) DO UPDATE SET
+  name = EXCLUDED.name;
+DELETE FROM "catalog_plan" WHERE code NOT IN ('free', 'pro');
+
 CREATE TABLE IF NOT EXISTS "catalog_currency" (
   code text NOT NULL PRIMARY KEY,
   name text NOT NULL,

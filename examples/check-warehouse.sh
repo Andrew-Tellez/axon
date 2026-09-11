@@ -14,7 +14,14 @@ ch() { $COMPOSE exec -T warehouse clickhouse-client --user local --password loca
 
 echo "  applying the generated schema"
 # The schema comes out with `@dataset` as a parameter; locally the database is `axon`.
-"$AXON" analytics . --target clickhouse | sed 's/"@dataset\.\([a-z0-9_]*\)"/axon.\1/g' > .axon/warehouse.sql
+"$AXON" analytics . --target clickhouse | sed 's/"@dataset"\./axon./g' > .axon/warehouse.sql
+# A `sed` that matches nothing is silent: the `@dataset` survives, ClickHouse
+# answers with a syntax error twenty lines further down, and what it names is
+# not what broke. It broke here.
+for f in .axon/warehouse.sql .axon/rules.sql; do
+  [ -f "$f" ] || continue
+  ! grep -q '@dataset' "$f" || { echo "  FAILED: \`@dataset\` survived the substitution in $f"; exit 1; }
+done
 ch --multiquery < .axon/warehouse.sql
 
 echo "  loading the envelope log"
