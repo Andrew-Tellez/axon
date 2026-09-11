@@ -13,6 +13,7 @@ mod gen_go;
 mod import;
 mod infra;
 mod init;
+mod lsp;
 mod manifest;
 mod pact;
 mod plugin;
@@ -93,6 +94,8 @@ enum Cmd {
     Discover { sources: Vec<String> },
     /// drift between manifests, migrations and infrastructure
     Verify { sources: Vec<String> },
+    /// language server over stdio: `verify` as diagnostics, inside the editor
+    Lsp,
     /// AsyncAPI or OpenAPI (JSON or YAML) -> an axon manifest
     Import {
         /// source format
@@ -545,6 +548,7 @@ fn run() -> Result<ExitCode, String> {
             }
             r.warnings.clear();
         }
+        Cmd::Lsp => lsp::serve()?,
         Cmd::Import {
             format,
             file,

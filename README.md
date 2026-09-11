@@ -56,6 +56,7 @@ You declare the service once, and everything else is derived from it:
                      ├─ axon traffic    who calls what, from the edge's log
                      ├─ axon pact       a pact from a consumer that does not use axon
                      ├─ axon tui        the system drawn, and what changed
+                     ├─ axon lsp        the same drift, inside the editor
                      └─ axon verify     drift: fails in CI
 ```
 

@@ -24,6 +24,35 @@ crossing a service boundary, a retry against something not idempotent, a metric 
 history that was deleted, a scope with a typo. It exits 1 on errors, and with
 `axon.accepted.json` present a **new** warning fails too.
 
+```sh
+axon lsp   # the same findings as diagnostics, over stdio
+```
+
+The manifests are TOML, so the editor already highlights them; what it cannot see is
+the half that lives between files. Point the editor's LSP client at `axon lsp` for
+`*.toml` and it re-reads the workspace on open and on save — the report of `verify`,
+placed on the line that caused it. It also completes: the keys of the block the cursor
+is in, and the closed list of values a key accepts. Both come out of the model itself,
+so a field that gets renamed renames in the editor. And it jumps: from a consumed event
+to the `[emits]` that declares it, from a `[[depends]]` to the method block on the other
+side — the jump the manifests are full of and that no editor can make on its own,
+because it crosses files. Hovering an event says who emits it, who reads it and which of
+its fields are personal data; hovering a service, what it promises. And it lists
+references: every line of every manifest that names a method — which is the question
+to ask before retiring one, and the one a grep answers wrong, because `getOrder` also
+matches `getOrderV2`.
+
+Any client that speaks LSP serves. In Neovim it is four lines, and the root is wherever
+the platform's own policy lives:
+
+```lua
+vim.lsp.start({
+  name = "axon",
+  cmd = { "axon", "lsp" },
+  root_dir = vim.fs.root(0, "axon.policy.toml"),
+})
+```
+
 ## What gets generated
 
 ```sh

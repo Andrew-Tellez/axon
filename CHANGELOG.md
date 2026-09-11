@@ -7,6 +7,39 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [No publicado]
+
+### Añadido
+
+- **`axon lsp`: lo que `verify` ya sabe, dentro del editor.** Los manifiestos son TOML,
+  así que el editor ya los pinta; lo que no puede ver es la mitad que vive entre archivos
+  —un evento que nadie consume, una garantía que la topología contradice—, y eso es
+  justo el informe de `verify`. El servidor relee el workspace al abrir y al guardar y
+  publica cada hallazgo como diagnóstico, colocado en la línea que lo causó: un error de
+  parseo trae su propia línea, y el resto se ubica por lo que el mensaje ya nombra entre
+  comillas invertidas. Completa también: las claves del bloque donde está el cursor y la
+  lista cerrada de valores que acepta una clave, ambas sacadas del modelo mismo —un
+  campo que se renombra se renombra en el editor— y de las mismas constantes que usan las
+  reglas. Y salta: del evento consumido al `[emits]` que lo declara, del `[[depends]]` al
+  bloque del método del otro lado. Y al pasar el cursor por un evento contesta lo que su
+  archivo no puede: quién lo emite, quién más lo lee —nadie, si nadie— y cuáles de sus
+  campos son datos personales. Lista referencias, que es la pregunta de antes de retirar
+  un método y la que un grep contesta mal, porque `getOrder` también casa con
+  `getOrderV2`. Sobre stdio, sin dependencias nuevas.
+
+### Cambiado
+
+- **Una clave que el modelo no conoce se rechaza en vez de ignorarse.** `transport =
+  "nats"` arriba de un manifiesto parecía declarado, se leía como una decisión en una
+  revisión, y no hacía nada: el modelo nunca tuvo ese campo, y el cliente generado dice
+  en su propio comentario que el framework no elige transporte. Ignorar es el peor de los
+  tres finales posibles. Ahora el error lista las claves que sí existen. El precio es que
+  un manifiesto escrito para un axon nuevo falla en uno viejo, que es el trato que hace
+  cualquier esquema y un fallo mejor que el silencioso. **Es incompatible**: un manifiesto
+  con una clave muerta deja de cargar hasta que se borre. Las de los ejemplos —`transport`
+  y `discovered_from`— ya se fueron; la segunda era procedencia de verdad y quedó como
+  comentario, que es donde vivía su valor.
+
 ## [0.29.0] — 2026-09-11
 
 Tres reglas que salieron de mutar los manifiestos del ejemplo y del banco de pruebas, una

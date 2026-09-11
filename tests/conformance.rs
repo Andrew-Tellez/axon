@@ -10021,3 +10021,130 @@ fn the_ci_gate_regenerates_every_contract_the_repo_keeps() {
         );
     }
 }
+
+/// The language server over the real protocol.
+///
+/// Everything else in this file drives the CLI, where a broken answer is
+/// visible. An editor is the opposite: a server that frames a reply wrong, or
+/// never answers a request, looks like an editor that is merely quiet. So the
+/// handshake is done here the way a client does it — headers, ids and all —
+/// against the real binary.
+#[test]
+fn the_language_server_speaks_the_protocol() {
+    use std::io::{Read, Write};
+
+    let dir = std::env::temp_dir().join("axon-lsp");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // a runtime that does not exist: one error, on a line the file really has
+    let manifest = "service = \"orders\"\nowner = \"commerce\"\ntier = \"1\"\n\n\
+                    [infra]\nruntime = \"nope\"\n\n\
+                    [methods.getOrder]\nhttp = \"GET /v1/orders/{orderId}\"\nauth = \"required\"\n\
+                    in = { orderId = \"uuid\" }\nout = { total = \"int\" }\n";
+    std::fs::write(dir.join("orders.toml"), manifest).unwrap();
+    let uri = format!("file://{}/orders.toml", dir.display());
+
+    let frame = |v: serde_json::Value| {
+        let body = v.to_string();
+        format!("Content-Length: {}\r\n\r\n{body}", body.len())
+    };
+    let input = [
+        frame(
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+              "params":{"rootUri":format!("file://{}", dir.display())}}),
+        ),
+        frame(
+            serde_json::json!({"jsonrpc":"2.0","method":"textDocument/didOpen",
+              "params":{"textDocument":{"uri":uri,"text":manifest}}}),
+        ),
+        // completion on the value of `runtime`, where the quote already is
+        frame(
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"textDocument/completion",
+              "params":{"textDocument":{"uri":uri},"position":{"line":5,"character":11}}}),
+        ),
+        frame(serde_json::json!({"jsonrpc":"2.0","method":"exit"})),
+    ]
+    .concat();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_axon"))
+        .arg("lsp")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    child.wait().unwrap();
+
+    // every frame carries its own length, and a client that cannot trust that
+    // cannot read the next message either
+    let mut messages = Vec::new();
+    let mut rest = out.as_str();
+    while let Some(at) = rest.find("Content-Length: ") {
+        let after = &rest[at + 16..];
+        let (len, body) = after.split_once("\r\n\r\n").unwrap();
+        let len: usize = len.trim().parse().unwrap();
+        assert!(
+            body.len() >= len,
+            "a frame shorter than its own header:\n{out}"
+        );
+        messages.push(serde_json::from_str::<serde_json::Value>(&body[..len]).unwrap());
+        rest = &body[len..];
+    }
+
+    let capabilities = messages
+        .iter()
+        .find(|m| m["id"] == 1)
+        .unwrap_or_else(|| panic!("the initialize request went unanswered:\n{out}"));
+    for capability in ["definitionProvider", "hoverProvider", "referencesProvider"] {
+        assert_eq!(
+            capabilities["result"]["capabilities"][capability], true,
+            "{capability} was not announced"
+        );
+    }
+
+    let published = messages
+        .iter()
+        .find(|m| m["method"] == "textDocument/publishDiagnostics")
+        .unwrap_or_else(|| panic!("nothing was published for an open manifest:\n{out}"));
+    let diagnostic = &published["params"]["diagnostics"][0];
+    assert!(
+        diagnostic["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("runtime")),
+        "the published finding is not the one the manifest has: {published}"
+    );
+    // the line `runtime` is on, counted from zero, and not the top of the file
+    assert_eq!(
+        diagnostic["range"]["start"]["line"], 5,
+        "the finding was not placed on the line that caused it: {published}"
+    );
+    assert_eq!(diagnostic["severity"], 1, "an error published as a hint");
+
+    let items = messages
+        .iter()
+        .find(|m| m["id"] == 2)
+        .unwrap_or_else(|| panic!("the completion request went unanswered:\n{out}"));
+    let offered: Vec<&str> = items["result"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["insertText"].as_str())
+        .collect();
+    assert_eq!(
+        offered,
+        vec!["container", "job"],
+        "the runtimes offered are not the ones that exist"
+    );
+}

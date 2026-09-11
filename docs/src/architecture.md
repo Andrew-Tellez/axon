@@ -77,6 +77,7 @@ flowchart TB
 
   BASE --> VER
   ACC --> VER
+  VER --> LSP["lsp.rs<br/><i>the same findings,<br/>inside the editor</i>"]
   PLUG["plugin.rs<br/><i>axon-gen-* · axon-infra-*<br/>axon-check-*</i>"] --> VER
   EMIT -.-> PLUG
   INF -.-> PLUG
