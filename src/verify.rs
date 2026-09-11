@@ -319,6 +319,15 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                      time limit is resource exhaustion"
                 ));
             }
+            // and the same zero on the serving side: what the method promises
+            // is what its callers budget against, and a zero promises a
+            // deadline nothing fits in
+            if meth.timeout_ms == Some(0) {
+                errors.push(format!(
+                    "{svc}.{name}: `timeout_ms = 0`. Nothing fits in a budget of zero, and \
+                     it is what whoever calls this method budgets against"
+                ));
+            }
             // A09: logging failures. Personal data that leaves through a public
             // route ends up in a log, a cache and a CDN.
             if public {
@@ -3832,6 +3841,18 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 errors.push(format!(
                     "{svc} -> {tgt}.{}: no `timeout_ms`; a network call with no time budget \
                      propagates the other side's outage",
+                    d.method
+                ));
+            }
+            // A zero is not «no limit», it is a limit nothing fits in. The
+            // generated client races the call against a `setTimeout(.., 0)`,
+            // which fires on the next tick: EVERY call ends in `TimedOut`
+            // before the request leaves. It typechecks, it deploys, and the
+            // dependency looks like it is down.
+            if d.timeout_ms == Some(0) {
+                errors.push(format!(
+                    "{svc} -> {tgt}.{}: `timeout_ms = 0`. Nothing fits in a budget of zero: \
+                     every call fails before it leaves, and the other side looks down",
                     d.method
                 ));
             }

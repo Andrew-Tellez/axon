@@ -5829,6 +5829,52 @@ fn the_vector_config_validates() {
     );
 }
 
+/// A budget of zero is not «no limit»: it is a limit nothing fits in.
+///
+/// The generated client races the call against a `setTimeout(.., 0)`, which
+/// fires on the next tick, so EVERY call ends in `TimedOut` before the request
+/// leaves. A missing `timeout_ms` was already an error; the zero typechecked,
+/// deployed, and made the dependency look like it was down.
+#[test]
+fn a_budget_of_zero_is_not_a_budget() {
+    let dir = std::env::temp_dir().join("axon-timeout-cero");
+    let write = |extra: &str| -> (String, bool) {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("shop.toml"),
+            format!(
+                "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"t\"\ntier = \"1\"\n\
+                 [cap]\nconsistency = \"strong\"\non_partition = \"reject\"\n{extra}"
+            ),
+        )
+        .unwrap();
+        let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        (err, ok)
+    };
+    let method = |ms: &str| {
+        format!(
+            "[methods.pay]\nhttp = \"POST /v1/pays\"\nauth = \"required\"\n\
+             idempotent = true\ntimeout_ms = {ms}\nin = {{ id = \"uuid\" }}\n\
+             out = {{ id = \"uuid\" }}\n"
+        )
+    };
+    // what the method promises is what its callers budget against
+    let (err, ok) = write(&method("0"));
+    assert!(!ok, "a method promising zero passes: {err}");
+    assert!(err.contains("budget of zero"), "{err}");
+    let (err, ok) = write(&method("2000"));
+    assert!(ok, "{err}");
+
+    // and the calling side, where the client really races the clock
+    let (err, ok) = write(&format!(
+        "{}[[depends]]\nexternal = \"bank\"\nmethod = \"charge\"\ntimeout_ms = 0\n",
+        method("2000")
+    ));
+    assert!(!ok, "a call with a budget of zero passes: {err}");
+    assert!(err.contains("the other side looks down"), "{err}");
+}
+
 /// The failure rules refute. A wrong declaration is worse than none: the
 /// generated client stops retrying what the manifest calls final, so a `409`
 /// marked retriable would silence a retry that would have worked.

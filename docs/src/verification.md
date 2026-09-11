@@ -28,6 +28,7 @@ has to be fixed cannot end up underneath.
 | | |
 | --- | --- |
 | A dependency with no `timeout_ms` | error |
+| A `timeout_ms = 0`, on a method or on a call | error — a zero is not «no limit», it is a limit nothing fits in: the generated client races the call against a `setTimeout(.., 0)`, which fires on the next tick, so every call fails before the request leaves and the other side looks down |
 | Retries over a method not declared idempotent | error |
 | Retries with no `breaker` | warning |
 | More synchronous dependencies than the policy's limit | warning |
