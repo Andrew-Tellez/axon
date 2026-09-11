@@ -55,7 +55,7 @@ finishes, `pages.yml` publishes that version's documentation under its own prefi
 ```sh
 cargo fmt
 cargo clippy --all-targets -- -D warnings
-cargo test --release              # includes tsc, go vet, terraform validate and node --test
+cargo test --release              # includes tsc, go vet, terraform validate, mermaid and node --test
 cargo run --release -- verify examples
 cd examples && ./demo.sh          # needs Docker
 mdbook serve docs --open          # the documentation
@@ -69,8 +69,20 @@ fail — I did that, and pushed nine red tests.
 **A generator is not validated with its own asserts: it is validated with the real tool
 of its ecosystem.** The TypeScript goes through `tsc --strict`, the Go through `go vet`,
 the Terraform through `terraform validate` with the real providers, the testkit through
-`node --test` against the example service, and the RLS is applied to a real Postgres to
-check that it isolates.
+`node --test` against the example service, the five diagrams through **mermaid itself**,
+and the RLS is applied to a real Postgres to check that it isolates.
+
+The mermaid one needs its dependencies, like the example's `tsc` does:
+
+```sh
+cd tests/mermaid && npm i
+```
+
+and the same file checks a diagram by hand, before pasting it anywhere:
+
+```sh
+axon classes . | node tests/mermaid/check.mjs
+```
 
 This is not zeal: the first three generators produced invalid output and the suite did
 not see it, because axon was only ever verified against itself.

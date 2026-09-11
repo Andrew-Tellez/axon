@@ -6710,6 +6710,54 @@ restore = "off"
     assert!(out.contains("0 of 1 rules propose"), "{out}");
 }
 
+/// The five diagrams, parsed by mermaid ITSELF.
+///
+/// The rule of this suite is that a generator is verified with the real tool
+/// of its ecosystem, and these five were the only ones verified against their
+/// own golden. A golden says the text did not change; it does not say the text
+/// renders. `axon graph` shipped a version dying to parse on every line that
+/// names an event —`@` stopped being text when mermaid 11 gave it to its own
+/// edge-id syntax— and every assert here was green, because they were all
+/// looking at axon and none at mermaid.
+///
+/// `tests/mermaid/check.mjs` is the same file a person runs by hand before
+/// pasting a diagram anywhere:
+///
+///   axon classes . | node tests/mermaid/check.mjs
+#[test]
+fn the_diagrams_parse_with_mermaid() {
+    let dir = std::path::Path::new("tests/mermaid");
+    if !has("node") || !dir.join("node_modules").exists() {
+        eprintln!("salteado: falta node o `npm i` en tests/mermaid");
+        return;
+    }
+    for args in [
+        vec!["graph", "examples"],
+        vec!["classes", "examples"],
+        vec!["er", "examples"],
+        vec!["states", "examples"],
+        vec!["seq", "order.placed@v1", "examples"],
+    ] {
+        let (diagram, err, ok) = axon(&args);
+        assert!(ok, "{args:?}: {err}");
+        let file = std::env::temp_dir().join(format!("axon-mermaid-{}.mmd", args[0]));
+        std::fs::write(&file, &diagram).unwrap();
+        let out = Command::new("node")
+            .arg("mermaid/check.mjs")
+            .arg(&file)
+            .current_dir("tests")
+            .output()
+            .expect("node");
+        assert!(
+            out.status.success(),
+            "`axon {}` does not parse:\n{}{}\n{diagram}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 /// The picture is a projection like any other, and a projection nobody
 /// verifies drifts. `--frames` renders through ratatui's own test backend, so
 /// this looks at exactly what a person sees.
