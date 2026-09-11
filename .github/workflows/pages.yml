@@ -24,7 +24,7 @@ jobs:
       name: github-pages
       url: ${{ steps.pages.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with: { fetch-depth: 0 }   # the tags are the source of the versions
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2

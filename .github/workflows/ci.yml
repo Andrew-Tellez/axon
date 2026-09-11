@@ -13,7 +13,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with: { components: clippy, rustfmt }
       - uses: Swatinem/rust-cache@v2
@@ -39,7 +39,7 @@ jobs:
     # real causal chain matches the one the manifest declares.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
@@ -52,7 +52,7 @@ jobs:
     # a public repo to satisfy a linter is worse than the inconsistency.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with: { fetch-depth: 0 }
       - uses: taiki-e/install-action@v2
         with: { tool: cocogitto }
