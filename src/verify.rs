@@ -1142,6 +1142,30 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                  the token accepts one minted by anybody"
             ));
         }
+        // Where the keys come from is as much of the verification as the
+        // algorithm. Over plaintext, whoever sits on the path serves their own
+        // key set and from then on mints tokens this service accepts: the
+        // signature checks out, against the wrong keys. Same for the
+        // introspection endpoint, whose ANSWER is the decision. `localhost` is
+        // the exception the local target needs, and it is not on anybody's
+        // path.
+        for (field, url) in [
+            ("jwks_uri", a.jwks_uri.as_deref()),
+            ("introspection_url", a.introspection_url.as_deref()),
+        ] {
+            let Some(url) = url else { continue };
+            let local = url.starts_with("http://localhost")
+                || url.starts_with("http://127.0.0.1")
+                || url.starts_with("http://[::1]");
+            if url.starts_with("http://") && !local {
+                errors.push(format!(
+                    "{svc}: `[auth] {field}` is plaintext http. Whoever sits on the path \
+                     serves their own keys and mints tokens this service accepts —the \
+                     signature checks out, against the wrong key set— and nothing looks \
+                     broken while it happens"
+                ));
+            }
+        }
         for alg in &a.algorithms {
             if WEAK_ALGORITHMS.contains(&alg.as_str()) {
                 errors.push(format!(

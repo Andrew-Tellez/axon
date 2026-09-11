@@ -9325,6 +9325,28 @@ fn the_auth_block_refuses_what_fails_open() {
     assert!(!ok);
     assert!(err.contains("nothing to fetch the keys from"), "{err}");
 
+    // where the keys come from is as much of the verification as the
+    // algorithm: over plaintext, whoever sits on the path serves their own key
+    // set and the signature checks out against the wrong keys
+    let (_, err, ok) = check(&good.replace("https://a/j", "http://a/j"));
+    assert!(!ok, "a key set over plaintext http passes: {err}");
+    assert!(err.contains("plaintext http"), "{err}");
+    // the same for the endpoint whose ANSWER is the decision
+    let (_, err, ok) = check(
+        &good
+            .replace("verify = \"jwks\"", "verify = \"introspection\"")
+            .replace(
+                "jwks_uri = \"https://a/j\"",
+                "introspection_url = \"http://a/i\"",
+            ),
+    );
+    assert!(!ok, "an introspection over plaintext http passes: {err}");
+    assert!(err.contains("plaintext http"), "{err}");
+    // and `localhost` is the exception the local target needs: it is not on
+    // anybody's path, and refusing it would mean the demo cannot run
+    let (_, err, ok) = check(&good.replace("https://a/j", "http://localhost:8080/j"));
+    assert!(ok, "the local key set is refused: {err}");
+
     // What it does NOT refuse, on purpose: three adversarial reviews of the
     // design agreed that a per-service `audience` uniqueness rule breaks Auth0
     // (one API identifier for several services) and Cognito (access tokens

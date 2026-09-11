@@ -110,6 +110,7 @@ What is refused, and why each one has no symptom:
 | `tenant_column` and no `tenant_claim` | the tenant the RLS binds to would come from the request instead of the token, which is the caller choosing whose rows to read |
 | two claim names that are the same | one of the two is reading the wrong thing, and nothing at runtime says which |
 | `jwks` with no `jwks_uri` | it typechecks and cannot boot |
+| a `jwks_uri` or an `introspection_url` over plaintext `http://` | where the keys come from is as much of the verification as the algorithm: whoever sits on the path serves their own key set and from then on mints tokens the service accepts. The signature checks out, against the wrong keys, and nothing looks broken while it happens. `localhost` is the exception the local target needs |
 | two services reading the same claim from different places | it is the same token: one of them gets nothing, and an empty scope list is a 403 that reads as a permissions problem |
 
 And what is **not** refused, on purpose. Three adversarial reviews of this design agreed
