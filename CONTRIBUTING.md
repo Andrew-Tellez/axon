@@ -71,7 +71,9 @@ of its ecosystem.** The TypeScript goes through `tsc --strict`, the Go through `
 the Terraform through `terraform validate` with the real providers, the testkit through
 `node --test` against the example service, the five diagrams through **mermaid itself**,
 the OpenAPI through **`redocly lint --extends=spec`** —conformance, not Redocly's
-taste— and the RLS is applied to a real Postgres to check that it isolates.
+taste—, the Kubernetes manifests through **kubeconform** with the CRDs' own schemas,
+the flagd configuration against **flagd's published schema**, and the RLS is applied to
+a real Postgres to check that it isolates.
 
 The two that run on Node need their dependencies, like the example's `tsc` does:
 
@@ -79,11 +81,15 @@ The two that run on Node need their dependencies, like the example's `tsc` does:
 cd tests/js && npm i
 ```
 
-and the same file checks a diagram by hand, before pasting it anywhere:
+and the same files check one by hand, before pasting it anywhere:
 
 ```sh
 axon classes . | node tests/js/mermaid.mjs
+axon flags .   | node tests/js/flagd.mjs
 ```
+
+flagd's schema is vendored in `tests/js/schemas/`, so the test has an opinion with no
+network. Refresh it from `https://flagd.dev/schema/v0/` when flagd publishes a new one.
 
 This is not zeal: the first three generators produced invalid output and the suite did
 not see it, because axon was only ever verified against itself.

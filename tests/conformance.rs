@@ -6710,6 +6710,91 @@ restore = "off"
     assert!(out.contains("0 of 1 rules propose"), "{out}");
 }
 
+/// The flagd configuration, against flagd's OWN schema.
+///
+/// flagd has no linter to shell out to, but it publishes the schema, and a
+/// JSON that parses is not a configuration flagd accepts: a `defaultVariant`
+/// that names nothing, a variant of the wrong type or a state that is not
+/// `ENABLED`/`DISABLED` are all valid JSON and a provider that starts empty —
+/// every flag falling back to its code default, which is the failure that
+/// looks like nothing happening.
+///
+/// The schema is vendored in `tests/js/schemas/`: a test that needs the
+/// network to have an opinion has no opinion on a plane.
+#[test]
+fn the_flagd_config_is_one_flagd_accepts() {
+    if !has("node") || !std::path::Path::new("tests/js/node_modules").exists() {
+        eprintln!("salteado: falta node o `npm i` en tests/js");
+        return;
+    }
+    let (flags, err, ok) = axon(&["flags", "examples"]);
+    assert!(ok, "{err}");
+    let file = std::env::temp_dir().join("axon-flagd.json");
+    std::fs::write(&file, &flags).unwrap();
+    let out = Command::new("node")
+        .arg("js/flagd.mjs")
+        .arg(&file)
+        .current_dir("tests")
+        .output()
+        .expect("node");
+    assert!(
+        out.status.success(),
+        "flagd would not accept it:\n{}{}\n{flags}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The Kubernetes manifests, read by a tool that knows the schemas.
+///
+/// 33 resources, and what the suite asserted about them was that certain
+/// strings appear. A `kind` that does not exist, a field in the wrong place or
+/// an `apiVersion` that moved are all invisible to a grep and fatal to
+/// `kubectl apply`. Nine of them are CRDs —Gateway API's `HTTPRoute`, Knative's
+/// `Trigger` and `Broker`— which is exactly where a hand-written YAML drifts,
+/// so their schemas are fetched too instead of being skipped.
+#[test]
+fn the_kubernetes_manifests_are_valid() {
+    let (yml, err, ok) = axon(&["infra", "examples", "--target", "k8s"]);
+    assert!(ok, "{err}");
+    if !has("docker") {
+        eprintln!("salteado: falta docker");
+        return;
+    }
+    let file = std::env::temp_dir().join("axon-k8s.yml");
+    std::fs::write(&file, &yml).unwrap();
+    let out = Command::new("docker")
+        .args(["run", "--rm", "-i", "ghcr.io/yannh/kubeconform:latest", "-strict", "-summary"])
+        .args([
+            "-schema-location",
+            "default",
+            "-schema-location",
+            // the CRDs, from the catalogue their own projects publish
+            "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json",
+        ])
+        .stdin(std::process::Stdio::from(std::fs::File::open(&file).unwrap()))
+        .output()
+        .expect("docker run kubeconform");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // no network, no verdict: saying it passed would be the lie this suite
+    // does not tell
+    if printed.contains("no such host") || printed.contains("dial tcp") {
+        eprintln!("salteado: sin red para los esquemas");
+        return;
+    }
+    assert!(out.status.success(), "the manifests are not valid:\n{printed}");
+    // and nothing went through unchecked: a skipped resource is a resource
+    // nobody validated, reported as a success
+    assert!(
+        printed.contains("Skipped: 0"),
+        "a resource has no schema and went unchecked:\n{printed}"
+    );
+}
+
 /// The document, read by a tool that reads OpenAPI and not JSON.
 ///
 /// `--extends=spec` and not the default ruleset: what is asserted is

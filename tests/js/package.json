@@ -4,6 +4,8 @@
   "type": "module",
   "dependencies": {
     "@redocly/cli": "^2.52.1",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "jsdom": "^26",
     "mermaid": "^11"
   }
