@@ -7,6 +7,62 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.28.0] — 2026-09-10
+
+### Añadido
+
+- **`axon verify` exige las dos tablas que axon nombra por su cuenta.** `outbox` e
+  `inbox_seen` no son una convención que alguien pueda renombrar: la regla de inquilino
+  las exime por ese nombre exacto, el pooler reserva conexiones para el relevo que drena
+  `outbox`, y `rls` las deja fuera de las políticas. Aun así, declarar `[patterns] outbox
+  = true` y no escribir la migración pasaba limpio. Es la única combinación que aplica sin
+  un error y revienta en el primer insert, en el camino cuya razón de existir es que
+  ningún evento se pierda; con `[consumes.*]` y sin `inbox_seen` es peor, porque el broker
+  entrega al menos una vez y el handler corre de nuevo en cada reentrega sin nada que diga
+  que ya pasó. Un servicio sin `[infra] state` no tiene migraciones que mirar y no se le
+  pide ninguna de las dos. La plantilla de `axon init` lo prometía desde la versión
+  anterior; ahora es cierto.
+- **El dibujo de `axon tui` dice qué significan sus propias etiquetas.** `[AP]` junto a un
+  nodo se lee como un estado —algo arriba, algo sano— cuando es una decisión sobre qué
+  hace el servicio durante una partición. Va una leyenda en el borde inferior del grafo, y
+  en el panel, junto a cada servicio, los dos campos declarados en palabras: `AP ·
+  eventual ≤3000ms · degrades`. Cada mitad sale de un campo distinto a propósito, porque
+  el par puede ser contradictorio y una frase construida de ambos se leería como absurdo
+  en vez de mostrarlo.
+
+### Corregido
+
+- **Todo esquema de warehouse creaba las tablas en la base equivocada.** `axon analytics`
+  entrecomillaba el par entero —`"dataset.tabla"`—, que es UN identificador que por
+  casualidad tiene un punto. En BigQuery la forma con backticks significa las dos cosas,
+  así que se leía bien mientras nadie lo aplicara en otro lado. Medido contra un ClickHouse
+  24: `CREATE TABLE "bench.demo"` aterriza en `default` bajo el nombre literal
+  `bench.demo`, y `SELECT FROM bench.demo` contesta `UNKNOWN_TABLE`. El esquema aplica
+  limpio y el dataset al que apuntaba queda vacío, que es exactamente el desenlace que
+  `[analytics] warehouse` existe para evitar. Los once puntos de llamada pasan por
+  `qualify`, que entrecomilla cada mitad por separado.
+- **`axon graph` moría al parsear en las líneas que nombran los eventos.** Un evento se
+  llama `order.placed@v1`, y mermaid 11 estrenó ids de arista y metadatos de nodo con `@`
+  (`e1@-->`, `A@{...}`): el `@` sin comillas dejó de ser texto. Va entrecomillado todo el
+  texto libre —etiquetas de arista y el nombre de cada nodo—, que de paso deja pasar un
+  punto, una llave o una barra. Los otros cuatro diagramas ya parseaban.
+- **La OpenAPI no declaraba los parámetros de sus propias rutas.** Cada ruta con plantilla
+  salía sin un solo `parameters`. No es un documento incompleto: el spec exige un objeto
+  por plantilla, cualquier validador lo rechaza —22 errores de `redocly lint` sobre un
+  repo de cinco servicios— y un cliente generado se queda con un método cuyo id no tiene
+  dónde ir. El tipo sale de `in`, que es donde el placeholder ya estaba declarado.
+- **`axon import openapi` escribía un manifiesto que no parsea.** `{tenantId}` es
+  parámetro de ruta Y propiedad del cuerpo: así se ve un documento bien formado. El
+  importador los sumaba sin más y escribía una clave duplicada, que no es TOML. Para axon
+  es un campo solo —`in` dice qué necesita el método, no cómo viaja— y gana el primero. Es
+  la mitad opuesta del arreglo anterior: las dos se separan solas, así que ahora hay un
+  test del viaje redondo en vez de uno por mitad.
+- **Lo que la herramienta genera habla un solo idioma.** Un diagrama de secuencia que
+  contestaba `respuesta`, un ER comentado `%% servicio:`, una NetworkPolicy que decía
+  `# nadie` y un warehouse vacío que explicaba `Ningun servicio exporta eventos`. El
+  código piensa en español y eso es asunto de este repo; el archivo que lee otra persona
+  no.
+
 ## [0.27.0] — 2026-09-10
 
 ### Añadido
