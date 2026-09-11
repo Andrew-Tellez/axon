@@ -2,7 +2,6 @@ service = "checkout"
 owner = "commerce-team"
 tier = "1"
 version = "1.0.0"
-transport = "pubsub"
 
 # The only method: it starts the saga. Everything else is done by the generated
 # coordinator.

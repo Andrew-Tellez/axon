@@ -2,7 +2,7 @@
 
 `axon.policy.toml`, versioned alongside the code:
 
-```toml
+```toml,no-verify
 require_owner          = true
 require_tier           = true
 allowed_event_prefixes = ["order", "payment", "billing"]

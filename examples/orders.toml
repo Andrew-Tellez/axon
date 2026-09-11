@@ -3,7 +3,6 @@ owner = "commerce-team"
 tier = "1"
 pii = ["customer_email"]
 version = "2.0.0"
-transport = "pubsub"
 
 [emits."order.placed@v1"]
 orderId = "uuid"

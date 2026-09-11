@@ -1,7 +1,7 @@
 # Servicio externo: descubierto desde su OpenAPI, congelado aqui como contrato.
+# Origen: https://api.stripe.com/openapi.json
 service = "stripe"
 external = true
-discovered_from = "https://api.stripe.com/openapi.json"
 
 [methods."charges.create"]
 idempotent = true

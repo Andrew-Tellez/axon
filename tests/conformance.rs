@@ -9939,8 +9939,7 @@ fn go_scopes_without_errors_still_compile() {
     let manifest = dir.join("s.toml");
     std::fs::write(
         &manifest,
-        "service = \"inventory\"\nowner = \"inv-team\"\ntier = \"1\"\nversion = \"1.0.0\"\n\
-         transport = \"pubsub\"\n\n\
+        "service = \"inventory\"\nowner = \"inv-team\"\ntier = \"1\"\nversion = \"1.0.0\"\n\n\
          [methods.listProduct]\nhttp = \"GET /v1/products\"\nauth = \"required\"\n\
          scopes = [\"inventory:read\"]\nin = { tenantId = \"string\" }\nout = { cursor = \"string\" }\n",
     )
@@ -9985,8 +9984,7 @@ fn the_ci_gate_regenerates_every_contract_the_repo_keeps() {
     std::fs::write(dir.join("sql/payments/001_init.sql"), "select 1;\n").unwrap();
     std::fs::write(
         dir.join("manifests/payments.toml"),
-        "service = \"payments\"\nowner = \"pay-team\"\ntier = \"0\"\nversion = \"1.0.0\"\n\
-         transport = \"pubsub\"\n\n\
+        "service = \"payments\"\nowner = \"pay-team\"\ntier = \"0\"\nversion = \"1.0.0\"\n\n\
          [infra]\nmigrations = \"../sql/payments\"\n\n\
          [methods.capturePayment]\nhttp = \"POST /v1/payments\"\nauth = \"required\"\n\
          in = { orderId = \"uuid\" }\nout = { paymentId = \"uuid\" }\n",

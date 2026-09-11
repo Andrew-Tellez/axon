@@ -2,7 +2,6 @@ service = "payments"
 owner = "payments-team"
 tier = "0"
 version = "1.2.0"
-transport = "pubsub"
 
 # El manifiesto partido por feature. Cada entrada es un archivo o un directorio;
 # un directorio son todos sus *.toml, ordenados, asi que agregar una feature es

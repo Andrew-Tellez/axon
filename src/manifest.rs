@@ -1563,7 +1563,14 @@ impl View {
     }
 }
 
+/// A key the model does not know is refused instead of ignored. Ignoring it is
+/// the worst of the three outcomes: `transport = "nats"` at the top of a
+/// manifest looks declared, reads like a decision in a review, and does
+/// nothing. The cost is that a manifest written for a newer axon fails on an
+/// older one, which is the same deal every schema makes and is a better failure
+/// than a silent one.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub service: String,
     pub version: Option<String>,

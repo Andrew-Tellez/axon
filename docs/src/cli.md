@@ -411,7 +411,7 @@ step with a note: that part your team knows, not axon.
 The **repo layout** comes from `[ci]` in `axon.policy.toml`, where `{service}` is
 substituted with the service's name:
 
-```toml
+```toml,no-verify
 [ci]
 manifests_dir  = "manifests"
 service_dir    = "services/{service}"
