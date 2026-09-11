@@ -6710,6 +6710,38 @@ restore = "off"
     assert!(out.contains("0 of 1 rules propose"), "{out}");
 }
 
+/// The document, read by a tool that reads OpenAPI and not JSON.
+///
+/// `--extends=spec` and not the default ruleset: what is asserted is
+/// CONFORMANCE, not Redocly's taste. A missing `summary` is a style opinion
+/// and does not belong in a test that has to stay believable; a path template
+/// with no parameter object is the spec, and it is what shipped —22 errors on
+/// a five-service repo— while every assert here passed, because they all read
+/// the JSON and none of them read the document.
+#[test]
+fn the_openapi_is_a_valid_openapi() {
+    let redocly = std::path::Path::new("tests/js/node_modules/.bin/redocly");
+    if !redocly.exists() {
+        eprintln!("salteado: falta `npm i` en tests/js");
+        return;
+    }
+    let (api, err, ok) = axon(&["openapi", "examples"]);
+    assert!(ok, "{err}");
+    let file = std::env::temp_dir().join("axon-openapi.json");
+    std::fs::write(&file, &api).unwrap();
+    let out = Command::new(redocly.canonicalize().unwrap())
+        .args(["lint", "--extends=spec"])
+        .arg(&file)
+        .output()
+        .expect("redocly");
+    assert!(
+        out.status.success(),
+        "the document is not valid OpenAPI:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// The five diagrams, parsed by mermaid ITSELF.
 ///
 /// The rule of this suite is that a generator is verified with the real tool
@@ -6720,15 +6752,14 @@ restore = "off"
 /// edge-id syntax— and every assert here was green, because they were all
 /// looking at axon and none at mermaid.
 ///
-/// `tests/mermaid/check.mjs` is the same file a person runs by hand before
+/// `tests/js/mermaid.mjs` is the same file a person runs by hand before
 /// pasting a diagram anywhere:
 ///
-///   axon classes . | node tests/mermaid/check.mjs
+///   axon classes . | node tests/js/mermaid.mjs
 #[test]
 fn the_diagrams_parse_with_mermaid() {
-    let dir = std::path::Path::new("tests/mermaid");
-    if !has("node") || !dir.join("node_modules").exists() {
-        eprintln!("salteado: falta node o `npm i` en tests/mermaid");
+    if !has("node") || !std::path::Path::new("tests/js/node_modules").exists() {
+        eprintln!("salteado: falta node o `npm i` en tests/js");
         return;
     }
     for args in [
@@ -6743,7 +6774,7 @@ fn the_diagrams_parse_with_mermaid() {
         let file = std::env::temp_dir().join(format!("axon-mermaid-{}.mmd", args[0]));
         std::fs::write(&file, &diagram).unwrap();
         let out = Command::new("node")
-            .arg("mermaid/check.mjs")
+            .arg("js/mermaid.mjs")
             .arg(&file)
             .current_dir("tests")
             .output()

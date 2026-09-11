@@ -70,18 +70,19 @@ fail — I did that, and pushed nine red tests.
 of its ecosystem.** The TypeScript goes through `tsc --strict`, the Go through `go vet`,
 the Terraform through `terraform validate` with the real providers, the testkit through
 `node --test` against the example service, the five diagrams through **mermaid itself**,
-and the RLS is applied to a real Postgres to check that it isolates.
+the OpenAPI through **`redocly lint --extends=spec`** —conformance, not Redocly's
+taste— and the RLS is applied to a real Postgres to check that it isolates.
 
-The mermaid one needs its dependencies, like the example's `tsc` does:
+The two that run on Node need their dependencies, like the example's `tsc` does:
 
 ```sh
-cd tests/mermaid && npm i
+cd tests/js && npm i
 ```
 
 and the same file checks a diagram by hand, before pasting it anywhere:
 
 ```sh
-axon classes . | node tests/mermaid/check.mjs
+axon classes . | node tests/js/mermaid.mjs
 ```
 
 This is not zeal: the first three generators produced invalid output and the suite did

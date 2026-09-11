@@ -1,8 +1,9 @@
 {
-  "name": "axon-mermaid-check",
+  "name": "axon-external-validators",
   "private": true,
   "type": "module",
   "dependencies": {
+    "@redocly/cli": "^2.52.1",
     "jsdom": "^26",
     "mermaid": "^11"
   }
