@@ -39,8 +39,13 @@ seed() {
                 (generateUUIDv4(), 'order.placed@v1', 'rules-demo',
                  now() - INTERVAL $1 DAY, generateUUIDv4(), generateUUIDv4(), $2, 'USD')"
 }
+# Las DOS etiquetas, no solo la propia: `check-apply.py` siembra con la suya, y
+# una corrida que murio a la mitad deja esas filas ahi. Borrando solo
+# `rules-demo`, la siguiente corrida las suma en los mismos dias y los importes
+# salen al doble —una caida deja de parecer una caida, y el fallo acusa a la
+# regla en vez de al residuo.
 wipe() {
-  ch -q "ALTER TABLE axon.order_placed_v1 DELETE WHERE source = 'rules-demo' SETTINGS mutations_sync = 2"
+  ch -q "ALTER TABLE axon.order_placed_v1 DELETE WHERE source IN ('rules-demo','apply-demo') SETTINGS mutations_sync = 2"
 }
 evaluate() {
   ch --multiquery --format TSV < .axon/rules.sql > .axon/rules.tsv
