@@ -7,6 +7,42 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.28.1] — 2026-09-11
+
+### Corregido
+
+- **Sin fuentes, el directorio actual.** Leer nada era una respuesta, y la peor: `axon
+  verify` sin argumento encontraba `axon.baseline.json` —que vive en ese mismo
+  directorio— y concluía que habían borrado todos los eventos y métodos publicados. Diez
+  errores y exit 1 sobre un repo donde no pasa nada. `graph` contestaba `graph LR` a
+  secas, `discover` contestaba `{}` y `pact` decía que el proveedor no tiene manifiesto:
+  cuatro veredictos sobre el proyecto, cuando lo que pasaba es que nadie dijo dónde
+  mirar. La mitad del comando ya defaulteaba a `.` —de ahí salía el baseline— y la otra
+  mitad no. `build` y `test` no cambian: ahí una lista vacía significa «sin pares».
+- **Dos servicios con una tabla del mismo nombre son dos tablas en `axon er`.** Una base
+  por servicio significa que `orders` y `notifier` tienen cada uno su `inbox_seen`, y
+  nombradas por la tabla sola son UNA entidad para mermaid: las une y dibuja las columnas
+  dos veces, así que el dibujo describe un esquema que nadie tiene. El id lleva el
+  servicio —`ORDERS_INBOX_SEEN`— y el alias mantiene el nombre legible,
+  `["orders.inbox_seen"]`, que es además lo único que dice en qué base vive cada tabla:
+  el `%% service:` que ya estaba es un comentario, y un comentario no se renderiza.
+- **El `demo.sh` del ejemplo, verde otra vez.** El arreglo del dataset de 0.28.0 dejó el
+  esquema como `"@dataset"."tabla"` y tres scripts lo sustituían con un `sed` que
+  matcheaba la forma vieja. El `sed` dejó de sustituir en silencio, el `@dataset`
+  sobrevivió y ClickHouse contestó con un error de sintaxis que no nombra lo que se
+  rompió; ahora hay un guardia en los tres que falla ahí mismo.
+
+### Pruebas
+
+- **Los cinco diagramas pasan por mermaid, la OpenAPI por `redocly lint --extends=spec`,
+  los 33 recursos de `--target k8s` por kubeconform con los esquemas de sus CRDs, y las
+  banderas por el esquema publicado de flagd.** Eran los cuatro generadores que se
+  verificaban contra su propio golden, y un golden dice que el texto no cambió, no que el
+  texto sirva: `axon graph` vivió una versión entera muriendo al parsear y la OpenAPI
+  salió con 22 errores de spec, con todos los asserts en verde. `tests/js/mermaid.mjs` y
+  `tests/js/flagd.mjs` son los mismos archivos que se corren a mano antes de pegar algo
+  en cualquier lado.
+
 ## [0.28.0] — 2026-09-10
 
 ### Añadido
