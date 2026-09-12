@@ -7,7 +7,7 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
-## [No publicado]
+## [0.34.0] — 2026-09-12
 
 ### Añadido
 
