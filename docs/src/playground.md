@@ -8,6 +8,11 @@ Two services and one migration. They are clean —zero errors, zero warnings— 
 to learn what axon checks is to **break them**. Each button breaks exactly one thing; the
 rule that fires is the lesson. The editor is yours too.
 
+The diagram under the editor is `axon graph`, redrawn as you type. It is not decoration
+and nobody maintains it: it comes out of the same manifests the report is about, which is
+the whole argument —an architecture diagram drawn by hand is a diagram that is already
+wrong.
+
 <div class="pg">
   <div class="pg-bar">
     <span id="pg-ex"></span>
@@ -16,6 +21,8 @@ rule that fires is the lesson. The editor is yours too.
   <p id="pg-hint" class="pg-hint"></p>
   <div class="pg-tabs" id="pg-tabs"></div>
   <textarea id="pg-src" spellcheck="false" rows="24"></textarea>
+  <p class="pg-head">the topology · what the manifests say, drawn</p>
+  <div id="pg-graph" class="pg-graph"></div>
   <p class="pg-head">the report · <span id="pg-count">compiling…</span></p>
   <ul id="pg-out"><li>loading the compiler…</li></ul>
 </div>

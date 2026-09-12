@@ -7,6 +7,18 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [No publicado]
+
+### Añadido
+
+- **La topología, dibujada, debajo del editor del playground.** Es `axon graph` —el mismo
+  mermaid, comprobado contra la salida de la terminal sobre los mismos manifiestos— y se
+  redibuja mientras escribes. Que salga de ahí es el argumento entero: un diagrama de
+  arquitectura dibujado a mano ya está equivocado. Y le da consecuencia visual a los
+  ejercicios: al quitar el consumidor, la flecha que entraba a `notifier` desaparece y el
+  evento se queda colgando en el dibujo a la vez que salta `has no consumers`. Cuesta 50
+  KB comprimidos, porque `emit` tampoco toca el disco.
+
 ## [0.31.0] — 2026-09-12
 
 ### Añadido

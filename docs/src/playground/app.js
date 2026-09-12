@@ -3,7 +3,7 @@
 // No server behind it and no prerecorded output. `axon.js` and `axon_bg.wasm`
 // are the same `verify` that runs in the terminal, compiled to wasm: what the
 // page says is what CI would say.
-import init, { verify } from "./axon.js";
+import init, { verify, graph } from "./axon.js";
 
 const FILES = {
   "orders.toml": `service = "orders"
@@ -122,6 +122,7 @@ let active = "orders.toml";
 const $ = (id) => document.getElementById(id);
 
 function run() {
+  draw();
   const out = $("pg-out");
   let report;
   try {
@@ -146,6 +147,26 @@ function run() {
     `<li class="pg-${kind}"><b>${kind === "e" ? "error" : "warn"}</b> ${escape_(text)}</li>`;
   out.innerHTML =
     errors.map((e) => item("e", e)).join("") + warnings.map((w) => item("w", w)).join("");
+}
+
+// The same `axon graph` as the terminal: the event topology as mermaid, drawn
+// by the mermaid the book already loads for every other page.
+let drawn = "";
+let seq = 0;
+async function draw() {
+  const code = graph(JSON.stringify(Object.entries(FILES)));
+  // redrawing the identical thing flickers for nothing, and this runs on
+  // every keystroke
+  if (!code || code === drawn || !window.mermaid) return;
+  drawn = code;
+  try {
+    const { svg } = await window.mermaid.render(`pg-svg-${seq++}`, code);
+    $("pg-graph").innerHTML = svg;
+  } catch {
+    // a half-typed manifest makes a graph mermaid will not take: the last good
+    // one stays, which is more use than a hole
+    drawn = "";
+  }
 }
 
 function escape_(s) {
@@ -207,4 +228,8 @@ function wire() {
 init().then(() => {
   wire();
   run();
+  // the book loads mermaid as a classic script, so it is there before this
+  // module runs — but if it ever is not, the diagram would stay blank until
+  // the first keystroke, and that reads as a broken page
+  if (!window.mermaid) window.addEventListener("load", draw, { once: true });
 });

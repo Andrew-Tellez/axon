@@ -60,3 +60,5 @@ select.axon-versions {
 #pg-out li.pg-w { border-color: #b8860b; }
 #pg-out li.pg-ok { border-color: #2f8f4e; }
 #pg-out li b { text-transform: uppercase; font-size: 0.8em; letter-spacing: 0.05em; opacity: 0.8; }
+.pg-graph { margin: 6px 0 0; overflow-x: auto; }
+.pg-graph svg { max-width: 100%; height: auto; }
