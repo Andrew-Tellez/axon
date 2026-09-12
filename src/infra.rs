@@ -2563,9 +2563,14 @@ services:
 ",
     );
     if !p.buckets.is_empty() {
+        // quay.io and a pinned tag: MinIO withdrew `minio/minio` and `minio/mc`
+        // from Docker Hub, and these two were the only images here on `latest`.
+        // A `latest` that disappears breaks the demo of a version that was
+        // green when it shipped, and the error —`pull access denied`— says
+        // nothing about what happened.
         o.push_str(
             "  objetos:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: [\"server\", \"/data\", \"--console-address\", \":9001\"]
     environment: { MINIO_ROOT_USER: local, MINIO_ROOT_PASSWORD: locallocal }
     ports: [\"${AXON_S3_PORT:-9000}:9000\", \"${AXON_S3_CONSOLE_PORT:-9001}:9001\"]
@@ -2575,7 +2580,7 @@ services:
       retries: 30
 ",
         );
-        o.push_str("  crear-buckets:\n    image: minio/mc:latest\n    depends_on: { objetos: { condition: service_healthy } }\n    entrypoint: >\n      /bin/sh -c \"mc alias set local http://objetos:9000 local locallocal");
+        o.push_str("  crear-buckets:\n    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z\n    depends_on: { objetos: { condition: service_healthy } }\n    entrypoint: >\n      /bin/sh -c \"mc alias set local http://objetos:9000 local locallocal");
         for b in &p.buckets {
             o.push_str(&format!(
                 " && mc mb -p local/{}",

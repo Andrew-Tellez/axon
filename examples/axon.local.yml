@@ -323,7 +323,7 @@ services:
       interval: 2s
       retries: 30
   objetos:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: ["server", "/data", "--console-address", ":9001"]
     environment: { MINIO_ROOT_USER: local, MINIO_ROOT_PASSWORD: locallocal }
     ports: ["${AXON_S3_PORT:-9000}:9000", "${AXON_S3_CONSOLE_PORT:-9001}:9001"]
@@ -332,7 +332,7 @@ services:
       interval: 2s
       retries: 30
   crear-buckets:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on: { objetos: { condition: service_healthy } }
     entrypoint: >
       /bin/sh -c "mc alias set local http://objetos:9000 local locallocal && mc mb -p local/local-payments-receipts && mc mb -p local/local-payments-assets"

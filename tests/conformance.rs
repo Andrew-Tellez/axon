@@ -1457,8 +1457,14 @@ fn the_edge_and_the_buckets_come_from_the_plan() {
     let (l, _, _) = axon(&["infra", "examples", "--target", "local"]);
     assert!(l.contains("BUCKET_RECEIPTS: local-payments-receipts"));
     assert!(
-        l.contains("image: minio/minio:latest"),
+        l.contains("image: quay.io/minio/minio:RELEASE."),
         "local with no object storage"
+    );
+    // an image on `latest` is an image that can disappear under a version that
+    // already shipped, which is what `minio/*` did on Docker Hub
+    assert!(
+        !l.contains(":latest"),
+        "an image with no pinned tag in the local compose:\n{l}"
     );
 }
 
