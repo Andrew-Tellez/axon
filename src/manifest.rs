@@ -1857,6 +1857,17 @@ fn included(m: &Manifest) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
+/// A manifest from text, with no disk under it: what `load` is minus the file
+/// and its `include`s. It is what lets the compiler run where there is no
+/// filesystem —a browser— over a manifest somebody is typing.
+pub fn parse(text: &str, origin: &str) -> Result<Manifest, String> {
+    let mut m: Manifest = toml::from_str(text).map_err(|e| format!("{origin}: {e}"))?;
+    m.cap.declared = text.contains("[cap]");
+    m.origin = PathBuf::from(origin);
+    expand(&mut m)?;
+    Ok(m)
+}
+
 pub fn load(path: &Path) -> Result<Manifest, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut m: Manifest = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1936,6 +1947,7 @@ pub fn discover(sources: &[String]) -> Result<Vec<Manifest>, String> {
             } else {
                 format!("{}/.well-known/axon.json", s.trim_end_matches('/'))
             };
+            #[cfg(feature = "http")]
             match ureq::get(&url)
                 .timeout(std::time::Duration::from_secs(5))
                 .call()
@@ -1948,6 +1960,13 @@ pub fn discover(sources: &[String]) -> Result<Vec<Manifest>, String> {
                 // a service that is down does not break discovery
                 Err(e) => eprintln!("axon: {url}: {e}"),
             }
+            // The build without `http` —the one that runs in a browser— has no
+            // sockets. Saying so beats a URL that silently discovers nothing.
+            #[cfg(not(feature = "http"))]
+            return Err(format!(
+                "{url}: this build has no HTTP; a peer that serves its own manifest is \
+                 read by the CLI, not from here"
+            ));
         } else {
             let p = Path::new(s);
             if p.is_dir() {
@@ -2397,6 +2416,58 @@ pub fn migrations_of(m: &Manifest) -> Vec<PathBuf> {
 /// The schema IS the sum of the migrations folded in order. There is no
 /// duplicated schema.sql to drift.
 pub fn schemas(manifests: &[Manifest]) -> IndexMap<String, Tables> {
+    // In a browser there is no directory to walk: the migrations arrive as text
+    // alongside the manifests. Reading them is not optional —half of what the
+    // rules buy is checking a CRUD against a column that has to exist— so the
+    // door is the same one, with the files coming from memory.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut out = IndexMap::new();
+        for m in manifests {
+            let Some(dir) = &m.infra.migrations else {
+                continue;
+            };
+            let dir = dir.trim_start_matches("./").trim_end_matches('/');
+            let mut files: Vec<(String, String)> = memory::sql()
+                .into_iter()
+                .filter(|(name, _)| name.starts_with(dir))
+                .collect();
+            if files.is_empty() {
+                continue;
+            }
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut tables = Tables::new();
+            for (name, text) in files {
+                parse_ddl(&text, &name, &mut tables);
+            }
+            out.insert(m.service.clone(), tables);
+        }
+        return out;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        schemas_from_disk(manifests)
+    }
+}
+
+/// What the host handed over, for the builds with no filesystem under them.
+#[cfg(target_arch = "wasm32")]
+pub mod memory {
+    use std::cell::RefCell;
+    thread_local! {
+        static SQL: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    }
+    /// The `*.sql` of the workspace, by the path they would have on disk.
+    pub fn set_sql(files: Vec<(String, String)>) {
+        SQL.with(|s| *s.borrow_mut() = files);
+    }
+    pub fn sql() -> Vec<(String, String)> {
+        SQL.with(|s| s.borrow().clone())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn schemas_from_disk(manifests: &[Manifest]) -> IndexMap<String, Tables> {
     let mut out = IndexMap::new();
     for m in manifests {
         let files = migrations_of(m);
@@ -2517,6 +2588,11 @@ mod pii {
 /// shifted to an era starting in March, and there the month pattern is
 /// regular. A whole dependency to compare two dates would be too much.
 pub fn today() -> (i64, i64, i64) {
+    // `SystemTime::now` is not a clock in a browser: it panics. The date there
+    // comes from the host, which is the only one that has one.
+    #[cfg(target_arch = "wasm32")]
+    let days = (js_sys::Date::now() / 86_400_000.0) as i64;
+    #[cfg(not(target_arch = "wasm32"))]
     let days = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64 / 86_400)

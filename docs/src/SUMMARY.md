@@ -5,6 +5,7 @@
 
 # Getting started
 
+- [Playground](./playground.md)
 - [Install](./install.md)
 - [Your first manifest](./getting-started.md)
 - [Getting in without rewriting anything](./importing.md)

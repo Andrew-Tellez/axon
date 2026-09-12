@@ -12,10 +12,27 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "0.8", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
-ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+ureq = { version = "2", default-features = false, features = ["tls", "json"], optional = true }
 serde_yaml_ng = "0.10.0"
 sqlparser = "0.62.0"
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+# the browser's clock: `SystemTime::now` there is not a clock, it is a panic
+js-sys = { version = "0.3", optional = true }
+
+# The CLI is everything; what the features buy is a build that is NOT the CLI.
+# `wasm` drops the two crates that cannot exist in a browser —sockets and a
+# terminal— and leaves the compiler, which is the part that is pure anyway.
+[features]
+default = ["http", "tui"]
+http = ["dep:ureq"]
+tui = ["dep:ratatui"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+
+[lib]
+name = "axon"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [profile.release]
 strip = true

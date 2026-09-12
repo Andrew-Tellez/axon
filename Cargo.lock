@@ -112,6 +112,7 @@ version = "0.30.0"
 dependencies = [
  "clap",
  "indexmap",
+ "js-sys",
  "ratatui",
  "serde",
  "serde_json",
@@ -119,6 +120,7 @@ dependencies = [
  "sqlparser",
  "toml",
  "ureq",
+ "wasm-bindgen",
 ]
 
 [[package]]

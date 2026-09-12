@@ -46,6 +46,18 @@ jobs:
       - run: ./demo.sh
         working-directory: examples
 
+  wasm:
+    # The playground is the compiler itself, so what breaks it is a rule that
+    # starts reading the disk —there is none in a browser. That shows up here,
+    # on the change, and not in a Pages deploy after the merge.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "wasm32-unknown-unknown" }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --lib --target wasm32-unknown-unknown --no-default-features --features wasm
+
   commits:
     # The convention is checked only over the range this push or this PR brings:
     # the history from before adopting it is not conventional, and rewriting it in

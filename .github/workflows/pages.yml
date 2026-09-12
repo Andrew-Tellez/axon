@@ -27,12 +27,24 @@ jobs:
       - uses: actions/checkout@v5
         with: { fetch-depth: 0 }   # the tags are the source of the versions
       - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "wasm32-unknown-unknown" }
       - uses: taiki-e/install-action@v2
         # mdbook-mermaid is the preprocessor that turns the ` ```mermaid ` blocks
         # into diagrams. Without it `mdbook build` fails on the current book, and
         # an older tag —whose book.toml does not declare it— builds the same.
-        with: { tool: "mdbook,mdbook-mermaid" }
+        #
+        # wasm-bindgen is pinned: it refuses a `.wasm` built by a different
+        # version of the crate, and that is the right failure —loud, and naming
+        # both versions— but it has to be the one in Cargo.lock.
+        with: { tool: "mdbook,mdbook-mermaid,wasm-bindgen@0.2.128" }
       - uses: actions/configure-pages@v5
+
+      # The playground: the real compiler, compiled to wasm and served next to
+      # the book. It goes into `docs/src/`, which mdBook copies verbatim, so the
+      # build order is the only thing that matters —before `mdbook build`.
+      # The older tags do not have the page and do not need it.
+      - name: the compiler, for the page
+        run: sh docs/wasm.sh
 
       # The site is rebuilt whole from git on every deploy: the root is `main`
       # and each tag lives under its own prefix. No external state, no gh-pages

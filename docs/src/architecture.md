@@ -78,6 +78,7 @@ flowchart TB
   BASE --> VER
   ACC --> VER
   VER --> LSP["lsp.rs<br/><i>the same findings,<br/>inside the editor</i>"]
+  VER --> LIB["lib.rs<br/><i>the compiler without the CLI:<br/>what compiles to wasm</i>"]
   PLUG["plugin.rs<br/><i>axon-gen-* · axon-infra-*<br/>axon-check-*</i>"] --> VER
   EMIT -.-> PLUG
   INF -.-> PLUG

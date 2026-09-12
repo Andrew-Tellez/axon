@@ -7,6 +7,35 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [No publicado]
+
+### Añadido
+
+- **El playground: el compilador corriendo en la página.** La documentación explicaba qué
+  comprueba `verify` citando salidas que alguien pegó y nadie vuelve a comprobar. Ahora la
+  página trae el compilador de verdad —`verify` compilado a WebAssembly, 0.61 MB con
+  brotli, 15 ms sobre cinco servicios— y lo que dice es lo que diría el CI sobre los
+  mismos archivos. Se aprende rompiendo: dos servicios limpios, cuatro botones que rompen
+  una cosa cada uno, y la regla que salta es la lección. El editor queda libre encima.
+- **El crate se puede usar sin la CLI.** `src/lib.rs` expone el núcleo —el modelo, las
+  reglas— y dos features nuevas, `http` y `tui`, ambas puestas por defecto, sacan las dos
+  únicas dependencias que no existen en un navegador: los sockets y la terminal. Nada del
+  núcleo tocaba ninguna de las dos, que es lo que hizo esto barato.
+- **`manifest::parse`**: un manifiesto desde texto, sin disco debajo. Es `load` menos el
+  archivo y sus `include`.
+
+### Corregido
+
+- **`SystemTime::now` no es un reloj en un navegador: es un panic.** Lo encontró el primer
+  intento de correr `verify` en wasm. La fecha la da el host, que es el único que tiene
+  una, y sin ella la retirada de una versión no se puede comparar con hoy.
+- **Las migraciones llegan por la misma puerta.** Sin filesystem, las reglas de esquema
+  —un CRUD sobre una columna que nadie declaró, un índice sobre una tabla que no existe—
+  se quedaban mudas y en su lugar salía un error sobre que no se leyó ninguna migración.
+  Ahora el `.sql` entra como texto y `schemas` lo pliega igual. El aviso del `Dockerfile`
+  se calla donde no hay repo que mirar: sería un error sobre la página, no sobre lo que
+  alguien escribió.
+
 ## [0.30.0] — 2026-09-11
 
 ### Añadido

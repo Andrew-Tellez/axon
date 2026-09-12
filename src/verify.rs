@@ -1634,7 +1634,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     // service written yet docker fails with an `lstat` that says nothing.
     // axon knows the path —it is the one it wrote— so it is the one that
     // should say it.
-    for m in ms.iter().filter(|m| !m.external) {
+    // ...unless there is no repo to look at. In a browser the manifests arrive
+    // as text and nothing is missing from a layout that does not exist; the
+    // warning would be an error about the page, not about what somebody wrote.
+    for m in ms
+        .iter()
+        .filter(|_| !cfg!(target_arch = "wasm32"))
+        .filter(|m| !m.external)
+    {
         let svc = &m.service;
         let dir = pol.ci.path(&pol.ci.service_dir, svc);
         // Relative to the manifest's own directory, like the migrations: what
