@@ -7,7 +7,7 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
-## [No publicado]
+## [0.31.0] — 2026-09-12
 
 ### Añadido
 
@@ -23,6 +23,13 @@ perderlas.
   núcleo tocaba ninguna de las dos, que es lo que hizo esto barato.
 - **`manifest::parse`**: un manifiesto desde texto, sin disco debajo. Es `load` menos el
   archivo y sus `include`.
+
+### Cambiado
+
+- **El binario usa la librería en vez de recompilarla.** Al aparecer `lib.rs`, `main.rs`
+  seguía declarando los mismos módulos: dos compilaciones del mismo código, dos copias de
+  sus pruebas, y lo que usa un solo lado pareciendo muerto en el otro. Los tres módulos
+  del núcleo se reexportan y el resto del binario sigue diciendo `crate::manifest`.
 
 ### Corregido
 
