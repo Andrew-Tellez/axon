@@ -18,11 +18,6 @@ pub mod verify;
 mod web {
     use wasm_bindgen::prelude::*;
 
-    /// The whole report over a workspace given as text: one TOML document per
-    /// entry, named as the file would be. The names matter because the
-    /// findings say who they are about.
-    ///
-    /// Returns the same JSON the editor gets: `{ errors: [], warnings: [] }`.
     /// The event topology, as mermaid: the same thing `axon graph` prints.
     ///
     /// A picture of what the manifests say, next to the report about what they
@@ -38,6 +33,39 @@ mod web {
         }
     }
 
+    /// The TypeScript one of those manifests generates: the types of its
+    /// events and methods, the resilient client for what it calls, the base
+    /// class somebody implements.
+    ///
+    /// The other two answers are about the manifests; this one is what they
+    /// are FOR. A diagram can be drawn by hand and a report argued with, but
+    /// nobody types this.
+    #[wasm_bindgen]
+    pub fn contracts(files: &str, of: &str) -> String {
+        let (ms, _) = match workspace(files) {
+            Ok(w) => w,
+            Err(e) => return e,
+        };
+        // the file being edited, when it is a service; otherwise the first one
+        // that is compiled, because an external manifest generates nothing
+        let Some(m) = ms
+            .iter()
+            .find(|m| m.origin.to_string_lossy() == of && !m.external)
+            .or_else(|| ms.iter().find(|m| !m.external))
+        else {
+            return "no service to generate: every manifest here is external".into();
+        };
+        match crate::emit::build_ts(m, &ms) {
+            Ok(ts) => ts,
+            Err(e) => e,
+        }
+    }
+
+    /// The whole report over a workspace given as text: one TOML document per
+    /// entry, named as the file would be. The names matter because the
+    /// findings say who they are about.
+    ///
+    /// Returns the same JSON the editor gets: `{ errors: [], warnings: [] }`.
     #[wasm_bindgen]
     pub fn verify(files: &str) -> String {
         match workspace(files) {

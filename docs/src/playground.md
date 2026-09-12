@@ -8,7 +8,12 @@ Three services and one migration. They are clean —zero errors, zero warnings�
 to learn what axon checks is to **break them**. Each button breaks exactly one thing; the
 rule that fires is the lesson. The editor is yours too.
 
-The diagram under the editor is `axon graph`, redrawn as you type. It is not decoration
+Under the editor are the three answers the compiler gives about what is written above:
+what the rules say, what it looks like, and what it generates. The last one is the point
+of the whole thing —nobody types 450 lines of contracts by hand— and it changes as you
+type, like the other two.
+
+The diagram is `axon graph`, redrawn as you type. It is not decoration
 and nobody maintains it: it comes out of the same manifests the report is about, which is
 the whole argument —an architecture diagram drawn by hand is a diagram that is already
 wrong.
@@ -49,10 +54,25 @@ up in the other projections —`axon er` draws the schema the migrations really 
   <p id="pg-hint" class="pg-hint"></p>
   <div class="pg-tabs" id="pg-tabs"></div>
   <textarea id="pg-src" spellcheck="false" rows="24"></textarea>
-  <p class="pg-head">the topology · what the manifests say, drawn</p>
-  <div id="pg-graph" class="pg-graph"></div>
-  <p class="pg-head">the report · <span id="pg-count">compiling…</span></p>
-  <ul id="pg-out"><li>loading the compiler…</li></ul>
+  <div class="pg-tabs" id="pg-views">
+    <button data-v="report" class="pg-on">the report</button>
+    <button data-v="topology">the topology</button>
+    <button data-v="contracts">the contracts</button>
+  </div>
+  <div class="pg-pane">
+    <div id="pg-pane-report">
+      <p class="pg-head">what the rules say · <span id="pg-count">compiling…</span></p>
+      <ul id="pg-out"><li>loading the compiler…</li></ul>
+    </div>
+    <div id="pg-pane-topology" hidden>
+      <p class="pg-head">what the manifests say, drawn · <code>axon graph</code></p>
+      <div id="pg-graph" class="pg-graph"></div>
+    </div>
+    <div id="pg-pane-contracts" hidden>
+      <p class="pg-head">the TypeScript of the file above · <code>axon build</code></p>
+      <pre class="pg-ts"><code id="pg-ts"></code></pre>
+    </div>
+  </div>
 </div>
 
 <script type="module" src="playground/app.js"></script>

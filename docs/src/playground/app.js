@@ -3,7 +3,7 @@
 // No server behind it and no prerecorded output. `axon.js` and `axon_bg.wasm`
 // are the same `verify` that runs in the terminal, compiled to wasm: what the
 // page says is what CI would say.
-import init, { verify, graph } from "./axon.js";
+import init, { verify, graph, contracts } from "./axon.js";
 
 const FILES = {
   "orders.toml": `service = "orders"
@@ -141,8 +141,26 @@ let active = "orders.toml";
 
 const $ = (id) => document.getElementById(id);
 
+// Which answer is on screen. Only that one is computed: the compiler is fast,
+// but generating 450 lines of TypeScript on every keystroke to show a diagram
+// is work nobody asked for.
+let view = "report";
+
+function show(next) {
+  view = next;
+  for (const b of $("pg-views").children) b.classList.toggle("pg-on", b.dataset.v === view);
+  for (const name of ["report", "topology", "contracts"]) {
+    $(`pg-pane-${name}`).hidden = name !== view;
+  }
+  run();
+}
+
 function run() {
-  draw();
+  if (view === "topology") return void draw();
+  if (view === "contracts") {
+    $("pg-ts").textContent = contracts(JSON.stringify(Object.entries(FILES)), active);
+    return;
+  }
   const out = $("pg-out");
   let report;
   try {
@@ -209,6 +227,8 @@ function tabs() {
       active = b.dataset.f;
       $("pg-src").value = FILES[active];
       tabs();
+      // the contracts are the ones of the file being edited
+      if (view === "contracts") run();
     };
   }
 }
@@ -236,6 +256,7 @@ function wire() {
       run();
     };
   }
+  for (const b of $("pg-views").children) b.onclick = () => show(b.dataset.v);
   $("pg-reset").onclick = () => {
     Object.assign(FILES, original);
     $("pg-src").value = FILES[active];

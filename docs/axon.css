@@ -62,3 +62,5 @@ select.axon-versions {
 #pg-out li b { text-transform: uppercase; font-size: 0.8em; letter-spacing: 0.05em; opacity: 0.8; }
 .pg-graph { margin: 6px 0 0; overflow-x: auto; }
 .pg-graph svg { max-width: 100%; height: auto; }
+.pg-pane { min-height: 12em; }
+pre.pg-ts { max-height: 26em; overflow: auto; margin: 6px 0 0; }

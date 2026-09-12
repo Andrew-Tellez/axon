@@ -7,6 +7,19 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [No publicado]
+
+### Añadido
+
+- **Los contratos que genera, como tercera pestaña del playground.** El panel de abajo
+  pasa a tener las tres respuestas que da el compilador sobre lo que hay escrito arriba:
+  lo que dicen las reglas, cómo se ve, y **qué genera**. La última es el argumento entero
+  —nadie escribe a mano 450 líneas de tipos, cliente con breaker y clase base— y cambia
+  mientras escribes, como las otras dos. Cambiar de archivo cambia el servicio: un
+  manifiesto externo no genera nada y cae al primero que sí. Cuesta 140 KB de wasm y
+  ninguna dependencia, porque `emit` ya estaba dentro. Solo se calcula la vista visible:
+  generar el TypeScript en cada tecla para enseñar un diagrama es trabajo que nadie pidió.
+
 ## [0.33.0] — 2026-09-12
 
 ### Añadido
