@@ -10191,10 +10191,7 @@ fn the_playground_legend_matches_what_the_compiler_draws() {
         r#"A -->|"event"| B"#,
         r#"A -.->|"method"| B"#,
     ] {
-        assert!(
-            page.contains(claim),
-            "the legend no longer shows `{claim}`"
-        );
+        assert!(page.contains(claim), "the legend no longer shows `{claim}`");
         assert!(
             drawn.contains(&claim),
             "the page explains `{claim}` and `axon graph` draws no such line:\n{graph}"
