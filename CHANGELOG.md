@@ -11,6 +11,19 @@ perderlas.
 
 ### Añadido
 
+- **`axon mcp`: el compilador como herramienta que un agente puede coger.** Un modelo es
+  bueno en lo que axon no hace —dónde va la frontera, cómo se llama un evento— y malo
+  sabiendo si lo que acaba de escribir se sostiene, que es justo lo que `verify` contesta.
+  Expone `verify`, `graph`, `manifest_schema` y `contracts` por MCP sobre stdio, sin
+  dependencias nuevas. `manifest_schema` es el que evita que adivine: sale del modelo del
+  propio compilador, así que lista los bloques, las claves y los valores que **esta**
+  versión entiende de verdad, y una clave inventada ya es un error de carga.
+  Ningún modelo corre dentro de axon: un compilador que llama a una API deja de ser
+  determinista, necesita una clave y no puede ser lo que zanja una discusión.
+- **`axon verify --json`.** El mismo veredicto y el mismo código de salida, para lo que
+  no es una persona. La prosa se escribió para leerla una vez; esto para parsearlo.
+- **`AGENTS.md`**: el bucle que funciona —un servicio, verificar, corregir, el siguiente—
+  y las trampas que un modelo no puede deducir del esquema.
 - **La leyenda del dibujo, y un externo y una llamada síncrona en el ejemplo.** El grafo
   tiene cuatro formas y dos flechas, y hasta ahora había que adivinarlas: caja es un
   servicio tuyo, caja redondeada uno externo, círculo un evento con el topic por el que

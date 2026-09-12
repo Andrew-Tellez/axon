@@ -10301,3 +10301,119 @@ fn the_playground_seed_is_clean_and_its_page_parses() {
         );
     }
 }
+
+/// The MCP server over the real protocol, the way a client speaks it.
+///
+/// Framed the way MCP frames it —one JSON object per line— and not the way the
+/// language server does. This test used to send `Content-Length` headers,
+/// agreed with the server, and passed; the first real client timed out waiting
+/// for a line. A test written from the same wrong assumption as the code
+/// confirms the assumption, not the behaviour.
+#[test]
+fn the_mcp_server_speaks_the_protocol() {
+    use std::io::{Read, Write};
+
+    let input = [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+              "params":{"protocolVersion":"2025-06-18","capabilities":{}}}),
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+        serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+              "params":{"name":"verify","arguments":{"path":"examples"}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+              "params":{"name":"manifest_schema","arguments":{}}}),
+        serde_json::json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+              "params":{"name":"nope","arguments":{}}}),
+    ]
+    .iter()
+    .map(|m| format!("{m}\n"))
+    .collect::<String>();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_axon"))
+        .arg("mcp")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .unwrap();
+    child.wait().unwrap();
+
+    assert!(
+        !out.contains("Content-Length"),
+        "that is the language server's framing; an MCP client waits for a line:\n{out}"
+    );
+    // every line is a whole message, and nothing else is written to stdout:
+    // one stray line —a log, a warning— corrupts the stream for the client
+    let answers: Vec<serde_json::Value> = out
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            serde_json::from_str(l)
+                .unwrap_or_else(|e| panic!("a line that is not a message: {e}\n{l}"))
+        })
+        .collect();
+    let answer = |id: i64| {
+        answers
+            .iter()
+            .find(|m| m["id"] == id)
+            .unwrap_or_else(|| panic!("request {id} went unanswered:\n{out}"))
+    };
+
+    assert_eq!(answer(1)["result"]["protocolVersion"], "2025-06-18");
+    assert!(
+        answer(1)["result"]["capabilities"]["tools"].is_object(),
+        "a server with no tools declared is a server an agent skips"
+    );
+
+    let tools = answer(2)["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(
+        names.contains(&"verify") && names.contains(&"manifest_schema"),
+        "the two that matter are missing: {names:?}"
+    );
+    for tool in tools {
+        // a tool is picked by its description, so an empty one is a tool that
+        // never gets used or gets used for the wrong thing
+        let described = tool["description"].as_str().unwrap_or("");
+        assert!(
+            described.len() > 60,
+            "`{}` does not say when to use it",
+            tool["name"]
+        );
+        assert_eq!(
+            tool["inputSchema"]["type"], "object",
+            "`{}` has no input schema",
+            tool["name"]
+        );
+    }
+
+    let report = answer(3)["result"]["content"][0]["text"].as_str().unwrap();
+    let report: serde_json::Value = serde_json::from_str(report)
+        .unwrap_or_else(|e| panic!("`verify` did not answer JSON: {e}\n{report}"));
+    assert!(report["services"].as_u64().unwrap() > 1, "{report}");
+
+    let vocabulary = answer(4)["result"]["content"][0]["text"].as_str().unwrap();
+    for block in ["[cap]", "[infra]", "consistency = strong | eventual"] {
+        assert!(
+            vocabulary.contains(block),
+            "the vocabulary does not describe `{block}`, so a model has to guess it"
+        );
+    }
+
+    // A tool that does not exist is an answer the model can read and correct,
+    // not a transport error it never sees.
+    assert_eq!(answer(5)["result"]["isError"], true);
+    assert!(answer(5)["error"].is_null(), "{}", answer(5));
+}

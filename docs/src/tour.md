@@ -53,6 +53,24 @@ vim.lsp.start({
 })
 ```
 
+## The one an agent runs
+
+```sh
+axon verify manifests/ --json   # the same verdict, for whatever is not a person
+axon mcp                        # the compiler as a tool, over MCP on stdio
+```
+
+A model is good at the part axon does not do —where the boundary goes, what an event is
+called— and bad at knowing whether what it just wrote holds up, which is the part axon
+answers. `axon mcp` exposes `verify`, `graph`, `manifest_schema` and `contracts` to any
+MCP client; `manifest_schema` is the one that stops it guessing, because it comes out of
+the compiler's own model and lists every block, key and accepted value this version
+really understands. The loop, and the traps, are in
+[AGENTS.md](https://github.com/Andrew-Tellez/axon/blob/main/AGENTS.md).
+
+No model runs inside axon. A compiler that calls an API stops being deterministic, needs
+a key, and cannot be the thing that settles an argument.
+
 ## What gets generated
 
 ```sh

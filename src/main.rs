@@ -20,6 +20,7 @@ mod import;
 mod infra;
 mod init;
 mod lsp;
+mod mcp;
 mod pact;
 mod plugin;
 mod pooler;
@@ -97,9 +98,18 @@ enum Cmd {
     /// registry of services and methods (directory, file or URL)
     Discover { sources: Vec<String> },
     /// drift between manifests, migrations and infrastructure
-    Verify { sources: Vec<String> },
+    Verify {
+        sources: Vec<String>,
+        /// the same report as JSON, for whatever reads it instead of a person:
+        /// a script, a bot, an agent. The prose is written to be read once by
+        /// somebody who can act on it; this is written to be parsed
+        #[arg(long)]
+        json: bool,
+    },
     /// language server over stdio: `verify` as diagnostics, inside the editor
     Lsp,
+    /// MCP server over stdio: the compiler as a tool an agent can pick up
+    Mcp,
     /// AsyncAPI or OpenAPI (JSON or YAML) -> an axon manifest
     Import {
         /// source format
@@ -463,7 +473,7 @@ fn run() -> Result<ExitCode, String> {
                 serde_json::to_string_pretty(&registry(&ms)).map_err(|e| e.to_string())?
             );
         }
-        Cmd::Verify { sources } => {
+        Cmd::Verify { sources, json } => {
             let (ms, root) = discover_with_root(&sources)?;
             let mut r = full_report(&ms, &root);
 
@@ -476,6 +486,33 @@ fn run() -> Result<ExitCode, String> {
                 None => (r.warnings.iter().collect(), 0, vec![]),
             };
             let bloquea = list.is_some() && !nuevas.is_empty();
+
+            // What a program gets instead of the prose. Same verdict, same
+            // exit code: the only difference is who is meant to read it.
+            if json {
+                let ok = r.errors.is_empty() && !bloquea;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": ok,
+                        "services": ms.len(),
+                        "errors": r.errors,
+                        "warnings": nuevas,
+                        "accepted": vigentes,
+                        "stale": stale,
+                        // with the list present a new warning fails the build,
+                        // and whoever reads this has to know which rule applies
+                        "warnings_block": list.is_some(),
+                    }))
+                    .map_err(|e| e.to_string())?
+                );
+                r.warnings.clear();
+                return Ok(if ok {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                });
+            }
 
             // Errors first: they are what has to be fixed, and in a long list
             // what matters cannot end up at the bottom.
@@ -553,6 +590,7 @@ fn run() -> Result<ExitCode, String> {
             r.warnings.clear();
         }
         Cmd::Lsp => lsp::serve()?,
+        Cmd::Mcp => mcp::serve()?,
         Cmd::Import {
             format,
             file,

@@ -403,7 +403,7 @@ metric = "x"
 /// The name every seeded map entry carries.
 const ENTRY: &str = "x";
 
-fn schema() -> &'static Value {
+pub(crate) fn schema() -> &'static Value {
     static S: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
     S.get_or_init(|| {
         let m: Manifest = toml::from_str(SEED).expect("the seed manifest parses");
@@ -493,7 +493,7 @@ fn resolve<'a>(schema: &'a Value, path: &str) -> Option<&'a Value> {
 
 /// The values a key accepts, when they are a closed list. The lists live where
 /// the rules that enforce them live, so there is one copy of each.
-fn values(path: &str, key: &str, block: &Value) -> Vec<&'static str> {
+pub(crate) fn values(path: &str, key: &str, block: &Value) -> Vec<&'static str> {
     use crate::manifest as m;
     let head = path.split('.').next().unwrap_or("");
     let list: &[&str] = match (head, key) {
@@ -750,7 +750,7 @@ fn location(path: &Path, needle: &str) -> Value {
 
 // ---------- the base protocol ----------
 
-fn read_message(r: &mut impl BufRead) -> Option<Value> {
+pub(crate) fn read_message(r: &mut impl BufRead) -> Option<Value> {
     let mut len = 0usize;
     loop {
         let mut line = String::new();
@@ -770,14 +770,14 @@ fn read_message(r: &mut impl BufRead) -> Option<Value> {
     serde_json::from_slice(&buf).ok()
 }
 
-fn send(v: &Value) {
+pub(crate) fn send(v: &Value) {
     let body = v.to_string();
     let mut out = std::io::stdout().lock();
     let _ = write!(out, "Content-Length: {}\r\n\r\n{body}", body.len());
     let _ = out.flush();
 }
 
-fn reply(id: Option<Value>, result: Value) {
+pub(crate) fn reply(id: Option<Value>, result: Value) {
     send(&json!({ "jsonrpc": "2.0", "id": id, "result": result }));
 }
 
