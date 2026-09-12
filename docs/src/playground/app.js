@@ -53,6 +53,16 @@ max_token_age_s = 900
 subject_claim = "sub"
 tenant_claim = "org_id"
 scopes_claim = "scope"
+
+# A synchronous call to somebody else: what it costs when it fails is declared
+# here, not left to whatever the HTTP client happens to do.
+[[depends]]
+service = "pay"
+method = "charges.create"
+timeout_ms = 2000
+retries = 2
+breaker = true
+uses = ["id", "status"]
 `,
   "notifier.toml": `service = "notifier"
 owner = "growth-team"
@@ -68,6 +78,16 @@ max_staleness_ms = 60000
 [consumes."order.placed@v1"]
 handler = "onOrderPlaced"
 uses = ["orderId", "total"]
+`,
+  "pay.external.toml": `# An external service: axon does not compile it, it freezes its contract here
+# so \`verify\` can say whether the generated client and the provider still agree.
+service = "pay"
+external = true
+
+[methods."charges.create"]
+idempotent = true
+in = { amount = "int", orderId = "uuid" }
+out = { id = "string", status = "string" }
 `,
   "sql/orders/001_init.sql": `create table orders (
   id uuid primary key,

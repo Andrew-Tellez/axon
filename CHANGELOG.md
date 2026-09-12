@@ -7,6 +7,31 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [No publicado]
+
+### Añadido
+
+- **La leyenda del dibujo, y un externo y una llamada síncrona en el ejemplo.** El grafo
+  tiene cuatro formas y dos flechas, y hasta ahora había que adivinarlas: caja es un
+  servicio tuyo, caja redondeada uno externo, círculo un evento con el topic por el que
+  viaja, flecha sólida publicar y leer, punteada una llamada síncrona —que es acoplamiento
+  en el tiempo, y por eso se dibuja distinto. El ejemplo del playground creció para que
+  las cuatro salgan de verdad, y sigue limpio. Lo que **no** está en el dibujo —la base,
+  la cache, el índice, el pooler— la página lo dice y manda a dónde sí se ve, porque no es
+  topología: es lo que cada servicio tiene dentro, no cómo se alcanzan entre ellos.
+- **Dos guardianes para lo que ningún test podía ver.** La leyenda se comprueba contra lo
+  que `build_graph` dibuja de verdad, en los dos sentidos: una forma explicada que el
+  compilador ya no hace, o una que hace y nadie explicó, fallan. Y la página se comprueba
+  entera: que su ejemplo salga limpio y que su módulo parsee.
+
+### Corregido
+
+- **La página se quedaba en «loading the compiler…».** Un comentario del ejemplo llevaba
+  comillas invertidas dentro de un template literal de JavaScript: eso cierra el literal,
+  el módulo deja de parsear y nada de la página llega a ejecutarse. No había error visible
+  —solo el texto inicial— y todo lo demás seguía verde, que es exactamente por qué ahora
+  hay un test que lo mira desde fuera.
+
 ## [0.32.0] — 2026-09-12
 
 ### Añadido

@@ -10154,3 +10154,153 @@ fn the_language_server_speaks_the_protocol() {
         "the runtimes offered are not the ones that exist"
     );
 }
+
+/// The legend of the playground says what each shape of the diagram means.
+/// That is a claim about `build_graph`, and a drawing whose key is wrong is
+/// worse than one with no key: the reader trusts it.
+///
+/// Both directions. Every shape the page explains has to be one the compiler
+/// really draws, and every line it draws has to be one the page explains —a
+/// new shape nobody documented is a drawing that stopped being readable.
+#[test]
+fn the_playground_legend_matches_what_the_compiler_draws() {
+    let page = std::fs::read_to_string("docs/src/playground.md").unwrap();
+    let (graph, err, ok) = axon(&["graph", "examples"]);
+    assert!(ok, "{err}");
+
+    // What each line of a graph is, told apart by the only thing that
+    // distinguishes them: the shape of the node and the kind of arrow.
+    fn kind(line: &str) -> Option<&'static str> {
+        let l = line.trim();
+        Some(match () {
+            _ if l == "graph LR" || l.is_empty() => return None,
+            _ if l.contains(" -.->|") => r#"A -.->|"method"| B"#,
+            _ if l.contains(" -->|") => r#"(("order.placed@v1"))"#,
+            _ if l.contains(")) --> ") => r#"A -->|"event"| B"#,
+            _ if l.ends_with("])") => r#"(["pay"])"#,
+            _ if l.ends_with("]") => r#"["orders"]"#,
+            _ => return Some("UNDOCUMENTED"),
+        })
+    }
+
+    let drawn: Vec<&str> = graph.lines().filter_map(kind).collect();
+    for claim in [
+        r#"["orders"]"#,
+        r#"(["pay"])"#,
+        r#"(("order.placed@v1"))"#,
+        r#"A -->|"event"| B"#,
+        r#"A -.->|"method"| B"#,
+    ] {
+        assert!(
+            page.contains(claim),
+            "the legend no longer shows `{claim}`"
+        );
+        assert!(
+            drawn.contains(&claim),
+            "the page explains `{claim}` and `axon graph` draws no such line:\n{graph}"
+        );
+    }
+    assert!(
+        !drawn.contains(&"UNDOCUMENTED"),
+        "`axon graph` draws a shape the playground's legend does not explain:\n{graph}"
+    );
+}
+
+/// The playground's page is the one thing in this repo that no test could see:
+/// its code runs in a browser, and there is none here. So the two failures that
+/// would ship silently get checked from outside.
+///
+/// The first is real and happened: a backtick inside the seed —the manifests
+/// are template literals— closes the literal, the module stops parsing, and the
+/// page sits on "loading the compiler…" forever. Nothing else notices, because
+/// mdBook copies the file and the Rust side is green.
+///
+/// The second is the promise the page makes in its first paragraph: that the
+/// example is clean. A rule that starts firing on it turns the lesson —break it
+/// yourself and watch— into noise that was already there.
+#[test]
+fn the_playground_seed_is_clean_and_its_page_parses() {
+    let app = std::fs::read_to_string("docs/src/playground/app.js").unwrap();
+
+    // The seed, taken out of the page instead of copied here: a copy would be
+    // one more thing to keep in agreement.
+    let mut files = Vec::new();
+    let mut rest = app.as_str();
+    while let Some(at) = rest.find("\": `") {
+        let name_start = rest[..at].rfind('"').unwrap() + 1;
+        let name = &rest[name_start..at];
+        let body = &rest[at + 4..];
+        // an escaped backtick belongs to the file, a bare one ends it
+        let mut end = 0;
+        loop {
+            let next = body[end..].find('`').expect("the literal is closed") + end;
+            if body[..next].ends_with('\\') {
+                end = next + 1;
+            } else {
+                end = next;
+                break;
+            }
+        }
+        files.push((name.to_string(), body[..end].replace("\\`", "`")));
+        rest = &body[end..];
+    }
+    assert!(
+        files.len() >= 3 && files.iter().any(|(n, _)| n.ends_with(".sql")),
+        "the seed was read wrong: {:?}",
+        files.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+
+    let dir = std::env::temp_dir().join("axon-playground-seed");
+    let _ = std::fs::remove_dir_all(&dir);
+    for (name, text) in &files {
+        let path = dir.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    // The CLI looks at a repo and the browser has none, so what it would report
+    // over a bare directory are two findings about the layout —no Dockerfile to
+    // build, no baseline to compare against— that say nothing about the
+    // manifests. Giving the directory both is more honest than a list of
+    // warnings to ignore: anything left over is a real one.
+    for (name, _) in files.iter().filter(|(n, t)| {
+        n.ends_with(".toml") && !t.contains("external = true") && !n.starts_with("axon.")
+    }) {
+        let svc = dir.join("services").join(name.trim_end_matches(".toml"));
+        std::fs::create_dir_all(&svc).unwrap();
+        std::fs::write(svc.join("Dockerfile"), "FROM scratch\n").unwrap();
+    }
+    let (baseline, err, ok) = axon(&["baseline", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    std::fs::write(dir.join("axon.baseline.json"), baseline).unwrap();
+
+    let (out, err, _) = axon(&["verify", dir.to_str().unwrap()]);
+    let printed = format!("{out}{err}");
+    assert!(
+        printed.contains("0 errors, 0 warnings"),
+        "the playground promises an example with no findings, and it has some:\n{printed}"
+    );
+
+    // And that the page's code is a module a browser would accept. Without
+    // node there is nothing to check with, and that is not a reason to fail.
+    let node = Command::new("node")
+        .args(["--input-type=module", "--check"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    if let Ok(mut child) = node {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(app.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "the page's module does not parse, so nothing on it runs:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
