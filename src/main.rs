@@ -1,8 +1,14 @@
 //! axon — the manifest is the source of truth; the rest are projections.
+//!
+//! The model and the rules live in the library —that is what compiles to wasm
+//! for the playground— and they are re-exported here so the rest of the
+//! modules go on saying `crate::manifest`. Declaring them again would compile
+//! a second copy, and in that copy whatever only the library uses looks dead.
+pub use axon::{bi, manifest, verify};
+
 mod accepted;
 mod api;
 mod baseline;
-mod bi;
 mod cap;
 mod carga;
 mod catalog;
@@ -14,14 +20,12 @@ mod import;
 mod infra;
 mod init;
 mod lsp;
-mod manifest;
 mod pact;
 mod plugin;
 mod pooler;
 mod trace;
 mod traffic;
 mod tui;
-mod verify;
 mod versions;
 
 use clap::{Parser, Subcommand};
