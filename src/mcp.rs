@@ -217,6 +217,18 @@ fn described() -> String {
          A key with a closed list shows it; anything else takes free text or a number.\n\n",
     );
     walk(schema(), "", &mut out);
+    // The blocks with no fixed keys. They cannot come out of the walk —there
+    // is nothing to list— and they are the ones a manifest is mostly made of,
+    // so leaving them out is worse than saying it in a paragraph.
+    out.push_str(
+        "Field maps: blocks whose keys are the names YOU choose, and whose values are types.\n\
+         \n\
+         [emits.\"order.placed@v1\"]   an event, named with its version\n\
+         [methods.<name>] in / out    the request and the response\n\
+         \n\
+         The types: uuid, timestamp, int, float, bool, money —an amount and a currency—\n\
+         and anything else is a string. A field is `name = \"type\"`.\n",
+    );
     out
 }
 
@@ -224,19 +236,36 @@ fn walk(node: &Value, path: &str, out: &mut String) {
     let Some(block) = node.as_object() else {
         return;
     };
-    // A block whose keys are all blocks has nothing of its own to say, and a
-    // header with nothing under it reads as a block you can write empty.
-    let own: Vec<_> = block
-        .iter()
-        .filter(|(_, v)| !(v.is_object() || v.as_array().is_some_and(|a| !a.is_empty())))
-        .collect();
+    let nested = |v: &Value| v.is_object() || v.as_array().is_some_and(|a| !a.is_empty());
+
+    // The block's OWN keys first, and the blocks under it afterwards. Walking
+    // in one pass puts whatever is alphabetically after a nested block under
+    // that block's header, which reads as a key of the wrong thing.
+    let own: Vec<_> = block.iter().filter(|(_, v)| !nested(v)).collect();
     if !path.is_empty() && !own.is_empty() {
         out.push_str(&format!("[{path}]\n"));
     }
-    for (key, value) in block {
-        // a map's entry is named by whoever writes it; what is worth saying is
-        // the shape every entry has, which is the one seeded under this name
-        let name = if key == "x" { "<name>" } else { key };
+    for (key, _) in &own {
+        let accepted = values(path, key, node);
+        if accepted.is_empty() {
+            out.push_str(&format!("  {key}\n"));
+        } else {
+            out.push_str(&format!("  {key} = {}\n", accepted.join(" | ")));
+        }
+    }
+    if !own.is_empty() {
+        out.push('\n');
+    }
+
+    for (key, value) in block.iter().filter(|(_, v)| nested(v)) {
+        // A map's entry is named by whoever writes it; what is worth saying is
+        // the shape every entry has. The seed names them `x` —and `x@v1` where
+        // the name is an event, which carries its version.
+        let name = if key == "x" || key.starts_with("x@") {
+            "<name>"
+        } else {
+            key
+        };
         let child = format!(
             "{}{}",
             if path.is_empty() {
@@ -252,17 +281,8 @@ fn walk(node: &Value, path: &str, out: &mut String) {
                 Some(first) if first.is_object() => walk(first, &child, out),
                 _ => out.push_str(&format!("  {key} = [...]\n")),
             },
-            _ => {
-                let accepted = values(path, key, node);
-                if accepted.is_empty() {
-                    out.push_str(&format!("  {key}\n"));
-                } else {
-                    out.push_str(&format!("  {key} = {}\n", accepted.join(" | ")));
-                }
-            }
+            // the filter above left only what nests
+            _ => {}
         }
-    }
-    if !own.is_empty() {
-        out.push('\n');
     }
 }

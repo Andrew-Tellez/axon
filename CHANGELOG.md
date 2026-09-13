@@ -7,6 +7,19 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [No publicado]
+
+### Corregido
+
+- **`manifest_schema` describía mal lo que un agente no puede comprobar.** Las claves
+  propias de un bloque salían mezcladas con los bloques anidados —así que `state` y
+  `runtime` aparecían bajo `[infra.buckets.<name>]`, que es la clave de otra cosa—, la
+  entrada de `[consumes]` se llamaba `x@v1` en vez de `<name>`, y los bloques que son
+  mapas de campos (`[emits]`, el `in` y el `out` de un método) no salían: no tienen claves
+  fijas que listar, así que el recorrido no llegaba a ellos. Ahora se nombran aparte, con
+  los tipos que aceptan. Salió de usar el servidor como lo usa un agente, que es la única
+  forma de ver que una respuesta es correcta pero ilegible.
+
 ## [0.34.0] — 2026-09-12
 
 ### Añadido

@@ -10405,7 +10405,18 @@ fn the_mcp_server_speaks_the_protocol() {
     assert!(report["services"].as_u64().unwrap() > 1, "{report}");
 
     let vocabulary = answer(4)["result"]["content"][0]["text"].as_str().unwrap();
-    for block in ["[cap]", "[infra]", "consistency = strong | eventual"] {
+    for block in [
+        "[cap]",
+        "[infra]",
+        "consistency = strong | eventual",
+        // a block's own keys belong under its own header, and the entry of a
+        // map is named by whoever writes it —both went wrong the first time
+        // somebody read this instead of the code
+        "[consumes.<name>]",
+        "  state = postgres",
+        // the field maps have no fixed keys, so the walk cannot reach them
+        "[emits.\"order.placed@v1\"]",
+    ] {
         assert!(
             vocabulary.contains(block),
             "the vocabulary does not describe `{block}`, so a model has to guess it"
