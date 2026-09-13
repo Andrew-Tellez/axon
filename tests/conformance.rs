@@ -9344,7 +9344,14 @@ fn a_catalog_is_one_list_in_three_places() {
 fn the_auth_block_refuses_what_fails_open() {
     let dir = std::env::temp_dir().join("axon-auth");
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    // the manifest says where its schema lives, so it has to lead somewhere:
+    // with no migrations read, half the rules stop checking without a word
+    std::fs::write(
+        dir.join("sql/shop/001_init.sql"),
+        "create table items (id uuid primary key, tenant_id uuid not null);\n",
+    )
+    .unwrap();
     let base = "service = \"shop\"\nowner = \"t\"\ntier = \"2\"\nversion = \"1.0.0\"\n\
         [cap]\nconsistency = \"eventual\"\non_partition = \"degrade\"\nmax_staleness_ms = 5000\n\
         [infra]\nstate = \"postgres\"\ntenant_column = \"tenant_id\"\nmigrations = \"sql/shop\"\n\
@@ -10427,4 +10434,62 @@ fn the_mcp_server_speaks_the_protocol() {
     // not a transport error it never sees.
     assert_eq!(answer(5)["result"]["isError"], true);
     assert!(answer(5)["error"].is_null(), "{}", answer(5));
+}
+
+/// A `migrations` that leads nowhere.
+///
+/// Found by an agent writing a manifest with `migrations = "auto"` —a
+/// directory that never existed— and axon saying nothing. Every rule about the
+/// schema gives up quietly when there is no schema to read, so one wrong path
+/// turns off the outbox check, the inbox check, the foreign keys, the CRUDs
+/// and the indexes at once, and the manifest still reads as if it declared
+/// where its tables are. A mistake that looks like it was checked is worse
+/// than one that fails.
+#[test]
+fn a_migrations_path_that_leads_nowhere_is_refused() {
+    let dir = std::env::temp_dir().join("axon-migrations-path");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = |migrations: &str| {
+        format!(
+            "service = \"shop\"\nowner = \"t\"\ntier = \"2\"\nversion = \"1.0.0\"\n\
+             [cap]\nconsistency = \"eventual\"\non_partition = \"degrade\"\nmax_staleness_ms = 5000\n\
+             [infra]\nstate = \"postgres\"\nmigrations = \"{migrations}\"\n\
+             [patterns]\noutbox = true\n\
+             [emits.\"item.sold@v1\"]\nitemId = \"uuid\"\n"
+        )
+    };
+
+    std::fs::write(dir.join("shop.toml"), manifest("auto")).unwrap();
+    let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    let printed = format!("{out}{err}");
+    assert!(!ok, "a path that does not exist passed:\n{printed}");
+    assert!(
+        printed.contains("has no `*.sql`") && printed.contains("resolved from"),
+        "the error does not say what is wrong or where it looked:\n{printed}"
+    );
+    // the rules it was hiding are the point, and the message has to name them
+    assert!(
+        printed.contains("outbox") && printed.contains("foreign keys"),
+        "the error does not say what stopped being checked:\n{printed}"
+    );
+
+    // an empty directory is the same silence as a missing one
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(dir.join("shop.toml"), manifest("sql")).unwrap();
+    let (out, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+    assert!(!ok, "an empty directory passed:\n{out}{err}");
+
+    // and with a migration there, the outbox rule gets to speak for itself
+    std::fs::write(
+        dir.join("sql/001_init.sql"),
+        "create table items (id uuid primary key);\n",
+    )
+    .unwrap();
+    let (out, err, _) = axon(&["verify", dir.to_str().unwrap()]);
+    let printed = format!("{out}{err}");
+    assert!(
+        printed.contains("creates no `outbox` table") || printed.contains("no `outbox`"),
+        "with the migrations read, the outbox rule should be the one talking:\n{printed}"
+    );
 }

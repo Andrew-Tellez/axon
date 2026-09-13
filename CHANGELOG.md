@@ -7,6 +7,18 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [No publicado]
+
+### Añadido
+
+- **Un `migrations` que no lleva a ninguna parte se rechaza.** Todas las reglas sobre el
+  esquema se callan cuando no hay esquema que leer, así que una ruta equivocada apagaba de
+  golpe el outbox, el inbox, las claves foráneas, los CRUD y los índices —y el manifiesto
+  seguía diciendo dónde viven sus tablas. Un error con forma de comprobado es peor que uno
+  que falla. Lo encontró un agente escribiendo `migrations = "auto"`, un directorio que
+  nunca existió, y axon sin decir nada. El error dice desde dónde resolvió la ruta y qué
+  dejaba de comprobarse.
+
 ## [0.34.1] — 2026-09-12
 
 ### Corregido

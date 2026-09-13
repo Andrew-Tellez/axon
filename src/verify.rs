@@ -397,6 +397,44 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     // the pattern and not creating the table is the one combination that
     // applies clean and breaks on the first insert, in the path that exists so
     // that no event gets lost.
+    // ...and before any of that: the address has to lead somewhere.
+    //
+    // Every rule below reads the schema, and every one of them gives up
+    // quietly when there is no schema to read. So a `migrations` pointing at a
+    // directory that does not exist does not fail: it turns off the outbox
+    // check, the inbox check, the FKs, the CRUD and the indexes at once, and
+    // the manifest still says where the schema lives. That is the worst shape
+    // a mistake can have here —it reads as checked.
+    //
+    // Not in a browser: there is no directory to find there, and the
+    // migrations arrive as text or not at all.
+    for m in ms
+        .iter()
+        .filter(|_| !cfg!(target_arch = "wasm32"))
+        .filter(|m| !m.external)
+    {
+        let Some(declared) = &m.infra.migrations else {
+            continue;
+        };
+        if !crate::manifest::migrations_of(m).is_empty() {
+            continue;
+        }
+        let from = m
+            .origin
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .display()
+            .to_string();
+        errors.push(format!(
+            "{}: `[infra] migrations = \"{declared}\"` has no `*.sql`; resolved from `{}`, \
+             where the manifest is. The schema IS the migrations, so with none of them read \
+             the outbox, the inbox, the foreign keys, the CRUDs and the indexes stop being \
+             checked —without a word, which is what makes this worth stopping for",
+            m.service,
+            if from.is_empty() { ".".into() } else { from }
+        ));
+    }
+
     for m in ms.iter().filter(|m| !m.external) {
         // No parsed schema means no migrations to look at —a service with no
         // state of its own— and there is nothing to be missing.
