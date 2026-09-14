@@ -29,7 +29,7 @@ mod traffic;
 mod tui;
 mod versions;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -308,6 +308,15 @@ enum Cmd {
         /// between services does not pass through the edge
         #[arg(long = "manifests")]
         manifests: Vec<String>,
+    },
+    /// the shell's completion script, derived from this same definition
+    ///
+    /// Install it where the shell looks: zsh into a `$fpath` directory as
+    /// `_axon`, bash into `/etc/bash_completion.d/axon`, fish into
+    /// `~/.config/fish/completions/axon.fish`.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
 }
 
@@ -1052,6 +1061,9 @@ fn run() -> Result<ExitCode, String> {
                     return Ok(ExitCode::FAILURE);
                 }
             }
+        }
+        Cmd::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "axon", &mut std::io::stdout());
         }
     }
     Ok(ExitCode::SUCCESS)

@@ -12,6 +12,11 @@ service that is down is reported and does not break the rest.
 command. Everything but `build` and `test` takes only sources, and for those two an empty
 list means "no peers", which they say so themselves.
 
+## `axon completions <zsh|bash|fish|elvish|powershell>`
+The shell's completion script, on stdout. It is generated from the same definition as
+`--help`, so a new command or flag appears in it without anybody updating a list. Where
+each shell reads it from is in [Install](./install.md#tab-completion).
+
 # Code and contracts
 
 ## `axon build <manifest> [sources...] [--lang ts]`

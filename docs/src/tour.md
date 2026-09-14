@@ -11,6 +11,7 @@ axon import asyncapi events.yaml > manifests/shipping.toml   # an event catalogu
 axon import openapi swagger.json > manifests/billing.toml    # what a NestJS repo has
 axon baseline manifests/ > axon.baseline.json                # freeze what is published
 axon accept manifests/ > axon.accepted.json                  # the line: today's warnings
+axon completions zsh > ~/.zsh/completions/_axon              # thirty commands, tab-able
 ```
 
 ## The one you run every time

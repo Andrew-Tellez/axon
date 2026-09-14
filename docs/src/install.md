@@ -20,6 +20,21 @@ From source, if you would rather build it:
 cargo install --git https://github.com/Andrew-Tellez/axon
 ```
 
+## Tab completion
+
+Thirty-odd commands is more than anybody remembers. The binary prints its own completion
+script, derived from the same definition as `--help`, so it cannot drift:
+
+```sh
+axon completions zsh  > ~/.zsh/completions/_axon              # in any `$fpath` directory
+axon completions bash > /etc/bash_completion.d/axon
+axon completions fish > ~/.config/fish/completions/axon.fish
+```
+
+Also `elvish` and `powershell`. It completes the commands, their flags and the fixed
+values a flag accepts (`--target bigquery|snowflake|clickhouse|plan`); what it does not
+complete is what only the manifests know, such as a service name after `-s`.
+
 ## For the whole flow
 
 `axon` on its own needs nothing. These tools are needed for what it **generates**, and

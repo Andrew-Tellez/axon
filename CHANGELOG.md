@@ -7,6 +7,17 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [No publicado]
+
+### Añadido
+
+- **`axon completions <shell>`.** Treinta y un comandos es más de lo que nadie recuerda, y
+  hasta ahora la única forma de encontrarlos era leer el `--help` entero. El script lo
+  imprime el propio binario a partir de la misma definición que el `--help`, así que no
+  puede quedarse atrás: completa comandos, banderas y los valores fijos que una bandera
+  acepta. zsh, bash, fish, elvish y powershell. Lo que no completa es lo que solo saben los
+  manifiestos —el nombre de un servicio después de `-s`.
+
 ## [0.35.0] — 2026-09-13
 
 ### Añadido
