@@ -30,8 +30,41 @@ mod tui;
 mod versions;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::engine::{ArgValueCandidates, CompletionCandidate};
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+/// The half a static script cannot know: which services and which events exist.
+///
+/// The shell asks before the command is finished, so there are no `sources` to
+/// read yet —it reads the current directory, which is what every command
+/// defaults to anyway. A directory with no manifests completes nothing, which
+/// is the same as what the shell did before.
+fn manifests_here() -> Vec<manifest::Manifest> {
+    manifest::discover(&[".".to_string()]).unwrap_or_default()
+}
+
+fn services_here() -> Vec<CompletionCandidate> {
+    manifests_here()
+        .iter()
+        .map(|m| CompletionCandidate::new(&m.service))
+        .collect()
+}
+
+fn events_here() -> Vec<CompletionCandidate> {
+    manifests_here()
+        .iter()
+        .flat_map(|m| {
+            // the emitter, as the description: two services rarely emit the
+            // same event, and when the name is ambiguous that is the thing
+            // worth seeing
+            let owner = m.service.clone();
+            m.emits.keys().map(move |e| {
+                CompletionCandidate::new(e).help(Some(format!("emitted by {owner}").into()))
+            })
+        })
+        .collect()
+}
 
 #[derive(Parser)]
 #[command(
@@ -49,14 +82,17 @@ enum Cmd {
     /// manifest -> contracts and base class
     Build {
         /// a path, or the URL of a service that serves its own manifest
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         manifest: String,
         /// The other manifests: that is where the type of what this service consumes comes from.
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         #[arg(long, default_value = "ts")]
         lang: String,
     },
     /// manifest -> CI/CD pipeline
     Ci {
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         manifest: PathBuf,
         /// deploy platform; without it only the gates get generated
         #[arg(long, default_value = "none")]
@@ -67,6 +103,7 @@ enum Cmd {
     },
     /// manifests -> IaC. `--target plan` gives the neutral plan in JSON.
     Infra {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         #[arg(long, default_value = "plan")]
         target: String,
@@ -80,25 +117,43 @@ enum Cmd {
         schema: bool,
     },
     /// manifests -> mermaid: event topology
-    Graph { sources: Vec<String> },
+    Graph {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        sources: Vec<String>,
+    },
     /// manifests -> mermaid: class diagram
-    Classes { sources: Vec<String> },
+    Classes {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        sources: Vec<String>,
+    },
     /// the domain's state machines -> mermaid: stateDiagram
-    States { sources: Vec<String> },
+    States {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        sources: Vec<String>,
+    },
     /// migrations -> mermaid: entity-relationship
-    Er { sources: Vec<String> },
+    Er {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        sources: Vec<String>,
+    },
     /// an event's causal flow -> mermaid: sequence
     Seq {
+        #[arg(add = ArgValueCandidates::new(events_here))]
         event: String,
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         /// Only the event chain, comparable with `axon trace --seq`.
         #[arg(long)]
         events: bool,
     },
     /// registry of services and methods (directory, file or URL)
-    Discover { sources: Vec<String> },
+    Discover {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        sources: Vec<String>,
+    },
     /// drift between manifests, migrations and infrastructure
     Verify {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         /// the same report as JSON, for whatever reads it instead of a person:
         /// a script, a bot, an agent. The prose is written to be read once by
@@ -116,6 +171,7 @@ enum Cmd {
         #[arg(value_parser = ["asyncapi", "openapi"])]
         format: String,
         /// file, or `-` for stdin
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         file: String,
         /// service name, unless it has to be inferred from info.title
         #[arg(long)]
@@ -123,6 +179,7 @@ enum Cmd {
     },
     /// warehouse schemas and funnel views, derived from the events
     Analytics {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         #[arg(long, default_value = "bigquery",
               value_parser = ["bigquery", "snowflake", "clickhouse", "plan"])]
@@ -146,7 +203,7 @@ enum Cmd {
         /// table does not have loads as nothing, and nobody sees an error.
         /// With `--metabase`, compares the questions somebody exported from
         /// the dashboard instead.
-        #[arg(long)]
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
         check: Option<PathBuf>,
         /// emits the Vector config: the ingest path for a cluster, where there
         /// is no managed warehouse to subscribe to.
@@ -154,27 +211,33 @@ enum Cmd {
         vector: bool,
     },
     /// the API's maintenance cycle: what each version is, and what changed
-    Versions { sources: Vec<String> },
+    Versions {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        sources: Vec<String>,
+    },
     /// a pact from a consumer that does not use axon, crossed against what
     /// the provider declares
     Pact {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         /// the pact file (Pact v2, v3 or v4). axon does not need a broker to
         /// read one: what it wants is the list of fields the consumer needs
-        #[arg(long)]
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
         check: PathBuf,
     },
     /// who calls what, read from the edge's access log
     Traffic {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         /// the edge's access log, NDJSON. axon does not connect to the edge:
         /// the log comes in here and the compiler crosses it against what the
         /// manifests declare
-        #[arg(long)]
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
         check: PathBuf,
     },
     /// the system as it is, drawn: topology, verdict, versions and changes
     Tui {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         /// renders N frames to stdout and exits instead of taking over the
         /// terminal; that is what makes the picture checkable in CI
@@ -183,42 +246,55 @@ enum Cmd {
     },
     /// rules over a metric: the SQL that evaluates them, and what they propose
     Rules {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         /// the warehouse's answer (TSV) to compare the declared against what
         /// happened; without it the query is emitted
-        #[arg(long)]
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
         check: Option<PathBuf>,
         /// MOVES the levers, on the flagd configuration at this path. Two locks
         /// and not one: the rule has to say `mode = "apply"` and you have to
         /// say this. Every change is appended to an audit trail next to it
-        #[arg(long)]
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
         apply: Option<PathBuf>,
     },
     /// reconciles the declared CAP side with the patterns in use
     Cap {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         /// limits the report to these services; the analysis still looks at all of them
-        #[arg(long = "service", short = 's')]
+        #[arg(long = "service", short = 's', add = ArgValueCandidates::new(services_here))]
         services: Vec<String>,
     },
     /// flagd config derived from the declared `[flags.*]`
-    Flags { sources: Vec<String> },
+    Flags {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        sources: Vec<String>,
+    },
     /// load test derived from the manifest, and its verdict
     Load {
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         manifest: PathBuf,
         /// k6 summary (`--summary-export`) to compare the measured against the
         /// declared; without it the script is emitted
-        #[arg(long)]
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
         check: Option<PathBuf>,
     },
     /// snapshot of the published contracts, to detect incompatible changes
-    Baseline { sources: Vec<String> },
+    Baseline {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        sources: Vec<String>,
+    },
     /// the warnings this repo lives with for now: with the file present, a new
     /// one fails the build. It is how an existing codebase can adopt `verify`
     /// without fixing two hundred things first
-    Accept { sources: Vec<String> },
+    Accept {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        sources: Vec<String>,
+    },
     /// pooler or sharder config, derived from the manifest
     Pooler {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         /// `local` names the containers `axon infra --target local` brings up;
         /// the rest leave the hosts as environment variables. `k8s` is what
@@ -232,7 +308,7 @@ enum Cmd {
         users: bool,
         /// which service. Each one carries its own pgdog.toml, so it can only
         /// be omitted when a single one declares a pooler.
-        #[arg(long = "service", short = 's')]
+        #[arg(long = "service", short = 's', add = ArgValueCandidates::new(services_here))]
         service: Option<String>,
     },
     /// a project that verifies clean and comes up: manifest, migration,
@@ -241,18 +317,20 @@ enum Cmd {
         /// the service's name: lowercase and dashes
         service: String,
         /// where to write it. The current directory by default
-        #[arg(long, default_value = ".")]
+        #[arg(long, default_value = ".", value_hint = clap::ValueHint::DirPath)]
         path: PathBuf,
     },
     /// the verifier for what `[auth]` declares. Emitted, not linked: a file you
     /// can read beats a dependency that hides which claim it trusted
     Auth {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         manifest: String,
         #[arg(long, default_value = "ts", value_parser = ["ts"])]
         lang: String,
     },
     /// what a `[crud.*]` stands for, as TOML you can paste and edit
     Crud {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         manifest: String,
         /// prints the generated methods instead of nothing
         #[arg(long)]
@@ -260,14 +338,16 @@ enum Cmd {
     },
     /// the declared lists: table, seed and type from one place
     Catalog {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         /// which service. Each one's catalogs go in its own migration
         /// directory, so it can only be omitted when a single one declares any.
-        #[arg(long = "service", short = 's')]
+        #[arg(long = "service", short = 's', add = ArgValueCandidates::new(services_here))]
         service: Option<String>,
     },
     /// data access policies: per-row RLS and masked views
     Rls {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         /// `sql` protects the live query; `pg_anon` generates the dictionary for
         /// making a masked copy.
@@ -276,6 +356,7 @@ enum Cmd {
     },
     /// manifests -> OpenAPI 3.1 (one catalogue for the whole platform)
     Openapi {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         /// the document as of a dated version (`[api] versioning = "header"`):
         /// the shapes are the ones that version promised, not today's
@@ -284,18 +365,20 @@ enum Cmd {
     },
     /// manifest -> test scaffolding (unit, integration, e2e)
     Test {
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         manifest: PathBuf,
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
         #[arg(long, default_value = "ts")]
         lang: String,
         /// Path of the module `axon build` generated.
-        #[arg(long, default_value = "./contracts.ts")]
+        #[arg(long, default_value = "./contracts.ts", value_hint = clap::ValueHint::FilePath)]
         contracts: String,
     },
     /// NDJSON envelope log -> the real causal chain (for local debugging)
     Trace {
         /// file, or `-` for stdin
-        #[arg(default_value = "-")]
+        #[arg(default_value = "-", value_hint = clap::ValueHint::FilePath)]
         log: String,
         /// one business flow only
         #[arg(long)]
@@ -306,7 +389,7 @@ enum Cmd {
         /// the manifests, to cross the REAL edges between services against the
         /// declared ones. It is the half `axon traffic` cannot see: a call
         /// between services does not pass through the edge
-        #[arg(long = "manifests")]
+        #[arg(long = "manifests", value_hint = clap::ValueHint::AnyPath)]
         manifests: Vec<String>,
     },
     /// the shell's completion script, derived from this same definition
@@ -314,9 +397,13 @@ enum Cmd {
     /// Install it where the shell looks: zsh into a `$fpath` directory as
     /// `_axon`, bash into `/etc/bash_completion.d/axon`, fish into
     /// `~/.config/fish/completions/axon.fish`.
+    ///
+    /// The script does not carry the list of commands: it asks this binary
+    /// each time, which is how a service name or an event can be completed at
+    /// all —they live in the manifests, not in the definition.
     Completions {
-        #[arg(value_enum)]
-        shell: clap_complete::Shell,
+        #[arg(value_parser = SHELLS)]
+        shell: String,
     },
 }
 
@@ -374,7 +461,20 @@ fn full_report(ms: &[manifest::Manifest], root: &std::path::Path) -> verify::Rep
     r
 }
 
+/// The five the generated script can be written for.
+const SHELLS: [&str; 5] = ["bash", "elvish", "fish", "powershell", "zsh"];
+
+/// What the installed script sets to say "this is not a run, it is a question".
+/// The default is `COMPLETE`, generic enough to collide with another tool's.
+const COMPLETE_VAR: &str = "AXON_COMPLETE";
+
 fn main() -> ExitCode {
+    // Before anything else: with the variable set this process is the shell
+    // asking, and it answers and exits. It must not reach `Cli::parse`, because
+    // a half-typed command line does not parse.
+    clap_complete::CompleteEnv::with_factory(Cli::command)
+        .var(COMPLETE_VAR)
+        .complete();
     match run() {
         Ok(code) => code,
         Err(e) => {
@@ -1063,7 +1163,12 @@ fn run() -> Result<ExitCode, String> {
             }
         }
         Cmd::Completions { shell } => {
-            clap_complete::generate(shell, &mut Cli::command(), "axon", &mut std::io::stdout());
+            let shells = clap_complete::env::Shells::builtins();
+            let sh = shells
+                .completer(&shell)
+                .ok_or_else(|| format!("unknown shell `{shell}`"))?;
+            sh.write_registration(COMPLETE_VAR, "axon", "axon", "axon", &mut std::io::stdout())
+                .map_err(|e| e.to_string())?;
         }
     }
     Ok(ExitCode::SUCCESS)

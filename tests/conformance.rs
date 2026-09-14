@@ -10493,3 +10493,45 @@ fn a_migrations_path_that_leads_nowhere_is_refused() {
         "with the migrations read, the outbox rule should be the one talking:\n{printed}"
     );
 }
+
+/// The completion is dynamic: the script carries no list, it asks the binary.
+/// That is the whole point —a service name and an event live in the manifests,
+/// not in the CLI definition— and it is also what makes it breakable in
+/// silence: if this stops answering, tab just goes quiet and nobody reports it.
+#[test]
+fn completion_reads_the_manifests() {
+    let complete = |index: &str, args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_axon"))
+            .current_dir("examples")
+            .env("AXON_COMPLETE", "zsh")
+            .env("_CLAP_COMPLETE_INDEX", index)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    // the services `axon cap -s` accepts, read from examples/
+    let out = complete("4", &["--", "axon", "cap", ".", "-s", ""]);
+    assert!(
+        out.lines().any(|l| l == "payments"),
+        "`-s` completed no service:\n{out}"
+    );
+
+    // an event, with its emitter as the description
+    let out = complete("2", &["--", "axon", "seq", ""]);
+    assert!(
+        out.contains("order.placed@v1:emitted by orders"),
+        "`seq` completed no event:\n{out}"
+    );
+
+    // the values a flag fixes still come from the definition
+    let out = complete("4", &["--", "axon", "analytics", ".", "--target", ""]);
+    assert!(out.lines().any(|l| l == "snowflake"), "{out}");
+
+    // and the script that installs all of it names the variable it answers on
+    let (script, _, ok) = axon(&["completions", "zsh"]);
+    assert!(ok);
+    assert!(script.starts_with("#compdef axon"), "{script}");
+    assert!(script.contains("AXON_COMPLETE"), "{script}");
+}

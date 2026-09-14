@@ -22,8 +22,8 @@ cargo install --git https://github.com/Andrew-Tellez/axon
 
 ## Tab completion
 
-Thirty-odd commands is more than anybody remembers. The binary prints its own completion
-script, derived from the same definition as `--help`, so it cannot drift:
+Thirty-odd commands is more than anybody remembers. The binary prints the script that
+installs its own completion:
 
 ```sh
 axon completions zsh  > ~/.zsh/completions/_axon              # in any `$fpath` directory
@@ -31,9 +31,19 @@ axon completions bash > /etc/bash_completion.d/axon
 axon completions fish > ~/.config/fish/completions/axon.fish
 ```
 
-Also `elvish` and `powershell`. It completes the commands, their flags and the fixed
-values a flag accepts (`--target bigquery|snowflake|clickhouse|plan`); what it does not
-complete is what only the manifests know, such as a service name after `-s`.
+Also `elvish` and `powershell`. The script carries no list of anything: it asks the binary
+on every tab, which is what makes it complete **what only the manifests know** —
+
+| | |
+| --- | --- |
+| `axon cap . -s ` | the services declared in this directory |
+| `axon seq ` | every emitted event, with its emitter as the description |
+| `axon analytics . --target ` | the values that flag accepts |
+| `axon verify `, `--check ` | directories and files, as any other tool |
+
+It reads the manifests of the **current directory** — the same default every command has
+when you give it no sources. In a directory with none, there is nothing to offer and tab
+behaves as it did before.
 
 ## For the whole flow
 

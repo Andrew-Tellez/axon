@@ -18,6 +18,12 @@ perderlas.
   acepta. zsh, bash, fish, elvish y powershell. Lo que no completa es lo que solo saben los
   manifiestos —el nombre de un servicio después de `-s`.
 
+- **Y sí completa lo que solo saben los manifiestos.** El script no lleva ninguna lista:
+  pregunta al binario en cada tabulación, así que `-s ` ofrece los servicios del
+  directorio y `axon seq ` los eventos emitidos, con su emisor como descripción. Lee el
+  directorio actual, que es lo que asume cualquier comando sin fuentes; en uno sin
+  manifiestos no hay nada que ofrecer y la tabulación se comporta como antes.
+
 ## [0.35.0] — 2026-09-13
 
 ### Añadido

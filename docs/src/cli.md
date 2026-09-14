@@ -13,9 +13,12 @@ command. Everything but `build` and `test` takes only sources, and for those two
 list means "no peers", which they say so themselves.
 
 ## `axon completions <zsh|bash|fish|elvish|powershell>`
-The shell's completion script, on stdout. It is generated from the same definition as
-`--help`, so a new command or flag appears in it without anybody updating a list. Where
-each shell reads it from is in [Install](./install.md#tab-completion).
+The script that installs completion, on stdout. It holds no list of commands: it calls
+this binary back on every tab, with `AXON_COMPLETE` set, so a new command appears without
+anybody regenerating anything —and a **service name** or an **event** can be completed at
+all, which no static script could do: they live in the manifests of the current directory,
+not in the CLI. Where each shell reads the script from is in
+[Install](./install.md#tab-completion).
 
 # Code and contracts
 
