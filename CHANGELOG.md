@@ -69,6 +69,20 @@ perderlas.
   y aparecen los `…In` y los `…Out` que faltaban. El TypeScript no cambia de tipos: solo
   gana los comentarios que Go ya tenía.
 
+- **Go genera clientes.** Hasta ahora el Go generado eran tipos, handlers y la máquina de
+  estados: quien llamaba a otro servicio escribía a mano el timeout, los reintentos y el
+  cortacircuitos, que es justo lo que el manifiesto ya declara. Ahora sale el cliente, con
+  la política dentro y literal — el timeout es el `context` que la llamada ya recibe, el
+  backoff lleva su jitter, el cortacircuitos es un mapa detrás de un mutex, y un fallo que
+  la otra parte declaró final no se reintenta. `on_partition = "degrade"` hace del camino
+  degradado un argumento obligatorio, igual que en TypeScript: no se puede llamar sin decir
+  qué se sirve mientras la otra parte no contesta. Y una dependencia sobre un método que se
+  está muriendo sale con el `Deprecated:` que leen el editor y el linter de Go.
+
+  Es la misma política en los dos lenguajes porque sale del mismo sitio, y hay un test que
+  falla si dejan de coincidir. El servicio gana un `transport Transport` en su constructor
+  cuando tiene `[[depends]]`.
+
 ### Corregido
 
 - **El gate de Go del suite no se ejecutaba nunca.** La comprobación de si la herramienta

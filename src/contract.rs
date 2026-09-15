@@ -45,8 +45,43 @@ pub struct Contract {
     pub events: Vec<Decl>,
     /// The input and the output of each of its methods.
     pub methods: Vec<Decl>,
-    /// Per declared dependency: what it sends, and what it reads back.
-    pub calls: Vec<Decl>,
+    /// One per declared dependency: its two types, and the policy it runs
+    /// under.
+    pub calls: Vec<Call>,
+}
+
+/// A call to another service: what it sends, what this caller reads back, and
+/// everything the manifest decided about what happens when it goes wrong.
+///
+/// The numbers are not a suggestion. They land literally in the generated
+/// code, so the policy that ships is the policy that was declared — and that
+/// is why they belong here and not in one generator: a client that retries in
+/// TypeScript and gives up in Go is two different services.
+pub struct Call {
+    pub service: String,
+    pub method: String,
+    pub input: Decl,
+    pub output: Decl,
+    pub timeout_ms: u32,
+    pub retries: u32,
+    pub breaker: bool,
+    /// The codes the CALLEE declared worth another try. Whoever fails owns the
+    /// reason, so this comes from the target's manifest: a failure declared
+    /// final is not retried at all, and an error nobody declared is, because
+    /// an unknown failure could be the network.
+    pub retriable: Vec<String>,
+    /// Every failure the callee declares: code, HTTP status, and whether
+    /// trying again can end differently.
+    pub declares: Vec<(String, u16, bool)>,
+    /// Whether the callee declared the method idempotent, which is what says
+    /// an idempotency key may travel with the retry.
+    pub idempotent: bool,
+    /// `on_partition = "degrade"`: the caller cannot make the call without
+    /// saying what gets served while the other side is unreachable.
+    pub degrades: bool,
+    /// The callee announced this method is dying: since when, and what
+    /// replaces it.
+    pub retiring: Option<(Option<String>, Option<String>)>,
 }
 
 /// Only the fields `uses` names, in the order the owner declared them.
@@ -118,7 +153,7 @@ pub fn of(m: &Manifest, all: &[Manifest]) -> Result<Contract, String> {
         methods.push(Decl::new(&[name, "Out"], String::new(), me.output.clone()));
     }
 
-    let mut calls = Vec::new();
+    let mut calls: Vec<Call> = Vec::new();
     for d in &m.depends {
         let tgt = d.target();
         let other = all
@@ -129,11 +164,7 @@ pub fn of(m: &Manifest, all: &[Manifest]) -> Result<Contract, String> {
             .methods
             .get(&d.method)
             .ok_or_else(|| format!("{}: {tgt} does not expose `{}`", m.service, d.method))?;
-        calls.push(Decl::new(
-            &[tgt, &d.method, "In"],
-            String::new(),
-            sig.input.clone(),
-        ));
+        let input = Decl::new(&[tgt, &d.method, "In"], String::new(), sig.input.clone());
         // The answer as THIS caller sees it: same rule as `uses` on an event.
         let (doc, fields) = match d.uses.as_deref() {
             Some(uses) => (
@@ -152,7 +183,31 @@ pub fn of(m: &Manifest, all: &[Manifest]) -> Result<Contract, String> {
             ),
             None => (String::new(), sig.output.clone()),
         };
-        calls.push(Decl::new(&[tgt, &d.method, "Out"], doc, fields));
+        calls.push(Call {
+            service: tgt.to_string(),
+            method: d.method.clone(),
+            input,
+            output: Decl::new(&[tgt, &d.method, "Out"], doc, fields),
+            timeout_ms: d.timeout_ms.unwrap_or(10_000),
+            retries: d.retries,
+            breaker: d.breaker,
+            retriable: sig
+                .errors
+                .iter()
+                .filter(|f| f.retriable)
+                .map(|f| f.code.clone())
+                .collect(),
+            declares: sig
+                .errors
+                .iter()
+                .map(|f| (f.code.clone(), f.status, f.retriable))
+                .collect(),
+            idempotent: sig.is_idempotent(),
+            degrades: m.cap.degrades(),
+            retiring: sig
+                .retiring()
+                .then(|| (sig.sunset.clone(), sig.successor.clone())),
+        });
     }
 
     Ok(Contract {

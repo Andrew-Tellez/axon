@@ -2956,38 +2956,29 @@ fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         return Ok(String::new());
     }
     let mut types = Vec::new();
-    for d in &crate::contract::of(m, all)?.calls {
-        if !d.doc.is_empty() {
-            types.push(format!("/** {} */", d.doc));
+    for c in &crate::contract::of(m, all)?.calls {
+        for d in [&c.input, &c.output] {
+            if !d.doc.is_empty() {
+                types.push(format!("/** {} */", d.doc));
+            }
+            types.push(iface(&ts_name(d), &d.fields));
         }
-        types.push(iface(&ts_name(d), &d.fields));
     }
     let mut methods = Vec::new();
-    for d in &m.depends {
-        let tgt = d.target();
-        let other = all
-            .iter()
-            .find(|o| o.service == tgt)
-            .ok_or_else(|| format!("{}: depends on {tgt}, which has no manifest", m.service))?;
-        let sig = other
-            .methods
-            .get(&d.method)
-            .ok_or_else(|| format!("{}: {tgt} does not expose `{}`", m.service, d.method))?;
+    for c in &crate::contract::of(m, all)?.calls {
+        let (tgt, met) = (&c.service, &c.method);
         // Prefixed with the service: another service's types cannot collide
         // with our own.
-        let base = format!("{}{}", pascal(tgt), pascal(&d.method));
+        let base = format!("{}{}", pascal(tgt), pascal(met));
         let seen = format!("{base}Out");
-
         let pol = format!(
             "{{ timeoutMs: {}, retries: {}, breaker: {} }}",
-            d.timeout_ms.unwrap_or(10_000),
-            d.retries,
-            d.breaker
+            c.timeout_ms, c.retries, c.breaker
         );
         // `on_partition = "degrade"` makes the degraded path a required
         // argument: the client cannot be called without saying what gets served
         // while the other side is unreachable.
-        let (param, body) = if m.cap.degrades() {
+        let (param, body) = if c.degrades {
             (
                 format!(", fallback: () => Promise<{seen}>"),
                 concat!(
@@ -3003,35 +2994,28 @@ fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         } else {
             (String::new(), "    return attempt();".to_string())
         };
-        // The failures the CALLEE declared, and which of them are worth another
-        // try. It comes from the target's manifest for the same reason a
-        // consumed event's schema does: whoever fails owns the reason.
-        let retriable: Vec<String> = sig
-            .errors
-            .iter()
-            .filter(|f| f.retriable)
-            .map(|f| format!("\"{}\"", f.code))
-            .collect();
-        let decide = if sig.errors.is_empty() {
+        let decide = if c.declares.is_empty() {
             String::new()
         } else {
             format!(
                 ",\n      (code) => [{}].includes(code)",
-                retriable.join(", ")
+                c.retriable
+                    .iter()
+                    .map(|code| format!("\"{code}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         };
-        let declared = if sig.errors.is_empty() {
+        let declared = if c.declares.is_empty() {
             String::new()
         } else {
             format!(
                 "\n   *  declares: {}",
-                sig.errors
+                c.declares
                     .iter()
-                    .map(|f| format!(
-                        "{} ({}{})",
-                        f.code,
-                        f.status,
-                        if f.retriable { ", retriable" } else { "" }
+                    .map(|(code, status, retriable)| format!(
+                        "{code} ({status}{})",
+                        if *retriable { ", retriable" } else { "" }
                     ))
                     .collect::<Vec<_>>()
                     .join(" · ")
@@ -3040,22 +3024,19 @@ fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         // A dependency on a version that is dying: `@deprecated` is read by the
         // editor and by whoever reviews, without anybody having to know that
         // the other service announced something.
-        let retiring = if sig.retiring() {
-            format!(
+        let retiring = match &c.retiring {
+            None => String::new(),
+            Some((sunset, successor)) => format!(
                 "\n   *  @deprecated {tgt}.{met} is deprecated{}{}",
-                sig.sunset
+                sunset
                     .as_deref()
                     .map(|s| format!("; it sunsets on {s}"))
                     .unwrap_or_default(),
-                sig.successor
+                successor
                     .as_deref()
                     .map(|s| format!("; use `{s}`"))
                     .unwrap_or_default(),
-                tgt = tgt,
-                met = d.method,
-            )
-        } else {
-            String::new()
+            ),
         };
         methods.push(format!(
             "  /** {tgt}.{met} · timeout {t}ms · {r} retries · breaker {b}{declared}{retiring} */\n  \
@@ -3064,12 +3045,11 @@ fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
                  (await this.transport.call(\"{tgt}\", \"{met}\", input, headers(e, {idem}))) as {seen}{decide});\n\
 {body}\n  \
              }}",
-            met = d.method,
-            t = d.timeout_ms.unwrap_or(10_000),
-            r = d.retries,
-            b = d.breaker,
-            name = camel(&format!("{tgt}.{}", d.method)),
-            idem = sig.is_idempotent(),
+            t = c.timeout_ms,
+            r = c.retries,
+            b = c.breaker,
+            name = camel(&format!("{tgt}.{met}")),
+            idem = c.idempotent,
         ));
     }
     Ok(format!(

@@ -10611,3 +10611,73 @@ fn a_finding_carries_its_service_and_its_file() {
         "a platform-wide finding was placed on a service:\n{out}"
     );
 }
+
+/// One call, one policy, two languages.
+///
+/// This is the test the IR exists for. The timeout, the retries, the breaker
+/// and which failures are worth another try are decided in `contract.rs` and
+/// rendered twice, so a client that retries three times in TypeScript and
+/// gives up in Go stops being possible — and that was not a hypothesis: the
+/// two generators had already drifted on the names of the types they emit for
+/// the very same call.
+#[test]
+fn a_call_runs_under_the_same_policy_in_both_languages() {
+    let (ts, err, ok) = axon(&["build", "examples/checkout.toml", "examples"]);
+    assert!(ok, "{err}");
+    let (go, err, ok) = axon(&[
+        "build",
+        "examples/checkout.toml",
+        "examples",
+        "--lang",
+        "go",
+    ]);
+    assert!(ok, "{err}");
+
+    // what checkout.toml declares about each of its dependencies
+    for (method, timeout, retries, breaker) in [
+        ("capturePayment", 8000, 0, true),
+        ("refundPayment", 8000, 3, true),
+    ] {
+        assert!(
+            ts.contains(&format!(
+                "{{ timeoutMs: {timeout}, retries: {retries}, breaker: {breaker} }}"
+            )),
+            "TypeScript no lleva la politica de {method}:\n{ts}"
+        );
+        assert!(
+            go.contains(&format!(
+                "Policy{{Timeout: {timeout} * time.Millisecond, Retries: {retries}, \
+                 Breaker: {breaker}}}"
+            )),
+            "Go no lleva la politica de {method}:\n{go}"
+        );
+    }
+
+    // and the same answer to the only question a retry asks: the code the
+    // CALLEE declared retriable, and no other
+    assert!(ts.contains("(code) => [\"issuer_unavailable\"].includes(code)"));
+    assert!(
+        go.contains(r#"return code == "issuer_unavailable""#),
+        "{go}"
+    );
+
+    // `on_partition = "degrade"` —which is orders, not checkout— makes the
+    // degraded path a required argument: neither language lets the call be made
+    // without saying what gets served while the other side is unreachable.
+    let (ts, _, _) = axon(&["build", "examples/orders.toml", "examples"]);
+    let (go, _, _) = axon(&["build", "examples/orders.toml", "examples", "--lang", "go"]);
+    assert!(
+        ts.contains("fallback: () => Promise<PaymentsCapturePaymentOut>"),
+        "{ts}"
+    );
+    assert!(
+        go.contains("fallback func() (PaymentsCapturePaymentOut, error)"),
+        "{go}"
+    );
+
+    // the two types of one call are one pair of names, not one per language
+    for t in ["PaymentsCapturePaymentIn", "PaymentsCapturePaymentOut"] {
+        assert!(ts.contains(t), "TypeScript no declara {t}");
+        assert!(go.contains(t), "Go no declara {t}");
+    }
+}
