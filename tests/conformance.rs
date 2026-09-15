@@ -2,11 +2,18 @@
 use serde::Deserialize;
 use std::process::Command;
 
+/// Whether a tool is installed. Both spellings, because `go --version` is not
+/// one of them: it exits 2 with a usage message, so every check guarded by
+/// `has("go")` —`go build` over what the generator writes, `gofmt -l`, `go
+/// vet`— skipped itself on a machine with Go installed, and said so in a line
+/// nobody reads. A gate that turns itself off is worse than no gate.
 fn has(bin: &str) -> bool {
-    Command::new(bin)
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
+    ["--version", "version"].iter().any(|flag| {
+        Command::new(bin)
+            .arg(flag)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    })
 }
 
 fn axon(args: &[&str]) -> (String, String, bool) {
