@@ -37,6 +37,22 @@ perderlas.
   una cadena a ser `{ message, service, file }` — `service` y `file` solo cuando el
   hallazgo nombra uno que existe en el proyecto. `axon accept` sigue anclado al mensaje.
 
+- **Y ahora se coloca cada hallazgo, no solo los que abren con dos puntos.** Una regla que
+  dice `orders calls payments.charge, which is deprecated` nombra su sujeto igual de claro
+  que una que escribe `orders: ...`, pero el editor solo sabía leer la segunda, así que
+  cuarenta hallazgos —todos los de la familia `[A01]`, los de dependencias y los de
+  consumo— se quedaban sin archivo. Se lee la primera palabra de la frase, sin el prefijo
+  `[A01]` o `[axon-check-x]`, y se comprueba contra la lista de servicios: una palabra que
+  no nombra un servicio no coloca nada. Sobre `examples/` pasa de 7 de 11 a 11 de 11. Lo
+  que sigue sin colocarse es lo que no es de un servicio: `[api]` es una decisión sobre
+  todos los manifiestos y ponerla sobre el primero que se leyó es señalar un archivo al
+  azar.
+
+- **`stock.changed@v1 (inventory) has no consumers` pasa a `inventory: stock.changed@v1 has
+  no consumers`.** Era la única regla que nombraba a su servicio entre paréntesis, y por eso
+  la única cuyo aviso no se podía abrir. Si tienes esa línea en un `axon.accepted.json`,
+  vuelve a correr `axon accept`.
+
 ## [0.35.0] — 2026-09-13
 
 ### Añadido

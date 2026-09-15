@@ -133,15 +133,36 @@ impl std::fmt::Display for Finding {
 /// migration's path— comes back placed nowhere, and whoever displays it
 /// decides where that goes.
 pub fn place(ms: &[Manifest], message: String) -> Finding {
-    let owner = split_owner(&message).0;
-    let file = owner
-        .and_then(|o| ms.iter().find(|m| m.service == o))
-        .map(|m| m.origin.clone());
+    let owner = owner_of(ms, &message);
     Finding {
-        service: owner.filter(|_| file.is_some()).map(str::to_string),
-        file,
+        service: owner.map(|m| m.service.clone()),
+        file: owner.map(|m| m.origin.clone()),
         message,
     }
+}
+
+/// The service a finding is about: the first thing its sentence names, when
+/// that thing is a service of this workspace.
+///
+/// Every rule opens by naming its subject, and there are three shapes of it
+/// —`orders: ...`, `orders.getOrder: ...`, `orders calls ...`— because a
+/// sentence that has to start with a colon stops reading like a sentence. The
+/// list of services is what makes reading the first word safe instead of a
+/// guess: a word that is not a service places nothing.
+fn owner_of<'a>(ms: &'a [Manifest], message: &str) -> Option<&'a Manifest> {
+    // a plugin's `[bin] ` and a rule's OWASP tag are not the subject
+    let m = match message.split_once("] ") {
+        Some((tag, rest)) if tag.starts_with('[') => rest,
+        _ => message,
+    };
+    let head = m.split([' ', ':']).next()?;
+    // `order.placed@v1` is an event, and its first segment is not a service
+    // even on the day somebody names a service after it
+    if head.contains('@') {
+        return None;
+    }
+    let name = head.split('.').next()?;
+    ms.iter().find(|x| x.service == name)
 }
 
 /// Splits `owner: rest` off a finding, seeing through a plugin's `[bin] `
@@ -4272,7 +4293,9 @@ fn events_with_no_consumers(
 ) {
     for (ev, (owner, _)) in emitters {
         if !ms.iter().any(|m| m.consumes.contains_key(*ev)) {
-            warnings.push(format!("{ev} ({owner}) has no consumers"));
+            // The one rule that used to name its subject in parentheses, so it
+            // was the one finding the editor could not place on a file.
+            warnings.push(format!("{owner}: {ev} has no consumers"));
         }
     }
 }

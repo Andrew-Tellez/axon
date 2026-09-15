@@ -10569,4 +10569,38 @@ fn a_finding_carries_its_service_and_its_file() {
         dir.join("p.toml").display().to_string(),
         "the finding does not name its manifest:\n{out}"
     );
+
+    // Not every rule can open with a colon —a sentence that has to would stop
+    // reading like one— so the subject is also read off `svc calls ...` and
+    // off `[A01] svc.table: ...`, against the list of services so that a word
+    // that is not one places nothing.
+    std::fs::write(
+        dir.join("p.toml"),
+        "service = \"p\"\nowner = \"x\"\ntier = \"1\"\n\
+         [consumes.\"nobody.emits@v1\"]\nhandler = \"onIt\"\nuses = [\"id\"]\n",
+    )
+    .unwrap();
+    let (out, _, _) = axon(&["verify", dir.to_str().unwrap(), "--json"]);
+    let r: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let e = r["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["message"].as_str().unwrap().contains("nobody emits it"))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(e["service"], "p", "`p consumes ...` was not placed:\n{out}");
+
+    // And what belongs to the platform and not to one service stays placed
+    // nowhere, on purpose: `[api]` is one decision over every manifest, and
+    // landing it on whichever was read first would point at an arbitrary file.
+    assert!(
+        r["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(r["warnings"].as_array().unwrap())
+            .filter(|f| f["message"].as_str().unwrap().starts_with("[api]"))
+            .all(|f| f["service"].is_null()),
+        "a platform-wide finding was placed on a service:\n{out}"
+    );
 }
