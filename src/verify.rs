@@ -228,8 +228,147 @@ fn catalog_names(ms: &[Manifest], name: &str) -> Option<Vec<String>> {
 pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     let (mut errors, mut warnings) = (Vec::new(), Vec::new());
 
-    // governance: nothing without an owner, nothing without a criticality,
-    // names under control
+    governance(ms, pol, &mut errors, &mut warnings);
+    // one event, one owner, one schema
+    let mut emitters: IndexMap<&str, (&str, &Fields)> = IndexMap::new();
+    for m in ms {
+        for (ev, fields) in &m.emits {
+            if let Some((owner, prev)) = emitters.get(ev.as_str()) {
+                if *prev != fields {
+                    errors.push(format!(
+                        "{ev}: two emitters with different schemas ({owner} vs {})",
+                        m.service
+                    ));
+                }
+            }
+            emitters.insert(ev, (&m.service, fields));
+        }
+    }
+
+    security(ms, &mut errors, &mut warnings);
+    // A01: a table that forgets the tenant column gets no policy, and a table
+    // with no policy does not fail: it returns everyone's rows.
+    let esquemas = schemas(ms);
+    tenant_isolation(ms, &esquemas, &mut errors);
+    migrations_lead_somewhere(ms, &mut errors);
+    the_tables_axon_names(ms, &esquemas, &mut errors);
+    warehouse_export(ms, &mut errors, &mut warnings);
+    // ---- feature flags: what nobody enforces ----
+    let ahora = today();
+    flags(ms, ahora, &mut errors, &mut warnings);
+    pooler(ms, &mut errors, &mut warnings);
+    cache(ms, &mut errors, &mut warnings);
+    catalogs(ms, &mut errors, &mut warnings);
+    // ---- how a caller becomes a principal ----
+    //
+    // The rules here are deliberately few. Three adversarial reviews of the
+    // design agreed on the same trap: a rule that fires on a correct setup
+    // —a per-API audience, an issuer migration, a long-lived machine token—
+    // gets the whole family silenced, and the good ones go with it. So what is
+    // checked is only what cannot be a legitimate configuration.
+    let with_auth: Vec<&Manifest> = ms
+        .iter()
+        .filter(|m| !m.external && !m.auth.issuers.is_empty())
+        .collect();
+    auth(ms, &mut errors, &mut warnings);
+    auth_is_platform_wide(&with_auth, &mut errors);
+    endpoint_scopes(ms, &mut errors, &mut warnings);
+    // ---- the CRUD, against the real schema ----
+    //
+    // The five endpoints with no business logic. What makes declaring them
+    // worth anything is not the typing saved: it is that the compiler already
+    // reads the migrations with a real SQL parser, so a CRUD over a column
+    // that does not exist fails here instead of at the first request.
+    let crud_schemas = crate::manifest::schemas(ms);
+    crud(ms, &crud_schemas, &mut errors);
+    search_index(ms, &crud_schemas, &mut errors, &mut warnings);
+    the_code_the_compose_expects(ms, pol, &mut warnings);
+    one_migration_convention(ms, &mut errors);
+    storage_engine(ms, &mut errors);
+    db_scaling(ms, &mut errors, &mut warnings);
+    // ---- sharding across nodes ----
+    //
+    // These rules hold against plain Postgres with sharding in the application,
+    // which is how most of the people who really shard do it. And nobody
+    // enforces them: PgDog's schema validator is on its roadmap and not
+    // started, and Citus only fails at runtime when distributing the table.
+    // Every one of them describes a leak or a collision that raises no error,
+    // just wrong data.
+    let esquemas_shard = schemas(ms);
+    sharding(ms, &esquemas_shard, &mut errors);
+    // ---- CAP: the partition is not a choice, what to do during one is ----
+    let lado: IndexMap<&str, &Cap> = ms.iter().map(|m| (m.service.as_str(), &m.cap)).collect();
+    cap(ms, &lado, &mut errors, &mut warnings);
+    image_is_pinned(pol, &mut warnings);
+    // API patterns: what separates an endpoint from one that survives production
+    let mut routes: IndexMap<String, String> = IndexMap::new();
+    api_patterns(ms, &mut routes, &mut errors, &mut warnings);
+    metric_rules(ms, &mut errors, &mut warnings);
+    declared_consumption(ms, &mut errors);
+    fields_nobody_reads(ms, &mut warnings);
+    // The API's versioning, and its maintenance cycle.
+    //
+    // A platform decision: `verify` requires every service to declare the same
+    // one, for the same reason it requires one warehouse. With two schemes at
+    // once a caller has to know which service it is talking to before it can
+    // know how to ask for a version, which is the opposite of what versioning
+    // is for.
+    let internal: Vec<&Manifest> = ms.iter().filter(|m| !m.external).collect();
+    one_versioning_scheme(&internal, &mut errors);
+    let api = internal.first().map(|m| &m.api);
+    version_cycle(ahora, api, &mut errors, &mut warnings);
+    versions_are_not_mixed(ms, &mut errors);
+    retirement(ms, ahora, &mut errors, &mut warnings);
+    callers_of_what_dies(ms, &mut warnings);
+    scopes_nobody_demands(ms, &mut warnings);
+    declared_failures(ms, &mut errors, &mut warnings);
+    retries_with_nothing_to_retry(ms, &mut warnings);
+    event_retention(ms, &mut errors, &mut warnings);
+    // One warehouse per platform. The events of one flow have to land in the
+    // same place: split across two warehouses, the funnel —which is what makes
+    // exporting worth anything— cannot be built with a single query, and nobody
+    // sees an error because every table exists and has rows.
+    let exportan: Vec<&Manifest> = ms
+        .iter()
+        .filter(|m| !m.external && m.analytics.export)
+        .collect();
+    one_warehouse(&exportan, &mut errors);
+    let known: IndexMap<&str, &Manifest> = ms.iter().map(|m| (m.service.as_str(), m)).collect();
+
+    sagas(ms, &esquemas, &known, &mut errors, &mut warnings);
+    event_sourcing(ms, &emitters, &esquemas, &mut errors, &mut warnings);
+    // Business metrics. What a funnel answers is derivable from the causal chain;
+    // this is not, so the whole value of declaring it is that these things become
+    // refutable instead of being a query somebody pasted into a dashboard.
+    let emitted: IndexMap<&str, &Manifest> = ms
+        .iter()
+        .filter(|m| !m.external)
+        .flat_map(|m| m.emits.keys().map(move |e| (e.as_str(), m)))
+        .collect();
+    let mut metric_owner: IndexMap<String, String> = IndexMap::new();
+    business_metrics(ms, &emitted, &mut metric_owner, &mut errors, &mut warnings);
+    state_machines(ms, &mut errors);
+    what_is_named_exists(ms, &emitters, &known, &mut errors, &mut warnings);
+    migration_order(ms, &mut errors, &mut warnings);
+    // database per service: no FK crosses the boundary
+    let by_svc = schemas(ms);
+    let mut owner_of: IndexMap<&str, &str> = IndexMap::new();
+    for (svc, tables) in &by_svc {
+        for t in tables.keys() {
+            owner_of.insert(t, svc);
+        }
+    }
+    no_fk_across_services(&by_svc, &owner_of, &mut errors);
+    events_with_no_consumers(ms, &emitters, &mut warnings);
+    Report {
+        errors: errors.into_iter().map(|e| place(ms, e)).collect(),
+        warnings: warnings.into_iter().map(|w| place(ms, w)).collect(),
+    }
+}
+
+// governance: nothing without an owner, nothing without a criticality,
+// names under control
+fn governance(ms: &[Manifest], pol: &Policy, errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         if pol.require_owner && pendiente(&m.owner) {
             errors.push(format!(
@@ -248,7 +387,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             Some(r) if RUNTIMES.contains(&r) => {}
             Some(other) => errors.push(format!(
                 "{}: `runtime = \"{other}\"` does not exist; today there is {}. Another \
-                 execution model gets added with an `axon-infra-*` plugin",
+             execution model gets added with an `axon-infra-*` plugin",
                 m.service,
                 RUNTIMES.join(" and ")
             )),
@@ -266,8 +405,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !served.is_empty() {
                 errors.push(format!(
                     "{}: `runtime = \"job\"` and it declares routes ({}). A job is not a \
-                     process listening on a port: the routes would be behind an edge that \
-                     reaches nothing",
+                 process listening on a port: the routes would be behind an edge that \
+                 reaches nothing",
                     m.service,
                     served
                         .iter()
@@ -279,8 +418,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if m.infra.min_instances.is_some() || m.infra.max_instances.is_some() {
                 errors.push(format!(
                     "{}: a job has no instances to scale; how many run at a time is the \
-                     scheduler's, and `min_instances` here would be an autoscaler over \
-                     something that is not up",
+                 scheduler's, and `min_instances` here would be an autoscaler over \
+                 something that is not up",
                     m.service
                 ));
             }
@@ -290,7 +429,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !m.consumes.is_empty() {
                 warnings.push(format!(
                     "{}: a job that consumes {} events. Between the event and the reaction \
-                     there is a whole schedule, and the broker has to retain them meanwhile",
+                 there is a whole schedule, and the broker has to retain them meanwhile",
                     m.service,
                     m.consumes.len()
                 ));
@@ -298,7 +437,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         } else if m.infra.schedule.is_some() {
             errors.push(format!(
                 "{}: it declares `schedule` and is not a `job`. A container that is up does \
-                 not get scheduled: what runs on a schedule is something that ends",
+             not get scheduled: what runs on a schedule is something that ends",
                 m.service
             ));
         }
@@ -309,7 +448,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if sched.split_whitespace().count() != 5 {
                 errors.push(format!(
                     "{}: `schedule = \"{sched}\"` is not five cron fields. The three \
-                     providers speak that and not `@daily`",
+                 providers speak that and not `@daily`",
                     m.service
                 ));
             }
@@ -317,7 +456,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if m.depends.len() > pol.max_deps_per_service {
             warnings.push(format!(
                 "{}: {} synchronous dependencies (limit {}); check whether something should \
-                 be an event",
+             be an event",
                 m.service,
                 m.depends.len(),
                 pol.max_deps_per_service
@@ -334,26 +473,12 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
         }
     }
+}
 
-    // one event, one owner, one schema
-    let mut emitters: IndexMap<&str, (&str, &Fields)> = IndexMap::new();
-    for m in ms {
-        for (ev, fields) in &m.emits {
-            if let Some((owner, prev)) = emitters.get(ev.as_str()) {
-                if *prev != fields {
-                    errors.push(format!(
-                        "{ev}: two emitters with different schemas ({owner} vs {})",
-                        m.service
-                    ));
-                }
-            }
-            emitters.insert(ev, (&m.service, fields));
-        }
-    }
-
-    // ---- security. Every rule cites its OWASP Top 10 (2021) category,
-    // because an error that does not say why it matters gets silenced with an
-    // allow-list entry.
+// ---- security. Every rule cites its OWASP Top 10 (2021) category,
+// because an error that does not say why it matters gets silenced with an
+// allow-list entry.
+fn security(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let pii = &m.pii;
@@ -365,7 +490,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if public && meth.mutating() && m.tier.as_deref() == Some("0") {
                 errors.push(format!(
                     "[A01] {svc}.{name}: public mutating route on a tier 0 service; put it \
-                     behind `auth = \"required\"` or lower the tier deliberately"
+                 behind `auth = \"required\"` or lower the tier deliberately"
                 ));
             }
             // A04: insecure design. With no time budget, a public route is free
@@ -373,7 +498,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if public && meth.timeout_ms.is_none() {
                 errors.push(format!(
                     "[A04] {svc}.{name}: public route with no `timeout_ms`; a request with no \
-                     time limit is resource exhaustion"
+                 time limit is resource exhaustion"
                 ));
             }
             // and the same zero on the serving side: what the method promises
@@ -382,7 +507,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if meth.timeout_ms == Some(0) {
                 errors.push(format!(
                     "{svc}.{name}: `timeout_ms = 0`. Nothing fits in a budget of zero, and \
-                     it is what whoever calls this method budgets against"
+                 it is what whoever calls this method budgets against"
                 ));
             }
             // A09: logging failures. Personal data that leaves through a public
@@ -392,7 +517,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if is_pii(pii, field) {
                         errors.push(format!(
                             "[A09] {svc}.{name}: returns `{field}`, declared PII, through a \
-                             public route"
+                         public route"
                         ));
                     }
                 }
@@ -405,7 +530,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if parece_secreto(k) {
                 errors.push(format!(
                     "[A02] {svc}: `{k}` in `secrets` looks like the value and not the name; \
-                     the reference goes there, the value lives in the vault"
+                 the reference goes there, the value lives in the vault"
                 ));
             }
         }
@@ -416,15 +541,18 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if b.public && b.retention_days.is_none() {
                 warnings.push(format!(
                     "[A05] {svc}: bucket `{name}` is public and has no `retention_days`; \
-                     nobody will know what was left exposed"
+                 nobody will know what was left exposed"
                 ));
             }
         }
     }
+}
 
-    // A01: a table that forgets the tenant column gets no policy, and a table
-    // with no policy does not fail: it returns everyone's rows.
-    let esquemas = schemas(ms);
+fn tenant_isolation(
+    ms: &[Manifest],
+    esquemas: &IndexMap<String, Tables>,
+    errors: &mut Vec<String>,
+) {
     for m in ms.iter().filter(|m| !m.external) {
         let Some(tenant) = &m.infra.tenant_column else {
             continue;
@@ -439,32 +567,34 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !cols.has(tenant) {
                 errors.push(format!(
                     "[A01] {}.{t}: no `{tenant}` column; it ends up with no RLS policy and \
-                     returns rows from every tenant. Add it, or list the table in \
-                     `tenant_exempt`",
+                 returns rows from every tenant. Add it, or list the table in \
+                 `tenant_exempt`",
                     m.service
                 ));
             }
         }
     }
+}
 
-    // The two tables axon names itself. `outbox` and `inbox_seen` are not a
-    // convention the user may rename: `verify` exempts them from the tenant
-    // rule by that exact name, the pooler reserves connections for the relay
-    // that reads `outbox`, and `rls` leaves them out of the policies. Declaring
-    // the pattern and not creating the table is the one combination that
-    // applies clean and breaks on the first insert, in the path that exists so
-    // that no event gets lost.
-    // ...and before any of that: the address has to lead somewhere.
-    //
-    // Every rule below reads the schema, and every one of them gives up
-    // quietly when there is no schema to read. So a `migrations` pointing at a
-    // directory that does not exist does not fail: it turns off the outbox
-    // check, the inbox check, the FKs, the CRUD and the indexes at once, and
-    // the manifest still says where the schema lives. That is the worst shape
-    // a mistake can have here —it reads as checked.
-    //
-    // Not in a browser: there is no directory to find there, and the
-    // migrations arrive as text or not at all.
+// The two tables axon names itself. `outbox` and `inbox_seen` are not a
+// convention the user may rename: `verify` exempts them from the tenant
+// rule by that exact name, the pooler reserves connections for the relay
+// that reads `outbox`, and `rls` leaves them out of the policies. Declaring
+// the pattern and not creating the table is the one combination that
+// applies clean and breaks on the first insert, in the path that exists so
+// that no event gets lost.
+// ...and before any of that: the address has to lead somewhere.
+//
+// Every rule below reads the schema, and every one of them gives up
+// quietly when there is no schema to read. So a `migrations` pointing at a
+// directory that does not exist does not fail: it turns off the outbox
+// check, the inbox check, the FKs, the CRUD and the indexes at once, and
+// the manifest still says where the schema lives. That is the worst shape
+// a mistake can have here —it reads as checked.
+//
+// Not in a browser: there is no directory to find there, and the
+// migrations arrive as text or not at all.
+fn migrations_lead_somewhere(ms: &[Manifest], errors: &mut Vec<String>) {
     for m in ms
         .iter()
         .filter(|_| !cfg!(target_arch = "wasm32"))
@@ -484,14 +614,20 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             .to_string();
         errors.push(format!(
             "{}: `[infra] migrations = \"{declared}\"` has no `*.sql`; resolved from `{}`, \
-             where the manifest is. The schema IS the migrations, so with none of them read \
-             the outbox, the inbox, the foreign keys, the CRUDs and the indexes stop being \
-             checked —without a word, which is what makes this worth stopping for",
+         where the manifest is. The schema IS the migrations, so with none of them read \
+         the outbox, the inbox, the foreign keys, the CRUDs and the indexes stop being \
+         checked —without a word, which is what makes this worth stopping for",
             m.service,
             if from.is_empty() { ".".into() } else { from }
         ));
     }
+}
 
+fn the_tables_axon_names(
+    ms: &[Manifest],
+    esquemas: &IndexMap<String, Tables>,
+    errors: &mut Vec<String>,
+) {
     for m in ms.iter().filter(|m| !m.external) {
         // No parsed schema means no migrations to look at —a service with no
         // state of its own— and there is nothing to be missing.
@@ -502,16 +638,16 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if m.patterns.outbox && missing("outbox") {
             errors.push(format!(
                 "{}: `[patterns] outbox = true` and the migrations create no `outbox` \
-                 table. The event is staged in the same transaction as the state change, \
-                 and there is nowhere to stage it",
+             table. The event is staged in the same transaction as the state change, \
+             and there is nowhere to stage it",
                 m.service
             ));
         }
         if !m.consumes.is_empty() && missing("inbox_seen") {
             errors.push(format!(
                 "{}: consumes {} and the migrations create no `inbox_seen` table. The \
-                 broker delivers at least once, and with nowhere to record what was already \
-                 seen the handler runs again on every redelivery",
+             broker delivers at least once, and with nowhere to record what was already \
+             seen the handler runs again on every redelivery",
                 m.service,
                 m.consumes
                     .keys()
@@ -521,8 +657,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             ));
         }
     }
+}
 
-    // ---- export to the warehouse ----
+// ---- export to the warehouse ----
+fn warehouse_export(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         if !WAREHOUSES.contains(&m.analytics.warehouse.as_str()) {
             errors.push(format!(
@@ -544,16 +682,21 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if m.analytics.pii == "hash" && m.analytics.export && !m.pii.is_empty() {
             warnings.push(format!(
                 "{}: exports {} hashed personal fields to the warehouse. A hash is not \
-                 anonymisation: it identifies the same person across tables, so it works \
-                 for counting and for joining alike",
+             anonymisation: it identifies the same person across tables, so it works \
+             for counting and for joining alike",
                 m.service,
                 m.pii.len()
             ));
         }
     }
+}
 
-    // ---- feature flags: what nobody enforces ----
-    let ahora = today();
+fn flags(
+    ms: &[Manifest],
+    ahora: (i64, i64, i64),
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         for (name, f) in &m.flags {
@@ -565,26 +708,26 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // A codebase with two hundred old flags does not have two hundred
             // features: it has two hundred branches nobody tests.
             match (&f.expires, f.kill_switch) {
-                (None, false) => errors.push(format!(
-                    "{svc}.{name}: flag with no `expires`. A flag with no death date does not die; \
-                     if it really is permanent, declare it `kill_switch = true`"
+            (None, false) => errors.push(format!(
+                "{svc}.{name}: flag with no `expires`. A flag with no death date does not die; \
+                 if it really is permanent, declare it `kill_switch = true`"
+            )),
+            (Some(_), true) => warnings.push(format!(
+                "{svc}.{name}: `kill_switch` with `expires`; an emergency switch lives as long as \
+                 the thing it turns off does"
+            )),
+            (Some(e), false) => match date(e) {
+                None => errors.push(format!(
+                    "{svc}.{name}: `expires = \"{e}\"` is not in YYYY-MM-DD form"
                 )),
-                (Some(_), true) => warnings.push(format!(
-                    "{svc}.{name}: `kill_switch` with `expires`; an emergency switch lives as long as \
-                     the thing it turns off does"
+                Some(f) if f < ahora => errors.push(format!(
+                    "{svc}.{name}: expired on {e}. Either the dead branch gets cleaned up or the date \
+                     gets renewed as an explicit decision: leaving it expired is neither"
                 )),
-                (Some(e), false) => match date(e) {
-                    None => errors.push(format!(
-                        "{svc}.{name}: `expires = \"{e}\"` is not in YYYY-MM-DD form"
-                    )),
-                    Some(f) if f < ahora => errors.push(format!(
-                        "{svc}.{name}: expired on {e}. Either the dead branch gets cleaned up or the date \
-                         gets renewed as an explicit decision: leaving it expired is neither"
-                    )),
-                    _ => {}
-                },
                 _ => {}
-            }
+            },
+            _ => {}
+        }
 
             // A per-request rollout makes the SAME entity take one path on one
             // call and the other on the next. With state involved, that leaves
@@ -593,19 +736,19 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // The order of these checks matters: a kill switch with a rollout is
             // an error of its own, not a case of the missing sticky field.
             match f.rollout {
-                Some(_) if f.kill_switch => errors.push(format!(
-                    "{svc}.{name}: `kill_switch` with `rollout`. An emergency switch turns everything \
-                     off or it is worth nothing"
-                )),
-                Some(p) if p > 100 => errors.push(format!(
-                    "{svc}.{name}: `rollout = {p}` is not a percentage"
-                )),
-                Some(p) if p > 0 && p < 100 && f.sticky_by.is_none() => errors.push(format!(
-                    "{svc}.{name}: rollout at {p}% with no `sticky_by`. Evaluated per request, the same \
-                     entity takes one path and then the other, and ends up half-migrated"
-                )),
-                _ => {}
-            }
+            Some(_) if f.kill_switch => errors.push(format!(
+                "{svc}.{name}: `kill_switch` with `rollout`. An emergency switch turns everything \
+                 off or it is worth nothing"
+            )),
+            Some(p) if p > 100 => errors.push(format!(
+                "{svc}.{name}: `rollout = {p}` is not a percentage"
+            )),
+            Some(p) if p > 0 && p < 100 && f.sticky_by.is_none() => errors.push(format!(
+                "{svc}.{name}: rollout at {p}% with no `sticky_by`. Evaluated per request, the same \
+                 entity takes one path and then the other, and ends up half-migrated"
+            )),
+            _ => {}
+        }
             // A default variant that does not exist makes evaluation always
             // fall back to the value in the code, and the flag quietly stops
             // doing anything: it looks like "the rollout does nothing".
@@ -614,7 +757,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !variantes.contains_key(&defecto) {
                 errors.push(format!(
                     "{svc}.{name}: `default_variant = \"{defecto}\"` is not in `variants` ({}). \
-                     Evaluation would always fall back to the value in the code",
+                 Evaluation would always fall back to the value in the code",
                     variantes.keys().cloned().collect::<Vec<_>>().join(", ")
                 ));
             }
@@ -632,15 +775,15 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if tipos.len() > 1 {
                 errors.push(format!(
                     "{svc}.{name}: the variants mix types ({}). OpenFeature resolves one type per \
-                     flag, not one per variant",
+                 flag, not one per variant",
                     tipos.into_iter().collect::<Vec<_>>().join(", ")
                 ));
             }
             if f.default && !f.kill_switch {
                 warnings.push(format!(
-                    "{svc}.{name}: `default = true` on a flag that is not a kill switch. A new flag on \
-                     by default is not a gradual rollout: it is a deploy"
-                ));
+                "{svc}.{name}: `default = true` on a flag that is not a kill switch. A new flag on \
+                 by default is not a gradual rollout: it is a deploy"
+            ));
             }
             // The field it is pinned by has to exist in some contract, or the
             // decision is pinned by data the service never receives.
@@ -655,16 +798,18 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     });
                 if !conocido {
                     errors.push(format!(
-                        "{svc}.{name}: is pinned by `{field}`, which appears in no contract and is not \
-                         the tenant column; the service never receives it"
-                    ));
+                    "{svc}.{name}: is pinned by `{field}`, which appears in no contract and is not \
+                     the tenant column; the service never receives it"
+                ));
                 }
             }
         }
     }
+}
 
-    // ---- the pooler: it changes the subject of the arithmetic, and it can
-    // break tenant isolation without raising an error ----
+// ---- the pooler: it changes the subject of the arithmetic, and it can
+// break tenant isolation without raising an error ----
+fn pooler(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let pl = &m.pooler;
@@ -674,7 +819,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if pl.shards > 1 || pl.max_client_conn.is_some() || pl.tenant_binding.is_some() {
                 errors.push(format!(
                     "{svc}: there are `[pooler]` fields declared with `engine = \"none\"`; none \
-                     of them is applied anywhere"
+                 of them is applied anywhere"
                 ));
             }
             continue;
@@ -686,11 +831,11 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             )),
         }
         match pl.mode.as_str() {
-            "transaction" | "session" | "statement" => {}
-            otro => errors.push(format!(
-                "{svc}: `[pooler] mode = \"{otro}\"` does not exist; use transaction, session or statement"
-            )),
-        }
+        "transaction" | "session" | "statement" => {}
+        otro => errors.push(format!(
+            "{svc}: `[pooler] mode = \"{otro}\"` does not exist; use transaction, session or statement"
+        )),
+    }
 
         // THE RULE. In transaction mode the connection goes back to the pool at
         // every COMMIT and is handed to another tenant. If the tenant is pinned
@@ -701,10 +846,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 Some("set_local") => {}
                 _ => errors.push(format!(
                     "{svc}: `mode = \"{}\"` with `tenant_column` and no `tenant_binding = \
-                     \"set_local\"`. The connection goes back to the pool at every COMMIT and is \
-                     handed to another tenant: a session GUC survives and the next request reads \
-                     the previous tenant's rows, with no error. `SET LOCAL` dies with the \
-                     transaction",
+                 \"set_local\"`. The connection goes back to the pool at every COMMIT and is \
+                 handed to another tenant: a session GUC survives and the next request reads \
+                 the previous tenant's rows, with no error. `SET LOCAL` dies with the \
+                 transaction",
                     pl.mode
                 )),
             }
@@ -712,8 +857,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if let Some(b) = &pl.tenant_binding {
             if b != "set_local" {
                 errors.push(format!(
-                    "{svc}: `tenant_binding = \"{b}\"` does not exist; the only safe one is \"set_local\""
-                ));
+                "{svc}: `tenant_binding = \"{b}\"` does not exist; the only safe one is \"set_local\""
+            ));
             }
         }
 
@@ -721,7 +866,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if pl.shards > 1 && m.infra.shard_key.is_none() {
             errors.push(format!(
                 "{svc}: `shards = {}` with no `shard_key`. The sharder needs to know which \
-                 column it shards by, and `verify` needs to check that every table carries it",
+             column it shards by, and `verify` needs to check that every table carries it",
                 pl.shards
             ));
         }
@@ -731,11 +876,11 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         // as reading from a replica and promising CP.
         if pl.shards > 1 && !m.cap.eventual() {
             errors.push(format!(
-                "{svc}: {} shard nodes with `consistency = \"strong\"`. A transaction that crosses \
-                 nodes commits in two phases and makes partial states visible: the real \
-                 guarantee is eventual, and declaring it strong does not change that",
-                pl.shards
-            ));
+            "{svc}: {} shard nodes with `consistency = \"strong\"`. A transaction that crosses \
+             nodes commits in two phases and makes partial states visible: the real \
+             guarantee is eventual, and declaring it strong does not change that",
+            pl.shards
+        ));
         }
 
         // Measured against pgdog: with the tenant column declared, EVERY query on
@@ -751,9 +896,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 }
                 errors.push(format!(
                     "{svc}.{name}: does not receive `{col}` and the database is sharded by \
-                     that column. The router rejects a query that does not filter by tenant \
-                     (`no multi tenant id`), and the sharder does not know which node to send \
-                     it to. Add it to `in`, and usually to the route as well"
+                 that column. The router rejects a query that does not filter by tenant \
+                 (`no multi tenant id`), and the sharder does not know which node to send \
+                 it to. Add it to `in`, and usually to the route as well"
                 ));
             }
         }
@@ -765,8 +910,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if pico > clientes {
                 errors.push(format!(
                     "{svc}: {pool} connections x {techo} instances = {pico} clients, and the \
-                     pooler accepts {clientes}. With a pooler in between, the arithmetic runs \
-                     against its client limit, not the engine's"
+                 pooler accepts {clientes}. With a pooler in between, the arithmetic runs \
+                 against its client limit, not the engine's"
                 ));
             }
         }
@@ -777,7 +922,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if ppool + reservado > tope {
                 errors.push(format!(
                     "{svc}: the pooler opens {ppool} connections to each engine, plus \
-                     {reservado} reserved, against a limit of {tope} PER ENGINE"
+                 {reservado} reserved, against a limit of {tope} PER ENGINE"
                 ));
             }
         }
@@ -789,8 +934,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if pool * techo > ppool {
                     errors.push(format!(
                         "{svc}: `mode = \"session\"` does not multiplex —one client connection \
-                         pins one server connection—, and {pool} x {techo} = {} clients against \
-                         {ppool} engine connections",
+                     pins one server connection—, and {pool} x {techo} = {} clients against \
+                     {ppool} engine connections",
                         pool * techo
                     ));
                 }
@@ -802,20 +947,22 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if pl.shards > 1 && !pl.cross_shard_disabled {
             warnings.push(format!(
                 "{svc}: `cross_shard_disabled = false` with {} nodes. A query that crosses \
-                 nodes runs anyway, and the ones the sharder cannot resolve —cross-node JOINs, \
-                 window functions, aggregates not on its list— can return an incomplete result \
-                 instead of an error",
+             nodes runs anyway, and the ones the sharder cannot resolve —cross-node JOINs, \
+             window functions, aggregates not on its list— can return an incomplete result \
+             instead of an error",
                 pl.shards
             ));
         }
     }
+}
 
-    // ---- the cache ----
-    //
-    // A cache is not another storage engine: it is a derived copy, and the only
-    // hard part is knowing when it stopped being true. Every rule here exists
-    // because of a failure with NO symptom: the wrong answer, served fast,
-    // with every dashboard green.
+// ---- the cache ----
+//
+// A cache is not another storage engine: it is a derived copy, and the only
+// hard part is knowing when it stopped being true. Every rule here exists
+// because of a failure with NO symptom: the wrong answer, served fast,
+// with every dashboard green.
+fn cache(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let c = &m.cache;
@@ -823,7 +970,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !CACHE_ENGINES.contains(&engine.as_str()) {
                 errors.push(format!(
                     "{svc}: `[cache] engine = \"{engine}\"` is not supported. Native engines: \
-                     {}",
+                 {}",
                     CACHE_ENGINES.join(", ")
                 ));
             }
@@ -834,8 +981,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if !c.active() {
             errors.push(format!(
                 "{svc}: declares {} cached answer(s) and no `[cache] engine`. The entries \
-                 describe a cache nothing brings up, and the code that reads them would go \
-                 to the database every time while the manifest says otherwise",
+             describe a cache nothing brings up, and the code that reads them would go \
+             to the database every time while the manifest says otherwise",
                 c.entries.len()
             ));
             continue;
@@ -847,9 +994,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if !m.cap.eventual() {
             errors.push(format!(
                 "{svc}: `consistency = \"strong\"` and a cache. A cache is eventual by \
-                 construction —between the change and the invalidation the old answer is \
-                 served— so either the promise drops to `eventual` with a \
-                 `max_staleness_ms`, or the cache goes"
+             construction —between the change and the invalidation the old answer is \
+             served— so either the promise drops to `eventual` with a \
+             `max_staleness_ms`, or the cache goes"
             ));
         }
         for (name, e) in &c.entries {
@@ -866,8 +1013,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !method.input.contains_key(k) {
                     errors.push(format!(
                         "{svc}: `[cache.{name}] key` names `{k}`, which is not in the `in` of \
-                         `{}`. A key built from something the method does not receive is a key \
-                         two different requests can share",
+                     `{}`. A key built from something the method does not receive is a key \
+                     two different requests can share",
                         e.of
                     ));
                 }
@@ -875,7 +1022,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if e.key.is_empty() {
                 errors.push(format!(
                     "{svc}: `[cache.{name}]` has no `key`. One entry for every call of `{}` is \
-                     one answer served to everybody",
+                 one answer served to everybody",
                     e.of
                 ));
             }
@@ -891,9 +1038,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 {
                     errors.push(format!(
                         "{svc}: `[cache.{name}] key` does not carry `{tenant}`, and the service \
-                         is multi-tenant. The first tenant to ask warms the entry and the next \
-                         one is served their data, as a hit: the RLS and the router never see \
-                         the second query"
+                     is multi-tenant. The first tenant to ask warms the entry and the next \
+                     one is served their data, as a hit: the RLS and the router never see \
+                     the second query"
                     ));
                 }
             }
@@ -902,7 +1049,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if e.ttl_ms.is_none() && e.invalidated_by.is_empty() {
                 errors.push(format!(
                     "{svc}: `[cache.{name}]` has neither `ttl_ms` nor `invalidated_by`. \
-                     Nothing makes it stale, so the first answer is served forever"
+                 Nothing makes it stale, so the first answer is served forever"
                 ));
             }
             // The TTL is what keeps the promise `[cap]` made. Longer than the
@@ -914,8 +1061,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if ttl + stale > budget {
                     errors.push(format!(
                         "{svc}: `[cache.{name}]` serves an answer up to {} ms old (`ttl_ms` \
-                         {ttl}{}) against a declared `max_staleness_ms = {budget}`. The budget \
-                         is the promise and these are what keep it",
+                     {ttl}{}) against a declared `max_staleness_ms = {budget}`. The budget \
+                     is the promise and these are what keep it",
                         ttl + stale,
                         match e.stale_ms {
                             Some(s) => format!(" + `stale_ms` {s}"),
@@ -927,8 +1074,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if e.stale_ms.is_some() && e.ttl_ms.is_none() {
                 errors.push(format!(
                     "{svc}: `[cache.{name}] stale_ms` with no `ttl_ms`. Nothing ever expires, \
-                     so nothing is ever served stale-while-revalidating: the field promises a \
-                     behaviour that cannot happen"
+                 so nothing is ever served stale-while-revalidating: the field promises a \
+                 behaviour that cannot happen"
                 ));
             }
             // The switch. A cache behind a flag can be turned off the day its
@@ -941,7 +1088,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     )),
                     Some(f) if f.kind() != "boolean" => errors.push(format!(
                         "{svc}: `[cache.{name}] enabled_by = \"{flag}\"` is a {} flag, and a \
-                         cache is on or off",
+                     cache is on or off",
                         f.kind()
                     )),
                     Some(f) => {
@@ -953,9 +1100,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             {
                                 errors.push(format!(
                                     "{svc}: `[cache.{name}]` is gated by `{flag}`, pinned by \
-                                     `{sticky}`, and `{}` does not receive it. The decision \
-                                     would be taken per request, so the same entity would hit \
-                                     the cache on one call and not on the next",
+                                 `{sticky}`, and `{}` does not receive it. The decision \
+                                 would be taken per request, so the same entity would hit \
+                                 the cache on one call and not on the next",
                                     e.of
                                 ));
                             }
@@ -978,7 +1125,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if e.invalidated_by.is_empty() {
                     errors.push(format!(
                         "{svc}: `[cache.{name}] strategy = \"refresh\"` with no \
-                         `invalidated_by`. There is no event to rewrite it from"
+                     `invalidated_by`. There is no event to rewrite it from"
                     ));
                 }
                 for ev in &e.invalidated_by {
@@ -993,10 +1140,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if let Some(f) = missing.first() {
                         errors.push(format!(
                             "{svc}: `[cache.{name}] strategy = \"refresh\"` rewrites the \
-                             answer of `{}` from `{ev}`, and that event does not carry `{f}`. \
-                             The entry would be rewritten with a hole, and a hole is served \
-                             exactly like data. Either the event carries it or the strategy is \
-                             `invalidate`",
+                         answer of `{}` from `{ev}`, and that event does not carry `{f}`. \
+                         The entry would be rewritten with a hole, and a hole is served \
+                         exactly like data. Either the event carries it or the strategy is \
+                         `invalidate`",
                             e.of
                         ));
                     }
@@ -1013,15 +1160,15 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 match e.ttl_ms {
                     None => errors.push(format!(
                         "{svc}: `[cache.{name}]` caches `{}`, whose answer carries `{field}` \
-                         —declared `pii`— with no `ttl_ms`. Personal data with no bound is \
-                         personal data kept forever somewhere nobody lists when a deletion \
-                         request arrives",
+                     —declared `pii`— with no `ttl_ms`. Personal data with no bound is \
+                     personal data kept forever somewhere nobody lists when a deletion \
+                     request arrives",
                         e.of
                     )),
                     Some(_) => warnings.push(format!(
                         "{svc}: `[cache.{name}]` caches `{field}`, which is declared `pii`. It \
-                         is bounded by its `ttl_ms`, and it is still a second copy of personal \
-                         data outside the database",
+                     is bounded by its `ttl_ms`, and it is still a second copy of personal \
+                     data outside the database",
                     )),
                 }
             }
@@ -1030,7 +1177,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !emitted {
                     errors.push(format!(
                         "{svc}: `[cache.{name}] invalidated_by` names `{ev}`, which nobody \
-                         emits"
+                     emits"
                     ));
                     continue;
                 }
@@ -1045,10 +1192,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         if !fields.keys().any(|g| normalize(g) == normalize(k)) {
                             errors.push(format!(
                                 "{svc}: `[cache.{name}]` is keyed by `{k}` and `{ev}` does not \
-                                 carry it, so the invalidation cannot build the key: it would \
-                                 delete nothing and the stale answer would be served until the \
-                                 `ttl_ms`. Either the event carries `{k}` or it is not what \
-                                 makes this entry stale"
+                             carry it, so the invalidation cannot build the key: it would \
+                             delete nothing and the stale answer would be served until the \
+                             `ttl_ms`. Either the event carries `{k}` or it is not what \
+                             makes this entry stale"
                             ));
                         }
                     }
@@ -1059,8 +1206,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !visible {
                     errors.push(format!(
                         "{svc}: `[cache.{name}]` says `{ev}` makes it stale and this service \
-                         neither emits nor consumes it, so it cannot hear it. Declare it in \
-                         `[consumes]` or the invalidation is one nobody runs"
+                     neither emits nor consumes it, so it cannot hear it. Declare it in \
+                     `[consumes]` or the invalidation is one nobody runs"
                     ));
                 }
             }
@@ -1088,16 +1235,16 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             Some(back) if !e.invalidated_by.contains(back) => {
                                 errors.push(format!(
                                     "{svc}: `[cache.{name}]` is invalidated by `{emitted}` and \
-                                     not by `{back}`, which is what `{undo_name}` emits when it \
-                                     compensates it. After a rollback the cache keeps serving \
-                                     the value of the attempt that was undone"
+                                 not by `{back}`, which is what `{undo_name}` emits when it \
+                                 compensates it. After a rollback the cache keeps serving \
+                                 the value of the attempt that was undone"
                                 ));
                             }
                             None => warnings.push(format!(
                                 "{svc}: `{undo_name}` compensates what invalidates \
-                                 `[cache.{name}]` and emits nothing, so the compensation \
-                                 cannot invalidate anything. The cache keeps the value of the \
-                                 attempt that was undone until its `ttl_ms`"
+                             `[cache.{name}]` and emits nothing, so the compensation \
+                             cannot invalidate anything. The cache keeps the value of the \
+                             attempt that was undone until its `ttl_ms`"
                             )),
                             _ => {}
                         }
@@ -1106,12 +1253,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
         }
     }
+}
 
-    // ---- catalogs ----
-    //
-    // The list nobody thinks is worth declaring: currencies, statuses,
-    // reasons. It ends up written three times —an enum, a CHECK, a dropdown—
-    // and the day somebody adds a value two of the three do not hear about it.
+// ---- catalogs ----
+//
+// The list nobody thinks is worth declaring: currencies, statuses,
+// reasons. It ends up written three times —an enum, a CHECK, a dropdown—
+// and the day somebody adds a value two of the three do not hear about it.
+fn catalogs(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         for (name, cat) in &m.catalog {
@@ -1125,7 +1274,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if cat.entries.is_empty() {
                 warnings.push(format!(
                     "{svc}: `[catalog.{name}]` has no entries. The table and the type come out \
-                     empty, and an empty union type makes every value invalid"
+                 empty, and an empty union type makes every value invalid"
                 ));
             }
             let mut seen: Vec<String> = Vec::new();
@@ -1137,11 +1286,11 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     match entry.get(field) {
                         None => errors.push(format!(
                             "{svc}: `[catalog.{name}]` entry {i} has no `{field}`. A catalog \
-                             with holes is a NULL where the generated type promises a value"
+                         with holes is a NULL where the generated type promises a value"
                         )),
                         Some(v) if !fits(v, kind) => errors.push(format!(
                             "{svc}: `[catalog.{name}]` entry {i}: `{field}` is `{}` and the \
-                             field is declared `{kind}`",
+                         field is declared `{kind}`",
                             kind_of(v)
                         )),
                         _ => {}
@@ -1153,7 +1302,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if !cat.fields.contains_key(field) {
                         errors.push(format!(
                             "{svc}: `[catalog.{name}]` entry {i} carries `{field}`, which is \
-                             not one of its `fields`: it would be dropped in silence"
+                         not one of its `fields`: it would be dropped in silence"
                         ));
                     }
                 }
@@ -1165,7 +1314,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if seen.contains(&k) {
                         errors.push(format!(
                             "{svc}: `[catalog.{name}]` repeats the key `{k}`. The seed is an \
-                             upsert, so the second one silently wins"
+                         upsert, so the second one silently wins"
                         ));
                     }
                     seen.push(k);
@@ -1175,24 +1324,15 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if m.infra.state.is_none() {
                 errors.push(format!(
                     "{svc}: `[catalog.{name}]` with no `[infra] state`. The list has nowhere to \
-                     be seeded, and half of what declaring it buys is that the database knows \
-                     it too"
+                 be seeded, and half of what declaring it buys is that the database knows \
+                 it too"
                 ));
             }
         }
     }
+}
 
-    // ---- how a caller becomes a principal ----
-    //
-    // The rules here are deliberately few. Three adversarial reviews of the
-    // design agreed on the same trap: a rule that fires on a correct setup
-    // —a per-API audience, an issuer migration, a long-lived machine token—
-    // gets the whole family silenced, and the good ones go with it. So what is
-    // checked is only what cannot be a legitimate configuration.
-    let with_auth: Vec<&Manifest> = ms
-        .iter()
-        .filter(|m| !m.external && !m.auth.issuers.is_empty())
-        .collect();
+fn auth(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let a = &m.auth;
@@ -1207,8 +1347,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if demanding && !declared {
             warnings.push(format!(
                 "{svc}: methods demand authentication and there is no `[auth]`. What extracts \
-                 the subject, the tenant and the scopes from the token is then a hand-written \
-                 adapter with no contract, and two services can read the same token differently"
+             the subject, the tenant and the scopes from the token is then a hand-written \
+             adapter with no contract, and two services can read the same token differently"
             ));
         }
         if !declared {
@@ -1228,22 +1368,22 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         match verify_mode {
             "jwks" if a.jwks_uri.is_none() => errors.push(format!(
                 "{svc}: `verify = \"jwks\"` with no `jwks_uri`. There is nothing to fetch the \
-                 keys from, and it typechecks"
+             keys from, and it typechecks"
             )),
             "introspection" if a.introspection_url.is_none() => errors.push(format!(
                 "{svc}: `verify = \"introspection\"` with no `introspection_url`"
             )),
             "adapter" => warnings.push(format!(
                 "{svc}: `verify = \"adapter\"`. axon hands over the interface and promises \
-                 NOTHING about this token: not the algorithm, not the age, not the revocation. \
-                 What those fields say here is documentation"
+             NOTHING about this token: not the algorithm, not the age, not the revocation. \
+             What those fields say here is documentation"
             )),
             _ => {}
         }
         if a.issuers.is_empty() {
             errors.push(format!(
                 "{svc}: `[auth]` with no `issuers`. A verifier that does not check who minted \
-                 the token accepts one minted by anybody"
+             the token accepts one minted by anybody"
             ));
         }
         // Where the keys come from is as much of the verification as the
@@ -1264,9 +1404,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if url.starts_with("http://") && !local {
                 errors.push(format!(
                     "{svc}: `[auth] {field}` is plaintext http. Whoever sits on the path \
-                     serves their own keys and mints tokens this service accepts —the \
-                     signature checks out, against the wrong key set— and nothing looks \
-                     broken while it happens"
+                 serves their own keys and mints tokens this service accepts —the \
+                 signature checks out, against the wrong key set— and nothing looks \
+                 broken while it happens"
                 ));
             }
         }
@@ -1274,16 +1414,16 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if WEAK_ALGORITHMS.contains(&alg.as_str()) {
                 errors.push(format!(
                     "{svc}: `[auth] algorithms` accepts `{alg}`. `none` is no verification at \
-                     all, and an HMAC where a key set is published lets somebody sign with the \
-                     public key as if it were the secret. Both fail OPEN and both look like a \
-                     normal 200"
+                 all, and an HMAC where a key set is published lets somebody sign with the \
+                 public key as if it were the secret. Both fail OPEN and both look like a \
+                 normal 200"
                 ));
             }
         }
         if a.algorithms.is_empty() && verify_mode == "jwks" {
             errors.push(format!(
                 "{svc}: `verify = \"jwks\"` with no `algorithms`. Accepting whatever the token's \
-                 header says is how `none` and the HMAC trick get in"
+             header says is how `none` and the HMAC trick get in"
             ));
         }
         // `immediate` over offline verification is a promise the mechanism
@@ -1291,9 +1431,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if a.revocation.as_deref() == Some("immediate") && verify_mode == "jwks" {
             errors.push(format!(
                 "{svc}: `revocation = \"immediate\"` with `verify = \"jwks\"`. Verifying a \
-                 signature offline cannot see a session that was withdrawn: either the \
-                 revocation is `eventual` —and its window is `max_token_age_s`— or the \
-                 verification asks the issuer"
+             signature offline cannot see a session that was withdrawn: either the \
+             revocation is `eventual` —and its window is `max_token_age_s`— or the \
+             verification asks the issuer"
             ));
         }
         if let Some(r) = &a.revocation {
@@ -1306,8 +1446,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if r == "eventual" && a.max_token_age_s.is_none() {
                 errors.push(format!(
                     "{svc}: `revocation = \"eventual\"` with no `max_token_age_s`. The window \
-                     between withdrawing a token and it stopping is exactly that number, and \
-                     without it nobody can say how long it is"
+                 between withdrawing a token and it stopping is exactly that number, and \
+                 without it nobody can say how long it is"
                 ));
             }
         }
@@ -1316,8 +1456,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if m.infra.tenant_column.is_some() && a.tenant_claim.is_none() {
             errors.push(format!(
                 "{svc}: multi-tenant —`tenant_column`— and no `[auth] tenant_claim`. The tenant \
-                 the RLS binds to would come from the request instead of from the token, which \
-                 is the caller choosing whose rows to read"
+             the RLS binds to would come from the request instead of from the token, which \
+             is the caller choosing whose rows to read"
             ));
         }
         // Two things read out of the same claim is one of them reading the
@@ -1334,7 +1474,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if x == y {
                         errors.push(format!(
                             "{svc}: `{n1}` and `{n2}` both read `{x}`. One of the two is \
-                             reading the wrong thing, and nothing at runtime says which"
+                         reading the wrong thing, and nothing at runtime says which"
                         ));
                     }
                 }
@@ -1346,14 +1486,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !imp.audit {
                 errors.push(format!(
                     "{svc}: impersonation declared with `audit = false`. A change made in \
-                     somebody else's name with no trace of who made it is the worst version of \
-                     this: the row says the customer did it"
+                 somebody else's name with no trace of who made it is the worst version of \
+                 this: the row says the customer did it"
                 ));
             }
             if imp.roles.is_empty() {
                 errors.push(format!(
                     "{svc}: impersonation declared and nobody may do it. `roles` empty means \
-                     the guard lets everyone through or nobody, depending on how it is read"
+                 the guard lets everyone through or nobody, depending on how it is read"
                 ));
             }
             for r in &imp.roles {
@@ -1361,23 +1501,26 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if !cat.contains(r) {
                         errors.push(format!(
                             "{svc}: `{r}` may impersonate and is not in `[catalog.role]`. A \
-                             typo here is a grant that silently never applies"
+                         typo here is a grant that silently never applies"
                         ));
                     }
                 }
             }
         }
     }
-    // Platform-wide: the issuers, the mechanism and the claim names. NOT the
-    // audience, which is per service on purpose —and not per-API, which is how
-    // Auth0 and Cognito model it, so it is never checked for uniqueness.
+}
+
+// Platform-wide: the issuers, the mechanism and the claim names. NOT the
+// audience, which is per service on purpose —and not per-API, which is how
+// Auth0 and Cognito model it, so it is never checked for uniqueness.
+fn auth_is_platform_wide(with_auth: &[&Manifest], errors: &mut Vec<String>) {
     if let Some(first) = with_auth.first() {
         for m in with_auth.iter().skip(1) {
             if m.auth.issuers != first.auth.issuers {
                 errors.push(format!(
                     "{}: accepts issuers {:?} and {} accepts {:?}. A token that authenticates \
-                     at one hop and 401s at the next is a failure nothing before production \
-                     shows",
+                 at one hop and 401s at the next is a failure nothing before production \
+                 shows",
                     m.service, m.auth.issuers, first.service, first.auth.issuers
                 ));
             }
@@ -1402,17 +1545,20 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if a != b {
                     errors.push(format!(
                         "{}: reads `{name}` from {:?} and {} reads it from {:?}. It is the same \
-                         token: one of the two gets nothing, and an empty list of scopes is a \
-                         403 that looks like a permissions problem",
+                     token: one of the two gets nothing, and an empty list of scopes is a \
+                     403 that looks like a permissions problem",
                         m.service, a, first.service, b
                     ));
                 }
             }
         }
     }
-    // What each endpoint demands, against the declared lists. The requirement
-    // is the contract; the mapping from a role to its scopes is the provider's
-    // and is not declared anywhere here.
+}
+
+// What each endpoint demands, against the declared lists. The requirement
+// is the contract; the mapping from a role to its scopes is the provider's
+// and is not declared anywhere here.
+fn endpoint_scopes(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         for (name, me) in &m.methods {
@@ -1423,8 +1569,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if me.auth.as_deref() == Some("public") {
                     errors.push(format!(
                         "{svc}.{name}: `auth = \"public\"` and it demands a {kind}. There is no \
-                         principal to check it against, so the guard cannot run and the \
-                         requirement is decoration"
+                     principal to check it against, so the guard cannot run and the \
+                     requirement is decoration"
                     ));
                 }
                 match catalog_names(ms, kind) {
@@ -1433,28 +1579,23 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             if !catalogue.contains(v) {
                                 errors.push(format!(
                                     "{svc}.{name}: demands the {kind} `{v}`, which is not in \
-                                     `[catalog.{kind}]`. A typo here is a 403 in production \
-                                     that nobody sees in review"
+                                 `[catalog.{kind}]`. A typo here is a 403 in production \
+                                 that nobody sees in review"
                                 ));
                             }
                         }
                     }
                     None => warnings.push(format!(
                         "{svc}.{name}: demands {kind}(s) {values:?} and no service declares \
-                         `[catalog.{kind}]`. Nothing can catch a typo in that name"
+                     `[catalog.{kind}]`. Nothing can catch a typo in that name"
                     )),
                 }
             }
         }
     }
+}
 
-    // ---- the CRUD, against the real schema ----
-    //
-    // The five endpoints with no business logic. What makes declaring them
-    // worth anything is not the typing saved: it is that the compiler already
-    // reads the migrations with a real SQL parser, so a CRUD over a column
-    // that does not exist fails here instead of at the first request.
-    let crud_schemas = crate::manifest::schemas(ms);
+fn crud(ms: &[Manifest], crud_schemas: &IndexMap<String, Tables>, errors: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         for (name, c) in &m.crud {
@@ -1475,9 +1616,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             let Some(tables) = crud_schemas.get(svc) else {
                 errors.push(format!(
                     "{svc}: `[crud.{name}]` and NO migrations were read, so nothing checks that \
-                     `{}` and its columns exist —which is most of what declaring a CRUD buys. \
-                     `migrations` is relative to the manifest's own directory —`{}` from `{}`— \
-                     so a `manifests/` layout needs `../sql/...`",
+                 `{}` and its columns exist —which is most of what declaring a CRUD buys. \
+                 `migrations` is relative to the manifest's own directory —`{}` from `{}`— \
+                 so a `manifests/` layout needs `../sql/...`",
                     c.table,
                     m.infra.migrations.clone().unwrap_or_default(),
                     m.origin
@@ -1490,8 +1631,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             let Some(table) = tables.get(&c.table) else {
                 errors.push(format!(
                     "{svc}: `[crud.{name}] table = \"{}\"` is in no migration. The five \
-                     endpoints would come out and every one of them would fail on its first \
-                     query",
+                 endpoints would come out and every one of them would fail on its first \
+                 query",
                     c.table
                 ));
                 continue;
@@ -1500,7 +1641,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !table.has(&key_col) {
                 errors.push(format!(
                     "{svc}: `[crud.{name}]` is keyed by `{key_col}` and `{}` has no such \
-                     column",
+                 column",
                     c.table
                 ));
             } else if !table.uniques.iter().any(|u| u == &vec![key_col.clone()]) {
@@ -1508,8 +1649,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 // writes "some" rows: both work in a demo and neither is right.
                 errors.push(format!(
                     "{svc}: `[crud.{name}]` is keyed by `{}.{key_col}` and no PRIMARY KEY or \
-                     UNIQUE covers it alone. The read would return one of several rows and the \
-                     update would write to all of them",
+                 UNIQUE covers it alone. The read would return one of several rows and the \
+                 update would write to all of them",
                     c.table
                 ));
             }
@@ -1526,8 +1667,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if !table.has(&col) {
                         errors.push(format!(
                             "{svc}: `[crud.{name}]` writes `{field}` and `{}` has no column \
-                             `{col}`. The endpoint would come out and the INSERT would fail on \
-                             its first call",
+                         `{col}`. The endpoint would come out and the INSERT would fail on \
+                         its first call",
                             c.table
                         ));
                     }
@@ -1540,8 +1681,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !table.has(col) && !m.infra.tenant_exempt.contains(&c.table) {
                     errors.push(format!(
                         "{svc}: `[crud.{name}]` is over `{}`, which has no `{col}`, and the \
-                         service is multi-tenant. Either the table carries it or it is listed \
-                         in `tenant_exempt` as a decision",
+                     service is multi-tenant. Either the table carries it or it is listed \
+                     in `tenant_exempt` as a decision",
                         c.table
                     ));
                 }
@@ -1552,27 +1693,34 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if writes && c.write_scope.is_none() {
                 errors.push(format!(
                     "{svc}: `[crud.{name}]` creates, updates or deletes and declares no \
-                     `write_scope`. Anybody the edge lets through can write"
+                 `write_scope`. Anybody the edge lets through can write"
                 ));
             }
             if c.read_scope.is_some() && c.read_scope == c.write_scope {
                 errors.push(format!(
                     "{svc}: `[crud.{name}]` uses `{}` for reading and for writing. A token \
-                     issued to read then deletes rows, and the difference between the two is \
-                     the only thing a scope is for",
+                 issued to read then deletes rows, and the difference between the two is \
+                 the only thing a scope is for",
                     c.read_scope.clone().unwrap_or_default()
                 ));
             }
         }
     }
+}
 
-    // ---- the search index ----
-    //
-    // Same shape as the cache and stricter, because the failure is worse: a
-    // stale cache serves one wrong answer to whoever asked for that key; a
-    // stale or unfiltered index LISTS rows —somebody else's, or rows that no
-    // longer exist— and nobody asked for them by name, so nothing about the
-    // answer looks wrong.
+// ---- the search index ----
+//
+// Same shape as the cache and stricter, because the failure is worse: a
+// stale cache serves one wrong answer to whoever asked for that key; a
+// stale or unfiltered index LISTS rows —somebody else's, or rows that no
+// longer exist— and nobody asked for them by name, so nothing about the
+// answer looks wrong.
+fn search_index(
+    ms: &[Manifest],
+    crud_schemas: &IndexMap<String, Tables>,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let s = &m.search;
@@ -1590,7 +1738,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if !s.active() {
             errors.push(format!(
                 "{svc}: declares {} index(es) and no `[search] engine`. Nothing brings one up, \
-                 and the code that queries it would answer with an error",
+             and the code that queries it would answer with an error",
                 s.indexes.len()
             ));
             continue;
@@ -1598,8 +1746,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if !m.cap.eventual() {
             errors.push(format!(
                 "{svc}: `consistency = \"strong\"` and a search index. An index is eventual by \
-                 construction —between the write and the reindex it lists what was true \
-                 before— so either the promise drops to `eventual` or the index goes"
+             construction —between the write and the reindex it lists what was true \
+             before— so either the promise drops to `eventual` or the index goes"
             ));
         }
         let tables = crud_schemas.get(svc);
@@ -1609,7 +1757,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 (Some(_), None) => {
                     errors.push(format!(
                         "{svc}: `[search.{name}] of = \"{}\"` is in no migration. The index \
-                         would be declared over a table that does not exist",
+                     would be declared over a table that does not exist",
                         ix.of
                     ));
                     continue;
@@ -1619,9 +1767,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 // is worse than not having the feature: it reads as checked.
                 (None, _) => errors.push(format!(
                     "{svc}: `[search.{name}]` and NO migrations were read, so nothing checks \
-                     that `{}` and its columns exist. `migrations` is relative to the \
-                     manifest's own directory —`{}` from `{}`— so a `manifests/` layout needs \
-                     `../sql/...`",
+                 that `{}` and its columns exist. `migrations` is relative to the \
+                 manifest's own directory —`{}` from `{}`— so a `manifests/` layout needs \
+                 `../sql/...`",
                     ix.of,
                     m.infra.migrations.clone().unwrap_or_default(),
                     m.origin
@@ -1635,8 +1783,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !has(&ix.key_column()) {
                 errors.push(format!(
                     "{svc}: `[search.{name}]` is keyed by `{}` and `{}` has no such column. The \
-                     document id would be undefined, and every reindex would write a new \
-                     document instead of replacing one",
+                 document id would be undefined, and every reindex would write a new \
+                 document instead of replacing one",
                     ix.key_column(),
                     ix.of
                 ));
@@ -1644,7 +1792,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if ix.fields.is_empty() {
                 errors.push(format!(
                     "{svc}: `[search.{name}]` indexes no field. An index of ids answers no \
-                     search anybody would run"
+                 search anybody would run"
                 ));
             }
             for f in ix.fields.iter().chain(ix.filter_by.iter()) {
@@ -1663,9 +1811,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !carries {
                     errors.push(format!(
                         "{svc}: `[search.{name}] filter_by` does not carry `{col}` and the \
-                         service is multi-tenant. A search is not a lookup: it LISTS, so \
-                         without the filter the answer is other tenants' rows and nothing \
-                         about it looks wrong"
+                     service is multi-tenant. A search is not a lookup: it LISTS, so \
+                     without the filter the answer is other tenants' rows and nothing \
+                     about it looks wrong"
                     ));
                 }
             }
@@ -1676,9 +1824,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if sensitive && !ix.pii_indexed.iter().any(|p| normalize(p) == normalize(f)) {
                     errors.push(format!(
                         "{svc}: `[search.{name}]` indexes `{f}`, which is declared `pii`, and \
-                         does not say so. An index is a second copy of personal data outside \
-                         the database: name it in `pii_indexed` and it is a decision somebody \
-                         took, leave it out and it is one nobody saw"
+                     does not say so. An index is a second copy of personal data outside \
+                     the database: name it in `pii_indexed` and it is a decision somebody \
+                     took, leave it out and it is one nobody saw"
                     ));
                 }
             }
@@ -1686,14 +1834,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !ix.fields.contains(f) {
                     warnings.push(format!(
                         "{svc}: `[search.{name}] pii_indexed` names `{f}`, which is not \
-                         indexed. It reads as a decision that is not being taken"
+                     indexed. It reads as a decision that is not being taken"
                     ));
                 }
             }
             if ix.reindexed_by.is_empty() {
                 errors.push(format!(
                     "{svc}: `[search.{name}]` has no `reindexed_by`. Nothing updates it, so it \
-                     lists what was true the day it was built"
+                 lists what was true the day it was built"
                 ));
             }
             for ev in &ix.reindexed_by {
@@ -1706,7 +1854,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !m.emits.contains_key(ev) && !m.consumes.contains_key(ev) {
                     errors.push(format!(
                         "{svc}: `[search.{name}]` says `{ev}` reindexes it and this service \
-                         neither emits nor consumes it, so it cannot hear it"
+                     neither emits nor consumes it, so it cannot hear it"
                     ));
                 }
                 // The reindex has to know WHICH document: without the key in
@@ -1714,24 +1862,26 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !fields.keys().any(|g| normalize(g) == normalize(&ix.key)) {
                     errors.push(format!(
                         "{svc}: `[search.{name}]` is keyed by `{}` and `{ev}` does not carry \
-                         it, so the reindex cannot say which document changed",
+                     it, so the reindex cannot say which document changed",
                         ix.key
                     ));
                 }
             }
         }
     }
+}
 
-    // ---- the code the compose expects ----
-    //
-    // Found by using the CLI on an empty project: `axon infra --target local`
-    // emits a compose that builds `services/<svc>/Dockerfile`, and with no
-    // service written yet docker fails with an `lstat` that says nothing.
-    // axon knows the path —it is the one it wrote— so it is the one that
-    // should say it.
-    // ...unless there is no repo to look at. In a browser the manifests arrive
-    // as text and nothing is missing from a layout that does not exist; the
-    // warning would be an error about the page, not about what somebody wrote.
+// ---- the code the compose expects ----
+//
+// Found by using the CLI on an empty project: `axon infra --target local`
+// emits a compose that builds `services/<svc>/Dockerfile`, and with no
+// service written yet docker fails with an `lstat` that says nothing.
+// axon knows the path —it is the one it wrote— so it is the one that
+// should say it.
+// ...unless there is no repo to look at. In a browser the manifests arrive
+// as text and nothing is missing from a layout that does not exist; the
+// warning would be an error about the page, not about what somebody wrote.
+fn the_code_the_compose_expects(ms: &[Manifest], pol: &Policy, warnings: &mut Vec<String>) {
     for m in ms
         .iter()
         .filter(|_| !cfg!(target_arch = "wasm32"))
@@ -1754,30 +1904,34 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         }
         warnings.push(format!(
             "{svc}: there is no `{dir}/Dockerfile`, and that is what the compose \
-             `axon infra --target local` writes tries to build. Until it exists, `docker \
-             compose up` fails with a path error that names nothing"
+         `axon infra --target local` writes tries to build. Until it exists, `docker \
+         compose up` fails with a path error that names nothing"
         ));
     }
+}
 
-    // ---- one convention per directory ----
-    //
-    // Both are supported, and mixing them is the failure: `001_a.sql` and
-    // `V2__b.sql` in one directory have no defined order, and Flyway itself
-    // will only see one of the two depending on the flags it was given.
+// ---- one convention per directory ----
+//
+// Both are supported, and mixing them is the failure: `001_a.sql` and
+// `V2__b.sql` in one directory have no defined order, and Flyway itself
+// will only see one of the two depending on the flags it was given.
+fn one_migration_convention(ms: &[Manifest], errors: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let files = crate::manifest::migrations_of(m);
         let (_, mixed) = crate::manifest::migration_style(&files);
         if mixed {
             errors.push(format!(
                 "{}: its migrations mix `001_<name>.sql` with Flyway's `V1__<name>.sql`. In \
-                 one directory the two have no defined order, and Flyway sees only the ones \
-                 that match the prefix it was given: half of them would never be applied",
+             one directory the two have no defined order, and Flyway sees only the ones \
+             that match the prefix it was given: half of them would never be applied",
                 m.service
             ));
         }
     }
+}
 
-    // ---- the engine has to exist ----
+// ---- the engine has to exist ----
+fn storage_engine(ms: &[Manifest], errors: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let Some(motor) = &m.infra.state else {
             continue;
@@ -1789,32 +1943,34 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if motor == "none" {
                 errors.push(format!(
                     "{}: `state = \"none\"` is not an engine. A service with no database of its \
-                     own declares no `state` at all, and then no rule about pools, replicas or \
-                     backups applies to it",
+                 own declares no `state` at all, and then no rule about pools, replicas or \
+                 backups applies to it",
                     m.service
                 ));
             } else {
                 errors.push(format!(
                     "{}: `state = \"{motor}\"` is not supported. Native engines: {}. A different \
-                     one is served by an `axon-infra-{motor}` plugin, which receives the neutral \
-                     plan on stdin; without that, axon would generate Postgres infrastructure \
-                     for something that is not Postgres",
+                 one is served by an `axon-infra-{motor}` plugin, which receives the neutral \
+                 plan on stdin; without that, axon would generate Postgres infrastructure \
+                 for something that is not Postgres",
                     m.service,
                     ENGINES.join(", ")
                 ));
             }
         }
     }
+}
 
-    // ---- database scaling: arithmetic over what was declared ----
+// ---- database scaling: arithmetic over what was declared ----
+fn db_scaling(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let inf = &m.infra;
         if inf.state.is_none() {
             if inf.pool_size.is_some() || inf.read_replicas.is_some() {
                 errors.push(format!(
-                    "{svc}: declares a pool or replicas with no `state`; it has no database of its own"
-                ));
+                "{svc}: declares a pool or replicas with no `state`; it has no database of its own"
+            ));
             }
             continue;
         }
@@ -1838,21 +1994,21 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if pico + reservado > tope {
                 errors.push(format!(
                     "{svc}: {pool} connections x {techo} instances = {pico}, plus {reservado} \
-                     reserved, exceeds the limit of {tope}. The service falls over from \
-                     exhaustion when it scales, not when you test it: lower the pool, lower \
-                     max_instances, or put a pooler in front"
+                 reserved, exceeds the limit of {tope}. The service falls over from \
+                 exhaustion when it scales, not when you test it: lower the pool, lower \
+                 max_instances, or put a pooler in front"
                 ));
             } else if pico * 2 > tope {
                 warnings.push(format!(
-                    "{svc}: at peak it uses {pico} of {tope} connections; that leaves little room for \
-                     migrations, a pooler or a second service on the same instance"
-                ));
+                "{svc}: at peak it uses {pico} of {tope} connections; that leaves little room for \
+                 migrations, a pooler or a second service on the same instance"
+            ));
             }
         }
         if inf.pool_size.is_some() != inf.max_connections.is_some() {
             warnings.push(format!(
                 "{svc}: declares `pool_size` or `max_connections` but not the other; without both \
-                 there is no way to check for exhaustion"
+             there is no way to check for exhaustion"
             ));
         }
 
@@ -1862,8 +2018,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if tier0 && inf.ha != Some(true) {
             errors.push(format!(
                 "{svc}: `tier = \"0\"` with no `ha = true`. A critical service with a single \
-                 database instance goes down with it: either declare the standby or lower \
-                 the tier"
+             database instance goes down with it: either declare the standby or lower \
+             the tier"
             ));
         }
         // High availability is not a backup: a standby replicates the DROP
@@ -1871,12 +2027,12 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         // solutions.
         match inf.backup_retention_days {
             None if tier0 => errors.push(format!(
-                "{svc}: `tier = \"0\"` with no `backup_retention_days`. High availability is not a \
-                 backup: the standby replicates a delete within seconds"
-            )),
+            "{svc}: `tier = \"0\"` with no `backup_retention_days`. High availability is not a \
+             backup: the standby replicates a delete within seconds"
+        )),
             Some(d) if d < 7 && tier0 => errors.push(format!(
                 "{svc}: {d} days of backups on a tier 0. A logical delete gets discovered after \
-                 the weekend, not a minute later"
+             the weekend, not a minute later"
             )),
             // `0` is not the same as absent: absent takes the platform's
             // default, and a zero is somebody having written it. It is a
@@ -1885,16 +2041,16 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // said out loud once.
             Some(0) => warnings.push(format!(
                 "{svc}: `backup_retention_days = 0` with a database of its own. Nothing to \
-                 restore from: not a mistake if the data is disposable, and unrecoverable if \
-                 it is not"
+             restore from: not a mistake if the data is disposable, and unrecoverable if \
+             it is not"
             )),
             _ => {}
         }
         if inf.pitr == Some(true) && inf.backup_retention_days.is_none() {
             errors.push(format!(
-                "{svc}: `pitr` with no `backup_retention_days`. Point-in-time recovery needs a base \
-                 backup to roll forward from"
-            ));
+            "{svc}: `pitr` with no `backup_retention_days`. Point-in-time recovery needs a base \
+             backup to roll forward from"
+        ));
         }
         if inf.ha.is_some() && inf.state.is_none() {
             errors.push(format!(
@@ -1907,21 +2063,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if inf.read_replicas.unwrap_or(0) > 0 && !m.cap.eventual() {
             errors.push(format!(
                 "{svc}: reads from {} replicas and declares `consistency = \"strong\"`. A replica \
-                 lags: either the reads are `eventual`, or they do not come from there",
+             lags: either the reads are `eventual`, or they do not come from there",
                 inf.read_replicas.unwrap_or(0)
             ));
         }
     }
+}
 
-    // ---- sharding across nodes ----
-    //
-    // These rules hold against plain Postgres with sharding in the application,
-    // which is how most of the people who really shard do it. And nobody
-    // enforces them: PgDog's schema validator is on its roadmap and not
-    // started, and Citus only fails at runtime when distributing the table.
-    // Every one of them describes a leak or a collision that raises no error,
-    // just wrong data.
-    let esquemas_shard = schemas(ms);
+fn sharding(ms: &[Manifest], esquemas_shard: &IndexMap<String, Tables>, errors: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let Some(key) = &m.infra.shard_key else {
@@ -1937,7 +2086,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if inq != key {
                 errors.push(format!(
                     "{svc}: isolates by `{inq}` and shards by `{key}`. Every query from one \
-                     tenant would touch every node, so the sharding buys nothing"
+                 tenant would touch every node, so the sharding buys nothing"
                 ));
             }
         }
@@ -1947,8 +2096,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if m.infra.pitr == Some(true) {
             errors.push(format!(
                 "{svc}: `pitr = true` with `shard_key`. Each node has its own timeline: there \
-                 is no consistent recovery point for the set, and restoring leaves the \
-                 transactions that crossed nodes cut in half"
+             is no consistent recovery point for the set, and restoring leaves the \
+             transactions that crossed nodes cut in half"
             ));
         }
 
@@ -1965,7 +2114,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !repartidas.contains(&t) {
                 errors.push(format!(
                     "{svc}.{t}: no `{key}` column, so it cannot be sharded. Add it, or \
-                     take the table out of the sharded schema"
+                 take the table out of the sharded schema"
                 ));
                 continue;
             }
@@ -1986,9 +2135,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !u.iter().any(|c| c == key) {
                     errors.push(format!(
                         "{svc}.{t}: `UNIQUE ({})` does not include `{key}`. Each node \
-                         satisfies it separately and the set does not: two nodes accept the \
-                         same value with no error. Add the key to the constraint, or the \
-                         uniqueness is an illusion",
+                     satisfies it separately and the set does not: two nodes accept the \
+                     same value with no error. Add the key to the constraint, or the \
+                     uniqueness is an illusion",
                         u.join(", ")
                     ));
                 }
@@ -1998,8 +2147,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             for c in tb.cols.iter().filter(|c| c.serial) {
                 errors.push(format!(
                     "{svc}.{t}.{}: generated from a sequence (`{}`) in a sharded schema. \
-                     Each node has its own and the values collide: use a uuid, or a generator \
-                     that carries the node inside it",
+                 Each node has its own and the values collide: use a uuid, or a generator \
+                 that carries the node inside it",
                     c.name, c.ty
                 ));
             }
@@ -2009,24 +2158,29 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if tablas.contains_key(fk) && !repartidas.contains(&fk) {
                     errors.push(format!(
                         "{svc}.{t}.{}: FK to `{fk}`, which does not carry `{key}`. A FK \
-                         between a sharded table and one that is not crosses nodes, and that \
-                         cannot be guaranteed",
+                     between a sharded table and one that is not crosses nodes, and that \
+                     cannot be guaranteed",
                         c.name
                     ));
                 }
             }
         }
     }
+}
 
-    // ---- CAP: the partition is not a choice, what to do during one is ----
-    let lado: IndexMap<&str, &Cap> = ms.iter().map(|m| (m.service.as_str(), &m.cap)).collect();
+fn cap(
+    ms: &[Manifest],
+    lado: &IndexMap<&str, &Cap>,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let cap = &m.cap;
         if !cap.declared {
             warnings.push(format!(
                 "{svc}: no `[cap]`; assumed CP (strong/reject), which fails closed. \
-                 Declare it so the choice belongs to someone and not to the default"
+             Declare it so the choice belongs to someone and not to the default"
             ));
         }
         match cap.consistency.as_str() {
@@ -2045,7 +2199,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if cap.eventual() && cap.max_staleness_ms.is_none() {
             errors.push(format!(
                 "{svc}: `consistency = \"eventual\"` with no `max_staleness_ms`; with no \
-                 staleness budget nobody can say whether the data it served was acceptable"
+             staleness budget nobody can say whether the data it served was acceptable"
             ));
         }
         // you cannot be CP and serve something stale: that is the theorem's own
@@ -2053,7 +2207,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if !cap.eventual() && cap.degrades() {
             errors.push(format!(
                 "{svc}: `strong` with `on_partition = \"degrade\"` contradicts itself; \
-                 serving stale data IS choosing availability over consistency"
+             serving stale data IS choosing availability over consistency"
             ));
         }
         // your guarantee is that of the weakest link on the synchronous path
@@ -2061,7 +2215,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !cap.eventual() && lado.get(d.target()).is_some_and(|c| c.eventual()) {
                 warnings.push(format!(
                     "{svc} is `strong` and calls {}, which is `eventual`: the guarantee of \
-                     the path is the weaker one, not yours",
+                 the path is the weaker one, not yours",
                     d.target()
                 ));
             }
@@ -2072,27 +2226,34 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !cap.eventual() && m.consumes.contains_key(&t.on) {
                     warnings.push(format!(
                         "{svc}.{name}.{act}: `strong` transition triggered by the event \
-                         `{}`, which arrives eventually; the state may have changed first",
+                     `{}`, which arrives eventually; the state may have changed first",
                         t.on
                     ));
                 }
             }
         }
     }
+}
 
-    // A08: integrity failures. A tag is mutable: what gets deployed today is
-    // not what was audited yesterday.
+// A08: integrity failures. A tag is mutable: what gets deployed today is
+// not what was audited yesterday.
+fn image_is_pinned(pol: &Policy, warnings: &mut Vec<String>) {
     if let Some(img) = &pol.ci.image {
         if img.contains(":latest") || !img.contains('@') {
             warnings.push(format!(
                 "[A08] [ci].image `{img}` does not pin a digest; a tag is mutable and the \
-                 deploy stops being reproducible"
+             deploy stops being reproducible"
             ));
         }
     }
+}
 
-    // API patterns: what separates an endpoint from one that survives production
-    let mut routes: IndexMap<String, String> = IndexMap::new();
+fn api_patterns(
+    ms: &[Manifest],
+    routes: &mut IndexMap<String, String>,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
     for m in ms.iter().filter(|m| !m.external) {
         for (name, meth) in &m.methods {
             let Some(http) = &meth.http else { continue };
@@ -2106,16 +2267,16 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             // purpose: it is the caller who pins one, and the same route serves
             // every version.
             match meth.path() {
-                Some(p) if !m.api.by_header() && !p.starts_with("/v") => errors.push(format!(
-                    "{}.{name}: `{p}` has no version in the path; use /v1/... or declare `[api] versioning = \"header\"`",
-                    m.service
-                )),
-                _ => {}
-            }
+            Some(p) if !m.api.by_header() && !p.starts_with("/v") => errors.push(format!(
+                "{}.{name}: `{p}` has no version in the path; use /v1/... or declare `[api] versioning = \"header\"`",
+                m.service
+            )),
+            _ => {}
+        }
             if meth.mutating() && !meth.idempotent {
                 errors.push(format!(
                     "{}.{name}: {http} mutates with no `idempotent = true`; a client retry \
-                     would duplicate the effect",
+                 would duplicate the effect",
                     m.service
                 ));
             }
@@ -2128,14 +2289,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     m.service
                 )),
                 None => errors.push(format!(
-                    "{}.{name}: {http} is exposed with no `auth`; declare \"public\" or \"required\"",
-                    m.service
-                )),
+                "{}.{name}: {http} is exposed with no `auth`; declare \"public\" or \"required\"",
+                m.service
+            )),
             }
             if meth.auth.as_deref() == Some("public") && meth.rate_limit.is_none() {
                 errors.push(format!(
                     "{}.{name}: {http} is public and has no `rate_limit`; the edge has \
-                     nothing to throttle abuse with",
+                 nothing to throttle abuse with",
                     m.service
                 ));
             }
@@ -2147,7 +2308,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if meth.auth.as_deref() == Some("public") && !meth.scopes.is_empty() {
                 errors.push(format!(
                     "{}.{name}: it is `public` and demands scopes. Nobody presents a token on \
-                     a public route: it is either open or it is not",
+                 a public route: it is either open or it is not",
                     m.service
                 ));
             }
@@ -2155,7 +2316,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !catalogue.is_empty() && !catalogue.contains(sc) {
                     errors.push(format!(
                         "{}.{name}: `{sc}` is not in `[api] scopes`. A scope with a typo is a \
-                         403 in production that nobody sees in a review",
+                     403 in production that nobody sees in a review",
                         m.service
                     ));
                 }
@@ -2166,22 +2327,24 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             {
                 warnings.push(format!(
                     "{}.{name}: {http} mutates behind `auth = \"required\"` and no `scopes`. \
-                     Any valid token can call it, including one issued to read",
+                 Any valid token can call it, including one issued to read",
                     m.service
                 ));
             }
             if meth.paginated && !meth.output.contains_key("cursor") {
                 errors.push(format!(
-                    "{}.{name}: paginated but does not return a `cursor`; offset breaks as it grows",
-                    m.service
-                ));
+                "{}.{name}: paginated but does not return a `cursor`; offset breaks as it grows",
+                m.service
+            ));
             }
         }
     }
+}
 
-    // Rules over a metric. What they propose is a decision that today lives in
-    // an alert plus a runbook, and the point of declaring it is the same as
-    // everywhere else here: it can be refuted.
+// Rules over a metric. What they propose is a decision that today lives in
+// an alert plus a runbook, and the point of declaring it is the same as
+// everywhere else here: it can be refuted.
+fn metric_rules(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         for (name, r) in &m.rules {
             match r.mode.as_deref() {
@@ -2192,14 +2355,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 // and not only the day somebody wrote it.
                 Some("apply") => warnings.push(format!(
                     "{}.{name}: `mode = \"apply\"` moves `{}` on its own. It is a control \
-                     loop over production: it still takes `axon rules --apply` to happen, \
-                     and the audit trail is the only record that it did",
+                 loop over production: it still takes `axon rules --apply` to happen, \
+                 and the audit trail is the only record that it did",
                     m.service,
                     r.then.flag.as_deref().unwrap_or("something")
                 )),
                 Some(other) => errors.push(format!(
                     "{}.{name}: `mode = \"{other}\"` does not exist; it is \"propose\" or \
-                     \"apply\"",
+                 \"apply\"",
                     m.service
                 )),
             }
@@ -2208,8 +2371,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if r.mode.as_deref() == Some("apply") && r.then.flag.is_none() {
                 errors.push(format!(
                     "{}.{name}: `mode = \"apply\"` only moves a flag. Emitting an event or \
-                     calling a method on its own is not something axon does: those stay in \
-                     `propose`",
+                 calling a method on its own is not something axon does: those stay in \
+                 `propose`",
                     m.service
                 ));
             }
@@ -2217,8 +2380,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             match metric {
                 None => errors.push(format!(
                     "{}.{name}: watches `{}`, which is not a metric of the service. A rule \
-                     over a metric nobody declares never fires, and never firing reads \
-                     exactly like everything being fine",
+                 over a metric nobody declares never fires, and never firing reads \
+                 exactly like everything being fine",
                     m.service, r.metric
                 )),
                 Some(mt) => {
@@ -2238,8 +2401,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if !missing.is_empty() {
                         errors.push(format!(
                             "{}.{name}: `{}` is grouped by {}, and the rule does not pin {}. \
-                             It is one series per group: unpinned, it compares one group's \
-                             number against another's",
+                         It is one series per group: unpinned, it compares one group's \
+                         number against another's",
                             m.service,
                             r.metric,
                             mt.by.join(", "),
@@ -2258,8 +2421,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         {
                             errors.push(format!(
                                 "{}.{name}: `where.{k}` is not a dimension of `{}`. The \
-                                 segment has to be something the metric groups by, or there \
-                                 is nothing to filter",
+                             segment has to be something the metric groups by, or there \
+                             is nothing to filter",
                                 m.service, r.metric
                             ));
                         }
@@ -2302,7 +2465,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if r.sustained == 0 {
                 errors.push(format!(
                     "{}.{name}: `for = 0`; a condition that holds for no window is not a \
-                     condition",
+                 condition",
                     m.service
                 ));
             }
@@ -2312,7 +2475,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             match r.cooldown {
                 None => errors.push(format!(
                     "{}.{name}: no `cooldown`. It would propose the same thing every window \
-                     while the condition lasts, and what repeats gets ignored",
+                 while the condition lasts, and what repeats gets ignored",
                     m.service
                 )),
                 Some(0) => errors.push(format!("{}.{name}: `cooldown = 0`", m.service)),
@@ -2325,8 +2488,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 match m.metrics.get(&g.metric) {
                     None => errors.push(format!(
                         "{}.{name}: the guard watches `{}`, which is not a metric of the \
-                         service. A guard over a metric nobody declares never holds, and the \
-                         rule would never propose while reading as if it were guarded",
+                     service. A guard over a metric nobody declares never holds, and the \
+                     rule would never propose while reading as if it were guarded",
                         m.service, g.metric
                     )),
                     Some(mt) => {
@@ -2375,7 +2538,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 match (g.below, g.above) {
                     (None, None) => errors.push(format!(
                         "{}.{name}: a guard with no `below` nor `above` holds always, which is \
-                         the same as not being there",
+                     the same as not being there",
                         m.service
                     )),
                     (Some(_), Some(_)) => errors.push(format!(
@@ -2392,8 +2555,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 {
                     errors.push(format!(
                         "{}.{name}: the guard is the trigger written again —same metric, same \
-                         segment, same direction—, so it holds exactly when the trigger does \
-                         and guards nothing",
+                     segment, same direction—, so it holds exactly when the trigger does \
+                     and guards nothing",
                         m.service
                     ));
                 }
@@ -2403,15 +2566,15 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if r.guards.is_empty() && r.actions() == 1 {
                 warnings.push(format!(
                     "{}.{name}: it moves a lever off one metric and declares no `guard`. That \
-                     is Goodhart's law with a cron: the lever moves the number it is judged \
-                     by, and nobody is watching what it moves in the other direction",
+                 is Goodhart's law with a cron: the lever moves the number it is judged \
+                 by, and nobody is watching what it moves in the other direction",
                     m.service
                 ));
             }
             if r.actions() != 1 {
                 errors.push(format!(
                     "{}.{name}: it proposes {} things; declare exactly one of `flag`, \
-                     `emits` or `calls`",
+                 `emits` or `calls`",
                     m.service,
                     r.actions()
                 ));
@@ -2428,8 +2591,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         if f.kill_switch {
                             errors.push(format!(
                                 "{}.{name}: `{flag}` is a `kill_switch`, and that switch is a \
-                                 person's. A rule that flips it takes away the only thing it \
-                                 exists for",
+                             person's. A rule that flips it takes away the only thing it \
+                             exists for",
                                 m.service
                             ));
                         }
@@ -2437,26 +2600,26 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             [("variant", &r.then.variant), ("restore", &r.then.restore)]
                         {
                             match v {
-                                None => errors.push(format!(
-                                    "{}.{name}: it proposes `{flag}` with no `{which}`{}",
-                                    m.service,
-                                    if which == "restore" {
-                                        ". What goes up on its own has to be able to come back down on its own"
-                                    } else {
-                                        ""
-                                    }
-                                )),
-                                Some(v) if !f.variants.contains_key(v) => errors.push(format!(
-                                    "{}.{name}: `{which} = \"{v}\"` is not a variant of `{flag}`",
-                                    m.service
-                                )),
-                                _ => {}
-                            }
+                            None => errors.push(format!(
+                                "{}.{name}: it proposes `{flag}` with no `{which}`{}",
+                                m.service,
+                                if which == "restore" {
+                                    ". What goes up on its own has to be able to come back down on its own"
+                                } else {
+                                    ""
+                                }
+                            )),
+                            Some(v) if !f.variants.contains_key(v) => errors.push(format!(
+                                "{}.{name}: `{which} = \"{v}\"` is not a variant of `{flag}`",
+                                m.service
+                            )),
+                            _ => {}
+                        }
                         }
                         if r.then.variant.is_some() && r.then.variant == r.then.restore {
                             errors.push(format!(
                                 "{}.{name}: `variant` and `restore` are the same, so it \
-                                 proposes changing nothing",
+                             proposes changing nothing",
                                 m.service
                             ));
                         }
@@ -2467,7 +2630,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !m.emits.contains_key(ev) {
                     errors.push(format!(
                         "{}.{name}: it proposes emitting `{ev}`, which the service does not \
-                         declare in `[emits]`",
+                     declare in `[emits]`",
                         m.service
                     ));
                 }
@@ -2476,7 +2639,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !m.methods.contains_key(met) {
                     errors.push(format!(
                         "{}.{name}: it proposes calling `{met}`, which is not a method of the \
-                         service",
+                     service",
                         m.service
                     ));
                 }
@@ -2490,21 +2653,23 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if let Some(prev) = owner.insert(flag.as_str(), name.as_str()) {
                     errors.push(format!(
                         "{}: `{prev}` and `{name}` both propose over `{flag}`. One flag has \
-                         one rule, or which one won would depend on the order",
+                     one rule, or which one won would depend on the order",
                         m.service
                     ));
                 }
             }
         }
     }
+}
 
-    // Declared consumption: which fields each consumer really reads.
-    //
-    // This is what a producer cannot answer on its own, and the reason a
-    // contract ends up frozen: "somebody might be using it". Declared, the
-    // question has an answer — and it cannot drift, because the generated code
-    // hands the consumer `Pick<..., uses>` and reading anything else does not
-    // compile.
+// Declared consumption: which fields each consumer really reads.
+//
+// This is what a producer cannot answer on its own, and the reason a
+// contract ends up frozen: "somebody might be using it". Declared, the
+// question has an answer — and it cannot drift, because the generated code
+// hands the consumer `Pick<..., uses>` and reading anything else does not
+// compile.
+fn declared_consumption(ms: &[Manifest], errors: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         for d in &m.depends {
             let Some(uses) = &d.uses else { continue };
@@ -2520,8 +2685,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !sig.output.contains_key(f) {
                     errors.push(format!(
                         "{} declares it uses `{tgt}.{}.{f}`, which {tgt} does not return. \
-                         Either it is a field that was renamed and the caller is reading \
-                         `undefined`, or the declaration is wrong",
+                     Either it is a field that was renamed and the caller is reading \
+                     `undefined`, or the declaration is wrong",
                         m.service, d.method
                     ));
                 }
@@ -2541,11 +2706,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
         }
     }
-    // And the answer nobody has today: a field NOBODY reads.
-    //
-    // Only when every consumer declared what it uses. With one that declared
-    // nothing there is no answer, and a warning saying "delete it" without an
-    // answer is how a field somebody was reading gets deleted.
+}
+
+// And the answer nobody has today: a field NOBODY reads.
+//
+// Only when every consumer declared what it uses. With one that declared
+// nothing there is no answer, and a warning saying "delete it" without an
+// answer is how a field somebody was reading gets deleted.
+fn fields_nobody_reads(ms: &[Manifest], warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         // The warehouse reads EVERY field of an exported event, so for an
         // exported one nobody-reads-it is false. A rule with a false positive
@@ -2567,7 +2735,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 {
                     warnings.push(format!(
                         "{ev}.{f} is read by nobody: every consumer declared what it uses and \
-                         none of them names it. It can be removed in the next version",
+                     none of them names it. It can be removed in the next version",
                     ));
                 }
             }
@@ -2601,22 +2769,16 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 }) {
                     warnings.push(format!(
                         "{}.{name} returns `{f}` and no caller reads it: every one of them \
-                         declared what it uses. It can stop being returned",
+                     declared what it uses. It can stop being returned",
                         m.service
                     ));
                 }
             }
         }
     }
+}
 
-    // The API's versioning, and its maintenance cycle.
-    //
-    // A platform decision: `verify` requires every service to declare the same
-    // one, for the same reason it requires one warehouse. With two schemes at
-    // once a caller has to know which service it is talking to before it can
-    // know how to ask for a version, which is the opposite of what versioning
-    // is for.
-    let internal: Vec<&Manifest> = ms.iter().filter(|m| !m.external).collect();
+fn one_versioning_scheme(internal: &[&Manifest], errors: &mut Vec<String>) {
     if let Some(first) = internal.first() {
         for other in internal.iter().skip(1) {
             if other.api.versioning != first.api.versioning
@@ -2626,15 +2788,22 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             {
                 errors.push(format!(
                     "{} and {} declare different `[api]`. The versioning is one decision for \
-                     the whole platform: with two, whoever calls has to know which service \
-                     it is talking to before it can know how to ask for a version",
+                 the whole platform: with two, whoever calls has to know which service \
+                 it is talking to before it can know how to ask for a version",
                     first.service, other.service
                 ));
                 break;
             }
         }
     }
-    let api = internal.first().map(|m| &m.api);
+}
+
+fn version_cycle(
+    ahora: (i64, i64, i64),
+    api: Option<&Api>,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
     if let Some(api) = api {
         match api.versioning.as_deref() {
             None | Some("path") | Some("header") => {}
@@ -2645,14 +2814,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if !api.by_header() && !api.versions.is_empty() {
             errors.push(
                 "[api] declares dated versions with `versioning` that is not \"header\"; in \
-                 the path scheme the version IS the route, and these would be served by nobody"
+             the path scheme the version IS the route, and these would be served by nobody"
                     .to_string(),
             );
         }
         if api.by_header() && api.versions.is_empty() {
             errors.push(
                 "[api] `versioning = \"header\"` with no `[[api.version]]`; there is nothing \
-                 for the caller to pin"
+             for the caller to pin"
                     .to_string(),
             );
         }
@@ -2674,7 +2843,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if previous.is_some_and(|p| d < p) {
                 errors.push(format!(
                     "[api] version `{}` comes after a newer one. The list is the order the \
-                     adapters are applied in, so out of order it adapts backwards",
+                 adapters are applied in, so out of order it adapts backwards",
                     v.date
                 ));
             }
@@ -2684,7 +2853,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             match (&v.sunset, v.lts) {
                 (None, true) => errors.push(format!(
                     "[api] the LTS `{}` has no `sunset`. \"Long term\" with no date is not a \
-                     promise, it is a hope, and it is why a version from years ago is still up",
+                 promise, it is a hope, and it is why a version from years ago is still up",
                     v.date
                 )),
                 (Some(su), _) => match date(su) {
@@ -2702,7 +2871,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         if sd < ahora {
                             errors.push(format!(
                                 "[api] `{}` sunset on {su} and it is still declared. Either the \
-                                 version goes or the date gets renewed as a decision somebody makes",
+                             version goes or the date gets renewed as a decision somebody makes",
                                 v.date
                             ));
                         }
@@ -2718,7 +2887,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             if lived < w {
                                 errors.push(format!(
                                     "[api] `{}` is served for {lived} days and the declared \
-                                     {}window is {w}",
+                                 {}window is {w}",
                                     v.date,
                                     if v.lts { "LTS " } else { "" }
                                 ));
@@ -2730,7 +2899,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if api.newest().map(|n| n.date.as_str()) != Some(v.date.as_str()) {
                         warnings.push(format!(
                             "[api] `{}` is not the newest and has no `sunset`; a version with \
-                             no death date does not die",
+                         no death date does not die",
                             v.date
                         ));
                     }
@@ -2743,7 +2912,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if su < dep {
                     errors.push(format!(
                         "[api] `{}` sunsets before it is deprecated; there is no window to \
-                         migrate in",
+                     migrate in",
                         v.date
                     ));
                 }
@@ -2761,7 +2930,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         {
                             errors.push(format!(
                                 "[api] the LTS `{}` dies before `{}`, which is not LTS. Then it \
-                                 is not long-term support, it is just a label",
+                             is not long-term support, it is just a label",
                                 v.date, other.date
                             ));
                         }
@@ -2777,15 +2946,18 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             } else if api.newest().map(|n| &n.date) != Some(def) {
                 warnings.push(format!(
                     "[api] the default is `{def}` and the newest is `{}`; a new integration \
-                     that pins nothing lands on an old version",
+                 that pins nothing lands on an old version",
                     api.newest().map(|n| n.date.as_str()).unwrap_or_default()
                 ));
             }
         }
     }
-    // The two schemes cannot be mixed, and a shape from the past needs somebody
-    // to translate it: that is what makes one implementation able to serve a
-    // version from years ago.
+}
+
+// The two schemes cannot be mixed, and a shape from the past needs somebody
+// to translate it: that is what makes one implementation able to serve a
+// version from years ago.
+fn versions_are_not_mixed(ms: &[Manifest], errors: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         for (name, meth) in &m.methods {
             if m.api.by_header() {
@@ -2796,7 +2968,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     {
                         errors.push(format!(
                             "{}.{name}: `{p}` versions the route while `[api]` versions by \
-                             header; two schemes at once means two answers to the same question",
+                         header; two schemes at once means two answers to the same question",
                             m.service
                         ));
                     }
@@ -2804,7 +2976,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             } else if !meth.at.is_empty() {
                 errors.push(format!(
                     "{}.{name}: declares `at` shapes and `[api] versioning` is not \"header\"; \
-                     in the path scheme an old shape is an old route",
+                 in the path scheme an old shape is an old route",
                     m.service
                 ));
             }
@@ -2822,8 +2994,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !input_changed && !output_changed {
                     errors.push(format!(
                         "{}.{name}: `at.\"{ver}\"` declares the same shape as the current one. \
-                         A version only gets declared where something CHANGED; equal, it is an \
-                         adapter that copies and a version nobody needed",
+                     A version only gets declared where something CHANGED; equal, it is an \
+                     adapter that copies and a version nobody needed",
                         m.service
                     ));
                     continue;
@@ -2843,9 +3015,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             .collect();
                         errors.push(format!(
                             "{}.{name}: `at.\"{ver}\"` changes the shape and declares no \
-                             `adapter`. What changed: {}. Without somebody translating it, \
-                             whoever pinned that version receives the new shape and finds out \
-                             when it breaks",
+                         `adapter`. What changed: {}. Without somebody translating it, \
+                         whoever pinned that version receives the new shape and finds out \
+                         when it breaks",
                             m.service,
                             if changed.is_empty() {
                                 "the input".to_string()
@@ -2858,8 +3030,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                         if let Some(prev) = adapters.insert(a.as_str(), ver.as_str()) {
                             errors.push(format!(
                                 "{}.{name}: `{a}` adapts `{prev}` and `{ver}`. One adapter per \
-                                 step: chained, the same function would have to translate two \
-                                 different shapes",
+                             step: chained, the same function would have to translate two \
+                             different shapes",
                                 m.service
                             ));
                         }
@@ -2868,10 +3040,17 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
         }
     }
+}
 
-    // A retired version. The point of declaring it is that the announcement
-    // stops living in a chat thread: it travels in the response, it is in the
-    // OpenAPI, and `verify` can name who is still calling what is about to die.
+// A retired version. The point of declaring it is that the announcement
+// stops living in a chat thread: it travels in the response, it is in the
+// OpenAPI, and `verify` can name who is still calling what is about to die.
+fn retirement(
+    ms: &[Manifest],
+    ahora: (i64, i64, i64),
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
     for m in ms.iter().filter(|m| !m.external) {
         for (name, meth) in &m.methods {
             for (field, value) in [("deprecated", &meth.deprecated), ("sunset", &meth.sunset)] {
@@ -2889,7 +3068,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if meth.sunset.is_some() && meth.deprecated.is_none() {
                 errors.push(format!(
                     "{}.{name}: has `sunset` and no `deprecated`; whoever calls it finds out \
-                     the day it stops answering",
+                 the day it stops answering",
                     m.service
                 ));
             }
@@ -2900,7 +3079,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if su < d {
                     errors.push(format!(
                         "{}.{name}: it sunsets on {} and is deprecated from {}; there is no \
-                         window to migrate in",
+                     window to migrate in",
                         m.service,
                         meth.sunset.as_deref().unwrap_or_default(),
                         meth.deprecated.as_deref().unwrap_or_default()
@@ -2914,7 +3093,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if su < ahora {
                     errors.push(format!(
                         "{}.{name}: sunset on {} and it is still declared. Either the version \
-                         goes or the date gets renewed as a decision somebody makes",
+                     goes or the date gets renewed as a decision somebody makes",
                         m.service,
                         meth.sunset.as_deref().unwrap_or_default()
                     ));
@@ -2930,7 +3109,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 )),
                 None if meth.deprecated.is_some() => warnings.push(format!(
                     "{}.{name}: deprecated with no `successor`; whoever calls it learns that \
-                     it is dying and not where to go",
+                 it is dying and not where to go",
                     m.service
                 )),
                 _ => {}
@@ -2938,15 +3117,18 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if meth.deprecated.is_some() && meth.sunset.is_none() {
                 warnings.push(format!(
                     "{}.{name}: deprecated with no `sunset`; a deprecation with no date does \
-                     not end, and the version stays up for years",
+                 not end, and the version stays up for years",
                     m.service
                 ));
             }
         }
     }
-    // And the one that only a platform-wide view can see: somebody still calls
-    // what is about to die. Inside a single repo this is a grep; across twenty
-    // services it is the question nobody can answer.
+}
+
+// And the one that only a platform-wide view can see: somebody still calls
+// what is about to die. Inside a single repo this is a grep; across twenty
+// services it is the question nobody can answer.
+fn callers_of_what_dies(ms: &[Manifest], warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         for d in &m.depends {
             let tgt = d.target();
@@ -2973,10 +3155,12 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
         }
     }
+}
 
-    // A scope in the catalogue that no method demands: it can be granted to
-    // somebody and it guards nothing, which is the worst kind of permission —
-    // it looks like a control and is a label.
+// A scope in the catalogue that no method demands: it can be granted to
+// somebody and it guards nothing, which is the worst kind of permission —
+// it looks like a control and is a label.
+fn scopes_nobody_demands(ms: &[Manifest], warnings: &mut Vec<String>) {
     if let Some(api) = ms.iter().find(|m| !m.external).map(|m| &m.api) {
         for sc in &api.scopes {
             let used = ms
@@ -2986,16 +3170,18 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !used {
                 warnings.push(format!(
                     "[api] the scope `{sc}` is declared and no method demands it. It can be \
-                     granted and it guards nothing"
+                 granted and it guards nothing"
                 ));
             }
         }
     }
+}
 
-    // Declared failures. A method's failures are part of its contract, and the
-    // generated client acts on them: it does not retry what the callee declared
-    // as not retriable. Which means a wrong declaration is worse than none —
-    // it silences a retry that would have worked — so these rules are strict.
+// Declared failures. A method's failures are part of its contract, and the
+// generated client acts on them: it does not retry what the callee declared
+// as not retriable. Which means a wrong declaration is worse than none —
+// it silences a retry that would have worked — so these rules are strict.
+fn declared_failures(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         for (name, meth) in &m.methods {
             let mut seen: IndexMap<String, ()> = IndexMap::new();
@@ -3003,21 +3189,21 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !f.well_formed() {
                     errors.push(format!(
                         "{}.{name}: error code `{}` is not snake_case; the code travels in \
-                         `problem+json` and gets compared as a literal",
+                     `problem+json` and gets compared as a literal",
                         m.service, f.code
                     ));
                 }
                 if seen.insert(f.code.clone(), ()).is_some() {
                     errors.push(format!(
                         "{}.{name}: declares `{}` twice; whichever status and `retriable` \
-                         won would depend on the order",
+                     won would depend on the order",
                         m.service, f.code
                     ));
                 }
                 if !(400..600).contains(&f.status) {
                     errors.push(format!(
                         "{}.{name}.{}: `status = {}` is not a failure; a declared error has \
-                         to be 4xx or 5xx",
+                     to be 4xx or 5xx",
                         m.service, f.code, f.status
                     ));
                 }
@@ -3030,7 +3216,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 {
                     errors.push(format!(
                         "{}.{name}.{}: `retriable = true` on {}; a 4xx is the request's fault \
-                         and retrying it ends the same. Retriable 4xx: {}",
+                     and retrying it ends the same. Retriable 4xx: {}",
                         m.service,
                         f.code,
                         f.status,
@@ -3047,15 +3233,18 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if meth.auth.as_deref() == Some("public") && meth.mutating() && meth.errors.is_empty() {
                 warnings.push(format!(
                     "{}.{name}: public mutation with no declared `errors`; every caller \
-                     invents its own reading of a 500",
+                 invents its own reading of a 500",
                     m.service
                 ));
             }
         }
     }
-    // Retries against a method whose every declared failure is final: the
-    // generated client will not retry them, so the budget only buys attempts
-    // against what nobody declared.
+}
+
+// Retries against a method whose every declared failure is final: the
+// generated client will not retry them, so the budget only buys attempts
+// against what nobody declared.
+fn retries_with_nothing_to_retry(ms: &[Manifest], warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         for d in &m.depends {
             if d.retries == 0 {
@@ -3070,23 +3259,25 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !sig.errors.is_empty() && !sig.errors.iter().any(|f| f.retriable) {
                     warnings.push(format!(
                         "{} retries {tgt}.{} {} times and every failure it declares is final; \
-                         the retries only apply to what nobody declared",
+                     the retries only apply to what nobody declared",
                         m.service, d.method, d.retries
                     ));
                 }
             }
         }
     }
+}
 
-    // How long the events are kept. A table of events grows forever, and the
-    // first symptom is the bill while the second is a query that times out.
+// How long the events are kept. A table of events grows forever, and the
+// first symptom is the bill while the second is a query that times out.
+fn event_retention(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         let a = &m.analytics;
         if !a.export {
             if a.retention_days.is_some() || !a.retention.is_empty() {
                 errors.push(format!(
                     "{}: it declares retention and does not export. There is no table to keep \
-                     anything in",
+                 anything in",
                     m.service
                 ));
             }
@@ -3095,8 +3286,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         if a.retention_days.is_none() && a.retention.is_empty() && !m.emits.is_empty() {
             warnings.push(format!(
                 "{}: exports {} events with no `retention_days`. A table of events grows \
-                 forever, and the first symptom is the bill while the second is a query that \
-                 times out",
+             forever, and the first symptom is the bill while the second is a query that \
+             times out",
                 m.service,
                 m.emits.len()
             ));
@@ -3105,7 +3296,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !m.emits.contains_key(ev) {
                 errors.push(format!(
                     "{}: `[analytics.retention]` names `{ev}`, which this service does not \
-                     emit. Retention is decided by whoever owns the event",
+                 emit. Retention is decided by whoever owns the event",
                     m.service
                 ));
             }
@@ -3138,30 +3329,24 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if keeps < needs {
                     errors.push(format!(
                         "{}.{name}: the metric groups by {} and `{ev}` is kept {keeps} days. \
-                         The window that falls outside answers zero, and zero reads exactly \
-                         like nothing having happened",
+                     The window that falls outside answers zero, and zero reads exactly \
+                     like nothing having happened",
                         m.service, mt.window
                     ));
                 }
             }
         }
     }
+}
 
-    // One warehouse per platform. The events of one flow have to land in the
-    // same place: split across two warehouses, the funnel —which is what makes
-    // exporting worth anything— cannot be built with a single query, and nobody
-    // sees an error because every table exists and has rows.
-    let exportan: Vec<&Manifest> = ms
-        .iter()
-        .filter(|m| !m.external && m.analytics.export)
-        .collect();
+fn one_warehouse(exportan: &[&Manifest], errors: &mut Vec<String>) {
     if let Some(primero) = exportan.first() {
         for otro in exportan.iter().skip(1) {
             if otro.analytics.warehouse != primero.analytics.warehouse {
                 errors.push(format!(
                     "{} exports to `{}` and {} to `{}`. The events of one flow have to land \
-                     in the same warehouse or the funnel cannot be built, and every table \
-                     would exist with rows without anything warning about it",
+                 in the same warehouse or the funnel cannot be built, and every table \
+                 would exist with rows without anything warning about it",
                     primero.service,
                     primero.analytics.warehouse,
                     otro.service,
@@ -3170,11 +3355,17 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
         }
     }
+}
 
-    let known: IndexMap<&str, &Manifest> = ms.iter().map(|m| (m.service.as_str(), m)).collect();
-
-    // sagas: a step with no compensation is not a saga, it is a dual-write with
-    // more steps and more ways to end up half-done
+// sagas: a step with no compensation is not a saga, it is a dual-write with
+// more steps and more ways to end up half-done
+fn sagas(
+    ms: &[Manifest],
+    esquemas: &IndexMap<String, Tables>,
+    known: &IndexMap<&str, &Manifest>,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         for (name, sg) in &m.saga {
@@ -3190,15 +3381,15 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             match &sg.on {
                 None => errors.push(format!(
                     "{svc}.{name}: no `on`. A saga is started by a method of its own or by a \
-                     consumed event, and without saying which, the coordinator gets generated \
-                     and never runs"
+                 consumed event, and without saying which, the coordinator gets generated \
+                 and never runs"
                 )),
                 Some(on) => {
                     if !m.methods.contains_key(on) && !m.consumes.contains_key(on) {
                         errors.push(format!(
-                            "{svc}.{name}: started by `{on}`, which is neither a method of `{svc}` \
-                             nor an event it consumes"
-                        ));
+                        "{svc}.{name}: started by `{on}`, which is neither a method of `{svc}` \
+                         nor an event it consumes"
+                    ));
                     }
                 }
             }
@@ -3210,14 +3401,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             match esquemas.get(svc) {
                 None => errors.push(format!(
                     "{svc}.{name}: no migrations, and the saga needs the `{table}` table to \
-                     survive a restart of the coordinator"
+                 survive a restart of the coordinator"
                 )),
                 Some(tablas) => match tablas.get(&table) {
                     None => errors.push(format!(
-                        "{svc}.{name}: the `{table}` table is missing. Without it, a restart mid-saga \
-                         leaves the steps already taken applied and with no record of which \
-                         ones: it can neither finish nor compensate"
-                    )),
+                    "{svc}.{name}: the `{table}` table is missing. Without it, a restart mid-saga \
+                     leaves the steps already taken applied and with no record of which \
+                     ones: it can neither finish nor compensate"
+                )),
                     Some(t) => {
                         // `datos` and `actualizado` are not decoration: without the
                         // envelope that started it, the call cannot be rebuilt
@@ -3231,28 +3422,28 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             ("updated", "when it last moved, for the sweep"),
                         ] {
                             match t.col(col) {
-                                None => errors.push(format!(
-                                    "{svc}.{name}: `{table}` has no `{col}` column: that is where {what} goes"
-                                )),
-                                Some(c) => {
-                                    // A wrong type raises no error: it gives a
-                                    // comparison that compiles and compares wrong.
-                                    let esperado = match col {
-                                        "data" => "json",
-                                        "updated" => "timestamp",
-                                        _ => continue,
-                                    };
-                                    if !c.ty.to_lowercase().contains(esperado) {
-                                        errors.push(format!(
-                                            "{svc}.{name}: `{table}.{col}` is `{}` and has to \
-                                             be {esperado}. Comparing a date stored as text \
-                                             compiles and sorts wrong: the sweep would skip \
-                                             stranded sagas without saying anything",
-                                            c.ty
-                                        ));
-                                    }
+                            None => errors.push(format!(
+                                "{svc}.{name}: `{table}` has no `{col}` column: that is where {what} goes"
+                            )),
+                            Some(c) => {
+                                // A wrong type raises no error: it gives a
+                                // comparison that compiles and compares wrong.
+                                let esperado = match col {
+                                    "data" => "json",
+                                    "updated" => "timestamp",
+                                    _ => continue,
+                                };
+                                if !c.ty.to_lowercase().contains(esperado) {
+                                    errors.push(format!(
+                                        "{svc}.{name}: `{table}.{col}` is `{}` and has to \
+                                         be {esperado}. Comparing a date stored as text \
+                                         compiles and sorts wrong: the sweep would skip \
+                                         stranded sagas without saying anything",
+                                        c.ty
+                                    ));
                                 }
                             }
+                        }
                         }
                     }
                 },
@@ -3293,8 +3484,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if s != svc.as_str() && dep.is_none() {
                         errors.push(format!(
                             "{svc}.{name}.{field}: uses `{r}` without declaring it in \
-                             `[[depends]]`. The resilient client —timeout, retries, breaker— \
-                             comes from there, and without it the saga has nothing to call with"
+                         `[[depends]]`. The resilient client —timeout, retries, breaker— \
+                         comes from there, and without it the saga has nothing to call with"
                         ));
                     }
                     // The step's budget is the CALLER's, not the one the other
@@ -3320,8 +3511,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     None if i == ultimo => {}
                     None => errors.push(format!(
                         "{svc}.{name}: step {} (`{}`) has no `undo`, and it is not the \
-                         last one. If a later step fails, this one stays applied forever: that \
-                         is not a saga, it is a dual-write with more steps",
+                     last one. If a later step fails, this one stays applied forever: that \
+                     is not a saga, it is a dual-write with more steps",
                         i + 1,
                         step.call
                     )),
@@ -3333,9 +3524,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             if !me.idempotent {
                                 errors.push(format!(
                                     "{svc}.{name}: `{u}` compensates step {} and is not \
-                                     `idempotent`. A compensation gets retried until it lands \
-                                     —there is nothing behind it— and retrying one that is not \
-                                     idempotent applies the effect twice",
+                                 `idempotent`. A compensation gets retried until it lands \
+                                 —there is nothing behind it— and retrying one that is not \
+                                 idempotent applies the effect twice",
                                     i + 1
                                 ));
                             }
@@ -3354,14 +3545,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             match sg.timeout_ms {
                 Some(tope) if presupuesto > tope => errors.push(format!(
                     "{svc}.{name}: `timeout_ms = {tope}` and the steps plus their \
-                     compensations add up to {presupuesto}ms. Giving up while a step is still \
-                     in flight leaves the coordinator compensating something that later \
-                     succeeds"
+                 compensations add up to {presupuesto}ms. Giving up while a step is still \
+                 in flight leaves the coordinator compensating something that later \
+                 succeeds"
                 )),
                 Some(_) => {}
                 None => warnings.push(format!(
                     "{svc}.{name}: no `timeout_ms`. A saga with no time budget stays in \
-                     flight until somebody looks at it"
+                 flight until somebody looks at it"
                 )),
             }
 
@@ -3372,15 +3563,23 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !m.cap.eventual() {
                 errors.push(format!(
                     "{svc}.{name}: coordinates a saga with `consistency = \"strong\"`. \
-                     Between the first step and the last there are visible intermediate states \
-                     no invariant describes: the real guarantee of the flow is eventual"
+                 Between the first step and the last there are visible intermediate states \
+                 no invariant describes: the real guarantee of the flow is eventual"
                 ));
             }
         }
     }
+}
 
-    // event sourcing: the stream is the truth, so what gets refuted is
-    // everything that turns it into something that is not a stream
+// event sourcing: the stream is the truth, so what gets refuted is
+// everything that turns it into something that is not a stream
+fn event_sourcing(
+    ms: &[Manifest],
+    emitters: &IndexMap<&str, (&str, &Fields)>,
+    esquemas: &IndexMap<String, Tables>,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         for (name, ag) in &m.aggregate {
@@ -3394,10 +3593,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             for ev in &ag.events {
                 if !m.emits.contains_key(ev) {
                     errors.push(format!(
-                        "{svc}.{name}: is founded on `{ev}`, which this service does not declare it \
-                         emits. The stream is written by its owner: if the event belongs to \
-                         someone else, this is a view, not an aggregate"
-                    ));
+                    "{svc}.{name}: is founded on `{ev}`, which this service does not declare it \
+                     emits. The stream is written by its owner: if the event belongs to \
+                     someone else, this is a view, not an aggregate"
+                ));
                 }
             }
             // The machine, if declared, has to exist and speak of the same
@@ -3417,8 +3616,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             {
                                 errors.push(format!(
                                     "{svc}.{name}: `{ev}` belongs to the aggregate and no \
-                                     transition of `{mac}` emits it. The generated `fold` \
-                                     would not know which state to take it to"
+                                 transition of `{mac}` emits it. The generated `fold` \
+                                 would not know which state to take it to"
                                 ));
                             }
                         }
@@ -3434,10 +3633,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !ag.events.is_empty() && !m.patterns.outbox {
                 errors.push(format!(
                     "{svc}.{name}: an aggregate whose events get published needs \
-                     `[patterns] outbox = true`. The stream is already durable, so publishing \
-                     inline leaves a window where the event is recorded and nobody received \
-                     it, and publishing before recording leaves the opposite. The handoff goes \
-                     in the SAME transaction as the append"
+                 `[patterns] outbox = true`. The stream is already durable, so publishing \
+                 inline leaves a window where the event is recorded and nobody received \
+                 it, and publishing before recording leaves the opposite. The handoff goes \
+                 in the SAME transaction as the append"
                 ));
             }
 
@@ -3445,7 +3644,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             match esquemas.get(svc).and_then(|t| t.get(&table)) {
                 None => errors.push(format!(
                     "{svc}.{name}: the `{table}` table is missing. The state IS the stream, and \
-                     without the table there is nowhere to put it"
+                 without the table there is nowhere to put it"
                 )),
                 Some(t) => {
                     for (col, what) in [
@@ -3459,8 +3658,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     ] {
                         if !t.has(col) {
                             errors.push(format!(
-                                "{svc}.{name}: `{table}` has no `{col}` column: that is where {what} goes"
-                            ));
+                            "{svc}.{name}: `{table}` has no `{col}` column: that is where {what} goes"
+                        ));
                         }
                     }
                     // Without the UNIQUE, two concurrent writes to the same stream
@@ -3474,9 +3673,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if !optimista {
                         errors.push(format!(
                             "{svc}.{name}: `{table}` has no UNIQUE on (stream_id, version). Two \
-                             concurrent writes to the same stream both land with the same \
-                             version, with no error at all, and the state that gets rebuilt \
-                             depends on what order they are read in"
+                         concurrent writes to the same stream both land with the same \
+                         version, with no error at all, and the state that gets rebuilt \
+                         depends on what order they are read in"
                         ));
                     }
                 }
@@ -3505,13 +3704,13 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             .join(" ");
                         if limpio.contains(verbo) && limpio.contains(&table) {
                             errors.push(format!(
-                                "{svc}/{nombre_archivo}: `{}` on `{table}`, which is the stream of \
-                                 `{name}`. A stream is append-only: changing a past event \
-                                 leaves a past that did not happen, and everything rebuilt \
-                                 afterwards will be consistent with that lie. To correct \
-                                 something you add a new event, you do not edit the old one",
-                                verbo.to_uppercase()
-                            ));
+                            "{svc}/{nombre_archivo}: `{}` on `{table}`, which is the stream of \
+                             `{name}`. A stream is append-only: changing a past event \
+                             leaves a past that did not happen, and everything rebuilt \
+                             afterwards will be consistent with that lie. To correct \
+                             something you add a new event, you do not edit the old one",
+                            verbo.to_uppercase()
+                        ));
                         }
                     }
                 }
@@ -3531,34 +3730,34 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             (
                                 "rules",
                                 "which rules version it was computed with: without this column, \
-                                 an old snapshot gets rehydrated with new rules and gives a \
-                                 state that no longer matches replaying the stream, with no \
-                                 error at all",
+                             an old snapshot gets rehydrated with new rules and gives a \
+                             state that no longer matches replaying the stream, with no \
+                             error at all",
                                 "",
                             ),
                         ] {
                             match t.col(col) {
-                                None => errors.push(format!(
-                                    "{svc}.{name}: `{snapshots}` has no `{col}` column: that is where {what} goes"
-                                )),
-                                Some(c) if !kind.is_empty() && !c.ty.to_lowercase().contains(kind) => {
-                                    errors.push(format!(
-                                        "{svc}.{name}: `{snapshots}.{col}` is `{}` and has to be \
-                                         {kind}",
-                                        c.ty
-                                    ))
-                                }
-                                _ => {}
+                            None => errors.push(format!(
+                                "{svc}.{name}: `{snapshots}` has no `{col}` column: that is where {what} goes"
+                            )),
+                            Some(c) if !kind.is_empty() && !c.ty.to_lowercase().contains(kind) => {
+                                errors.push(format!(
+                                    "{svc}.{name}: `{snapshots}.{col}` is `{}` and has to be \
+                                     {kind}",
+                                    c.ty
+                                ))
                             }
+                            _ => {}
+                        }
                         }
                         // One snapshot per event is not a cache, it is a second
                         // copy of the stream with twice the writes.
                         if ag.snapshot_every == 1 {
                             warnings.push(format!(
-                                "{svc}.{name}: `snapshot_every = 1` stores one snapshot per event: that \
-                                 is not a cache, it is a second copy of the stream with twice \
-                                 the writes"
-                            ));
+                            "{svc}.{name}: `snapshot_every = 1` stores one snapshot per event: that \
+                             is not a cache, it is a second copy of the stream with twice \
+                             the writes"
+                        ));
                         }
                     }
                 }
@@ -3586,8 +3785,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !propio && !m.consumes.contains_key(ev.as_str()) {
                     errors.push(format!(
                         "{svc}.{name}: uses `{ev}`, from another service, without declaring it in \
-                         `[consumes]`. The subscription comes from there, and without it the \
-                         view gets generated and never receives anything"
+                     `[consumes]`. The subscription comes from there, and without it the \
+                     view gets generated and never receives anything"
                     ));
                 }
             }
@@ -3602,8 +3801,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             match tablas.and_then(|t| t.get(&cp)) {
                 None => errors.push(format!(
                     "{svc}.{name}: the `{cp}` table is missing. With nowhere to record how far it \
-                     got, a restart either reprocesses from the beginning or skips what it did \
-                     not get to apply; both give a wrong view and neither raises an error"
+                 got, a restart either reprocesses from the beginning or skips what it did \
+                 not get to apply; both give a wrong view and neither raises an error"
                 )),
                 Some(t) => {
                     for (col, what) in [
@@ -3613,8 +3812,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     ] {
                         if !t.has(col) {
                             errors.push(format!(
-                                "{svc}.{name}: `{cp}` has no `{col}` column: that is where {what} goes"
-                            ));
+                            "{svc}.{name}: `{cp}` has no `{col}` column: that is where {what} goes"
+                        ));
                         }
                     }
                     // Without `stream_id` in the key, one stream overwrites
@@ -3627,10 +3826,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     });
                     if !por_flujo && t.has("stream_id") {
                         errors.push(format!(
-                            "{svc}.{name}: `{cp}` has no key on (view_name, stream_id). One stream would \
-                             overwrite another's position, and the view would skip events or \
-                             reprocess them without anything warning about it"
-                        ));
+                        "{svc}.{name}: `{cp}` has no key on (view_name, stream_id). One stream would \
+                         overwrite another's position, and the view would skip events or \
+                         reprocess them without anything warning about it"
+                    ));
                     }
                 }
             }
@@ -3650,22 +3849,22 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 ) {
                     (Some(_), None) => errors.push(format!(
                         "{svc}.{name}: it can be rebuilt and `{shadow}` is missing. Rebuilding in \
-                         place leaves the view incomplete while it runs, and it keeps being \
-                         read: whoever asks gets fewer rows than there are, with no error"
+                     place leaves the view incomplete while it runs, and it keeps being \
+                     read: whoever asks gets fewer rows than there are, with no error"
                     )),
                     (Some(viva), Some(som)) => {
                         for c in &viva.cols {
                             match som.col(&c.name) {
                                 None => errors.push(format!(
                                     "{svc}.{name}: `{shadow}` has no `{}` column, which `{table}` \
-                                     does. The swap would leave a view without that data, and \
-                                     only then would it show",
+                                 does. The swap would leave a view without that data, and \
+                                 only then would it show",
                                     c.name
                                 )),
                                 Some(o) if o.ty != c.ty => errors.push(format!(
                                     "{svc}.{name}: `{shadow}.{}` is `{}` and in `{table}` it is \
-                                     `{}`. On the swap, the view changes type without anything \
-                                     saying so",
+                                 `{}`. On the swap, the view changes type without anything \
+                                 saying so",
                                     c.name, o.ty, c.ty
                                 )),
                                 _ => {}
@@ -3675,8 +3874,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                             if !viva.has(&c.name) {
                                 warnings.push(format!(
                                     "{svc}.{name}: `{shadow}.{}` is not in `{table}`. It is \
-                                     spare until the next swap, and after that the view is the \
-                                     one that has it",
+                                 spare until the next swap, and after that the view is the \
+                                 one that has it",
                                     c.name
                                 ));
                             }
@@ -3692,33 +3891,32 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !m.cap.eventual() {
                 errors.push(format!(
                     "{svc}.{name}: a read model with `consistency = \"strong\"`. The view gets \
-                     filled after the event happened: what it serves is stale by definition"
+                 filled after the event happened: what it serves is stale by definition"
                 ));
             }
             match (vi.max_staleness_ms, m.cap.max_staleness_ms) {
                 (Some(v), Some(tope)) if v > tope => errors.push(format!(
                     "{svc}.{name}: the view allows {v}ms of lag and the service declared a limit \
-                     of {tope}ms. The service cannot honour what it promised while serving \
-                     from a view older than its own budget"
+                 of {tope}ms. The service cannot honour what it promised while serving \
+                 from a view older than its own budget"
                 )),
                 (None, _) => warnings.push(format!(
                     "{svc}.{name}: no `max_staleness_ms`. With no lag budget, nobody can say \
-                     whether the view it served was acceptably stale"
+                 whether the view it served was acceptably stale"
                 )),
                 _ => {}
             }
         }
     }
+}
 
-    // Business metrics. What a funnel answers is derivable from the causal chain;
-    // this is not, so the whole value of declaring it is that these things become
-    // refutable instead of being a query somebody pasted into a dashboard.
-    let emitted: IndexMap<&str, &Manifest> = ms
-        .iter()
-        .filter(|m| !m.external)
-        .flat_map(|m| m.emits.keys().map(move |e| (e.as_str(), m)))
-        .collect();
-    let mut metric_owner: IndexMap<String, String> = IndexMap::new();
+fn business_metrics(
+    ms: &[Manifest],
+    emitted: &IndexMap<&str, &Manifest>,
+    metric_owner: &mut IndexMap<String, String>,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         for (name, mt) in &m.metrics {
@@ -3728,8 +3926,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if !m.analytics.export {
                 errors.push(format!(
                     "{svc}.{name}: a metric with `[analytics] export = false` reads tables that \
-                     carry nothing. It gets applied and answers zero forever, which is \
-                     indistinguishable from a business that sold nothing"
+                 carry nothing. It gets applied and answers zero forever, which is \
+                 indistinguishable from a business that sold nothing"
                 ));
             }
             // The view's name is global to the dataset: two services with the same
@@ -3738,15 +3936,15 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if let Some(prev) = metric_owner.insert(name.clone(), svc.clone()) {
                 errors.push(format!(
                     "{svc}.{name}: `{}` is also declared by {prev}, and both land on the same \
-                     view in the warehouse. Whichever is applied second overwrites the first \
-                     without an error",
+                 view in the warehouse. Whichever is applied second overwrites the first \
+                 without an error",
                     Metric::view(name)
                 ));
             }
             if !AGGREGATIONS.contains(&mt.kind.as_str()) {
                 errors.push(format!(
                     "{svc}.{name}: `kind = \"{}\"` is not an aggregation; use {}. Those are the \
-                     ones that mean the same thing in the three warehouses",
+                 ones that mean the same thing in the three warehouses",
                     mt.kind,
                     AGGREGATIONS.join(", ")
                 ));
@@ -3765,7 +3963,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 )),
                 (false, Some(f)) => warnings.push(format!(
                     "{svc}.{name}: `count` with `field = \"{f}\"`. A count counts rows: the field \
-                     is ignored, and nobody reading the declaration would guess so"
+                 is ignored, and nobody reading the declaration would guess so"
                 )),
                 _ => {}
             }
@@ -3778,7 +3976,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 let Some(owner) = emitted.get(ev.as_str()) else {
                     errors.push(format!(
                         "{svc}.{name}: reads `{ev}` and nobody emits it. The view gets applied \
-                         and counts zero forever"
+                     and counts zero forever"
                     ));
                     continue;
                 };
@@ -3788,7 +3986,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 if !owner.analytics.export {
                     errors.push(format!(
                         "{svc}.{name}: reads `{ev}`, and {} declares `[analytics] export = \
-                         false`: that event has no table in the warehouse",
+                     false`: that event has no table in the warehouse",
                         owner.service
                     ));
                     continue;
@@ -3802,14 +4000,14 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     match fields.iter().find(|(k, _)| normalize(k) == normalize(f)) {
                         None => errors.push(format!(
                             "{svc}.{name}: adds up `{f}`, which `{ev}` does not declare. That \
-                             column does not exist in that table"
+                         column does not exist in that table"
                         )),
                         Some((_, kind)) if !NUMERIC.contains(&kind.as_str()) => {
                             errors.push(format!(
                                 "{svc}.{name}: adds up `{f}`, which is `{kind}` in `{ev}`. A sum \
-                                 over something that is not a number is refused by one \
-                                 warehouse and answers zero in another, and zero reads like \
-                                 nothing happened"
+                             over something that is not a number is refused by one \
+                             warehouse and answers zero in another, and zero reads like \
+                             nothing happened"
                             ))
                         }
                         _ => {}
@@ -3831,8 +4029,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if !money_part && !fields.iter().any(|(k, _)| normalize(k) == normalize(dim)) {
                         errors.push(format!(
                             "{svc}.{name}: groups by `{dim}`, which `{ev}` does not declare. \
-                             That turns into a NULL group, and a metric with a NULL group is \
-                             one nobody can read"
+                         That turns into a NULL group, and a metric with a NULL group is \
+                         one nobody can read"
                         ));
                     }
                     // And a personal field is not a dimension. Hashed or not, one
@@ -3841,8 +4039,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if is_pii(&owner.pii, dim) {
                         errors.push(format!(
                             "{svc}.{name}: groups by `{dim}`, which {} declares as `pii`. One \
-                             row per person is not a metric, and hashing it does not change \
-                             that: the hash identifies the same person across tables",
+                         row per person is not a metric, and hashing it does not change \
+                         that: the hash identifies the same person across tables",
                             owner.service
                         ));
                     }
@@ -3850,8 +4048,10 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
         }
     }
+}
 
-    // state machines: dead states, unreachable ones and phantom triggers
+// state machines: dead states, unreachable ones and phantom triggers
+fn state_machines(ms: &[Manifest], errors: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         for (name, mac) in &m.machine {
             let states = mac.states();
@@ -3898,16 +4098,16 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                 // the trigger has to actually exist
                 if !m.methods.contains_key(&t.on) && !m.consumes.contains_key(&t.on) {
                     errors
-                        .push(format!(
-                        "{}.{name}.{act}: triggered by `{}`, which is neither a method nor a consumed event",
-                        m.service, t.on));
+                    .push(format!(
+                    "{}.{name}.{act}: triggered by `{}`, which is neither a method nor a consumed event",
+                    m.service, t.on));
                 }
                 if let Some(ev) = &t.emits {
                     if !m.emits.contains_key(ev) {
                         errors.push(format!(
-                            "{}.{name}.{act}: emits `{ev}`, which the service does not declare it emits",
-                            m.service
-                        ));
+                        "{}.{name}.{act}: emits `{ev}`, which the service does not declare it emits",
+                        m.service
+                    ));
                     }
                 }
                 if let Some(c) = &t.compensates {
@@ -3921,7 +4121,15 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
         }
     }
+}
 
+fn what_is_named_exists(
+    ms: &[Manifest],
+    emitters: &IndexMap<&str, (&str, &Fields)>,
+    known: &IndexMap<&str, &Manifest>,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
     for m in ms {
         let svc = &m.service;
         for ev in m.consumes.keys() {
@@ -3942,7 +4150,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if d.timeout_ms.is_none() {
                 errors.push(format!(
                     "{svc} -> {tgt}.{}: no `timeout_ms`; a network call with no time budget \
-                     propagates the other side's outage",
+                 propagates the other side's outage",
                     d.method
                 ));
             }
@@ -3954,7 +4162,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if d.timeout_ms == Some(0) {
                 errors.push(format!(
                     "{svc} -> {tgt}.{}: `timeout_ms = 0`. Nothing fits in a budget of zero: \
-                     every call fails before it leaves, and the other side looks down",
+                 every call fails before it leaves, and the other side looks down",
                     d.method
                 ));
             }
@@ -3971,14 +4179,16 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if d.retries > 0 && !d.breaker {
                 warnings.push(format!(
                     "{svc} -> {tgt}.{}: retries with no `breaker = true`; retries amplify \
-                     the other side's outage",
+                 the other side's outage",
                     d.method
                 ));
             }
         }
     }
+}
 
-    // migrations: expand -> migrate -> contract, and a deterministic order
+// migrations: expand -> migrate -> contract, and a deterministic order
+fn migration_order(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms {
         // Two migrations with the same version: Flyway refuses to apply EITHER,
         // so the deploy falls over with the database half migrated. It catches
@@ -3997,7 +4207,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if let Some(other) = vistas.get(ver) {
                 errors.push(format!(
                     "{}: `{name}` and `{other}` share the version `{ver}`. Flyway applies neither \
-                     of them and the deploy falls over with the database half migrated",
+                 of them and the deploy falls over with the database half migrated",
                     m.service
                 ));
             } else {
@@ -4014,7 +4224,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if destructive(&text, &f.display().to_string()) && !name.contains(".contract.") {
                 errors.push(format!(
                     "{}/{name}: destructive migration not marked as `.contract.sql` \
-                     (expand -> migrate -> contract)",
+                 (expand -> migrate -> contract)",
                     m.service
                 ));
             }
@@ -4024,22 +4234,20 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             if migration_version(&name).is_none() {
                 warnings.push(format!(
                     "{}/{name}: it follows neither `001_<name>.sql` nor Flyway's \
-                     `V1__<name>.sql`, so its order is whatever the filesystem says",
+                 `V1__<name>.sql`, so its order is whatever the filesystem says",
                     m.service
                 ));
             }
         }
     }
+}
 
-    // database per service: no FK crosses the boundary
-    let by_svc = schemas(ms);
-    let mut owner_of: IndexMap<&str, &str> = IndexMap::new();
-    for (svc, tables) in &by_svc {
-        for t in tables.keys() {
-            owner_of.insert(t, svc);
-        }
-    }
-    for (svc, tables) in &by_svc {
+fn no_fk_across_services(
+    by_svc: &IndexMap<String, Tables>,
+    owner_of: &IndexMap<&str, &str>,
+    errors: &mut Vec<String>,
+) {
+    for (svc, tables) in by_svc {
         for (t, cols) in tables {
             for c in &cols.cols {
                 let Some(fk) = &c.fk else { continue };
@@ -4047,7 +4255,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
                     if owner != svc {
                         errors.push(format!(
                             "{svc}.{t}.{}: an FK to {fk} crosses the service boundary \
-                             (owner: {owner}); store the id, not an FK",
+                         (owner: {owner}); store the id, not an FK",
                             c.name
                         ));
                     }
@@ -4055,14 +4263,36 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             }
         }
     }
+}
 
-    for (ev, (owner, _)) in &emitters {
+fn events_with_no_consumers(
+    ms: &[Manifest],
+    emitters: &IndexMap<&str, (&str, &Fields)>,
+    warnings: &mut Vec<String>,
+) {
+    for (ev, (owner, _)) in emitters {
         if !ms.iter().any(|m| m.consumes.contains_key(*ev)) {
             warnings.push(format!("{ev} ({owner}) has no consumers"));
         }
     }
-    Report {
-        errors: errors.into_iter().map(|e| place(ms, e)).collect(),
-        warnings: warnings.into_iter().map(|w| place(ms, w)).collect(),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A rule is a function, so it can be run on its own.
+    ///
+    /// That is the whole reason they are not one function any more: before
+    /// this, checking that governance says what it says meant building a
+    /// project on disk, running the binary and reading forty lines to find the
+    /// one that matters.
+    #[test]
+    fn a_rule_runs_on_its_own() {
+        let m: Manifest = toml::from_str("service = \"p\"\ntier = \"1\"\n").unwrap();
+        let (mut errors, mut warnings) = (Vec::new(), Vec::new());
+        governance(&[m], &Policy::default(), &mut errors, &mut warnings);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("no `owner`"), "{errors:?}");
     }
 }
