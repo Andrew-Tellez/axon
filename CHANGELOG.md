@@ -7,7 +7,7 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
-## [No publicado]
+## [0.36.0] — 2026-09-15
 
 ### Añadido
 
@@ -23,6 +23,29 @@ perderlas.
   directorio y `axon seq ` los eventos emitidos, con su emisor como descripción. Lee el
   directorio actual, que es lo que asume cualquier comando sin fuentes; en uno sin
   manifiestos no hay nada que ofrecer y la tabulación se comporta como antes.
+
+- **Go genera clientes.** Hasta ahora el Go generado eran tipos, handlers y la máquina de
+  estados: quien llamaba a otro servicio escribía a mano el timeout, los reintentos y el
+  cortacircuitos, que es justo lo que el manifiesto ya declara. Ahora sale el cliente, con
+  la política dentro y literal — el timeout es el `context` que la llamada ya recibe, el
+  backoff lleva su jitter, el cortacircuitos es un mapa detrás de un mutex, y un fallo que
+  la otra parte declaró final no se reintenta. `on_partition = "degrade"` hace del camino
+  degradado un argumento obligatorio, igual que en TypeScript: no se puede llamar sin decir
+  qué se sirve mientras la otra parte no contesta. Y una dependencia sobre un método que se
+  está muriendo sale con el `Deprecated:` que leen el editor y el linter de Go.
+
+  Es la misma política en los dos lenguajes porque sale del mismo sitio, y hay un test que
+  falla si dejan de coincidir. El servicio gana un `transport Transport` en su constructor
+  cuando tiene `[[depends]]`.
+
+- **Y las banderas.** Los accesores tipados de cada `[flags]`, con la misma forma de
+  OpenFeature que en TypeScript y la única que Go tiene para ella: una interfaz no puede
+  llevar un parámetro de tipo, así que el proveedor contesta `any` y una función genérica
+  comprueba que lo que volvió es lo que se declaró — un proveedor que contesta una cadena a
+  una bandera booleana es una mala configuración, y el valor seguro es mejor respuesta a eso
+  que un panic en medio de una petición. El valor por defecto viaja **dentro del código**,
+  así que un proveedor caído sigue contestando lo que el manifiesto dijo que era seguro, y
+  lo que está anclado a un campo lo lleva bajo su nombre y bajo el de OpenFeature.
 
 ### Cambiado
 
@@ -68,29 +91,6 @@ perderlas.
   **Rompe el Go generado**: `PaymentsCapturePaymentResult` pasa a `PaymentsCapturePaymentOut`,
   y aparecen los `…In` y los `…Out` que faltaban. El TypeScript no cambia de tipos: solo
   gana los comentarios que Go ya tenía.
-
-- **Go genera clientes.** Hasta ahora el Go generado eran tipos, handlers y la máquina de
-  estados: quien llamaba a otro servicio escribía a mano el timeout, los reintentos y el
-  cortacircuitos, que es justo lo que el manifiesto ya declara. Ahora sale el cliente, con
-  la política dentro y literal — el timeout es el `context` que la llamada ya recibe, el
-  backoff lleva su jitter, el cortacircuitos es un mapa detrás de un mutex, y un fallo que
-  la otra parte declaró final no se reintenta. `on_partition = "degrade"` hace del camino
-  degradado un argumento obligatorio, igual que en TypeScript: no se puede llamar sin decir
-  qué se sirve mientras la otra parte no contesta. Y una dependencia sobre un método que se
-  está muriendo sale con el `Deprecated:` que leen el editor y el linter de Go.
-
-  Es la misma política en los dos lenguajes porque sale del mismo sitio, y hay un test que
-  falla si dejan de coincidir. El servicio gana un `transport Transport` en su constructor
-  cuando tiene `[[depends]]`.
-
-- **Y las banderas.** Los accesores tipados de cada `[flags]`, con la misma forma de
-  OpenFeature que en TypeScript y la única que Go tiene para ella: una interfaz no puede
-  llevar un parámetro de tipo, así que el proveedor contesta `any` y una función genérica
-  comprueba que lo que volvió es lo que se declaró — un proveedor que contesta una cadena a
-  una bandera booleana es una mala configuración, y el valor seguro es mejor respuesta a eso
-  que un panic en medio de una petición. El valor por defecto viaja **dentro del código**,
-  así que un proveedor caído sigue contestando lo que el manifiesto dijo que era seguro, y
-  lo que está anclado a un campo lo lleva bajo su nombre y bajo el de OpenFeature.
 
 ### Corregido
 
