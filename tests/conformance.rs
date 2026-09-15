@@ -1247,7 +1247,7 @@ fn the_go_generator_is_native_and_idiomatic() {
     ]);
     assert!(ok);
     assert!(
-        co.contains("type PaymentsRefundPaymentResult struct{}"),
+        co.contains("type PaymentsRefundPaymentOut struct{}"),
         "`uses = []` is a declaration too:\n{co}"
     );
 

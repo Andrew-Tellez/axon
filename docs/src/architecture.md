@@ -56,8 +56,11 @@ flowchart TB
   MAN["manifest.rs<br/><i>the model, the folded schema,<br/>name helpers</i>"]
 
   MAN --> VER["verify.rs<br/><i>the rules</i>"]
+  MAN --> CTR["contract.rs<br/><i>which types exist,<br/>with no language in it</i>"]
   MAN --> EMIT["emit.rs<br/><i>TypeScript, CI,<br/>diagrams</i>"]
   MAN --> GGO["gen_go.rs<br/><i>the same manifest,<br/>as idiomatic Go</i>"]
+  CTR --> EMIT
+  CTR --> GGO
   MAN --> INF["infra.rs<br/><i>the neutral plan<br/>+ 4 renderers</i>"]
   MAN --> BI["bi.rs<br/><i>warehouse: 3 dialects,<br/>funnels, metrics, drift</i>"]
   MAN --> DBS["dbsec.rs<br/><i>RLS, masked views,<br/>pg_anon</i>"]

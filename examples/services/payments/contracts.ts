@@ -71,13 +71,14 @@ export class AxonProblem extends Error {
   }
 }
 
+// payment.captured@v1, emitted by this service.
 export interface PaymentCapturedV1 {
   paymentId: string;
   orderId: string;
   amount: { amount: number; currency: string };
 }
 
-// order.placed@v1: orders declares 4 fields; this service declared it reads orderId, total
+// order.placed@v1: orders declares 4 fields; this service declared it reads orderId, total. The rest do not exist on this side.
 export interface OrderPlacedV1 {
   orderId: string;
   total: { amount: number; currency: string };

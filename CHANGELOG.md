@@ -53,6 +53,30 @@ perderlas.
   la única cuyo aviso no se podía abrir. Si tienes esa línea en un `axon.accepted.json`,
   vuelve a correr `axon accept`.
 
+- **Qué tipos existen se decide una vez, para todos los lenguajes.** El generador de
+  TypeScript y el de Go resolvían los dos el esquema de un evento consumido contra su
+  emisor, lo recortaban los dos a los campos que el consumidor declaró que lee, y los dos
+  derivaban la forma de la respuesta que devuelve otro servicio. Escrito dos veces, ya
+  había derivado: Go llamaba `…Result` a lo que TypeScript llama `…Out`, Go no emitía el
+  tipo cuando quien llama no declaraba `uses`, y Go no emitía nunca el tipo de lo que
+  *envía*. Dos nombres para un contrato es exactamente lo que esta herramienta existe para
+  rechazar. Ahora esas decisiones viven en `contract.rs`, sin lenguaje dentro —el nombre
+  viaja en partes, sin mayúsculas, y cada lenguaje las une como su lector espera—, y un
+  generador es lo que las convierte en sintaxis. La superficie de tipos de Go pasa de 74
+  líneas a 13, que es lo que costaría un tercer lenguaje.
+
+  **Rompe el Go generado**: `PaymentsCapturePaymentResult` pasa a `PaymentsCapturePaymentOut`,
+  y aparecen los `…In` y los `…Out` que faltaban. El TypeScript no cambia de tipos: solo
+  gana los comentarios que Go ya tenía.
+
+### Corregido
+
+- **El gate de Go del suite no se ejecutaba nunca.** La comprobación de si la herramienta
+  está instalada corría `go --version`, que no es una de sus dos formas: sale con código 2
+  y un mensaje de uso. Así que `go build` sobre lo que escribe el generador, `gofmt -l` y
+  `go vet` se saltaban solos en una máquina con Go instalado, y lo decían en una línea que
+  nadie lee. Una puerta que se apaga sola es peor que no tenerla.
+
 ## [0.35.0] — 2026-09-13
 
 ### Añadido

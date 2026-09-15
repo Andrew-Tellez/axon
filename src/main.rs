@@ -13,6 +13,7 @@ mod cap;
 mod carga;
 mod catalog;
 mod color;
+mod contract;
 mod dbsec;
 mod emit;
 mod gen_go;

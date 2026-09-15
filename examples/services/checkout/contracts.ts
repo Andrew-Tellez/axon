@@ -71,17 +71,20 @@ export class AxonProblem extends Error {
   }
 }
 
+// checkout.started@v1, emitted by this service.
 export interface CheckoutStartedV1 {
   streamId: string;
   orderId: string;
   amount: { amount: number; currency: string };
 }
 
+// checkout.charged@v1, emitted by this service.
 export interface CheckoutChargedV1 {
   streamId: string;
   paymentId: string;
 }
 
+// checkout.compensated@v1, emitted by this service.
 export interface CheckoutCompensatedV1 {
   streamId: string;
   reason: string;

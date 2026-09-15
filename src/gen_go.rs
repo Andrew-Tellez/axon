@@ -387,75 +387,19 @@ fn scopes(m: &Manifest) -> String {
 /// of `uses`: a consumed event's type carries ONLY the fields this service
 /// declared it reads. The others do not exist on this side, so the
 /// declaration cannot drift from the code.
+/// A declared name as Go writes it.
+fn go_name(d: &crate::contract::Decl) -> String {
+    d.name.iter().map(|p| exported(p)).collect()
+}
+
 fn types(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
+    let c = crate::contract::of(m, all)?;
     let mut o = String::new();
-    for (ev, fields) in &m.emits {
+    for d in c.events.iter().chain(&c.methods).chain(&c.calls) {
         o.push_str(&struct_of(
-            &exported(ev),
-            &fields.iter().collect::<Vec<_>>(),
-            &format!("{ev}, emitted by this service."),
-        ));
-    }
-    for (ev, spec) in &m.consumes {
-        if m.emits.contains_key(ev) {
-            continue;
-        }
-        let owner = all
-            .iter()
-            .find(|p| p.emits.contains_key(ev))
-            .ok_or_else(|| format!("{ev} is consumed and nobody emits it"))?;
-        let fields = &owner.emits[ev];
-        let (kept, doc) = match &spec.uses {
-            Some(uses) => (
-                fields
-                    .iter()
-                    .filter(|(n, _)| uses.contains(n))
-                    .collect::<Vec<_>>(),
-                format!(
-                    "{ev}: schema declared by {}, its owner. Only the fields this \
-                     service declared it reads: the rest do not exist on this side.",
-                    owner.service
-                ),
-            ),
-            None => (
-                fields.iter().collect::<Vec<_>>(),
-                format!("{ev}: schema declared by {}, its owner.", owner.service),
-            ),
-        };
-        o.push_str(&struct_of(&exported(ev), &kept, &doc));
-    }
-    for (name, me) in &m.methods {
-        o.push_str(&struct_of(
-            &format!("{}In", exported(name)),
-            &me.input.iter().collect::<Vec<_>>(),
-            "",
-        ));
-        o.push_str(&struct_of(
-            &format!("{}Out", exported(name)),
-            &me.output.iter().collect::<Vec<_>>(),
-            "",
-        ));
-    }
-    // What this service reads of somebody else's answer. Same rule as `uses`
-    // on an event: what was not declared is not in the type.
-    for d in &m.depends {
-        let (Some(uses), Some(target)) = (
-            d.uses.as_ref(),
-            all.iter().find(|p| p.service == d.target() && !p.external),
-        ) else {
-            continue;
-        };
-        let Some(me) = target.methods.get(&d.method) else {
-            continue;
-        };
-        let kept: Vec<_> = me.output.iter().filter(|(n, _)| uses.contains(n)).collect();
-        o.push_str(&struct_of(
-            &format!("{}{}Result", exported(&target.service), exported(&d.method)),
-            &kept,
-            &format!(
-                "What this service reads of {}.{}: only what it declared.",
-                target.service, d.method
-            ),
+            &go_name(d),
+            &d.fields.iter().collect::<Vec<_>>(),
+            &d.doc,
         ));
     }
     Ok(o)

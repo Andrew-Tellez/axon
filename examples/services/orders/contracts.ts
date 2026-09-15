@@ -71,6 +71,7 @@ export class AxonProblem extends Error {
   }
 }
 
+// order.placed@v1, emitted by this service.
 export interface OrderPlacedV1 {
   orderId: string;
   customerId: string;

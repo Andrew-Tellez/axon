@@ -10,6 +10,7 @@
 //! every one of them is weight in the `.wasm`.
 pub mod bi;
 pub mod catalog;
+pub mod contract;
 pub mod emit;
 pub mod manifest;
 pub mod verify;

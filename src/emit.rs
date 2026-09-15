@@ -75,6 +75,11 @@ export class AxonProblem extends Error {
 }
 "#;
 
+/// A declared name as TypeScript writes it.
+fn ts_name(d: &crate::contract::Decl) -> String {
+    d.name.iter().map(|p| pascal(p)).collect()
+}
+
 fn iface(name: &str, fields: &Fields) -> String {
     let body: String = fields
         .iter()
@@ -108,60 +113,14 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         ),
         ENVELOPE_TS.to_string(),
     ];
-    for (ev, fields) in &m.emits {
-        out.push(iface(&pascal(ev), fields));
-    }
-    for ev in m.consumes.keys() {
-        if m.emits.contains_key(ev) {
-            continue;
+    // Which types exist and what each one carries is decided once, in
+    // `contract`, for every language. What is left here is the syntax.
+    let contrato = crate::contract::of(m, all)?;
+    for d in contrato.events.iter().chain(&contrato.methods) {
+        if !d.doc.is_empty() {
+            out.push(format!("// {}", d.doc));
         }
-        match all
-            .iter()
-            .find_map(|o| o.emits.get(ev).map(|f| (&o.service, f)))
-        {
-            Some((owner, fields)) => {
-                // The type this service sees of somebody else's event is what it
-                // DECLARED it reads. Narrowing the handler's parameter was not
-                // enough: an implementation can annotate the full type and TS
-                // accepts the wider parameter, so `uses` could lie. Here the wide
-                // type does not exist on this side.
-                match m.consumes.get(ev).and_then(|c| c.uses.as_deref()) {
-                    Some(uses) => {
-                        let mine: Fields = fields
-                            .iter()
-                            .filter(|(k, _)| uses.iter().any(|u| u == *k))
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        out.push(format!(
-                            "// {ev}: {owner} declares {} fields; this service declared it reads {}",
-                            fields.len(),
-                            if mine.is_empty() {
-                                "none".to_string()
-                            } else {
-                                uses.join(", ")
-                            }
-                        ));
-                        out.push(iface(&pascal(ev), &mine));
-                    }
-                    None => {
-                        out.push(format!("// {ev}: schema declared by {owner}, its owner"));
-                        out.push(iface(&pascal(ev), fields));
-                    }
-                }
-            }
-            None => {
-                return Err(format!(
-                    "{}: consumes `{ev}` and whoever emits it was not found. Pass the other \
-                     manifests: `axon build {} manifests/`",
-                    m.service,
-                    m.origin.display()
-                ))
-            }
-        }
-    }
-    for (meth, spec) in &m.methods {
-        out.push(iface(&format!("{}In", pascal(meth)), &spec.input));
-        out.push(iface(&format!("{}Out", pascal(meth)), &spec.output));
+        out.push(iface(&ts_name(d), &d.fields));
     }
     out.push(format!(
         "export const manifest = {} as const;\n",
@@ -2997,6 +2956,12 @@ fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         return Ok(String::new());
     }
     let mut types = Vec::new();
+    for d in &crate::contract::of(m, all)?.calls {
+        if !d.doc.is_empty() {
+            types.push(format!("/** {} */", d.doc));
+        }
+        types.push(iface(&ts_name(d), &d.fields));
+    }
     let mut methods = Vec::new();
     for d in &m.depends {
         let tgt = d.target();
@@ -3011,34 +2976,6 @@ fn clients_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         // Prefixed with the service: another service's types cannot collide
         // with our own.
         let base = format!("{}{}", pascal(tgt), pascal(&d.method));
-        types.push(iface(&format!("{base}In"), &sig.input));
-        // The answer, as THIS caller sees it: only what it declared it reads.
-        // The rest does not exist on this side, so the declaration cannot drift
-        // from the code — which is what makes it usable to decide what the
-        // other side is free to change.
-        match &d.uses {
-            None => types.push(iface(&format!("{base}Out"), &sig.output)),
-            Some(uses) => {
-                let mine: Fields = sig
-                    .output
-                    .iter()
-                    .filter(|(k, _)| uses.iter().any(|u| u == *k))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                types.push(format!(
-                    "/** {tgt}.{} returns {} fields; {} declared it reads {}. */",
-                    d.method,
-                    sig.output.len(),
-                    m.service,
-                    if uses.is_empty() {
-                        "none".to_string()
-                    } else {
-                        uses.join(", ")
-                    }
-                ));
-                types.push(iface(&format!("{base}Out"), &mine));
-            }
-        }
         let seen = format!("{base}Out");
 
         let pol = format!(
