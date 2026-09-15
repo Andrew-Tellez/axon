@@ -83,6 +83,15 @@ perderlas.
   falla si dejan de coincidir. El servicio gana un `transport Transport` en su constructor
   cuando tiene `[[depends]]`.
 
+- **Y las banderas.** Los accesores tipados de cada `[flags]`, con la misma forma de
+  OpenFeature que en TypeScript y la única que Go tiene para ella: una interfaz no puede
+  llevar un parámetro de tipo, así que el proveedor contesta `any` y una función genérica
+  comprueba que lo que volvió es lo que se declaró — un proveedor que contesta una cadena a
+  una bandera booleana es una mala configuración, y el valor seguro es mejor respuesta a eso
+  que un panic en medio de una petición. El valor por defecto viaja **dentro del código**,
+  así que un proveedor caído sigue contestando lo que el manifiesto dijo que era seguro, y
+  lo que está anclado a un campo lo lleva bajo su nombre y bajo el de OpenFeature.
+
 ### Corregido
 
 - **El gate de Go del suite no se ejecutaba nunca.** La comprobación de si la herramienta

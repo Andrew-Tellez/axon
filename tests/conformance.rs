@@ -10681,3 +10681,57 @@ fn a_call_runs_under_the_same_policy_in_both_languages() {
         assert!(go.contains(t), "Go no declara {t}");
     }
 }
+
+/// The declared flags, in Go, with the safe value inside the code.
+///
+/// The point of generating them is not the typing saved: it is that the name,
+/// the safe value and the field the decision is pinned by come out of the
+/// manifest instead of out of a loose string, and that a provider which is
+/// down still answers what was declared safe.
+#[test]
+fn the_flags_come_out_in_go_too() {
+    let (go, err, ok) = axon(&[
+        "build",
+        "examples/payments.toml",
+        "examples",
+        "--lang",
+        "go",
+    ]);
+    assert!(ok, "{err}");
+
+    // the four OpenFeature types, each with the Go type that matches it
+    assert!(
+        go.contains(
+            "func FlagChargeV2(ctx context.Context, flags Flags, tenantID string) (bool, error)"
+        ),
+        "{go}"
+    );
+    assert!(go.contains("(string, error)"), "no string flag:\n{go}");
+    // a number is `float64` and says so: an untyped literal makes the generic
+    // infer `int`, and the provider answers the float64 that JSON has
+    assert!(go.contains("float64(3)"), "{go}");
+
+    // the safe value travels in the code, not only in the provider
+    assert!(go.contains(r#""charge_provider", "stripe""#), "{go}");
+    // and what is pinned by a field carries it under both names, because a
+    // provider reads one or the other
+    assert!(
+        go.contains(r#"map[string]string{"targetingKey": tenantID, "tenant_id": tenantID}"#),
+        "{go}"
+    );
+    // a flag that is not declared does not exist
+    assert!(
+        go.contains(r#"var DeclaredFlags = []string{"charge_v2""#),
+        "{go}"
+    );
+
+    // and a service with no flags gets no provider interface at all
+    let (go, _, _) = axon(&[
+        "build",
+        "examples/checkout.toml",
+        "examples",
+        "--lang",
+        "go",
+    ]);
+    assert!(!go.contains("type Flags interface"), "{go}");
+}

@@ -33,6 +33,17 @@ fn exported(s: &str) -> String {
         .collect()
 }
 
+/// A field's name as a parameter takes it: the exported spelling with its
+/// first letter down, so `tenant_id` is `tenantID` and not `tenantId`.
+fn unexported(s: &str) -> String {
+    let f = field(s);
+    let mut c = f.chars();
+    match c.next() {
+        Some(first) => first.to_lowercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
 /// A field's name, with the trailing initialism Go expects: `orderId` is
 /// `OrderID`.
 fn field(s: &str) -> String {
@@ -716,6 +727,138 @@ fn clients(m: &Manifest, calls: &[crate::contract::Call]) -> String {
     o
 }
 
+/// A JSON value as a Go literal.
+///
+/// Only object flags need it, and they need it for the same reason the other
+/// three do not: the declared default has to be IN the code, so a provider
+/// that is down or has never heard of the flag still answers what the manifest
+/// said was safe.
+fn go_literal(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "nil".to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("{s:?}"),
+        serde_json::Value::Array(a) => format!(
+            "[]any{{{}}}",
+            a.iter().map(go_literal).collect::<Vec<_>>().join(", ")
+        ),
+        serde_json::Value::Object(o) => format!(
+            "map[string]any{{{}}}",
+            o.iter()
+                .map(|(k, v)| format!("{k:?}: {}", go_literal(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// The same OpenFeature shape as the TypeScript one, in the only form Go has
+/// for it: an interface cannot carry a type parameter, so the provider answers
+/// `any` and one generic function checks that what came back is what was
+/// declared.
+const FLAGS_GO: &str = r#"// Flags is a provider with OpenFeature's shape: Evaluate takes the name, the
+// default value and the context the decision is pinned by. axon ships no flag
+// SDK and invents no protocol, same as it ships none for traces. What it adds
+// is that the name, the safe value and the field it is pinned by come out of
+// the manifest and not out of a loose string in the code.
+type Flags interface {
+	Evaluate(ctx context.Context, name string, fallback any, context map[string]string) (any, error)
+}
+
+// flagValue asks the provider and checks that what came back is the type that
+// was declared. A provider answering a string to a boolean flag is a
+// misconfiguration, and the declared safe value is a better answer to it than
+// a panic in the path of a request.
+func flagValue[T any](ctx context.Context, f Flags, name string, fallback T, context map[string]string) (T, error) {
+	v, err := f.Evaluate(ctx, name, fallback, context)
+	if err != nil {
+		return fallback, err
+	}
+	t, ok := v.(T)
+	if !ok {
+		return fallback, fmt.Errorf("flag %s: the provider answered %T, and %T was declared", name, v, fallback)
+	}
+	return t, nil
+}
+
+"#;
+
+/// Typed accessors for the declared flags.
+fn flags(m: &Manifest) -> String {
+    if m.flags.is_empty() {
+        return String::new();
+    }
+    let mut o = String::from(FLAGS_GO);
+    let mut names = Vec::new();
+    for (name, f) in &m.flags {
+        names.push(format!("{name:?}"));
+        let variants = f.all_variants();
+        let value = variants
+            .get(&f.default_variant())
+            .map(go_literal)
+            .unwrap_or_else(|| "false".into());
+        let kind = match f.kind() {
+            "boolean" => "bool",
+            "string" => "string",
+            "number" => "float64",
+            _ => "map[string]any",
+        };
+        let mut doc = vec![format!(
+            "{} is the `{name}` flag: OpenFeature {}.",
+            format_args!("Flag{}", exported(name)),
+            f.kind()
+        )];
+        if variants.len() > 2 || !f.variants.is_empty() {
+            doc.push(format!(
+                "Variants: {}.",
+                variants
+                    .iter()
+                    .map(|(k, v)| format!("{k} = {}", go_literal(v)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(c) = &f.sticky_by {
+            doc.push(format!(
+                "Pinned by {c}: the same entity always takes the same path."
+            ));
+        }
+        // The context is the field the decision is pinned by, under its own
+        // name and under OpenFeature's: a provider reads one or the other.
+        let (param, context) = match &f.sticky_by {
+            Some(c) => {
+                let arg = unexported(c);
+                (
+                    format!(", {arg} string"),
+                    format!("map[string]string{{\"targetingKey\": {arg}, {c:?}: {arg}}}"),
+                )
+            }
+            None => (String::new(), "map[string]string{}".to_string()),
+        };
+        // A number needs saying which one: an untyped `3` makes the generic
+        // infer `int`, and the provider answers the `float64` that JSON has.
+        // The literal of the other three already carries its type.
+        let safe = match kind {
+            "float64" => format!("float64({value})"),
+            _ => value,
+        };
+        o.push_str(&format!(
+            "{}func Flag{n}(ctx context.Context, flags Flags{param}) ({kind}, error) {{\n\
+             \treturn flagValue(ctx, flags, {name:?}, {safe}, {context})\n}}\n\n",
+            comment(&doc.join("\n\n")),
+            n = exported(name),
+        ));
+    }
+    o.push_str(&format!(
+        "// DeclaredFlags are the flags the manifest declares. One that is not\n\
+         // here does not exist.\n\
+         var DeclaredFlags = []string{{{}}}\n\n",
+        names.join(", ")
+    ));
+    o
+}
+
 /// In Go the business logic implements an interface; it does not inherit.
 fn handlers(m: &Manifest) -> String {
     let s = exported(&m.service);
@@ -860,7 +1003,7 @@ pub fn build(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     let pkg = m.service.replace(['-', '_'], "");
     let c = crate::contract::of(m, all)?;
     let body = format!(
-        "{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}",
         types(&c),
         problem(m),
         failures(m),
@@ -868,6 +1011,7 @@ pub fn build(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         handlers(m),
         service(m),
         clients(m, &c.calls),
+        flags(m),
         machines(m)
     );
     // gofmt leaves exactly one newline at the end of a file
