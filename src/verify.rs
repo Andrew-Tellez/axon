@@ -4295,4 +4295,119 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("no `owner`"), "{errors:?}");
     }
+
+    fn manifest(text: &str) -> Manifest {
+        toml::from_str(text).expect("the fixture does not parse")
+    }
+
+    fn tables(sql: &str) -> Tables {
+        let mut t = Tables::new();
+        crate::manifest::parse_ddl(sql, "test.sql", &mut t);
+        t
+    }
+
+    // The five below are the rules the conformance suite never makes fire.
+    // Measured, not guessed: every call in `verify` was instrumented to record
+    // whether it produced a finding, and the whole suite left these five
+    // silent. Each one is a rule nobody had ever seen say anything.
+
+    /// A tag is mutable, so the deploy stops being reproducible.
+    #[test]
+    fn an_image_with_no_digest_is_reported() {
+        let pol = Policy {
+            ci: Ci {
+                image: Some("rust:1.90".into()),
+                ..Ci::default()
+            },
+            ..Policy::default()
+        };
+        let mut warnings = Vec::new();
+        image_is_pinned(&pol, &mut warnings);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("does not pin a digest"),
+            "{warnings:?}"
+        );
+    }
+
+    /// Two warehouses means the funnel cannot be built with one query, and
+    /// every table exists with rows while nobody sees an error.
+    #[test]
+    fn two_warehouses_are_refused() {
+        let a = manifest("service = \"a\"\n[analytics]\nwarehouse = \"bigquery\"\n");
+        let b = manifest("service = \"b\"\n[analytics]\nwarehouse = \"snowflake\"\n");
+        let mut errors = Vec::new();
+        one_warehouse(&[&a, &b], &mut errors);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("same warehouse"), "{errors:?}");
+    }
+
+    /// The generated client does not retry what the callee declared final, so
+    /// the budget only buys attempts against what nobody declared.
+    #[test]
+    fn retries_against_only_final_failures_are_reported() {
+        let caller = manifest(
+            "service = \"a\"\n[[depends]]\nservice = \"b\"\nmethod = \"charge\"\nretries = 2\n",
+        );
+        let callee = manifest(
+            "service = \"b\"\n[methods.charge]\nerrors = [{ code = \"declined\", status = 402 }]\n",
+        );
+        let mut warnings = Vec::new();
+        retries_with_nothing_to_retry(&[caller, callee], &mut warnings);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("every failure it declares is final"),
+            "{warnings:?}"
+        );
+    }
+
+    /// A table with no tenant column gets no RLS policy, and a table with no
+    /// policy does not fail: it returns everyone's rows.
+    #[test]
+    fn a_table_that_forgets_the_tenant_is_refused() {
+        let m = manifest("service = \"inv\"\n[infra]\ntenant_column = \"tenant_id\"\n");
+        let mut esquemas = IndexMap::new();
+        esquemas.insert(
+            "inv".to_string(),
+            tables("CREATE TABLE product (id uuid PRIMARY KEY);"),
+        );
+        let mut errors = Vec::new();
+        tenant_isolation(&[m], &esquemas, &mut errors);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("no `tenant_id` column"), "{errors:?}");
+
+        // and the two axon names itself are exempt by that exact name
+        let m = manifest("service = \"inv\"\n[infra]\ntenant_column = \"tenant_id\"\n");
+        let mut esquemas = IndexMap::new();
+        esquemas.insert(
+            "inv".to_string(),
+            tables("CREATE TABLE outbox (id uuid PRIMARY KEY);"),
+        );
+        let mut errors = Vec::new();
+        tenant_isolation(&[m], &esquemas, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    /// Database per service: an FK across the boundary is a join nobody can
+    /// make once the two schemas live in different clusters.
+    #[test]
+    fn an_fk_across_the_boundary_is_refused() {
+        let mut by_svc = IndexMap::new();
+        by_svc.insert(
+            "orders".to_string(),
+            tables(
+                "CREATE TABLE order_line (\n  id uuid PRIMARY KEY,\n  \
+                 product_id uuid REFERENCES product(id)\n);",
+            ),
+        );
+        let mut owner_of: IndexMap<&str, &str> = IndexMap::new();
+        owner_of.insert("product", "inv");
+        let mut errors = Vec::new();
+        no_fk_across_services(&by_svc, &owner_of, &mut errors);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("crosses the service boundary"),
+            "{errors:?}"
+        );
+    }
 }
