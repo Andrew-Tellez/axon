@@ -10535,3 +10535,38 @@ fn completion_reads_the_manifests() {
     assert!(script.starts_with("#compdef axon"), "{script}");
     assert!(script.contains("AXON_COMPLETE"), "{script}");
 }
+
+/// A finding says which service it is about and which file to open, and it
+/// says it in fields, not in the shape of its own sentence.
+///
+/// Both readers that are not a person depend on this: `verify --json` is what a
+/// pipeline parses, and the editor used to recover the file by splitting the
+/// message on its first colon —so a rule that worded itself differently went
+/// unplaced, silently, with the diagnostic landing on line 1 of whatever was
+/// open.
+#[test]
+fn a_finding_carries_its_service_and_its_file() {
+    let dir = std::env::temp_dir().join("axon-finding-placed");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // no `owner`: an error that names the service, and nothing else
+    std::fs::write(dir.join("p.toml"), "service = \"p\"\ntier = \"1\"\n").unwrap();
+
+    let (out, _, ok) = axon(&["verify", dir.to_str().unwrap(), "--json"]);
+    assert!(!ok, "a service with no owner verifies clean:\n{out}");
+    let r: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let e = &r["errors"][0];
+    assert!(
+        e["message"].as_str().unwrap().contains("no `owner`"),
+        "{out}"
+    );
+    assert_eq!(
+        e["service"], "p",
+        "the finding does not name its service:\n{out}"
+    );
+    assert_eq!(
+        e["file"],
+        dir.join("p.toml").display().to_string(),
+        "the finding does not name its manifest:\n{out}"
+    );
+}

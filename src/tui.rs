@@ -614,8 +614,8 @@ fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
     Status {
         verdict,
         verdict_color,
-        errors: report.errors,
-        warnings: report.warnings,
+        errors: report.errors.iter().map(|e| e.message.clone()).collect(),
+        warnings: report.warnings.iter().map(|w| w.message.clone()).collect(),
         versions,
         changed,
         services,

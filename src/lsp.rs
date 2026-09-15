@@ -9,6 +9,7 @@
 //! crosses services cannot be checked from one buffer. No incremental sync, no
 //! in-memory documents: the findings are about what is on disk anyway.
 use crate::manifest::{self, Manifest};
+use crate::verify::split_owner;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
@@ -239,21 +240,28 @@ fn diagnose(root: &Path, current: Option<&Path>) -> Vec<(PathBuf, Value)> {
     // An accepted warning is a decision somebody already took; showing it again
     // on every save is how a suppressions file gets ignored.
     if let Some(a) = crate::accepted::cargar(root) {
-        r.warnings.retain(|w| !a.warnings.contains(w));
+        r.warnings.retain(|w| !a.warnings.contains(&w.message));
     }
 
     let mut out = Vec::new();
-    for (message, severity) in r
+    for (f, severity) in r
         .errors
         .iter()
         .map(|e| (e, 1))
         .chain(r.warnings.iter().map(|w| (w, 2)))
     {
-        let file = file_for(&ms, root, message).or_else(|| current.map(PathBuf::from));
+        // The compiler places a finding on the manifest of the service it is
+        // about. What is left over names a path instead —a migration, an
+        // included fragment— or names nothing, and lands on the open file.
+        let file = f
+            .file
+            .clone()
+            .or_else(|| by_path(root, &f.message))
+            .or_else(|| current.map(PathBuf::from));
         let Some(file) = file else { continue };
         let text = std::fs::read_to_string(&file).unwrap_or_default();
-        let (line, len) = locate(&text, message);
-        out.push((file, diagnostic(message, line, len, severity)));
+        let (line, len) = locate(&text, &f.message);
+        out.push((file, diagnostic(&f.message, line, len, severity)));
     }
     out
 }
@@ -270,31 +278,10 @@ fn diagnostic(message: &str, line: u32, len: u32, severity: u8) -> Value {
     })
 }
 
-/// The file a finding belongs to. Findings read `service: what happened`, and
-/// a manifest remembers where it was loaded from.
-fn file_for(ms: &[Manifest], root: &Path, message: &str) -> Option<PathBuf> {
-    let (owner, _) = split_owner(message);
-    let owner = owner?;
-    if let Some(m) = ms.iter().find(|m| m.service == owner) {
-        return Some(m.origin.clone());
-    }
-    // some findings name a path instead: a migration, an included fragment
-    let p = root.join(owner);
+/// A finding whose owner is not a service but a file: the path it names.
+fn by_path(root: &Path, message: &str) -> Option<PathBuf> {
+    let p = root.join(split_owner(message).0?);
     p.is_file().then_some(p)
-}
-
-/// Splits `owner: rest` off a finding, seeing through a plugin's `[bin] `
-/// prefix. Returns none when the message does not carry one.
-fn split_owner(message: &str) -> (Option<&str>, &str) {
-    let m = match message.split_once("] ") {
-        Some((tag, rest)) if tag.starts_with('[') => rest,
-        _ => message,
-    };
-    match m.split_once(':') {
-        // a colon inside a sentence is not an owner
-        Some((owner, rest)) if !owner.contains(' ') && !owner.is_empty() => (Some(owner), rest),
-        _ => (None, m),
-    }
 }
 
 /// The line a finding points at, and how wide it is.
@@ -834,7 +821,8 @@ fn path_to_uri(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{locate, split_owner, uri_to_path};
+    use super::{locate, uri_to_path};
+    use crate::verify::split_owner;
 
     /// Placing a finding is the whole feature: a diagnostic on the wrong line is
     /// worse than the terminal output it replaces.

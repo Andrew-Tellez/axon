@@ -184,7 +184,8 @@ function run() {
   const item = (kind, text) =>
     `<li class="pg-${kind}"><b>${kind === "e" ? "error" : "warn"}</b> ${escape_(text)}</li>`;
   out.innerHTML =
-    errors.map((e) => item("e", e)).join("") + warnings.map((w) => item("w", w)).join("");
+    errors.map((e) => item("e", e.message)).join("") +
+    warnings.map((w) => item("w", w.message)).join("");
 }
 
 // The same `axon graph` as the terminal: the event topology as mermaid, drawn

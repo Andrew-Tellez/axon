@@ -24,6 +24,19 @@ perderlas.
   directorio actual, que es lo que asume cualquier comando sin fuentes; en uno sin
   manifiestos no hay nada que ofrecer y la tabulación se comporta como antes.
 
+### Cambiado
+
+- **Un hallazgo dice de qué servicio es y qué archivo abrir, en campos.** Hasta ahora un
+  hallazgo era una frase y nada más, y quien necesitaba sus partes las sacaba partiendo
+  la frase por el primer `:` — eso hacía el editor para decidir qué archivo subrayar, así
+  que una regla que se redactara de otra forma caía en la línea 1 de lo que estuviera
+  abierto, sin avisar. Ahora el compilador coloca cada hallazgo sobre el manifiesto del
+  servicio del que habla, una vez, con la lista de manifiestos delante. El texto que
+  imprime `axon verify` no cambia ni una coma; lo que cambia es `--json` y lo que devuelve
+  la herramienta `verify` del MCP, donde cada entrada de `errors` y `warnings` pasa de ser
+  una cadena a ser `{ message, service, file }` — `service` y `file` solo cuando el
+  hallazgo nombra uno que existe en el proyecto. `axon accept` sigue anclado al mensaje.
+
 ## [0.35.0] — 2026-09-13
 
 ### Añadido

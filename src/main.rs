@@ -430,13 +430,18 @@ fn full_report(ms: &[manifest::Manifest], root: &std::path::Path) -> verify::Rep
     let mut r = verify::verify(ms, &verify::load_policy(root));
     if let Some(b) = baseline::cargar(root) {
         let (errors, warnings) = baseline::comparar(ms, &b);
-        r.errors.extend(errors);
-        r.warnings.extend(warnings);
+        r.errors
+            .extend(errors.into_iter().map(|e| verify::place(ms, e)));
+        r.warnings
+            .extend(warnings.into_iter().map(|w| verify::place(ms, w)));
     } else {
-        r.warnings.push(format!(
-            "no {}: `verify` cannot detect a breaking change in an already published \
+        r.warnings.push(verify::place(
+            ms,
+            format!(
+                "no {}: `verify` cannot detect a breaking change in an already published \
              version. Generate it with `axon baseline`",
-            baseline::ARCHIVO
+                baseline::ARCHIVO
+            ),
         ));
     }
     let payload = serde_json::to_string(ms).unwrap_or_default();
@@ -445,7 +450,7 @@ fn full_report(ms: &[manifest::Manifest], root: &std::path::Path) -> verify::Rep
             Ok(out) => match serde_json::from_str::<Vec<plugin::Finding>>(&out) {
                 Ok(fs) => {
                     for f in fs {
-                        let line = format!("[{bin}] {}", f.message);
+                        let line = verify::place(ms, format!("[{bin}] {}", f.message));
                         if f.level == "error" {
                             r.errors.push(line)
                         } else {
@@ -453,9 +458,13 @@ fn full_report(ms: &[manifest::Manifest], root: &std::path::Path) -> verify::Rep
                         }
                     }
                 }
-                Err(e) => r.warnings.push(format!("[{bin}] invalid output: {e}")),
+                Err(e) => r
+                    .warnings
+                    .push(verify::place(ms, format!("[{bin}] invalid output: {e}"))),
             },
-            Err(e) => r.warnings.push(format!("[{bin}] did not run: {e}")),
+            Err(e) => r
+                .warnings
+                .push(verify::place(ms, format!("[{bin}] did not run: {e}"))),
         }
     }
     r
@@ -626,13 +635,13 @@ fn run() -> Result<ExitCode, String> {
             // Errors first: they are what has to be fixed, and in a long list
             // what matters cannot end up at the bottom.
             for e in &r.errors {
-                eprintln!("{} {}", color::red("error"), highlight(e));
+                eprintln!("{} {}", color::red("error"), highlight(&e.message));
             }
             for w in &nuevas {
                 if bloquea {
-                    eprintln!("{} {}", color::red("new"), highlight(w));
+                    eprintln!("{} {}", color::red("new"), highlight(&w.message));
                 } else {
-                    println!("{}  {}", color::yellow("warn"), highlight(w));
+                    println!("{}  {}", color::yellow("warn"), highlight(&w.message));
                 }
             }
             // The list can only shrink without anybody noticing. Saying which

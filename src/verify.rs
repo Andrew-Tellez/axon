@@ -97,8 +97,65 @@ pub fn load_policy(dir: &std::path::Path) -> Policy {
 }
 
 pub struct Report {
-    pub errors: Vec<String>,
-    pub warnings: Vec<String>,
+    pub errors: Vec<Finding>,
+    pub warnings: Vec<Finding>,
+}
+
+/// A finding, carrying what it is about instead of leaving it to be parsed
+/// back out of its own sentence.
+///
+/// The message is still the rule —`axon accept` keys on it, and the wording is
+/// what somebody reads— but who it is about and which file to open are
+/// resolved once, here, against the manifests that produced it. The editor
+/// used to recover both by splitting the sentence on its first colon.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Finding {
+    pub message: String,
+    /// The service the finding is about, when its message names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// The manifest that service was loaded from: the file to go and fix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<std::path::PathBuf>,
+}
+
+impl std::fmt::Display for Finding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Puts a finding on the manifest it is about.
+///
+/// Findings read `service: what happened`, which is a convention every rule
+/// here keeps, and a manifest remembers where it was loaded from. A message
+/// that names no service —or names one that is not in this workspace, like a
+/// migration's path— comes back placed nowhere, and whoever displays it
+/// decides where that goes.
+pub fn place(ms: &[Manifest], message: String) -> Finding {
+    let owner = split_owner(&message).0;
+    let file = owner
+        .and_then(|o| ms.iter().find(|m| m.service == o))
+        .map(|m| m.origin.clone());
+    Finding {
+        service: owner.filter(|_| file.is_some()).map(str::to_string),
+        file,
+        message,
+    }
+}
+
+/// Splits `owner: rest` off a finding, seeing through a plugin's `[bin] `
+/// prefix. Returns none when the message does not carry one.
+pub fn split_owner(message: &str) -> (Option<&str>, &str) {
+    let m = match message.split_once("] ") {
+        Some((tag, rest)) if tag.starts_with('[') => rest,
+        _ => message,
+    };
+    match m.split_once(':') {
+        // a colon inside a sentence is not an owner
+        Some((owner, rest)) if !owner.contains(' ') && !owner.is_empty() => (Some(owner), rest),
+        _ => (None, m),
+    }
 }
 
 /// A short, deliberately conservative heuristic: only shapes that cannot be
@@ -4004,5 +4061,8 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
             warnings.push(format!("{ev} ({owner}) has no consumers"));
         }
     }
-    Report { errors, warnings }
+    Report {
+        errors: errors.into_iter().map(|e| place(ms, e)).collect(),
+        warnings: warnings.into_iter().map(|w| place(ms, w)).collect(),
+    }
 }
