@@ -7,6 +7,79 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.37.0] — 2026-09-15
+
+### Añadido
+
+- **`[workflow]`: un saga que además puede esperar.** Con `engine = "saga"` —el que no se
+  declara— no hay nada nuevo: se baja al coordinador sobre Postgres que ya existía, y
+  hereda su tabla, su sweep y sus quince reglas. Lo que trae el bloque son las dos cosas
+  que ese coordinador no puede hacer, porque solo existen contra un historial: un timer
+  durable (`sleep_ms`, que no es un proceso esperando un día, es una fila con una fecha) y
+  una señal (`awaits`, que es un evento que el servicio ya consume). Con
+  `engine = "temporal"` sale el worker —una política de reintentos por paso, el `sleep`, el
+  `condition` sobre la señal y las compensaciones en orden inverso— y el servidor con su UI
+  en el compose local. En k8s solo la dirección: un Temporal en un manifiesto generado es
+  un archivo que nadie puede operar.
+
+  La regla que justifica todo lo demás es `version` contra la baseline. Un worker que
+  reproduce un historial viejo contra código nuevo no falla donde está el cambio: falla
+  donde el replay deja de coincidir, y los flujos ya empezados se quedan atascados sin nada
+  en los logs que nombre la causa. Ahora eso es un error antes del deploy, y dice qué paso
+  dejó de coincidir. La duración de un timer entra en la huella, porque un replay
+  reprograma el mismo timer.
+
+- **`[bus]`: el broker, declarado.** La tercera elección de infraestructura que vive en el
+  manifiesto, al lado de `[cache]` y `[search]`: `nats` —el de siempre—, `kafka`, `rabbit`
+  o `none`. Lo que impide que cinco servicios acaben en cinco brokers no es un archivo
+  compartido que alguien tiene que acordarse de leer: es una regla que los lee todos y se
+  niega nombrando a los dos que no coinciden. Un evento publicado en un bus y consumido del
+  otro no falla —el emisor tiene éxito, el consumidor se calla— y la única señal es un
+  handler que nunca corre.
+
+  En `local` sale el contenedor que toca y el servicio se sigue llamando `broker`: lo único
+  que cambia es `AXON_BROKER_URL`. En `gcp` y `aws` un kafka declarado **se rechaza** en vez
+  de traducirse a Pub/Sub o a SQS, que es la misma decisión que ya se tomó con Meilisearch:
+  cambiar el motor por detrás del manifiesto es otro orden, otra reentrega y otra falla.
+
+- **Las colas, en `[consumes]`.** `group` —los consumidores que se reparten el trabajo—,
+  `ordered_by`, `max_deliver` y `ack_wait_ms`. Son neutrales al motor y cada uno se traduce
+  al suyo. Salen tres veces: en el comando que crea el consumidor, en el contrato de
+  TypeScript y en el de Go, porque si no salieran, quien cablea el consumidor los teclearía
+  de memoria — y el que se desincroniza, la ventana de ack, se ve como un handler que corrió
+  dos veces.
+
+  Con ellos vienen sus refutaciones: ordenar por un campo que el evento no lleva (y dice
+  cuáles sí lleva), ordenar sobre un motor que no particiona, dos servicios compartiendo un
+  `group` —un grupo se reparte, no se duplica: el handler del otro nunca ve la mitad—, y un
+  `ack_wait_ms` por debajo del presupuesto del flujo que ese evento arranca, que es un
+  segundo coordinador sobre el mismo id con los dos compensando.
+
+- **`[tasks]`: el trabajo que no cuelga de la petición.** Casi todo lo que se llama tarea
+  asíncrona es un evento que el servicio se manda a sí mismo, y para eso ya estaban
+  `[emits]` y `[consumes]`. Lo que un evento no puede dar son tres cosas, y son estas:
+  correr más tarde (`delay_ms`), limitar cuántas corren a la vez (`concurrency`), y
+  devolver un recibo — un `taskId` que quien encoló puede consultar, cosa que un
+  fire-and-forget no tiene.
+
+  La cola es una tabla, `axon_task`, en la Postgres del propio servicio: encolar dentro de
+  la transacción que cambió la fila es una escritura más y no un segundo commit que se
+  puede perder. Sale el `enqueue`, el worker con su backoff y su techo de intentos, y la
+  interfaz de la cola con el SQL del claim escrito en el comentario, porque es el que no se
+  puede escribir a la ligera: sin `FOR UPDATE SKIP LOCKED` dos workers toman la misma fila
+  y la tarea corre dos veces. `axon infra` apunta un scheduler a la ruta que la drena, que
+  es lo que recupera lo que un worker muerto tenía agarrado.
+
+### Cambiado
+
+- **`[consumes]` rechaza una llave que no conoce.** Hasta ahora la ignoraba, que con cuatro
+  llaves nuevas es justo el peor desenlace: un `max_delivers` mal escrito parece declarado,
+  se lee como una decisión en una revisión, y no hace nada.
+
+- **`axon_task` no lleva `tenant_id`,** como el `outbox` y el `inbox_seen`: es una tabla que
+  escribe axon y que no es de ningún inquilino, así que las reglas de multi-inquilino la
+  saltan. La lista de esas tablas estaba copiada en tres sitios y ahora es una.
+
 ## [0.36.0] — 2026-09-15
 
 ### Añadido
