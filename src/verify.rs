@@ -3420,7 +3420,18 @@ fn sagas(
                         w.engine.temporal() && w.steps.iter().any(|s| s.call.is_some())
                     })
                     .map(|(n, w)| {
-                        let timers: u64 = w.steps.iter().filter_map(|s| s.sleep_ms).sum();
+                        // Waiting for a signal is time the flow spends too: a
+                        // budget that does not cover it gives up while the
+                        // step is still legitimately waiting.
+                        let timers: u64 = w
+                            .steps
+                            .iter()
+                            .filter_map(|s| match (s.sleep_ms, &s.awaits) {
+                                (Some(ms), _) => Some(ms),
+                                (_, Some(_)) => s.timeout_ms,
+                                _ => None,
+                            })
+                            .sum();
                         (
                             n.clone(),
                             w.lower(),

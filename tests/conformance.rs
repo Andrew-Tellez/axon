@@ -10820,7 +10820,9 @@ idempotent = true
 const FLUJO: &str = r#"[workflow.checkout]
 engine = "temporal"
 on = "comprar"
-timeout_ms = 900000
+# Covers the timer AND the wait for the signal: a budget that runs out while a
+# step is legitimately waiting compensates something that later succeeds.
+timeout_ms = 259200000
 version = 1
 
 [[workflow.checkout.steps]]
@@ -11224,4 +11226,20 @@ fn one_name_is_one_implementation() {
     let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
     let all = format!("{out}{err}");
     assert!(all.contains("is already a method"), "{all}");
+}
+
+#[test]
+fn waiting_for_a_signal_is_time_the_flow_spends() {
+    // The budget used to count the calls and the timers and not the wait, so a
+    // flow that may legitimately wait two days passed with a fifteen-minute
+    // budget — and would have given up mid-wait, compensating something that
+    // had not failed.
+    let dir = fixture_workflow(
+        "budget",
+        &FLUJO.replace("timeout_ms = 259200000", "timeout_ms = 900000"),
+    );
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("`timeout_ms = 900000`"), "{all}");
+    assert!(all.contains("add up to"), "{all}");
 }
