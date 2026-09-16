@@ -366,12 +366,20 @@ key = "x"
 [infra.buckets.x]
 [env.x]
 [methods.x]
+[bus]
+engine = "nats"
 [consumes."x@v1"]
+handler = "x"
+group = "x"
+ordered_by = "x"
+[tasks.x]
 handler = "x"
 [flags.x]
 [machine.x]
 initial = "x"
 [saga.x]
+[workflow.x]
+steps = [{ do = "x.y", retry = { max = 1 } }]
 [aggregate.x]
 [view.x]
 [catalog.x]
@@ -495,6 +503,9 @@ pub(crate) fn values(path: &str, key: &str, block: &Value) -> Vec<&'static str> 
         ("analytics", "pii") => &["exclude", "hash"],
         ("auth", "verify") => &m::AUTH_VERIFY,
         ("auth", "revocation") => &m::AUTH_REVOCATION,
+        ("bus", "engine") => &m::BUS_ENGINES,
+        ("workflow", "engine") => &m::WORKFLOW_ENGINES,
+        ("workflow", "backoff") => &m::BACKOFFS,
         ("cache", "engine") => &m::CACHE_ENGINES,
         ("cache", "strategy") => &m::CACHE_STRATEGIES,
         ("search", "engine") => &m::SEARCH_ENGINES,

@@ -546,6 +546,19 @@ export function paymentNext(state: PaymentState, action: PaymentAction): Payment
 }
 export const paymentCan = (state: PaymentState, action: PaymentAction) => paymentTransitions[action].from.includes(state);
 
+/** What each subscription asks of the broker. `axon infra` prints the
+ *  same numbers as the commands that create them: wiring the consumer
+ *  from here is what keeps the two from drifting.
+ *
+ *  `ackWaitMs` is how long the handler has before the event comes back.
+ *  Shorter than it really takes, and it runs twice with nothing saying
+ *  so —the dedup by envelope id is what makes that survivable, not
+ *  harmless. */
+export const subscriptions = {
+  "order.placed@v1": { group: "payments", maxDeliver: 5 },
+} as const;
+
+
 /** HTTP routes the manifest declares. Startup must fail if any of them
  *  has no handler: a 404 in production tells nobody. */
 export const httpRoutes = ["POST /v1/payments", "POST /v1/payments/{paymentId}/refunds", "POST /v1/payouts"] as const;

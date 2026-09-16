@@ -5,7 +5,132 @@ use std::path::{Path, PathBuf};
 
 pub type Fields = IndexMap<String, String>;
 
+/// Background work with a name, addressed to this service.
+///
+/// Most of what gets called an asynchronous task is an event the service emits
+/// to itself, and for that there is `[emits]` and `[consumes]` with the queue
+/// keys. What an event cannot do is three things, and they are what this
+/// block is for: run LATER, cap how many run at once, and hand back a receipt
+/// the caller can look up. A fire-and-forget event returns nothing.
+///
+/// The queue lives in the service's own Postgres, in `axon_task`, so enqueuing
+/// inside the transaction that changed the row is one more write and not a
+/// second commit that can be lost.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Task {
+    /// The method that does the work. It is implemented, not generated.
+    pub handler: String,
+    #[serde(rename = "in", default)]
+    pub input: Fields,
+    /// Retryable with no duplicated effects. A task with more than one attempt
+    /// and this false applies the effect twice, and the second time says
+    /// nothing.
+    #[serde(default)]
+    pub idempotent: bool,
+    /// How long one run may take. Past this it is taken as dead and, if there
+    /// are attempts left, it runs again.
+    pub timeout_ms: Option<u64>,
+    /// How long to wait before it becomes runnable. The whole point of a task
+    /// over an event: "charge this in three days" is a row with a date, not a
+    /// process waiting three days.
+    pub delay_ms: Option<u64>,
+    /// How many of this task may run at once in one service. Without a ceiling
+    /// the queue drains as fast as the database lets it, which is how a batch
+    /// of exports takes down the database the rows are read from.
+    pub concurrency: Option<u32>,
+    /// Attempts before it goes to the dead letter, the first one included.
+    pub max_deliver: Option<u32>,
+}
+
+/// The tables axon writes and nobody's tenant owns: the outbox, the inbox's
+/// dedup and the task queue. They carry no `tenant_id` and they are not a
+/// leak, so the multi-tenancy rules skip them.
+///
+/// One list and not three copies: it was three, and adding a fourth table to
+/// two of them is exactly the drift this project is about.
+pub const OWN_TABLES: [&str; 3] = ["outbox", "inbox_seen", Task::TABLE];
+
+impl Task {
+    /// Three and not the subscriptions' five: a task is heavier than an event,
+    /// and the cost of the fourth attempt is a job that ran four times.
+    pub fn max_deliver(&self) -> u32 {
+        self.max_deliver.unwrap_or(3)
+    }
+    /// The table the queue lives in. One for every task of the service, with
+    /// the name in a column: a table per task is a migration per task, and
+    /// they would all have the same shape.
+    pub const TABLE: &'static str = "axon_task";
+    /// The route the scheduler hits to drain what is due. Same reasoning as
+    /// the saga's sweep: it lives here because two generators concatenate it
+    /// —the code that serves it and the cron that hits it— and when they
+    /// drifted the CronJob applied with no error and hit a 404 forever.
+    pub fn run_route(name: &str) -> String {
+        format!("/internal/task/{name}/run")
+    }
+}
+
+/// The broker the events travel on.
+///
+/// It lives in the manifest and not in the policy because it is infrastructure
+/// the service declares, exactly like `[cache]` and `[search]`. What keeps that
+/// from becoming five services on five brokers is not a shared file: it is a
+/// rule that reads them all and refuses the disagreement by name.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Bus {
+    /// `None` means nobody said, which is not the same as saying `nats`: a
+    /// target that brings its own managed bus refuses the declared one and has
+    /// nothing to refuse about a default.
+    pub engine: Option<BusEngine>,
+    /// How long a published event is kept. It is the window a consumer that
+    /// was down can still catch up in.
+    pub retention_ms: Option<u64>,
+}
+
+impl Bus {
+    pub fn is_default(&self) -> bool {
+        *self == Bus::default()
+    }
+    /// What gets rendered when nobody declared anything.
+    pub fn engine(&self) -> BusEngine {
+        self.engine.unwrap_or(BusEngine::Nats)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BusEngine {
+    Nats,
+    Kafka,
+    Rabbit,
+    /// No bus. A service that neither emits nor consumes does not need one,
+    /// and saying so out loud is what makes an `[emits]` added later an error
+    /// instead of a silent dependency on a broker nobody deployed.
+    None,
+}
+
+impl BusEngine {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BusEngine::Nats => "nats",
+            BusEngine::Kafka => "kafka",
+            BusEngine::Rabbit => "rabbit",
+            BusEngine::None => "none",
+        }
+    }
+    /// Whether the engine delivers a partition in order. Rabbit's classic
+    /// queues do not: one queue, several consumers, and the order is whatever
+    /// the scheduler gives.
+    pub fn partitions(&self) -> bool {
+        matches!(self, BusEngine::Nats | BusEngine::Kafka)
+    }
+}
+
+pub const BUS_ENGINES: [&str; 4] = ["nats", "kafka", "rabbit", "none"];
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Consume {
     pub handler: String,
     /// The fields of the event this service actually READS.
@@ -20,6 +145,41 @@ pub struct Consume {
     /// declared does not compile, and the declaration cannot drift from the
     /// code the way a Pact recorded once does.
     pub uses: Option<Vec<String>>,
+    // The four below are not serialized when absent: the manifest goes embedded
+    // in what the generators write, and four nulls on every subscription is a
+    // diff in the contracts of every project that upgrades.
+    /// The competing consumers this subscription belongs to. Everyone on one
+    /// group shares the events: each one goes to a single member. The
+    /// service's name when it is not said, which is what makes two instances
+    /// of one service split the load instead of both handling everything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The field whose value keeps its order. Two events with the same value
+    /// arrive in the order they were published; two with different values do
+    /// not, and that is the whole point —ordering everything is one consumer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ordered_by: Option<String>,
+    /// Attempts before the event goes to the dead letter queue, the first one
+    /// included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_deliver: Option<u32>,
+    /// How long the handler has before the event is taken as unhandled and
+    /// delivered again. Longer than the handler really takes, or it runs twice
+    /// over the same event with nothing saying so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ack_wait_ms: Option<u32>,
+}
+
+impl Consume {
+    pub fn group(&self, service: &str) -> String {
+        self.group.clone().unwrap_or_else(|| service.into())
+    }
+    /// The delivery attempts. Five is not a declared number: it is the one the
+    /// renderers used before this could be declared, and changing it would
+    /// change every plan already generated.
+    pub fn max_deliver(&self) -> u32 {
+        self.max_deliver.unwrap_or(5)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -923,6 +1083,187 @@ impl Saga {
     }
 }
 
+/// Who keeps the history of a flow. The declaration is the same either way;
+/// what changes is what can be declared on top of it.
+///
+/// `saga` is the coordinator axon already generates: a table, a sweep, and
+/// compensations in reverse. It survives a restart, and that is all it does.
+/// `temporal` is a worker against a server that keeps the history and replays
+/// it, which is what buys durable timers and signals — the two things the
+/// Postgres coordinator cannot have without becoming that server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    #[default]
+    Saga,
+    Temporal,
+}
+
+impl Engine {
+    pub fn temporal(&self) -> bool {
+        *self == Engine::Temporal
+    }
+}
+
+/// How a step is retried. On `saga` this does not exist: the retries of a call
+/// come from its `[[depends]]`, and declaring them twice is two numbers that
+/// drift.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Retry {
+    /// Attempts, the first one included. `1` is "do not retry".
+    pub max: u32,
+    #[serde(default)]
+    pub backoff: Backoff,
+    /// The first wait. Doubles from there when the backoff is exponential.
+    pub initial_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backoff {
+    Fixed,
+    #[default]
+    Exponential,
+}
+
+/// A step of a workflow: exactly one of three things.
+///
+/// `do` is a call, and it is the saga's step with its `undo`. `sleep_ms` is a
+/// durable timer, and `awaits` is a signal. The last two are what separates a
+/// workflow from a saga, and they exist only against a history: a coordinator
+/// that sleeps for a day is a process that has to stay alive for a day.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowStep {
+    /// `service.method` to invoke. Has to be a declared dependency.
+    #[serde(rename = "do")]
+    pub call: Option<String>,
+    /// `service.method` that reverts it. Only the LAST call may omit it.
+    pub undo: Option<String>,
+    /// How long to wait before going on. A timer, not a sleep: nothing has to
+    /// be running while it passes.
+    pub sleep_ms: Option<u64>,
+    /// The event that resumes the flow. It has to be one this service
+    /// consumes: waiting for a signal nobody sends is a flow that never ends.
+    pub awaits: Option<String>,
+    /// How long to wait for the signal before the flow gives up and
+    /// compensates. Without it, `awaits` waits forever.
+    pub timeout_ms: Option<u64>,
+    pub retry: Option<Retry>,
+    /// How often a long call reports it is still alive. Past this with no
+    /// sign, the worker is taken as dead and the step is retried.
+    pub heartbeat_ms: Option<u32>,
+}
+
+impl WorkflowStep {
+    /// What the step IS, for a message that names it. `None` when it is none
+    /// of the three or more than one.
+    pub fn kind(&self) -> Option<&'static str> {
+        match (
+            self.call.is_some(),
+            self.sleep_ms.is_some(),
+            self.awaits.is_some(),
+        ) {
+            (true, false, false) => Some("do"),
+            (false, true, false) => Some("sleep_ms"),
+            (false, false, true) => Some("awaits"),
+            _ => None,
+        }
+    }
+}
+
+/// A workflow: a saga that can also wait.
+///
+/// Everything the saga refutes is refuted here too —a step with no
+/// compensation, a budget that does not close, a `strong` guarantee over a
+/// flow with visible intermediate states— and on top of it the one that only
+/// shows up with a history behind it: changing the steps of a flow that has
+/// instances still in the air. A worker replaying an old history against new
+/// code does not fail where the change is; it fails wherever the replay stops
+/// matching, and the flows already started stay stuck. `version` against the
+/// baseline is that error, moved to compile time.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Workflow {
+    #[serde(default)]
+    pub engine: Engine,
+    /// Own method or consumed event that starts it.
+    pub on: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<WorkflowStep>,
+    /// Budget for the whole flow, the timers included.
+    pub timeout_ms: Option<u64>,
+    /// The queue the worker polls. The service's name when it is not said.
+    pub task_queue: Option<String>,
+    /// The shape of the flow, as published. It goes up when the steps change.
+    pub version: Option<u32>,
+}
+
+impl Manifest {
+    /// Every flow coordinated over Postgres: the declared sagas, plus the
+    /// workflows whose engine is one. It lives here so no generator has to
+    /// remember that a `saga` workflow is a saga —forgetting it in one of the
+    /// five places that iterate them is a flow that verifies and never gets
+    /// generated.
+    pub fn flows(&self) -> IndexMap<String, Saga> {
+        let mut out: IndexMap<String, Saga> = self.saga.clone();
+        for (name, wf) in &self.workflow {
+            if !wf.engine.temporal() {
+                out.insert(name.clone(), wf.lower());
+            }
+        }
+        out
+    }
+}
+
+impl Workflow {
+    pub fn task_queue(&self, service: &str) -> String {
+        self.task_queue.clone().unwrap_or_else(|| service.into())
+    }
+    /// The fingerprint of the flow, which is what a replay has to match. The
+    /// budgets are deliberately out: raising a timeout does not change the
+    /// history, and putting it in here would demand a version bump for
+    /// something no in-flight instance would notice.
+    pub fn shape(&self) -> Vec<String> {
+        self.steps
+            .iter()
+            .map(|s| match (&s.call, s.sleep_ms, &s.awaits) {
+                (Some(c), _, _) => match &s.undo {
+                    Some(u) => format!("do {c} undo {u}"),
+                    None => format!("do {c}"),
+                },
+                // The duration is part of the shape: a replay reschedules the
+                // same timer, and one of a different length is exactly the
+                // mismatch this is here to catch.
+                (_, Some(ms), _) => format!("sleep {ms}"),
+                (_, _, Some(e)) => format!("awaits {e}"),
+                _ => "?".into(),
+            })
+            .collect()
+    }
+    /// The same flow as a saga, for the engine that already has a generator.
+    /// A `saga` workflow IS a saga —`verify` refuses the keys that are not—
+    /// so lowering it is what keeps there from being a second generator that
+    /// drifts from the first.
+    pub fn lower(&self) -> Saga {
+        Saga {
+            on: self.on.clone(),
+            steps: self
+                .steps
+                .iter()
+                .filter_map(|s| {
+                    Some(Step {
+                        call: s.call.clone()?,
+                        undo: s.undo.clone(),
+                    })
+                })
+                .collect(),
+            timeout_ms: self.timeout_ms.map(|t| t as u32),
+        }
+    }
+}
+
 /// Event sourcing: the state IS the event stream, and what today lives in a
 /// row is a projection of that stream.
 ///
@@ -1524,6 +1865,8 @@ impl Cache {
     }
 }
 
+pub const WORKFLOW_ENGINES: [&str; 2] = ["saga", "temporal"];
+pub const BACKOFFS: [&str; 2] = ["fixed", "exponential"];
 pub const CACHE_ENGINES: [&str; 2] = ["valkey", "none"];
 
 /// CQRS: a read model built by applying already declared events.
@@ -1637,12 +1980,27 @@ pub struct Manifest {
     /// Sagas this service coordinates. See `Saga`.
     #[serde(default)]
     pub saga: IndexMap<String, Saga>,
+    /// Workflows this service coordinates. See `Workflow`. A `saga` one is a
+    /// saga and is treated as one everywhere; a `temporal` one is a worker.
+    ///
+    /// Not serialized when empty, unlike its neighbours: the manifest goes
+    /// embedded in what the generators write, and a new key on it is a diff in
+    /// the contracts of every project that upgrades, for a block none of them
+    /// declared.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub workflow: IndexMap<String, Workflow>,
     /// Aggregates with event sourcing. See `Aggregate`.
     #[serde(default)]
     pub aggregate: IndexMap<String, Aggregate>,
     /// Read models. See `View`.
     #[serde(default)]
     pub view: IndexMap<String, View>,
+    /// Background work addressed to this service. See `Task`.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub tasks: IndexMap<String, Task>,
+    /// The broker its events travel on. See `Bus`.
+    #[serde(default, skip_serializing_if = "Bus::is_default")]
+    pub bus: Bus,
     /// Cached answers, with what makes them stale. See `Cache`.
     #[serde(default)]
     pub cache: Cache,
@@ -1754,6 +2112,7 @@ pub struct Fragment {
     pub flags: IndexMap<String, Flag>,
     pub machine: IndexMap<String, Machine>,
     pub saga: IndexMap<String, Saga>,
+    pub workflow: IndexMap<String, Workflow>,
     pub aggregate: IndexMap<String, Aggregate>,
     pub view: IndexMap<String, View>,
     pub metrics: IndexMap<String, Metric>,
@@ -1763,7 +2122,7 @@ pub struct Fragment {
 
 /// The blocks a fragment may carry. Anything else is the service's, and saying
 /// so by name beats a generic "unknown field".
-const FRAGMENT_BLOCKS: [&str; 13] = [
+const FRAGMENT_BLOCKS: [&str; 14] = [
     "catalog",
     "crud",
     "pii",
@@ -1774,6 +2133,7 @@ const FRAGMENT_BLOCKS: [&str; 13] = [
     "flags",
     "machine",
     "saga",
+    "workflow",
     "aggregate",
     "view",
     "metrics",
@@ -1800,7 +2160,9 @@ fn merge(m: &mut Manifest, f: Fragment, from: &Path) -> Result<(), String> {
             }
         )*};
     }
-    tables!(emits, consumes, methods, flags, machine, saga, aggregate, view, metrics, catalog);
+    tables!(
+        emits, consumes, methods, flags, machine, saga, workflow, aggregate, view, metrics, catalog
+    );
     for d in f.depends {
         if m.depends
             .iter()

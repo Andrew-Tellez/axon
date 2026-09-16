@@ -27,6 +27,20 @@ pub struct Firma {
     pub http: Option<String>,
 }
 
+/// A workflow as published: its number and its shape.
+///
+/// The shape is what a worker replays. Nothing else of the flow is here on
+/// purpose —a raised timeout changes no history— because a rule that demands a
+/// version bump for something no instance in flight would notice gets silenced
+/// wholesale.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Flujo {
+    pub owner: String,
+    #[serde(default)]
+    pub version: u32,
+    pub shape: Vec<String>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Baseline {
     /// A note for whoever opens the file with no context.
@@ -37,6 +51,9 @@ pub struct Baseline {
     /// Keyed by `service.method`.
     #[serde(default)]
     pub methods: IndexMap<String, Firma>,
+    /// Keyed by `service.workflow`. Only the ones with a history to break.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub workflows: IndexMap<String, Flujo>,
 }
 
 pub fn tomar(ms: &[Manifest]) -> Baseline {
@@ -53,6 +70,16 @@ pub fn tomar(ms: &[Manifest]) -> Baseline {
                 Evento {
                     owner: m.service.clone(),
                     fields: fields.clone(),
+                },
+            );
+        }
+        for (name, wf) in m.workflow.iter().filter(|(_, w)| w.engine.temporal()) {
+            b.workflows.insert(
+                format!("{}.{name}", m.service),
+                Flujo {
+                    owner: m.service.clone(),
+                    version: wf.version.unwrap_or(1),
+                    shape: wf.shape(),
                 },
             );
         }
@@ -141,6 +168,12 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
         .keys()
         .filter(|k| !b.events.contains_key(*k))
         .chain(ahora.methods.keys().filter(|k| !b.methods.contains_key(*k)))
+        .chain(
+            ahora
+                .workflows
+                .keys()
+                .filter(|k| !b.workflows.contains_key(*k)),
+        )
         .collect();
     if !nuevos.is_empty() {
         warnings.push(format!(
@@ -214,6 +247,60 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
             }
             _ => {}
         }
+    }
+
+    // The determinism rule. A worker replaying an old history against new code
+    // does not fail where the change is: it fails wherever the replay stops
+    // matching, and the instances already started stay stuck with nothing in
+    // the logs that names the change. This is that failure, moved to before the
+    // deploy.
+    for (key, before) in &b.workflows {
+        let Some(now_) = ahora.workflows.get(key) else {
+            errors.push(format!(
+                "{key}: it was published by {} and no longer exists. The instances started \
+                 under it are still in flight, and a worker that does not know the flow fails \
+                 them for good. If it really is being retired, drain it first and remove it \
+                 from {ARCHIVO} in the same PR",
+                before.owner
+            ));
+            continue;
+        };
+        if now_.shape == before.shape {
+            if now_.version < before.version {
+                errors.push(format!(
+                    "{key}: `version` went down, from {} to {}. The number only goes \
+                     forward: two shapes sharing one number is a replay that cannot tell \
+                     which of them it is looking at",
+                    before.version, now_.version
+                ));
+            }
+            continue;
+        }
+        if now_.version > before.version {
+            continue;
+        }
+        let (was, is) = (before.shape.len(), now_.shape.len());
+        let first = before
+            .shape
+            .iter()
+            .zip(&now_.shape)
+            .position(|(a, b)| a != b)
+            .map(|i| {
+                format!(
+                    "step {} was `{}` and is `{}`",
+                    i + 1,
+                    before.shape[i],
+                    now_.shape[i]
+                )
+            })
+            .unwrap_or_else(|| format!("it had {was} steps and has {is}"));
+        errors.push(format!(
+            "{key}: the shape changed —{first}— and it is still `version = {}`. A flow in \
+             flight replays the history it started with: from the step that no longer \
+             matches, it neither goes on nor compensates. Bump `version` and leave the old \
+             one running until it drains",
+            before.version
+        ));
     }
 
     for (key, before) in &b.methods {

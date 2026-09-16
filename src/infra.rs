@@ -25,6 +25,15 @@ pub struct Sub {
     pub event: String,
     pub name: String,
     pub max_attempts: u32,
+    /// The competing consumers it belongs to: the queue group on nats, the
+    /// consumer group on kafka, the shared queue on rabbit.
+    pub group: String,
+    /// The field whose order is kept, or `null`. It is serialized either way:
+    /// the plan's schema requires every key, and a plugin that reads it should
+    /// not have to tell "absent" from "nobody declared it".
+    pub ordered_by: Option<String>,
+    /// How long the handler has before the event comes back, or `null`.
+    pub ack_wait_ms: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -280,7 +289,8 @@ pub fn plan_schema() -> serde_json::Value {
                 "event": str_, "name": str_, "dlq": str_, "analytics": bool_, "table": str_
             }), "one per event, with its dead-letter queue. Always")),
             "subs": array(object(serde_json::json!({
-                "service": str_, "event": str_, "name": str_, "max_attempts": uint
+                "service": str_, "event": str_, "name": str_, "max_attempts": uint,
+                "group": str_, "ordered_by": str_or_null, "ack_wait_ms": uint_or_null
             }), "one subscription per consumer")),
             "stores": array(object(serde_json::json!({
                 "service": str_, "engine": str_, "outbox": bool_, "ha": bool_,
@@ -324,7 +334,9 @@ pub fn plan_schema() -> serde_json::Value {
                 "image_var": str_, "db": bool_,
                 "secrets": array(str_.clone()), "subscribes": array(str_.clone()),
                 "owner": str_, "tier": str_, "version": str_
-            }), "what runs. `container` listens on a port; `job` runs and ends"))
+            }), "what runs. `container` listens on a port; `job` runs and ends")),
+            "temporal": array(str_.clone()),
+            "bus": str_or_null, "bus_retention_ms": uint_or_null
         }
     })
 }
@@ -356,6 +368,19 @@ pub struct Plan {
     pub crons: Vec<Cron>,
     pub secrets: Vec<Secret>,
     pub workloads: Vec<Workload>,
+    /// The declared broker, if anybody declared one. `None` is not `nats`: a
+    /// target that brings its own managed bus refuses a declared engine that
+    /// is not theirs, and has nothing to refuse about a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus: Option<String>,
+    /// How long a published event is kept, when it was declared. It is the
+    /// window a consumer that was down still catches up in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus_retention_ms: Option<u64>,
+    /// The task queues of the `temporal` workflows. Empty is the normal case:
+    /// the flows that coordinate over Postgres need no server of their own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub temporal: Vec<String>,
 }
 
 /// Both files for a service, or nothing. Generating them can fail —a
@@ -410,13 +435,16 @@ pub fn plan(ms: &[Manifest]) -> Plan {
     let mut workloads = Vec::new();
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
-        for ev in m.consumes.keys() {
+        for (ev, c) in &m.consumes {
             subs.push(Sub {
                 service: svc.clone(),
                 event: ev.clone(),
                 name: format!("{svc}--{}", topic(ev)),
                 // DLQ always: there is no way to declare a consumer without one
-                max_attempts: 5,
+                max_attempts: c.max_deliver(),
+                group: c.group(svc),
+                ordered_by: c.ordered_by.clone(),
+                ack_wait_ms: c.ack_wait_ms,
             });
         }
         for (name, ag) in &m.aggregate {
@@ -435,7 +463,22 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 every_ms: 3_600_000,
             });
         }
-        for (name, sg) in &m.saga {
+        for name in m.tasks.keys() {
+            crons.push(Cron {
+                service: svc.clone(),
+                name: format!("task.{name}"),
+                path: Task::run_route(name),
+                port: m.infra.port.unwrap_or(8080),
+                // A minute, and it is a floor and not the latency: the worker
+                // drains its own queue in process. This is what claims back
+                // what a worker that died was holding, and what runs what was
+                // enqueued while nobody was up. Neither of the two is urgent;
+                // both of them are the difference between a queue that drains
+                // and one that stops without saying so.
+                every_ms: 60_000,
+            });
+        }
+        for (name, sg) in &m.flows() {
             crons.push(Cron {
                 service: svc.clone(),
                 name: format!("saga.{name}"),
@@ -546,6 +589,31 @@ pub fn plan(ms: &[Manifest]) -> Plan {
         crons,
         secrets,
         workloads,
+        // One entry per queue, not per flow: it is the address a worker polls,
+        // and `verify` already refused two services sharing one.
+        bus: ms
+            .iter()
+            .filter(|m| !m.external)
+            .find_map(|m| m.bus.engine)
+            .map(|e| e.as_str().to_string()),
+        bus_retention_ms: ms
+            .iter()
+            .filter(|m| !m.external)
+            .find_map(|m| m.bus.retention_ms),
+        temporal: {
+            let mut qs: Vec<String> = ms
+                .iter()
+                .flat_map(|m| {
+                    m.workflow
+                        .values()
+                        .filter(|w| w.engine.temporal())
+                        .map(|w| w.task_queue(&m.service))
+                })
+                .collect();
+            qs.sort();
+            qs.dedup();
+            qs
+        },
     }
 }
 
@@ -583,6 +651,25 @@ pub fn render(p: &Plan, target: &str) -> Result<String, String> {
                      `[pooler] pool_size`, lower `max_instances`, or raise the node's \
                      `max_connections`",
                     svc = s.service
+                ));
+            }
+        }
+    }
+    // The bus on a managed cloud is the cloud's: Pub/Sub on gcp, SQS on aws.
+    // Rendering a declared kafka as either of them would be axon changing the
+    // engine behind the manifest's back —different ordering, different
+    // redelivery, different failure— and rendering a broker of our own would be
+    // a StatefulSet nobody asked for on a target that has no place to put one.
+    if matches!(target, "gcp" | "aws") {
+        if let Some(engine) = p.bus.as_deref().filter(|e| *e != "none") {
+            let managed = if target == "gcp" { "Pub/Sub" } else { "SQS" };
+            if engine != "nats" {
+                return Err(format!(
+                    "`[bus] engine = \"{engine}\"` is not rendered on `{target}`: the bus there \
+                     is {managed}, and emitting it instead would be changing the engine behind \
+                     the manifest's back —another ordering, another redelivery, another \
+                     failure. It comes up on `local`, and `--target plan` carries the \
+                     subscriptions so you can render it with your own template"
                 ));
             }
         }
@@ -2387,10 +2474,85 @@ fn local(p: &Plan) -> String {
         400,
         &nodos_todos.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
     );
-    let mut o = String::from(
-        "# generated by axon — do not edit.  docker compose -f axon.local.yml up -d --wait
-services:
-  broker:
+    // The server only when there is a flow that needs it. A container nobody
+    // uses is 400MB of RAM on every developer's machine for a feature this
+    // project did not declare.
+    let temporal = if p.temporal.is_empty() {
+        String::new()
+    } else {
+        // The dev image: one process, SQLite inside, and the UI. It is NOT what
+        // this renders for a cluster —there it is a managed service or its own
+        // chart, and inventing one here would be a generated file nobody can
+        // operate— but locally it is the difference between a generated worker
+        // and a worker you can run.
+        String::from(
+            "  temporal:
+    image: temporalio/auto-setup:1.25
+    environment:
+      DB: sqlite
+      SKIP_DEFAULT_NAMESPACE_CREATION: \"false\"
+    ports: [\"${AXON_TEMPORAL_PORT:-7233}:7233\"]
+    healthcheck:
+      test: [\"CMD\", \"tctl\", \"--address\", \"localhost:7233\", \"cluster\", \"health\"]
+      interval: 2s
+      retries: 30
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    depends_on: { temporal: { condition: service_healthy } }
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports: [\"${AXON_TEMPORAL_UI_PORT:-8233}:8080\"]
+",
+        )
+    };
+    // The address every workload gets, whether or not it hosts a worker: the
+    // client that signals a flow needs it too, and a flow signalled from a
+    // service that cannot reach the server fails where nothing says so.
+    let temporal_env = if p.temporal.is_empty() {
+        String::new()
+    } else {
+        "      AXON_TEMPORAL_ADDRESS: temporal:7233\n".to_string()
+    };
+    // The container changes with the engine and the service's name does not:
+    // what the app reads is one env var, so moving from one broker to another
+    // is not also a rename in every compose file that ever referenced it.
+    let engine = p.bus.as_deref().unwrap_or("nats");
+    let broker = match engine {
+        "kafka" => String::from(
+            "  broker:
+    image: redpandadata/redpanda:v24.2.7
+    # Redpanda and not the JVM Kafka: one process, no ZooKeeper and no KRaft
+    # ceremony, and the same protocol on the wire. Locally the difference is a
+    # container that starts in two seconds instead of forty.
+    command:
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 512M
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://broker:9092
+    ports: [\"${AXON_BROKER_PORT:-9092}:9092\", \"${AXON_BROKER_ADMIN_PORT:-9644}:9644\"]
+    healthcheck:
+      test: [\"CMD-SHELL\", \"rpk cluster health | grep -q 'Healthy:.*true'\"]
+      interval: 2s
+      retries: 30
+",
+        ),
+        "rabbit" => String::from(
+            "  broker:
+    image: rabbitmq:4-management-alpine
+    ports: [\"${AXON_BROKER_PORT:-5672}:5672\", \"${AXON_BROKER_MON_PORT:-15672}:15672\"]
+    healthcheck:
+      test: [\"CMD\", \"rabbitmq-diagnostics\", \"-q\", \"ping\"]
+      interval: 2s
+      retries: 30
+",
+        ),
+        // Declared `none`: no broker and nothing that talks to one. `verify`
+        // already refused it for a service with events.
+        "none" => String::new(),
+        _ => String::from(
+            "  broker:
     image: nats:2-alpine
     command: [\"-js\", \"-m\", \"8222\"]
     # Overridable like every other port here. Two axon projects on one machine
@@ -2402,7 +2564,23 @@ services:
       interval: 2s
       retries: 30
 ",
+        ),
+    };
+    // One variable, one value per engine. The app does not learn which broker
+    // it is against from the container's name.
+    let broker_env = match engine {
+        "kafka" => "      AXON_BROKER_URL: broker:9092\n",
+        "rabbit" => "      AXON_BROKER_URL: amqp://broker:5672\n",
+        "none" => "",
+        _ => "      AXON_BROKER_URL: nats://broker:4222\n",
+    };
+    let mut o = String::from(
+        "# generated by axon — do not edit.  docker compose -f axon.local.yml up -d --wait
+services:
+",
     );
+    o.push_str(&broker);
+    o.push_str(&temporal);
     for s in p.stores.iter() {
         let svc = &s.service;
         let v = tfname(&s.service);
@@ -2707,8 +2885,7 @@ services:
     # error that says nothing about what is missing.
     env_file: [{{ path: .env.local, required: false }}]
     environment:
-      AXON_BROKER_URL: nats://broker:4222
-      AXON_TRACE_LOG: /out/log/local.ndjson
+{broker_env}{temporal_env}      AXON_TRACE_LOG: /out/log/local.ndjson
 {db_env}{cache_env}{search_env}{secrets}    volumes: [\"./.axon:/out\"]
     # `{schedule}` on the target that has a scheduler; here it runs once at
     # startup, which is what makes it visible instead of theoretical.
@@ -2731,8 +2908,7 @@ services:
     # error that says nothing about what is missing.
     env_file: [{{ path: .env.local, required: false }}]
     environment:
-      AXON_BROKER_URL: nats://broker:4222
-      AXON_TRACE_LOG: /out/log/local.ndjson
+{broker_env}{temporal_env}      AXON_TRACE_LOG: /out/log/local.ndjson
 {db_env}{cache_env}{search_env}{secrets}    volumes: [\"./.axon:/out\"]
     # The k8s target already probes `/healthz`; here it is what makes `up --wait`
     # actually wait. Without it compose returns as soon as the container STARTS, and
@@ -2854,18 +3030,89 @@ services:
              retries: 40\n",
         );
     }
-    o.push_str("\n# JetStream streams to create at startup:\n");
-    for t in &p.topics {
-        o.push_str(&format!(
-            "#   nats stream add {} --subjects {}\n",
-            t.name, t.name
-        ));
-    }
+    o.push_str(&bootstrap(p, engine));
     o.push_str(
         "# the envelope log lands in ./.axon/local.ndjson -> `axon trace .axon/local.ndjson`\n",
     );
     o
 }
+/// The commands that create the topics and the subscriptions, as comments.
+///
+/// They are comments and not a container that runs them because the day one
+/// of them fails is the day it matters: a bootstrap that swallows its own
+/// error leaves a consumer that never receives, and the compose comes up
+/// green. Here the group, the attempts and the ack window are visible, which
+/// is the only place they can be compared with what the manifest declared.
+fn bootstrap(p: &Plan, engine: &str) -> String {
+    if engine == "none" {
+        return String::new();
+    }
+    let mut o = String::from("\n# to create at startup:\n");
+    // Retention belongs on the topic and not on the subscription: it is the
+    // same window for everyone reading it.
+    let keep = p.bus_retention_ms;
+    let age = |fmt: fn(u64) -> String| keep.map(fmt).unwrap_or_default();
+    for t in &p.topics {
+        o.push_str(&match engine {
+            "kafka" => format!(
+                "#   rpk topic create {}{}\n#   rpk topic create {}\n",
+                t.name,
+                age(|ms| format!(" -c retention.ms={ms}")),
+                t.dlq
+            ),
+            "rabbit" => format!(
+                "#   rabbitmqadmin declare exchange name={} type=topic\n\
+                 #   rabbitmqadmin declare queue name={}{}\n",
+                t.name,
+                t.dlq,
+                age(|ms| format!(" arguments='{{\"x-message-ttl\":{ms}}}'"))
+            ),
+            _ => format!(
+                "#   nats stream add {} --subjects {}{}\n",
+                t.name,
+                t.name,
+                age(|ms| format!(" --max-age {}s", ms / 1000))
+            ),
+        });
+    }
+    for s in &p.subs {
+        let t = topic(&s.event);
+        // The ack window has an engine-specific name everywhere and the same
+        // meaning in all three: how long the handler has before the event is
+        // taken as unhandled.
+        let ack = s.ack_wait_ms.map(|ms| ms / 1000);
+        o.push_str(&match engine {
+            "kafka" => format!(
+                "#   consumer group `{}` on `{t}`{}{}\n",
+                s.group,
+                match &s.ordered_by {
+                    Some(f) => format!(", partition key `{f}`"),
+                    None => String::new(),
+                },
+                match ack {
+                    Some(sec) => format!(", max.poll.interval.ms={}", sec * 1000),
+                    None => String::new(),
+                }
+            ),
+            "rabbit" => format!(
+                "#   rabbitmqadmin declare queue name={} && declare binding source={t} destination={}\n",
+                s.group, s.group
+            ),
+            _ => format!(
+                "#   nats consumer add {t} {} --deliver-group {} --max-deliver {}{}\n",
+                s.name,
+                s.group,
+                s.max_attempts,
+                match ack {
+                    Some(sec) => format!(" --ack-wait {sec}s"),
+                    None => String::new(),
+                }
+            ),
+        });
+    }
+    o
+}
+
 /// The plan's same routes, as Traefik rules. Local is not a separate
 /// subsystem: it is another render of the same edge.
 fn edge_labels(p: &Plan, svc: &str) -> String {

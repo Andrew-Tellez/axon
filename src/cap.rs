@@ -126,7 +126,7 @@ pub fn informe(ms: &[Manifest], only: &[String]) -> String {
         }
 
         // --- sagas declaradas ---
-        for (name, sg) in &m.saga {
+        for (name, sg) in &m.flows() {
             // `verify` already emits the error; here the cost is explained,
             // which is what this report adds.
             let compensated = sg.steps.iter().filter(|p| p.undo.is_some()).count();

@@ -357,6 +357,9 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     let known: IndexMap<&str, &Manifest> = ms.iter().map(|m| (m.service.as_str(), m)).collect();
 
     sagas(ms, &esquemas, &known, &mut errors, &mut warnings);
+    workflows(ms, &mut errors, &mut warnings);
+    bus(ms, &emitters, &mut errors, &mut warnings);
+    tasks(ms, &esquemas, &mut errors, &mut warnings);
     event_sourcing(ms, &emitters, &esquemas, &mut errors, &mut warnings);
     // Business metrics. What a funnel answers is derivable from the causal chain;
     // this is not, so the whole value of declaring it is that these things become
@@ -582,7 +585,7 @@ fn tenant_isolation(
             continue;
         };
         for (t, cols) in tables {
-            if ["outbox", "inbox_seen"].contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
+            if OWN_TABLES.contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
                 continue;
             }
             if !cols.has(tenant) {
@@ -2129,7 +2132,7 @@ fn sharding(ms: &[Manifest], esquemas_shard: &IndexMap<String, Tables>, errors: 
             .collect();
 
         for (t, tb) in tablas {
-            if ["outbox", "inbox_seen"].contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
+            if OWN_TABLES.contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
                 continue;
             }
             if !repartidas.contains(&t) {
@@ -3389,10 +3392,50 @@ fn sagas(
 ) {
     for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
-        for (name, sg) in &m.saga {
+        // Every flow the same rules run over: the sagas and the workflows.
+        // `journal` is false for the ones Temporal keeps the history of —it
+        // keeps it— and `timers` is what their `sleep_ms` already spends of
+        // the budget, which a lowered saga has no way to show.
+        let flows: Vec<(String, Saga, bool, u32, &str)> = m
+            .flows()
+            .into_iter()
+            .map(|(n, sg)| {
+                // The noun the message uses. A `saga` workflow is a saga in
+                // every way except the block it was written in, and naming the
+                // other one sends whoever reads the error looking for a block
+                // that is not in the file.
+                let noun = if m.saga.contains_key(&n) {
+                    "saga"
+                } else {
+                    "workflow"
+                };
+                (n, sg, true, 0, noun)
+            })
+            .chain(
+                m.workflow
+                    .iter()
+                    // One with no call has nothing a saga's rules can say; its
+                    // own rules are in `workflows`.
+                    .filter(|(_, w)| {
+                        w.engine.temporal() && w.steps.iter().any(|s| s.call.is_some())
+                    })
+                    .map(|(n, w)| {
+                        let timers: u64 = w.steps.iter().filter_map(|s| s.sleep_ms).sum();
+                        (
+                            n.clone(),
+                            w.lower(),
+                            false,
+                            timers.min(u32::MAX as u64) as u32,
+                            "workflow",
+                        )
+                    }),
+            )
+            .collect();
+        for (name, sg, journal, timers, noun) in &flows {
+            let (name, timers) = (name.as_str(), *timers);
             if sg.steps.is_empty() {
                 errors.push(format!(
-                    "{svc}.{name}: a saga with no steps coordinates nothing"
+                    "{svc}.{name}: a {noun} with no steps coordinates nothing"
                 ));
                 continue;
             }
@@ -3401,7 +3444,7 @@ fn sagas(
             // never runs.
             match &sg.on {
                 None => errors.push(format!(
-                    "{svc}.{name}: no `on`. A saga is started by a method of its own or by a \
+                    "{svc}.{name}: no `on`. A {noun} is started by a method of its own or by a \
                  consumed event, and without saying which, the coordinator gets generated \
                  and never runs"
                 )),
@@ -3419,14 +3462,15 @@ fn sagas(
             // halfway neither finishes nor compensates it: the steps already
             // taken stay applied forever and nobody knows which ones they were.
             let table = Saga::table(name);
-            match esquemas.get(svc) {
-                None => errors.push(format!(
-                    "{svc}.{name}: no migrations, and the saga needs the `{table}` table to \
+            match esquemas.get(svc).filter(|_| *journal) {
+                None if *journal => errors.push(format!(
+                    "{svc}.{name}: no migrations, and the {noun} needs the `{table}` table to \
                  survive a restart of the coordinator"
                 )),
+                None => {}
                 Some(tablas) => match tablas.get(&table) {
                     None => errors.push(format!(
-                    "{svc}.{name}: the `{table}` table is missing. Without it, a restart mid-saga \
+                    "{svc}.{name}: the `{table}` table is missing. Without it, a restart mid-flow \
                      leaves the steps already taken applied and with no record of which \
                      ones: it can neither finish nor compensate"
                 )),
@@ -3471,7 +3515,7 @@ fn sagas(
             }
 
             let ultimo = sg.steps.len() - 1;
-            let mut presupuesto = 0u32;
+            let mut presupuesto = timers;
             for (i, step) in sg.steps.iter().enumerate() {
                 // Every reference is resolved against the manifests, not against
                 // good faith: a misspelled `undo` is a compensation that does
@@ -3506,7 +3550,7 @@ fn sagas(
                         errors.push(format!(
                             "{svc}.{name}.{field}: uses `{r}` without declaring it in \
                          `[[depends]]`. The resilient client —timeout, retries, breaker— \
-                         comes from there, and without it the saga has nothing to call with"
+                         comes from there, and without it the {noun} has nothing to call with"
                         ));
                     }
                     // The step's budget is the CALLER's, not the one the other
@@ -3533,7 +3577,7 @@ fn sagas(
                     None => errors.push(format!(
                         "{svc}.{name}: step {} (`{}`) has no `undo`, and it is not the \
                      last one. If a later step fails, this one stays applied forever: that \
-                     is not a saga, it is a dual-write with more steps",
+                     is not a {noun}, it is a dual-write with more steps",
                         i + 1,
                         step.call
                     )),
@@ -3572,7 +3616,7 @@ fn sagas(
                 )),
                 Some(_) => {}
                 None => warnings.push(format!(
-                    "{svc}.{name}: no `timeout_ms`. A saga with no time budget stays in \
+                    "{svc}.{name}: no `timeout_ms`. A {noun} with no time budget stays in \
                  flight until somebody looks at it"
                 )),
             }
@@ -3583,9 +3627,434 @@ fn sagas(
             // from a replica and promising CP.
             if !m.cap.eventual() {
                 errors.push(format!(
-                    "{svc}.{name}: coordinates a saga with `consistency = \"strong\"`. \
+                    "{svc}.{name}: coordinates a {noun} with `consistency = \"strong\"`. \
                  Between the first step and the last there are visible intermediate states \
                  no invariant describes: the real guarantee of the flow is eventual"
+                ));
+            }
+        }
+    }
+}
+
+// tasks: the queue is a table, so what gets refuted is everything that makes
+// it a table that cannot be a queue
+fn tasks(
+    ms: &[Manifest],
+    esquemas: &IndexMap<String, Tables>,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
+    for m in ms.iter().filter(|m| !m.external && !m.tasks.is_empty()) {
+        let svc = &m.service;
+
+        // A job runs on a schedule and ends. A queue needs somebody awake to
+        // claim from it, and a task enqueued between two runs of the cron waits
+        // for the next one with nothing saying so.
+        if m.infra.runtime.as_deref() == Some("job") {
+            errors.push(format!(
+                "{svc}: declares {} tasks and `runtime = \"job\"`. A job runs on its schedule \
+                 and dies; a queue needs somebody awake to claim from it. What is enqueued in \
+                 between waits for the next run, and nothing says so",
+                m.tasks.len()
+            ));
+        }
+
+        // The queue is a table. Without it, what gets generated is an enqueue
+        // that writes nowhere.
+        match esquemas.get(svc).and_then(|t| t.get(Task::TABLE)) {
+            None => errors.push(format!(
+                "{svc}: declares tasks and the `{}` table is missing. The queue is a table in \
+                 its own database —that is what makes enqueuing inside the transaction that \
+                 changed the row one more write, and not a second commit that can be lost",
+                Task::TABLE
+            )),
+            Some(t) => {
+                for (col, what) in [
+                    ("id", "the task's id, which is the receipt the caller keeps"),
+                    ("name", "which of the declared tasks this row is"),
+                    ("status", "whether it is waiting, running, done or dead"),
+                    (
+                        "run_at",
+                        "when it becomes runnable, which is what `delay_ms` writes",
+                    ),
+                    (
+                        "attempts",
+                        "how many have been spent, against `max_deliver`",
+                    ),
+                    ("data", "the input it was enqueued with"),
+                    (
+                        "updated",
+                        "when it last moved, so a dead worker can be told from a slow one",
+                    ),
+                ] {
+                    match t.col(col) {
+                        None => errors.push(format!(
+                            "{svc}: `{}` has no `{col}` column: that is where {what} goes",
+                            Task::TABLE
+                        )),
+                        Some(c) => {
+                            let expected = match col {
+                                "data" => "json",
+                                "run_at" | "updated" => "timestamp",
+                                "attempts" => "int",
+                                _ => continue,
+                            };
+                            if !c.ty.to_lowercase().contains(expected) {
+                                errors.push(format!(
+                                    "{svc}: `{}.{col}` is `{}` and has to be {expected}. A date \
+                                     stored as text compares and sorts wrong: the claim would \
+                                     pick up tasks that are not due yet, and skip ones that are",
+                                    Task::TABLE,
+                                    c.ty
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (name, t) in &m.tasks {
+            // One name, one implementation. A handler shared with a method or
+            // with a consumer is one function receiving two different shapes,
+            // and the one that does not fit arrives at runtime.
+            if m.methods.contains_key(&t.handler)
+                || m.consumes.values().any(|c| c.handler == t.handler)
+            {
+                errors.push(format!(
+                    "{svc}.{name}: its handler `{}` is already a method or an event's handler. \
+                     One name is one implementation: shared, it is one function receiving two \
+                     different shapes",
+                    t.handler
+                ));
+            }
+            match t.max_deliver {
+                Some(0) => errors.push(format!(
+                    "{svc}.{name}: `max_deliver = 0`. Zero attempts is a task that is enqueued \
+                     and goes straight to dead without anybody having run it"
+                )),
+                _ => {
+                    // The rule `[[depends]]` already has, on the block that
+                    // decides how many times the work is attempted.
+                    if t.max_deliver() > 1 && !t.idempotent {
+                        errors.push(format!(
+                            "{svc}.{name}: runs up to {} times and is not `idempotent`. A task \
+                             is retried when the worker that had it dies —and there is no \
+                             telling whether it died before or after the effect— so the second \
+                             run applies it again, and says nothing",
+                            t.max_deliver()
+                        ));
+                    }
+                }
+            }
+            if t.concurrency == Some(0) {
+                errors.push(format!(
+                    "{svc}.{name}: `concurrency = 0`. Nothing runs it, and the rows pile up in \
+                     the queue with no error anywhere"
+                ));
+            }
+            if t.timeout_ms.is_none() {
+                warnings.push(format!(
+                    "{svc}.{name}: no `timeout_ms`. A task with no budget that hangs stays \
+                     `running` forever: it is not retried, because nothing can tell it from \
+                     one still working"
+                ));
+            }
+        }
+    }
+}
+
+// the bus: one broker for everybody, and what each subscription asks of it
+fn bus(
+    ms: &[Manifest],
+    emitters: &IndexMap<&str, (&str, &Fields)>,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
+    // A topic has one bus. Two services that disagree is an event published
+    // where the other one is not listening, and nothing fails: the emitter
+    // succeeds, the consumer stays quiet, and the only sign is a handler that
+    // never runs.
+    let mut declared: Option<(&str, BusEngine)> = None;
+    for m in ms.iter().filter(|m| !m.external) {
+        let Some(e) = m.bus.engine else { continue };
+        match declared {
+            None => declared = Some((&m.service, e)),
+            Some((who, first))
+                if first != e && (e != BusEngine::None && first != BusEngine::None) =>
+            {
+                errors.push(format!(
+                    "{}: `[bus] engine = \"{}\"` and `{who}` declares `\"{}\"`. A topic has one \
+                     bus: published on one and consumed from the other, the emitter succeeds, \
+                     the consumer stays quiet, and the only sign is a handler that never runs",
+                    m.service,
+                    e.as_str(),
+                    first.as_str()
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        let engine = m.bus.engine();
+        if engine == BusEngine::None && !(m.emits.is_empty() && m.consumes.is_empty()) {
+            errors.push(format!(
+                "{svc}: `[bus] engine = \"none\"` and it declares {} events. Either it has a \
+                 broker or it has no events: with none, what gets generated is a publisher \
+                 with nowhere to publish",
+                m.emits.len() + m.consumes.len()
+            ));
+        }
+        if m.bus.retention_ms.is_some() && m.emits.is_empty() {
+            warnings.push(format!(
+                "{svc}: declares `retention_ms` and emits nothing. Retention is the window a \
+                 consumer that was down catches up in, and there is nothing here to catch up on"
+            ));
+        }
+
+        for (ev, c) in &m.consumes {
+            if let Some(n) = c.max_deliver {
+                if n == 0 {
+                    errors.push(format!(
+                        "{svc}.{ev}: `max_deliver = 0`. Zero attempts is an event that goes \
+                         straight to the dead letter queue without anybody having tried it"
+                    ));
+                }
+            }
+            if let Some(field) = &c.ordered_by {
+                // The key has to be a field of the event. A misspelled one is
+                // not an error at the broker: everything lands in one partition
+                // or in none, and the ordering that was declared is not there.
+                match emitters.get(ev.as_str()) {
+                    Some((owner, fields)) if !fields.contains_key(field) => errors.push(format!(
+                        "{svc}.{ev}: ordered by `{field}`, which `{ev}` does not carry. \
+                         `{owner}` declares: {}",
+                        fields.keys().cloned().collect::<Vec<_>>().join(", ")
+                    )),
+                    _ => {}
+                }
+                if !engine.partitions() {
+                    warnings.push(format!(
+                        "{svc}.{ev}: ordered by `{field}` over `{}`, which does not partition. \
+                         One queue and several consumers is whatever order the scheduler \
+                         gives: the ordering has to come from a single consumer, and that is \
+                         a decision about throughput",
+                        engine.as_str()
+                    ));
+                }
+            }
+            // The event that starts a flow cannot be redelivered while the
+            // flow is still running: what comes back is a second coordinator
+            // over the same id, and both of them compensate.
+            if let Some(wait) = c.ack_wait_ms {
+                // Both engines: a temporal flow is redelivered the same way,
+                // and there the second coordinator is a second workflow id.
+                let started: Vec<(String, u64)> = m
+                    .flows()
+                    .into_iter()
+                    .filter(|(_, sg)| sg.on.as_deref() == Some(ev.as_str()))
+                    .filter_map(|(n, sg)| sg.timeout_ms.map(|t| (n, t as u64)))
+                    .chain(
+                        m.workflow
+                            .iter()
+                            .filter(|(_, w)| {
+                                w.engine.temporal() && w.on.as_deref() == Some(ev.as_str())
+                            })
+                            .filter_map(|(n, w)| w.timeout_ms.map(|t| (n.clone(), t))),
+                    )
+                    .collect();
+                for (flow, budget) in started {
+                    if u64::from(wait) < budget {
+                        errors.push(format!(
+                            "{svc}.{ev}: `ack_wait_ms = {wait}` and it starts `{flow}`, whose \
+                             budget is {budget}ms. The event comes back while the flow is \
+                             still going: a second coordinator over the same id, and both of \
+                             them compensate"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // A group is what the members of one service split. Two services sharing
+    // one is each of them getting half the events, and the half that went to
+    // the wrong handler is not an error anywhere.
+    let mut groups: IndexMap<String, (&str, &str)> = IndexMap::new();
+    for m in ms.iter().filter(|m| !m.external) {
+        for (ev, c) in &m.consumes {
+            let key = format!("{ev}/{}", c.group(&m.service));
+            match groups.get(&key) {
+                Some((other, _)) if *other != m.service.as_str() => errors.push(format!(
+                    "{}.{ev}: shares the `{}` group with `{other}`. A group is split, not \
+                     duplicated: each event goes to one of the two, and the handler of the \
+                     other one never sees it",
+                    m.service,
+                    c.group(&m.service)
+                )),
+                _ => {
+                    groups.insert(key, (&m.service, ev));
+                }
+            }
+        }
+    }
+}
+
+// workflows: what a saga's rules cannot say, because a saga cannot wait. A
+// timer and a signal only exist against a history, and a history only forgives
+// a change of shape if somebody numbered it.
+fn workflows(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        for (name, wf) in &m.workflow {
+            // The same name in both blocks is two flows with one journal and
+            // one generated coordinator, and which of the two it is depends on
+            // the order they got read in.
+            if m.saga.contains_key(name) {
+                errors.push(format!(
+                    "{svc}.{name}: declared as `[saga.{name}]` and as `[workflow.{name}]`. \
+                     They are the same flow with one journal and one generated coordinator: \
+                     leave one"
+                ));
+            }
+            if wf.steps.is_empty() {
+                errors.push(format!(
+                    "{svc}.{name}: a workflow with no steps coordinates nothing"
+                ));
+                continue;
+            }
+            // A temporal flow is started like any other. The saga's rules only
+            // cover the ones with a call, so the trigger is checked here.
+            match &wf.on {
+                None => errors.push(format!(
+                    "{svc}.{name}: no `on`. A workflow is started by a method of its own or by \
+                     a consumed event, and without saying which, the worker gets generated and \
+                     never runs"
+                )),
+                Some(on) => {
+                    if !m.methods.contains_key(on) && !m.consumes.contains_key(on) {
+                        errors.push(format!(
+                            "{svc}.{name}: started by `{on}`, which is neither a method of \
+                             `{svc}` nor an event it consumes"
+                        ));
+                    }
+                }
+            }
+
+            for (i, step) in wf.steps.iter().enumerate() {
+                let n = i + 1;
+                // A step is a call, a timer or a signal. Two of them at once is
+                // an order nobody declared: it is not visible whether the sleep
+                // goes before or after the call, and the generator has to pick.
+                let kind = match step.kind() {
+                    Some(k) => k,
+                    None => {
+                        errors.push(format!(
+                            "{svc}.{name}: step {n} is not exactly one of `do`, `sleep_ms` or \
+                             `awaits`. Two at once leaves the order between them undeclared, \
+                             and none at all is a step that does nothing"
+                        ));
+                        continue;
+                    }
+                };
+                if step.undo.is_some() && step.call.is_none() {
+                    errors.push(format!(
+                        "{svc}.{name}: step {n} is a `{kind}` with an `undo`. Only a call \
+                         leaves something applied to undo"
+                    ));
+                }
+
+                // The signal has to be an event this service already consumes:
+                // waiting for one nobody sends is a flow that never ends, and
+                // the declaration is what makes the handler get generated.
+                if let Some(ev) = &step.awaits {
+                    if !m.consumes.contains_key(ev) {
+                        errors.push(format!(
+                            "{svc}.{name}: step {n} waits for `{ev}`, which `{svc}` does not \
+                             consume. The signal arrives as an event or it does not arrive: \
+                             declare it in `[consumes.\"{ev}\"]`"
+                        ));
+                    }
+                    if step.timeout_ms.is_none() {
+                        warnings.push(format!(
+                            "{svc}.{name}: step {n} waits for `{ev}` with no `timeout_ms`. \
+                             If it never arrives, the flow stays in flight until somebody \
+                             looks at it"
+                        ));
+                    }
+                }
+
+                // The keys that only exist against a history. On the Postgres
+                // coordinator they are not a limitation to warn about: there is
+                // no code behind them, and a key that does nothing reads like a
+                // decision in a review.
+                if !wf.engine.temporal() {
+                    for (key, what) in [
+                        (step.sleep_ms.map(|_| "sleep_ms"), "a durable timer"),
+                        (step.awaits.as_ref().map(|_| "awaits"), "a signal"),
+                        (step.retry.as_ref().map(|_| "retry"), "a retry policy"),
+                        (step.heartbeat_ms.map(|_| "heartbeat_ms"), "a heartbeat"),
+                    ] {
+                        let Some(key) = key else { continue };
+                        errors.push(format!(
+                            "{svc}.{name}: step {n} declares `{key}`, and the flow's engine is \
+                             `saga`. {what} needs a history to resume from; the Postgres \
+                             coordinator calls, compensates and nothing else. Either drop the \
+                             key or move the flow to `engine = \"temporal\"`"
+                        ));
+                    }
+                }
+
+                // A retry against something that is not idempotent applies the
+                // effect twice. It is the rule `[[depends]]` already has, on
+                // the key that overrides it.
+                if let Some(r) = &step.retry {
+                    if r.max > 1 {
+                        if let Some((s, met)) = step.call.as_deref().and_then(Step::parts) {
+                            let target = ms
+                                .iter()
+                                .find(|o| o.service == s)
+                                .and_then(|o| o.methods.get(met));
+                            if target.is_some_and(|me| !me.idempotent) {
+                                errors.push(format!(
+                                    "{svc}.{name}: step {n} retries `{s}.{met}` up to {} times \
+                                     and it is not `idempotent`. A retry over a call that is \
+                                     not idempotent applies the effect twice, and the second \
+                                     one raises no error",
+                                    r.max
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !wf.engine.temporal() {
+                continue;
+            }
+            // The queue is the address of the worker. Two flows of two services
+            // on the same queue is a worker being handed a workflow it does not
+            // have the code for.
+            let queue = wf.task_queue(svc);
+            if let Some(other) = ms.iter().filter(|o| &o.service != svc).find(|o| {
+                o.workflow
+                    .iter()
+                    .any(|(_, w)| w.engine.temporal() && w.task_queue(&o.service) == queue)
+            }) {
+                errors.push(format!(
+                    "{svc}.{name}: polls the `{queue}` queue and so does `{}`. A worker only \
+                     runs the flows it was compiled with: whichever picks up the other one's \
+                     task fails it for good",
+                    other.service
+                ));
+            }
+            if wf.version.is_none() {
+                warnings.push(format!(
+                    "{svc}.{name}: no `version`. It is what lets a change of shape be told \
+                     from a flow that is still the same one, and without it nobody can say \
+                     whether the instances in flight still match"
                 ));
             }
         }

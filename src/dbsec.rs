@@ -7,7 +7,7 @@
 use crate::manifest::*;
 
 /// The framework's own tables: they carry no tenant and no personal data.
-const OWN_TABLES: [&str; 2] = ["outbox", "inbox_seen"];
+use crate::manifest::OWN_TABLES;
 
 /// `order` is a reserved word, and not the only one. Every identifier is quoted.
 fn q(n: &str) -> String {

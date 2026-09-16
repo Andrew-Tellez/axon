@@ -209,6 +209,16 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
             pascal(ev)
         ));
     }
+    for (name, t) in &m.tasks {
+        cls.push(format!(
+            "  /** task {name} · runs later, off the request */"
+        ));
+        cls.push(format!(
+            "  abstract {}(input: {p}Task, e: Envelope<{p}Task>): Promise<void>;",
+            t.handler,
+            p = pascal(name)
+        ));
+    }
     for meth in m.methods.keys() {
         cls.push(format!(
             "  abstract {}(input: {p}In, e: Envelope<unknown>): Promise<{p}Out>;",
@@ -240,8 +250,17 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     if !m.machine.is_empty() {
         out.push(machines_ts(m));
     }
-    if !m.saga.is_empty() {
+    if !m.flows().is_empty() {
         out.push(sagas_ts(m));
+    }
+    if m.workflow.values().any(|w| w.engine.temporal()) {
+        out.push(temporal_ts(m));
+    }
+    if !m.consumes.is_empty() {
+        out.push(subscriptions_ts(m));
+    }
+    if !m.tasks.is_empty() {
+        out.push(tasks_ts(m));
     }
     if !m.aggregate.is_empty() {
         out.push(aggregates_ts(m));
@@ -813,6 +832,484 @@ pub fn build_er(ms: &[Manifest]) -> String {
 /// The TypeScript type of a step's output. It is the same name the dependency's
 /// client already emits, so the saga's context ends up typed without inventing
 /// new types.
+/// The Temporal worker for each `engine = "temporal"` workflow.
+///
+/// What gets generated is the part that is mechanical and, at the same time,
+/// the part that is dangerous to write by hand: the order of the steps, the
+/// compensations in reverse, and the two things a saga cannot do —a timer that
+/// survives the process and a signal that resumes the flow. What does NOT get
+/// generated is what the activities do, which is where the knowledge is.
+///
+/// The file is not editable by hand, and that is not a convention here: a
+/// workflow is replayed against the history it started with, so an edit that
+/// changes the order of the awaits breaks the instances already in flight, and
+/// it breaks them wherever the replay stops matching, not where the edit is.
+/// The task queue: what enqueues, what drains it, and the table both agree on.
+///
+/// The generated part is the mechanical one and, as with the saga, the one
+/// that is dangerous to write by hand: claiming without two workers taking the
+/// same row, counting attempts against the ceiling, and telling a dead worker
+/// from a slow one. What is NOT generated is the work itself.
+pub fn tasks_ts(m: &Manifest) -> String {
+    let mut o = vec![format!(
+        "\n/** The queue, which is a table in this service's own database. Enqueuing\n \
+         *  inside the transaction that changed the row is one more write —not a\n \
+         *  second commit that can be lost— and that is the whole reason it lives\n \
+         *  here and not in the broker.\n \
+         *\n \
+         *  `claim` is the one that cannot be written casually: two workers taking\n \
+         *  the same row run the task twice. It has to be one statement,\n \
+         *\n \
+         *    UPDATE {t} SET status = 'running', attempts = attempts + 1,\n \
+         *           updated = now()\n \
+         *     WHERE id IN (SELECT id FROM {t}\n \
+         *                   WHERE name = $1 AND run_at <= $2\n \
+         *                     AND (status = 'waiting' OR (status = 'running' AND updated < $3))\n \
+         *                   ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT $4)\n \
+         *    RETURNING id, attempts, data;\n \
+         *\n \
+         *  `SKIP LOCKED` is what makes two workers take different rows, and the\n \
+         *  `updated < $3` is what brings back what a worker that died was\n \
+         *  holding. */\n\
+         export interface TaskQueue {{\n  \
+           enqueue(row: {{ id: string; name: string; runAt: Date; data: Envelope<unknown> }}): Promise<void>;\n  \
+           /** Claims up to `limit` due tasks, and those a dead worker left\n   \
+            *  `running` before `staleBefore`. */\n  \
+           claim(name: string, due: Date, staleBefore: Date, limit: number): Promise<{{ id: string; attempts: number; data: Envelope<unknown> }}[]>;\n  \
+           done(id: string): Promise<void>;\n  \
+           /** Back to `waiting`, to be run again from `runAt`. */\n  \
+           retry(id: string, runAt: Date): Promise<void>;\n  \
+           /** Out of attempts. It is not run again: it is left where somebody\n   \
+            *  can see it. */\n  \
+           dead(id: string, reason: unknown): Promise<void>;\n  \
+           /** The receipt: what the caller who enqueued it looks up. */\n  \
+           read(id: string): Promise<{{ status: string; attempts: number }} | null>;\n\
+         }}\n\n\
+         /** What one pass of a queue did. `pending` says the limit filled up and\n \
+         *  there is more waiting, which is the difference between a worker that\n \
+         *  keeps up and one that does not. */\n\
+         export interface TaskReport {{\n  \
+           claimed: number;\n  done: number;\n  retried: number;\n  dead: number;\n  pending: boolean;\n\
+         }}\n",
+        t = Task::TABLE
+    )];
+
+    let mut table = Vec::new();
+    for (name, t) in &m.tasks {
+        let p = pascal(name);
+        let c = camel(name);
+        let fields: Vec<String> = t
+            .input
+            .iter()
+            .map(|(k, ty)| format!("  {k}: {};", ts_type(ty)))
+            .collect();
+        o.push(format!(
+            "\n/** What `{name}` is enqueued with. */\nexport interface {p}Task {{\n{}\n}}\n",
+            fields.join("\n")
+        ));
+        let delay = t.delay_ms.unwrap_or(0);
+        table.push(format!(
+            "  {c}: {{ handler: {:?}, maxDeliver: {}, delayMs: {delay}, concurrency: {}, timeoutMs: {}, route: {:?} }},",
+            t.handler,
+            t.max_deliver(),
+            t.concurrency.unwrap_or(1),
+            match t.timeout_ms {
+                Some(ms) => format!("{ms}"),
+                None => "null".into(),
+            },
+            format!("POST {}", Task::run_route(name))
+        ));
+        o.push(format!(
+            "/** Enqueues `{name}`. Returns the id, which is the receipt: it is the\n \
+             *  only thing the caller keeps, and `queue.read` is where it is looked\n \
+             *  up.\n \
+             *\n \
+             *  Call it inside the transaction that made the work necessary. Outside\n \
+             *  it, there is a window where the row is written and the task does not\n \
+             *  exist —or the other way round. */\n\
+             export async function enqueue{p}(\n  \
+               queue: TaskQueue,\n  \
+               input: {p}Task,\n  \
+               e: Envelope<unknown>,\n  \
+               opts?: {{ delayMs?: number }},\n\
+             ): Promise<{{ taskId: string }}> {{\n  \
+               const taskId = crypto.randomUUID();\n  \
+               const delay = opts?.delayMs ?? {delay};\n  \
+               await queue.enqueue({{\n    \
+                 id: taskId,\n    \
+                 name: \"{name}\",\n    \
+                 runAt: new Date(Date.now() + delay),\n    \
+                 // The envelope travels with it: the trace of whoever enqueued it is\n    \
+                 // what connects the work to the request that caused it, and a task\n    \
+                 // that runs an hour later has no other way back to it.\n    \
+                 data: newEnvelope(\"task.{name}\", \"{svc}\", input, e),\n  \
+               }});\n  \
+               return {{ taskId }};\n\
+             }}\n",
+            svc = m.service
+        ));
+        let limit = t.concurrency.unwrap_or(1);
+        let stale = match t.timeout_ms {
+            Some(ms) => format!("{ms}"),
+            // With no declared budget there is nothing to measure a hung run
+            // against, so nothing is reclaimed. `axon verify` warns about it.
+            None => "Number.POSITIVE_INFINITY".into(),
+        };
+        o.push(format!(
+            "/** One pass of the `{name}` queue: claims what is due and runs it.\n \
+             *\n \
+             *  Up to {limit} at a time —the declared `concurrency`— because a queue\n \
+             *  that drains as fast as the database allows is how a batch takes down\n \
+             *  the database the rows are read from.\n \
+             *\n \
+             *  A run that fails goes back to `waiting` with exponential backoff\n \
+             *  until attempt {attempts}; after that it is left dead where somebody can\n \
+             *  see it. Retrying a task past its ceiling forever hides the one\n \
+             *  thing worth knowing, which is that it never works. */\n\
+             export async function run{p}(\n  \
+               queue: TaskQueue,\n  \
+               handler: (input: {p}Task, e: Envelope<{p}Task>) => Promise<void>,\n  \
+               limit = {limit},\n\
+             ): Promise<TaskReport> {{\n  \
+               const now = Date.now();\n  \
+               const claimed = await queue.claim(\n    \
+                 \"{name}\",\n    \
+                 new Date(now),\n    \
+                 // A `running` row older than the budget was held by a worker that\n    \
+                 // died: nothing else can tell it from one still working.\n    \
+                 new Date(now - {stale}),\n    \
+                 limit,\n  \
+               );\n  \
+               const r: TaskReport = {{ claimed: claimed.length, done: 0, retried: 0, dead: 0, pending: claimed.length >= limit }};\n  \
+               await Promise.all(\n    \
+                 claimed.map(async ({{ id, attempts, data }}) => {{\n      \
+                   try {{\n        \
+                     await handler(data.data as {p}Task, data as Envelope<{p}Task>);\n        \
+                     await queue.done(id);\n        \
+                     r.done++;\n      \
+                   }} catch (err) {{\n        \
+                     if (attempts >= {attempts}) {{\n          \
+                       await queue.dead(id, err);\n          \
+                       r.dead++;\n        \
+                     }} else {{\n          \
+                       // Exponential from a second: a task that fails because what it\n          \
+                       // calls is down should not hammer it while it comes back.\n          \
+                       await queue.retry(id, new Date(Date.now() + 1000 * 2 ** attempts));\n          \
+                       r.retried++;\n        \
+                     }}\n      \
+                   }}\n    \
+                 }}),\n  \
+               );\n  \
+               return r;\n\
+             }}\n",
+            attempts = t.max_deliver()
+        ));
+    }
+    o.push(format!(
+        "/** The tasks the manifest declares, with the route `axon infra` points a\n \
+         *  scheduler at. Startup has to serve each one by calling its `run`: a\n \
+         *  scheduler aimed at a 404 applies with no error and drains nothing.\n \
+         *\n \
+         *  They are NOT declared methods, so they do not go out through the\n \
+         *  gateway. */\n\
+         export const tasks = {{\n{}\n}} as const;\n",
+        table.join("\n")
+    ));
+    o.join("\n")
+}
+
+/// What each subscription asks of the broker.
+///
+/// It is generated because the alternative is that the keys exist in the
+/// manifest, `axon infra` prints them in a comment, and whoever wires the
+/// consumer up types them again from memory. Two numbers for one thing drift,
+/// and the one that drifts here —the ack window— shows up as a handler that
+/// ran twice.
+pub fn subscriptions_ts(m: &Manifest) -> String {
+    let rows: Vec<String> = m
+        .consumes
+        .iter()
+        .map(|(ev, c)| {
+            let mut opts = vec![
+                format!("group: {:?}", c.group(&m.service)),
+                format!("maxDeliver: {}", c.max_deliver()),
+            ];
+            if let Some(f) = &c.ordered_by {
+                opts.push(format!("orderedBy: {f:?}"));
+            }
+            if let Some(ms) = c.ack_wait_ms {
+                opts.push(format!("ackWaitMs: {ms}"));
+            }
+            format!("  {ev:?}: {{ {} }},", opts.join(", "))
+        })
+        .collect();
+    format!(
+        "\n/** What each subscription asks of the broker. `axon infra` prints the\n \
+         *  same numbers as the commands that create them: wiring the consumer\n \
+         *  from here is what keeps the two from drifting.\n \
+         *\n \
+         *  `ackWaitMs` is how long the handler has before the event comes back.\n \
+         *  Shorter than it really takes, and it runs twice with nothing saying\n \
+         *  so —the dedup by envelope id is what makes that survivable, not\n \
+         *  harmless. */\n\
+         export const subscriptions = {{\n{}\n}} as const;\n",
+        rows.join("\n")
+    )
+}
+
+pub fn temporal_ts(m: &Manifest) -> String {
+    let svc = &m.service;
+    let mut o = vec![
+        "\n// ---------------------------------------------------------------------------\n\
+         // Temporal workflows. GENERATED: do not edit.\n\
+         //\n\
+         // An instance in flight replays the history it started with. Editing this\n\
+         // by hand is changing the code under a replay that is already under way:\n\
+         // change the manifest and bump the flow's `version`.\n\
+         // ---------------------------------------------------------------------------\n\
+         import {\n  \
+           proxyActivities,\n  \
+           sleep,\n  \
+           condition,\n  \
+           defineSignal,\n  \
+           setHandler,\n  \
+           ApplicationFailure,\n\
+         } from \"@temporalio/workflow\";\n"
+            .to_string(),
+    ];
+
+    for (name, wf) in m.workflow.iter().filter(|(_, w)| w.engine.temporal()) {
+        let p = pascal(name);
+        let c = camel(name);
+        o.push(format!(
+            "/** The queue this flow's worker polls. `axon verify` already checked that\n \
+             *  no other service polls it: a worker only runs the flows it was compiled\n \
+             *  with, and whichever picks up a stranger's task fails it for good. */\n\
+             export const {c}TaskQueue = \"{}\" as const;\n\n\
+             /** The shape as published. It goes up when the steps change, and\n \
+             *  `axon baseline` refuses a change that does not bump it. */\n\
+             export const {c}Version = {} as const;\n",
+            wf.task_queue(svc),
+            wf.version.unwrap_or(1)
+        ));
+
+        // The activities: one per call, one per compensation. Same division as
+        // the saga's — the flow knows the order, not the contents.
+        let mut acts = Vec::new();
+        let mut outputs = Vec::new();
+        for (i, step) in wf.steps.iter().enumerate() {
+            let (n, Some(call)) = (i + 1, step.call.as_deref()) else {
+                continue;
+            };
+            let met = Step::parts(call).map(|(_, x)| x).unwrap_or("?");
+            outputs.push(format!("  step{n}?: {};", salida_de(m, call)));
+            acts.push(format!(
+                "  /** step {n} · {call} */\n  \
+                 step{n}{}(e: Envelope<unknown>, prior: {p}Outputs): Promise<{}>;",
+                pascal(met),
+                salida_de(m, call)
+            ));
+            if let Some(u) = &step.undo {
+                let umet = Step::parts(u).map(|(_, x)| x).unwrap_or("?");
+                acts.push(format!(
+                    "  /** undoes step {n} · {u} · it is retried until it lands, so it has\n   \
+                     *  to tolerate there being nothing left to undo */\n  \
+                     undo{n}{}(e: Envelope<unknown>, prior: {p}Outputs): Promise<void>;",
+                    pascal(umet)
+                ));
+            }
+        }
+        o.push(format!(
+            "/** What each step returned. A compensation usually needs the id the step\n \
+             *  it undoes returned, and in a workflow that is what the replay rebuilds. */\n\
+             export interface {p}Outputs {{\n{}\n}}\n",
+            outputs.join("\n")
+        ));
+        o.push(format!(
+            "/** The activities, implemented by whoever knows the data. They run in the\n \
+             *  worker, outside the replay: this is where a call, a query or a clock is\n \
+             *  allowed to live. */\n\
+             export interface {p}Activities {{\n{}\n}}\n",
+            acts.join("\n")
+        ));
+
+        // The signals, before the body: a handler registered after the first
+        // await misses a signal that arrived in between, and Temporal delivers
+        // it exactly once.
+        let mut signals = Vec::new();
+        let mut handlers = Vec::new();
+        for (i, step) in wf.steps.iter().enumerate() {
+            let (n, Some(ev)) = (i + 1, step.awaits.as_deref()) else {
+                continue;
+            };
+            signals.push(format!(
+                "/** The signal step {n} waits for. It is the `{ev}` event: whoever consumes\n \
+                 *  it in `{svc}` signals the flow with it. */\n\
+                 export const {c}Signal{n} = defineSignal<[{}]>(\"{ev}\");\n",
+                pascal(ev)
+            ));
+            handlers.push(format!(
+                "  // Registered before the first await: a handler set up later misses a\n  \
+                   // signal that already arrived, and it is delivered exactly once.\n  \
+                   let signal{n}: {} | undefined;\n  \
+                   setHandler({c}Signal{n}, (p) => {{\n    \
+                     signal{n} = p;\n  \
+                   }});",
+                pascal(ev)
+            ));
+        }
+        o.extend(signals);
+
+        let mut body: Vec<String> = Vec::new();
+        let mut proxies = Vec::new();
+        for (i, step) in wf.steps.iter().enumerate() {
+            let n = i + 1;
+            match (&step.call, step.sleep_ms, &step.awaits) {
+                (Some(call), _, _) => {
+                    let met = Step::parts(call).map(|(_, x)| x).unwrap_or("?");
+                    // The budget is the CALLER's: what `[[depends]]` declares,
+                    // which is the same number the saga counts with.
+                    let dep = Step::parts(call).and_then(|(s, met)| {
+                        m.depends
+                            .iter()
+                            .find(|d| d.service.as_deref() == Some(s) && d.method == met)
+                    });
+                    let timeout = dep.and_then(|d| d.timeout_ms).unwrap_or(30_000);
+                    let retry = match &step.retry {
+                        // Without a declared policy, the one from the
+                        // dependency: two numbers for the same thing is how
+                        // they drift.
+                        None => format!(
+                            "maximumAttempts: {} }}",
+                            dep.map(|d| d.retries + 1).unwrap_or(1)
+                        ),
+                        Some(r) => format!(
+                            "maximumAttempts: {}, backoffCoefficient: {}{} }}",
+                            r.max,
+                            if matches!(r.backoff, Backoff::Fixed) {
+                                "1"
+                            } else {
+                                "2"
+                            },
+                            match r.initial_ms {
+                                Some(ms) => format!(", initialInterval: {ms}"),
+                                None => String::new(),
+                            }
+                        ),
+                    };
+                    let heartbeat = match step.heartbeat_ms {
+                        Some(ms) => format!(", heartbeatTimeout: {ms}"),
+                        None => String::new(),
+                    };
+                    proxies.push(format!(
+                        "const {c}Step{n} = proxyActivities<{p}Activities>({{\n  \
+                           startToCloseTimeout: {timeout}{heartbeat},\n  \
+                           retry: {{ {retry},\n\
+                         }});"
+                    ));
+                    body.push(format!(
+                        "    prior.step{n} = await {c}Step{n}.step{n}{}(e, prior);\n    \
+                         // Recorded AFTER it returned: what is not in here does not get\n    \
+                         // compensated, and compensating a step that never ran is an\n    \
+                         // effect undone twice.\n    \
+                         done.push({n});",
+                        pascal(met)
+                    ));
+                }
+                (_, Some(ms), _) => body.push(format!(
+                    "    // A durable timer, not a sleep: nothing is running while it\n    \
+                       // passes, and it survives the worker being restarted.\n    \
+                       await sleep({ms});"
+                )),
+                (_, _, Some(ev)) => {
+                    let wait = match step.timeout_ms {
+                        Some(ms) => format!("() => signal{n} !== undefined, {ms}"),
+                        None => format!("() => signal{n} !== undefined"),
+                    };
+                    let timeout_branch = if step.timeout_ms.is_some() {
+                        format!(
+                            "\n    if (!arrived{n}) {{\n      \
+                               // The signal did not arrive in time. It is thrown so the\n      \
+                               // compensations below run: leaving it waiting is a flow\n      \
+                               // nobody closes.\n      \
+                               throw ApplicationFailure.nonRetryable(\n        \
+                                 \"{name}: `{ev}` did not arrive before the step's timeout\",\n        \
+                                 \"SignalTimeout\",\n      \
+                               );\n    \
+                             }}"
+                        )
+                    } else {
+                        String::new()
+                    };
+                    body.push(format!(
+                        "    const arrived{n} = await condition({wait});{timeout_branch}"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        o.extend(proxies.into_iter().map(|s| format!("{s}\n")));
+
+        // The compensations, in reverse. Forward order undoes a step whose
+        // effect a later one already used.
+        let mut undos = Vec::new();
+        for (i, step) in wf.steps.iter().enumerate() {
+            let (n, Some(u)) = (i + 1, step.undo.as_deref()) else {
+                continue;
+            };
+            let umet = Step::parts(u).map(|(_, x)| x).unwrap_or("?");
+            undos.push(format!(
+                "        case {n}:\n          \
+                   await {c}Step{n}.undo{n}{}(e, prior);\n          \
+                   break;",
+                pascal(umet)
+            ));
+        }
+        let budget = match wf.timeout_ms {
+            Some(ms) => format!(
+                "\n *  Budget: {ms}ms, the timers included. `axon verify` already checked\n \
+                 *  that it covers the sum of the steps and their compensations.",
+            ),
+            None => String::new(),
+        };
+        o.push(format!(
+            "/** The `{name}` flow.{budget}\n \
+             *\n \
+             *  Forward until a step fails; from there the compensations in REVERSE\n \
+             *  order, undoing only what is in `done`. Reverse order is not\n \
+             *  aesthetics: compensating forward undoes a step whose effect a later\n \
+             *  step already used.\n \
+             *\n \
+             *  There is no journal here and no sweep: the history is Temporal's, and\n \
+             *  a restarted worker replays it up to where it was. */\n\
+             export async function {c}(e: Envelope<unknown>): Promise<{p}Outputs> {{\n  \
+               const prior: {p}Outputs = {{}};\n  \
+               const done: number[] = [];\n\
+             {}\n  \
+               try {{\n\
+             {}\n  \
+               }} catch (err) {{\n    \
+                 for (const step of [...done].reverse()) {{\n      \
+                   switch (step) {{\n\
+             {}\n      \
+                   }}\n    \
+                 }}\n    \
+                 throw err;\n  \
+               }}\n  \
+               return prior;\n\
+             }}\n",
+            handlers.join("\n"),
+            body.join("\n"),
+            if undos.is_empty() {
+                "        // no step declares a compensation".to_string()
+            } else {
+                undos.join("\n")
+            }
+        ));
+    }
+    o.join("\n")
+}
+
 fn salida_de(m: &Manifest, r: &str) -> String {
     match Step::parts(r) {
         // a step on the service itself uses its own types, with no prefix
@@ -1303,15 +1800,15 @@ pub fn build_seq(ms: &[Manifest], root: &str, solo_eventos: bool) -> Result<Stri
         .collect();
     // A saga is a flow too, and its own has a branch no event diagram shows:
     // the compensation.
-    if let Some((m, sg)) = ms.iter().find_map(|m| m.saga.get(root).map(|sg| (m, sg))) {
-        return Ok(seq_saga(m, root, sg));
+    if let Some((m, sg)) = ms
+        .iter()
+        .find_map(|m| m.flows().swap_remove(root).map(|sg| (m, sg)))
+    {
+        return Ok(seq_saga(m, root, &sg));
     }
     if !emitter.contains_key(root) {
         let known: Vec<_> = emitter.keys().copied().collect();
-        let sagas: Vec<&str> = ms
-            .iter()
-            .flat_map(|m| m.saga.keys().map(|k| k.as_str()))
-            .collect();
+        let sagas: Vec<String> = ms.iter().flat_map(|m| m.flows().into_keys()).collect();
         return Err(format!(
             "{root}: nobody emits it and no saga is called that. Events: {}. Sagas: {}",
             known.join(", "),
@@ -1541,7 +2038,7 @@ pub fn sagas_ts(m: &Manifest) -> String {
          }\n"
             .to_string(),
     ];
-    for (name, sg) in &m.saga {
+    for (name, sg) in &m.flows() {
         let p = pascal(name);
         let c = camel(name);
         let mut actions = Vec::new();

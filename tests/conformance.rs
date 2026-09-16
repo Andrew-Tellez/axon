@@ -10735,3 +10735,493 @@ fn the_flags_come_out_in_go_too() {
     ]);
     assert!(!go.contains("type Flags interface"), "{go}");
 }
+
+/// A service with a `temporal` workflow: a call with its compensation, a
+/// durable timer and a signal. The three things that separate a workflow from
+/// a saga are in it, so every rule that only exists for one of them has
+/// something to fire on.
+fn fixture_workflow(who: &str, body: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("axon-wf-{who}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("tienda.toml"),
+        format!(
+            r#"service = "tienda"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[cap]
+consistency = "eventual"
+on_partition = "reject"
+max_staleness_ms = 5000
+
+[analytics]
+export = false
+
+[methods.comprar]
+in = {{ orderId = "uuid" }}
+out = {{ ok = "string" }}
+timeout_ms = 20000
+idempotent = true
+
+[consumes."pago.liquidado@v1"]
+handler = "onPagoLiquidado"
+uses = ["orderId"]
+
+[[depends]]
+service = "banco"
+method = "cobrar"
+timeout_ms = 3000
+retries = 1
+
+[[depends]]
+service = "banco"
+method = "reembolsar"
+timeout_ms = 3000
+retries = 2
+
+{body}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("banco.toml"),
+        r#"service = "banco"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[analytics]
+export = false
+
+[emits."pago.liquidado@v1"]
+orderId = "uuid"
+
+[methods.cobrar]
+in = { orderId = "uuid" }
+out = { ok = "string" }
+timeout_ms = 3000
+idempotent = true
+
+[methods.reembolsar]
+in = { orderId = "uuid" }
+out = { ok = "string" }
+timeout_ms = 3000
+idempotent = true
+"#,
+    )
+    .unwrap();
+    dir
+}
+
+const FLUJO: &str = r#"[workflow.checkout]
+engine = "temporal"
+on = "comprar"
+timeout_ms = 900000
+version = 1
+
+[[workflow.checkout.steps]]
+do = "banco.cobrar"
+undo = "banco.reembolsar"
+retry = { max = 3, initial_ms = 200 }
+
+[[workflow.checkout.steps]]
+sleep_ms = 60000
+
+[[workflow.checkout.steps]]
+awaits = "pago.liquidado@v1"
+timeout_ms = 172800000
+"#;
+
+#[test]
+fn a_temporal_workflow_needs_no_journal_and_generates_its_worker() {
+    let dir = fixture_workflow("worker", FLUJO);
+    let d = dir.to_string_lossy().to_string();
+    // No `[infra]` and no migrations on purpose: the history is Temporal's, and
+    // demanding the saga's journal of it would be asking for a table nobody
+    // writes.
+    let (out, err, ok) = axon(&["verify", &d]);
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("0 errors"), "{out}");
+
+    let manifest = dir.join("tienda.toml").to_string_lossy().to_string();
+    let (ts, err, ok) = axon(&["build", &manifest, &d]);
+    assert!(ok, "{err}");
+    for piece in [
+        // the timer and the signal, which are what a saga cannot do
+        "await sleep(60000)",
+        "defineSignal",
+        "await condition(() => signal3 !== undefined, 172800000)",
+        // the retry policy declared on the step, not the dependency's
+        "maximumAttempts: 3",
+        "initialInterval: 200",
+        // the compensation, in reverse and only over what was done
+        "for (const step of [...done].reverse())",
+        "await checkoutStep1.undo1Reembolsar(e, prior)",
+        // the queue and the number a replay is told apart by
+        // no `task_queue` declared: the default is the service's name
+        "checkoutTaskQueue = \"tienda\"",
+        "checkoutVersion = 1",
+    ] {
+        assert!(ts.contains(piece), "missing `{piece}` in:\n{ts}");
+    }
+}
+
+#[test]
+fn a_timer_on_the_postgres_coordinator_is_refused() {
+    // The key exists in the model, so leaving it silent on the engine that has
+    // no code behind it is the worst of the three outcomes: it looks declared,
+    // it reads like a decision in review, and it does nothing.
+    let dir = fixture_workflow(
+        "timer",
+        &FLUJO.replace("engine = \"temporal\"", "engine = \"saga\""),
+    );
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("declares `sleep_ms`"), "{all}");
+    assert!(
+        all.contains("engine = \\\"temporal\\\"") || all.contains("temporal"),
+        "{all}"
+    );
+}
+
+#[test]
+fn a_signal_nobody_sends_is_a_flow_that_never_ends() {
+    let dir = fixture_workflow(
+        "signal",
+        &FLUJO.replace("pago.liquidado@v1", "pago.fantasma@v1"),
+    );
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("which `tienda` does not consume"), "{all}");
+}
+
+#[test]
+fn a_step_is_one_thing() {
+    let dir = fixture_workflow(
+        "onething",
+        &FLUJO.replace(
+            "sleep_ms = 60000",
+            "sleep_ms = 60000\ndo = \"banco.cobrar\"",
+        ),
+    );
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("not exactly one of"), "{all}");
+}
+
+#[test]
+fn changing_the_shape_without_the_number_is_refused() {
+    let dir = fixture_workflow("shape", FLUJO);
+    let d = dir.to_string_lossy().to_string();
+    let (base, err, ok) = axon(&["baseline", &d]);
+    assert!(ok, "{err}");
+    std::fs::write(dir.join("axon.baseline.json"), &base).unwrap();
+
+    // The same flow with one more step and the same number. A worker replaying
+    // an old history against this does not fail where the change is.
+    let t = dir.join("tienda.toml");
+    let changed = std::fs::read_to_string(&t)
+        .unwrap()
+        .replace("sleep_ms = 60000", "sleep_ms = 60000\n\n[[workflow.checkout.steps]]\ndo = \"banco.cobrar\"\nundo = \"banco.reembolsar\"");
+    std::fs::write(&t, &changed).unwrap();
+    let (out, err, _) = axon(&["verify", &d]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("the shape changed"), "{all}");
+    assert!(all.contains("version = 1"), "{all}");
+
+    // And the bump clears it: the old instances drain against the old number.
+    std::fs::write(&t, changed.replace("version = 1", "version = 2")).unwrap();
+    let (out, err, ok) = axon(&["verify", &d]);
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("0 errors"), "{out}");
+}
+
+/// Two services on one bus: `tienda` consumes what `banco` emits. Every bus
+/// rule needs both sides, because every one of them is about the two of them
+/// disagreeing.
+fn fixture_bus(who: &str, tienda_extra: &str, banco_extra: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("axon-bus-{who}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("tienda.toml"),
+        format!(
+            r#"service = "tienda"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[analytics]
+export = false
+
+[consumes."pago.liquidado@v1"]
+handler = "onPagoLiquidado"
+uses = ["orderId"]
+{tienda_extra}
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("banco.toml"),
+        format!(
+            r#"service = "banco"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[analytics]
+export = false
+
+[emits."pago.liquidado@v1"]
+orderId = "uuid"
+monto = "int"
+{banco_extra}
+"#
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn the_declared_broker_is_the_one_that_comes_up() {
+    let dir = fixture_bus(
+        "kafka",
+        "group = \"tienda\"\nordered_by = \"orderId\"\nmax_deliver = 3\nack_wait_ms = 30000\n\n[bus]\nengine = \"kafka\"",
+        "[bus]\nengine = \"kafka\"",
+    );
+    let d = dir.to_string_lossy().to_string();
+    let (out, err, ok) = axon(&["verify", &d]);
+    assert!(ok, "{out}{err}");
+
+    let (compose, err, ok) = axon(&["infra", &d, "--target", "local"]);
+    assert!(ok, "{err}");
+    assert!(compose.contains("redpandadata/redpanda"), "{compose}");
+    assert!(!compose.contains("nats:2-alpine"), "{compose}");
+    assert!(
+        compose.contains("AXON_BROKER_URL: broker:9092"),
+        "{compose}"
+    );
+    // What the manifest declared, in the command that creates the consumer:
+    // typing it again by hand is the drift this is here to prevent.
+    assert!(compose.contains("consumer group `tienda`"), "{compose}");
+    assert!(compose.contains("partition key `orderId`"), "{compose}");
+
+    // And the same numbers in the generated code, in both languages.
+    let manifest = dir.join("tienda.toml").to_string_lossy().to_string();
+    let (ts, _, _) = axon(&["build", &manifest, &d]);
+    assert!(
+        ts.contains("group: \"tienda\", maxDeliver: 3, orderedBy: \"orderId\", ackWaitMs: 30000"),
+        "{ts}"
+    );
+    let (go, _, _) = axon(&["build", &manifest, &d, "--lang", "go"]);
+    assert!(
+        go.contains("{Group: \"tienda\", MaxDeliver: 3, OrderedBy: \"orderId\", AckWaitMS: 30000}"),
+        "{go}"
+    );
+}
+
+#[test]
+fn a_topic_has_one_bus() {
+    let dir = fixture_bus(
+        "split",
+        "[bus]\nengine = \"kafka\"",
+        "[bus]\nengine = \"rabbit\"",
+    );
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("A topic has one bus"), "{all}");
+}
+
+#[test]
+fn ordering_by_a_field_the_event_does_not_carry() {
+    let dir = fixture_bus("key", "ordered_by = \"tenantId\"", "");
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(
+        all.contains("which `pago.liquidado@v1` does not carry"),
+        "{all}"
+    );
+    // and it says what there IS, which is what turns the error into a fix
+    assert!(all.contains("orderId, monto"), "{all}");
+}
+
+#[test]
+fn a_bus_the_cloud_does_not_have_is_refused_instead_of_swapped() {
+    let dir = fixture_bus(
+        "cloud",
+        "[bus]\nengine = \"kafka\"",
+        "[bus]\nengine = \"kafka\"",
+    );
+    for target in ["gcp", "aws"] {
+        let (_, err, ok) = axon(&["infra", &dir.to_string_lossy(), "--target", target]);
+        assert!(!ok, "{target}: rendered a bus it does not have");
+        assert!(err.contains("is not rendered on"), "{target}: {err}");
+    }
+}
+
+#[test]
+fn an_unknown_key_in_a_subscription_is_refused() {
+    // The keys are new, so the typo is new too. Ignoring it would leave a
+    // `max_delivers` that reads like a decision in review and does nothing.
+    let dir = fixture_bus("typo", "max_delivers = 3", "");
+    let (out, err, ok) = axon(&["verify", &dir.to_string_lossy()]);
+    assert!(!ok, "{out}");
+    assert!(
+        err.contains("max_delivers") || out.contains("max_delivers"),
+        "{out}{err}"
+    );
+}
+
+/// A service with a task and the table its queue lives in. `body` replaces the
+/// task block, which is what every rule here is about.
+fn fixture_task(who: &str, task: &str, ddl: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("axon-task-{who}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(dir.join("sql/001_init.expand.sql"), ddl).unwrap();
+    std::fs::write(
+        dir.join("tienda.toml"),
+        format!(
+            r#"service = "tienda"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[analytics]
+export = false
+
+[infra]
+state = "postgres"
+migrations = "sql/"
+
+[methods.comprar]
+in = {{ orderId = "uuid" }}
+out = {{ ok = "string" }}
+timeout_ms = 2000
+idempotent = true
+
+{task}
+"#
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+const COLA: &str = "CREATE TABLE axon_task (\n  id uuid PRIMARY KEY,\n  name text NOT NULL,\n  \
+                    status text NOT NULL,\n  run_at timestamptz NOT NULL,\n  \
+                    attempts int NOT NULL,\n  data jsonb NOT NULL,\n  \
+                    updated timestamptz NOT NULL\n);\n";
+
+const TAREA: &str = r#"[tasks.exportOrders]
+handler = "onExportOrders"
+in = { tenantId = "uuid", month = "string" }
+idempotent = true
+timeout_ms = 300000
+delay_ms = 3600000
+concurrency = 4
+max_deliver = 3
+"#;
+
+#[test]
+fn a_task_gets_its_enqueue_its_worker_and_its_schedule() {
+    let dir = fixture_task("ok", TAREA, COLA);
+    let d = dir.to_string_lossy().to_string();
+    let (out, err, ok) = axon(&["verify", &d]);
+    assert!(ok, "{out}{err}");
+
+    let manifest = dir.join("tienda.toml").to_string_lossy().to_string();
+    let (ts, err, ok) = axon(&["build", &manifest, &d]);
+    assert!(ok, "{err}");
+    for piece in [
+        // the receipt, which is the thing an event cannot give back
+        "Promise<{ taskId: string }>",
+        // the deferral, which is the other one
+        "opts?.delayMs ?? 3600000",
+        // the ceiling, so a batch does not drain as fast as the database allows
+        "limit = 4",
+        "if (attempts >= 3)",
+        // and the work itself is implemented, not generated
+        "abstract onExportOrders(input: ExportOrdersTask",
+    ] {
+        assert!(ts.contains(piece), "missing `{piece}` in:\n{ts}");
+    }
+
+    let (go, err, ok) = axon(&["build", &manifest, &d, "--lang", "go"]);
+    assert!(ok, "{err}");
+    assert!(go.contains("func EnqueueExportOrders("), "{go}");
+    assert!(go.contains("func RunExportOrders("), "{go}");
+
+    // And somebody hits the route: a worker that only drains in process leaves
+    // behind what was enqueued while nobody was up.
+    let (plan, err, ok) = axon(&["infra", &d, "--target", "plan"]);
+    assert!(ok, "{err}");
+    assert!(plan.contains("/internal/task/exportOrders/run"), "{plan}");
+}
+
+#[test]
+fn a_queue_with_no_table_is_an_enqueue_that_writes_nowhere() {
+    let dir = fixture_task(
+        "notable",
+        TAREA,
+        "CREATE TABLE thing (id uuid PRIMARY KEY);\n",
+    );
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("the `axon_task` table is missing"), "{all}");
+}
+
+#[test]
+fn a_date_stored_as_text_would_claim_the_wrong_rows() {
+    let dir = fixture_task(
+        "types",
+        TAREA,
+        &COLA.replace("run_at timestamptz", "run_at text"),
+    );
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("`axon_task.run_at` is `text`"), "{all}");
+}
+
+#[test]
+fn retrying_a_task_that_is_not_idempotent_is_refused() {
+    let dir = fixture_task(
+        "idem",
+        &TAREA.replace("idempotent = true", "idempotent = false"),
+        COLA,
+    );
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(
+        all.contains("runs up to 3 times and is not `idempotent`"),
+        "{all}"
+    );
+}
+
+#[test]
+fn a_queue_needs_somebody_awake() {
+    let dir = fixture_task("job", TAREA, COLA);
+    let t = dir.join("tienda.toml");
+    let s = std::fs::read_to_string(&t).unwrap().replace(
+        "state = \"postgres\"",
+        "state = \"postgres\"\nruntime = \"job\"\nschedule = \"*/15 * * * *\"",
+    );
+    std::fs::write(&t, s).unwrap();
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("A job runs on its schedule and dies"), "{all}");
+}
+
+#[test]
+fn one_name_is_one_implementation() {
+    let dir = fixture_task("clash", &TAREA.replace("onExportOrders", "comprar"), COLA);
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("is already a method"), "{all}");
+}

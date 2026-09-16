@@ -859,6 +859,175 @@ fn flags(m: &Manifest) -> String {
     o
 }
 
+/// What each subscription asks of the broker, so the consumer is wired from
+/// here and not from memory. The same numbers `axon infra` prints in the
+/// commands that create them.
+fn subscriptions(m: &Manifest) -> String {
+    if m.consumes.is_empty() {
+        return String::new();
+    }
+    let doc = comment(
+        "Subscription is what a consumer asks of the broker.\n\nAckWaitMS is how long the \
+         handler has before the event comes back. Shorter than it really takes and it runs \
+         twice, with nothing saying so: the dedup by envelope id is what makes that survivable, \
+         not harmless.",
+    );
+    let mut o = format!(
+        "{doc}type Subscription struct {{\n\tGroup      string\n\tMaxDeliver int\n\t\
+         OrderedBy  string\n\tAckWaitMS  int\n}}\n\n\
+         // Subscriptions is what the manifest declared, by event.\n\
+         var Subscriptions = map[string]Subscription{{\n"
+    );
+    for (ev, c) in &m.consumes {
+        o.push_str(&format!(
+            "\t{ev:?}: {{Group: {:?}, MaxDeliver: {}, OrderedBy: {:?}, AckWaitMS: {}}},\n",
+            c.group(&m.service),
+            c.max_deliver(),
+            c.ordered_by.clone().unwrap_or_default(),
+            c.ack_wait_ms.unwrap_or(0),
+        ));
+    }
+    o.push_str("}\n\n");
+    o
+}
+
+/// The task queue in Go: the same table, the same claim, the same ceiling.
+fn tasks_go(m: &Manifest) -> String {
+    if m.tasks.is_empty() {
+        return String::new();
+    }
+    let mut o = comment(
+        "TaskQueue is the queue, which is a table in this service's own database. \
+         Enqueuing inside the transaction that changed the row is one more write —not a second \
+         commit that can be lost.\n\nClaim is the one that cannot be written casually: two \
+         workers taking the same row run the task twice. It has to be one statement with FOR \
+         UPDATE SKIP LOCKED, which is what makes two workers take different rows, and a \
+         staleBefore on the rows left running, which is what brings back what a worker that \
+         died was holding.",
+    );
+    o.push_str(
+        "type TaskRow struct {\n\tID       string\n\tAttempts int\n\tData     Envelope\n}\n\n\
+         type TaskQueue interface {\n\t\
+           Enqueue(ctx context.Context, id, name string, runAt time.Time, data Envelope) error\n\t\
+           Claim(ctx context.Context, name string, due, staleBefore time.Time, limit int) ([]TaskRow, error)\n\t\
+           Done(ctx context.Context, id string) error\n\t\
+           Retry(ctx context.Context, id string, runAt time.Time) error\n\t\
+           Dead(ctx context.Context, id string, reason error) error\n\t\
+           Read(ctx context.Context, id string) (status string, attempts int, err error)\n\
+         }\n\n",
+    );
+    o.push_str(&comment(
+        "TaskReport is what one pass did. Pending says the limit filled up and there is more \
+         waiting, which is the difference between a worker that keeps up and one that does not.",
+    ));
+    o.push_str(
+        "type TaskReport struct {\n\tClaimed int\n\tDone    int\n\tRetried int\n\tDead    int\n\t\
+         Pending bool\n}\n\n",
+    );
+
+    for (name, t) in &m.tasks {
+        let p = exported(name);
+        o.push_str(&struct_of(
+            &format!("{p}Task"),
+            &t.input.iter().collect::<Vec<_>>(),
+            &format!("{p}Task is what {name} is enqueued with."),
+        ));
+        // Only when there is one to apply: `if delay == 0 { delay = 0 }` is a
+        // knob that reads as a decision and is not one.
+        let default_delay = match t.delay_ms.unwrap_or(0) {
+            0 => String::new(),
+            ms => format!("if delay == 0 {{\n\t\tdelay = {ms} * time.Millisecond\n\t}}\n\t"),
+        };
+        o.push_str(&comment(&format!(
+            "Enqueue{p} enqueues {name} and returns the id, which is the receipt: it is the \
+             only thing the caller keeps, and TaskQueue.Read is where it is looked up. Call it \
+             inside the transaction that made the work necessary.",
+        )));
+        o.push_str(&format!(
+            "func Enqueue{p}(ctx context.Context, q TaskQueue, in {p}Task, cause Envelope, \
+             delay time.Duration) (string, error) {{\n\t\
+               {default_delay}\
+               id := uuid4()\n\t\
+               // The envelope travels with it: the trace of whoever enqueued it is what\n\t\
+               // connects the work to the request that caused it.\n\t\
+               e, err := NewEnvelope(\"task.{name}\", {svc:?}, in, &cause)\n\t\
+               if err != nil {{\n\t\treturn \"\", err\n\t}}\n\t\
+               return id, q.Enqueue(ctx, id, {name:?}, time.Now().Add(delay), e)\n\
+             }}\n\n",
+            svc = m.service,
+        ));
+
+        let limit = t.concurrency.unwrap_or(1);
+        let stale = match t.timeout_ms {
+            Some(ms) => format!("{ms} * time.Millisecond"),
+            // Nothing to measure a hung run against, so nothing is reclaimed.
+            None => "time.Duration(1<<62)".into(),
+        };
+        o.push_str(&comment(&format!(
+            "Run{p} is one pass of the {name} queue: it claims what is due and runs it, up to \
+             {limit} at a time —the declared concurrency— because a queue that drains as fast \
+             as the database allows is how a batch takes down the database the rows are read \
+             from.\n\nA run that fails goes back to waiting with exponential backoff until \
+             attempt {}; after that it is left dead where somebody can see it.",
+            t.max_deliver()
+        )));
+        o.push_str(&format!(
+            "func Run{p}(ctx context.Context, q TaskQueue, h func(context.Context, {p}Task, \
+             Envelope) error, limit int) (TaskReport, error) {{\n\t\
+               if limit <= 0 {{\n\t\tlimit = {limit}\n\t}}\n\t\
+               now := time.Now()\n\t\
+               rows, err := q.Claim(ctx, {name:?}, now, now.Add(-({stale})), limit)\n\t\
+               if err != nil {{\n\t\treturn TaskReport{{}}, err\n\t}}\n\t\
+               r := TaskReport{{Claimed: len(rows), Pending: len(rows) >= limit}}\n\t\
+               var mu sync.Mutex\n\t\
+               var wg sync.WaitGroup\n\t\
+               for _, row := range rows {{\n\t\t\
+                 wg.Add(1)\n\t\t\
+                 go func(row TaskRow) {{\n\t\t\t\
+                   defer wg.Done()\n\t\t\t\
+                   var in {p}Task\n\t\t\t\
+                   runErr := json.Unmarshal(row.Data.Data, &in)\n\t\t\t\
+                   if runErr == nil {{\n\t\t\t\t\
+                     runErr = h(ctx, in, row.Data)\n\t\t\t}}\n\t\t\t\
+                   mu.Lock()\n\t\t\t\
+                   defer mu.Unlock()\n\t\t\t\
+                   if runErr == nil {{\n\t\t\t\t\
+                     if err := q.Done(ctx, row.ID); err == nil {{\n\t\t\t\t\t\
+                       r.Done++\n\t\t\t\t}}\n\t\t\t\t\
+                     return\n\t\t\t}}\n\t\t\t\
+                   if row.Attempts >= {attempts} {{\n\t\t\t\t\
+                     if err := q.Dead(ctx, row.ID, runErr); err == nil {{\n\t\t\t\t\t\
+                       r.Dead++\n\t\t\t\t}}\n\t\t\t\t\
+                     return\n\t\t\t}}\n\t\t\t\
+                   // Exponential from a second: a task that fails because what it calls\n\t\t\t\
+                   // is down should not hammer it while it comes back.\n\t\t\t\
+                   back := time.Duration(1<<uint(row.Attempts)) * time.Second\n\t\t\t\
+                   if err := q.Retry(ctx, row.ID, time.Now().Add(back)); err == nil {{\n\t\t\t\t\
+                     r.Retried++\n\t\t\t}}\n\t\t\
+                 }}(row)\n\t}}\n\t\
+               wg.Wait()\n\t\
+               return r, nil\n\
+             }}\n\n",
+            attempts = t.max_deliver()
+        ));
+    }
+
+    o.push_str(&comment(
+        "Tasks is what the manifest declares, with the route axon infra points a scheduler at. \
+         Startup has to serve each one by calling its Run: a scheduler aimed at a 404 applies \
+         with no error and drains nothing.",
+    ));
+    o.push_str("var Tasks = map[string]string{\n");
+    for name in m.tasks.keys() {
+        o.push_str(&format!(
+            "\t{name:?}: \"POST {}\",\n",
+            Task::run_route(name)
+        ));
+    }
+    o.push_str("}\n\n");
+    o
+}
+
 /// In Go the business logic implements an interface; it does not inherit.
 fn handlers(m: &Manifest) -> String {
     let s = exported(&m.service);
@@ -869,6 +1038,13 @@ fn handlers(m: &Manifest) -> String {
             "\t// consume {ev}\n\t{}(ctx context.Context, e Envelope, data {}) error\n",
             exported(&spec.handler),
             exported(ev)
+        ));
+    }
+    for (name, t) in &m.tasks {
+        o.push_str(&format!(
+            "\t// task {name}\n\t{}(ctx context.Context, in {}Task, e Envelope) error\n",
+            exported(&t.handler),
+            exported(name)
         ));
     }
     for name in m.methods.keys() {
@@ -1003,11 +1179,13 @@ pub fn build(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     let pkg = m.service.replace(['-', '_'], "");
     let c = crate::contract::of(m, all)?;
     let body = format!(
-        "{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}",
         types(&c),
         problem(m),
         failures(m),
         scopes(m),
+        subscriptions(m),
+        tasks_go(m),
         handlers(m),
         service(m),
         clients(m, &c.calls),
