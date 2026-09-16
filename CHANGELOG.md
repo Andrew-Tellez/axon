@@ -7,6 +7,21 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [No publicado]
+
+### Cambiado
+
+- **La página de patrones cubre los flujos durables y la cola de tareas.** Los dos bloques
+  salieron en 0.37.0 y la página no los nombraba, así que la fila de la tabla remitía a un
+  sitio donde no estaban. Lo que se cuenta no es la lista de llaves —esa está en la
+  referencia del manifiesto— sino el porqué: qué es lo que un saga no puede hacer y por
+  qué esas dos cosas solo existen contra un historial, que `engine = "saga"` no es una
+  segunda implementación sino el coordinador de siempre, que `engine = "temporal"` es un
+  worker y no un runtime que axon despliegue, y la regla de la forma contra la baseline
+  con lo que entra en la huella y lo que no. De la cola, por qué es una tabla del propio
+  servicio —la misma razón que el outbox— y el `claim` entero explicado, que es lo único
+  ahí que no se puede escribir a la ligera.
+
 ## [0.37.1] — 2026-09-16
 
 ### Corregido
