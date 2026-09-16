@@ -18,6 +18,8 @@ not in the generated code, it does not exist.
 | **Event sourcing** | `[aggregate.<name>]` | The append-only store, the `fold` with one case per declared event, and the optimistic versioning. An `UPDATE` on the stream is a `verify` error, no exceptions. See [below](#event-sourcing). |
 | **CQRS** | `[view.<name>]` | The projection with one case per event and its checkpoint. A view that promises `strong`, or more lag than the service, is an error. See [below](#cqrs-the-read-model). |
 | **Saga** | `[saga.<name>]` | The complete coordinator: order, journal, compensation in reverse order, and the sweep that resumes what was left stranded. An intermediate step with no `undo` is an error. See [below](#saga). |
+| **Durable workflow** | `[workflow.<name>]` | A saga that can also wait: a durable timer and a signal. Over Postgres it is the coordinator above; over Temporal it is a worker, and a change to the flow's shape that does not bump its `version` is an error. See [below](#durable-workflows). |
+| **Task queue** | `[tasks.<name>]` | Work that runs later, capped, and with a receipt. The queue is a table in the service's own database, so the enqueue goes in the caller's transaction. Retrying something non-idempotent is an error. See [below](#the-task-queue). |
 
 The GoF patterns live one level down, in the code the team writes — that is what
 [`gof-patterns`](https://github.com/Andrew-Tellez/patterns) is for, in six languages.
@@ -418,6 +420,246 @@ there would be putting something of the demo's inside the generated infrastructu
 And the attempt log lives in `tenant_exempt` in writing: it is infrastructure of the retry
 policy, not tenant data. Without that explicit declaration, the RLS rule would flag it
 —correctly— and stop being useful for everything else.
+
+## Durable workflows
+
+A saga cannot wait. It calls, it compensates, and everything it does happens inside a
+process that has to be alive from the first step to the last. Two things it cannot
+express, and both are ordinary in a real flow:
+
+- **wait a day** before charging a subscription, and
+- **wait for something to arrive** — the payment settles, a human approves, a document
+  finishes processing.
+
+A coordinator that sleeps for a day is a process that has to stay up for a day, and one
+that waits for an event is a saga that stopped being a sequence. Both of them only exist
+against a **history**: something that records what already happened, so a restarted worker
+can replay up to where it was instead of starting over.
+
+`[workflow.<name>]` is the saga with those two, and with a choice of who keeps that
+history.
+
+```toml
+[workflow.checkout]
+engine     = "temporal"     # temporal | saga (the default)
+on         = "placeOrder"
+task_queue = "commerce"     # the service's name when it is not said
+# It has to cover the timer AND the wait below: a budget that runs out while a step is
+# legitimately waiting compensates something that later succeeded.
+timeout_ms = 604800000
+version    = 1
+
+[[workflow.checkout.steps]]
+do    = "inventory.reserveStock"
+undo  = "inventory.releaseStock"
+retry = { max = 3, backoff = "exponential", initial_ms = 200 }
+heartbeat_ms = 30000
+
+[[workflow.checkout.steps]]
+sleep_ms = 86400000            # a durable timer: a row with a date, not a process waiting
+
+[[workflow.checkout.steps]]
+awaits     = "payment.settled@v1"   # a signal: an event this service already consumes
+timeout_ms = 172800000
+```
+
+A step is **exactly one** of the three: a call, a timer or a signal. Two at once leaves
+the order between them undeclared and the generator would have to pick one, which is a
+decision nobody wrote down.
+
+### `engine = "saga"` is not a second implementation
+
+With the default engine there is no new generator. The workflow is lowered onto the
+coordinator described [above](#saga): the same `saga_<name>` journal, the same sweep, the
+same compensation in reverse, the same rules. A `saga` workflow **is** a saga, and the
+only difference is the block it was written in.
+
+Which is why the three keys that need a history —`sleep_ms`, `awaits`, `retry`— are an
+**error** on that engine and not a warning. The Postgres coordinator calls and
+compensates, and that is all: leaving those keys silent would be a declaration that reads
+like a decision in a review and does nothing.
+
+### `engine = "temporal"` is a worker, not a runtime axon ships
+
+Temporal is a server with a history and a replayer. axon does not reimplement it and does
+not deploy it: it **declares** it and generates the worker, which is the same division as
+everywhere else — the design is yours, the mechanical part is generated.
+
+| Temporal | declared as |
+| --- | --- |
+| activity | a step's `do`, which is already a `[[depends]]` |
+| retry policy | `retry` on the step |
+| timer | `sleep_ms` |
+| signal | `awaits`, over an event in `[consumes]` |
+| task queue | `task_queue`, and the worker `axon infra` points at it |
+
+What comes out is the flow with its control structure: a `proxyActivities` per step with
+its own timeout and policy, the `sleep`, the `setHandler` + `condition` on the signal, and
+the compensations in reverse over what actually ran. What does **not** come out is what
+the activities do — that is an interface you implement, like the saga's actions.
+
+`--target local` brings up the server and its UI in the compose, because a generated
+worker with nowhere to run is half a feature. On `k8s` only the address: a Temporal in a
+generated manifest is a file nobody can operate, and it is a managed service or its own
+chart.
+
+### The rule that justifies the whole block
+
+A workflow is replayed against the history it started with. Change the steps while
+instances are still in the air and the worker does not fail where the change is: it fails
+wherever the replay stops matching, and the flows already started stay stuck with nothing
+in the logs that names the cause. It is the most expensive failure in durable execution
+and the least legible.
+
+`axon baseline` records each `temporal` workflow's **shape** and its `version`, and
+`verify` compares:
+
+```
+error: orders.checkout: the shape changed —step 3 was `awaits payment.settled@v1` and is
+       `do inventory.readProduct`— and it is still `version = 1`. A flow in flight
+       replays the history it started with: from the step that no longer matches, it
+       neither goes on nor compensates. Bump `version` and leave the old one running
+       until it drains.
+```
+
+The shape is the steps and nothing else. A raised timeout does not change a history, so
+demanding a bump for it would be a false positive — the same carve-out, and for the same
+reason, as the saga's last step. A timer's **duration** is in the shape, because a replay
+reschedules the same timer and one of a different length is exactly the mismatch this
+exists to catch.
+
+### What `verify` refutes about a workflow
+
+Everything in the [saga's table](#what-verify-refutes) applies, plus:
+
+| | |
+| --- | --- |
+| A step that is not exactly one of `do`, `sleep_ms`, `awaits` | two at once leaves the order between them undeclared; none at all is a step that does nothing |
+| `awaits` over an event the service does not consume | the signal arrives as an event or it does not arrive: a flow waiting for one nobody sends never ends |
+| `sleep_ms`, `awaits`, `retry` or `heartbeat_ms` on `engine = "saga"` | there is no history to resume from; the key would look declared and do nothing |
+| Two services polling the same `task_queue` | a worker only runs the flows it was compiled with: whichever picks up the other one's task fails it for good |
+| `timeout_ms` that does not cover the timers **and** the waits | giving up while a step is legitimately waiting compensates something that later succeeds |
+| A changed shape on the same `version` | see above |
+| No `version` | without it nobody can say whether the instances in flight still match |
+
+That last pair is why `version` is worth writing even for a flow nobody has changed yet:
+it is the number a replay is told apart by, and there is no way to add it after the
+instances exist.
+
+## The task queue
+
+Most of what gets called an asynchronous task is an event the service sends to itself,
+and for that there is `[emits]` and `[consumes]` — with `group`, `max_deliver` and
+`ack_wait_ms` for how it is delivered. Reaching for anything else first is building a
+second system for what one already does.
+
+Three things an event cannot do:
+
+| | |
+| --- | --- |
+| **run later** | "charge this in three days" is a row with a date, not a subscriber holding a message for three days |
+| **be capped** | a queue that drains as fast as the database allows is how a batch of exports takes down the database the rows are read from |
+| **hand back a receipt** | fire-and-forget returns nothing, and whoever enqueued has no id to ask about |
+
+```toml
+[tasks.exportOrders]
+handler     = "onExportOrders"
+in          = { tenantId = "uuid", month = "string" }
+idempotent  = true
+timeout_ms  = 300000
+delay_ms    = 3600000
+concurrency = 4
+max_deliver = 3
+```
+
+### The queue is a table, and that is the point
+
+It lives in the service's own Postgres, in `axon_task`. Not in the broker, and the reason
+is the same one the [outbox](#the-outbox-and-the-callers-transaction) exists for:
+enqueuing inside the transaction that made the work necessary is **one more write**, not a
+second commit that can be lost between the row and the queue.
+
+```sql
+CREATE TABLE axon_task (
+  id       uuid        PRIMARY KEY,  -- the receipt the caller keeps
+  name     text        NOT NULL,     -- which of the declared tasks this row is
+  status   text        NOT NULL,
+  run_at   timestamptz NOT NULL,     -- what `delay_ms` writes
+  attempts int         NOT NULL,     -- against `max_deliver`
+  data     jsonb       NOT NULL,     -- the envelope it was enqueued with
+  updated  timestamptz NOT NULL      -- so a dead worker can be told from a slow one
+);
+```
+
+`verify` requires the table and the type of every column that gets compared. A `run_at`
+stored as text compares and sorts wrong: the claim would pick up tasks that are not due
+and skip ones that are, and nothing would say so.
+
+One table for every task of the service, with the name in a column. A table per task is a
+migration per task and they would all have the same shape.
+
+### `claim` is the one that cannot be written casually
+
+Two workers taking the same row run the task twice, so the generated interface carries the
+statement in its own documentation:
+
+```sql
+UPDATE axon_task SET status = 'running', attempts = attempts + 1, updated = now()
+ WHERE id IN (SELECT id FROM axon_task
+               WHERE name = $1 AND run_at <= $2
+                 AND (status = 'waiting' OR (status = 'running' AND updated < $3))
+               ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT $4)
+RETURNING id, attempts, data;
+```
+
+`SKIP LOCKED` is what makes two workers take **different** rows. The `updated < $3` is
+what brings back what a worker that died was holding: a `running` row older than the
+task's own budget was not being worked on, and nothing else can tell that apart from one
+still in progress. That is what `timeout_ms` is for, and why a task without one gets a
+warning — it can hang in `running` forever and never be retried.
+
+### What gets generated
+
+The enqueue with its receipt, the worker with the claim, the exponential backoff and the
+ceiling of attempts, and the route a scheduler hits:
+
+```ts
+export async function enqueueExportOrders(
+  queue: TaskQueue,
+  input: ExportOrdersTask,
+  e: Envelope<unknown>,
+  opts?: { delayMs?: number },
+): Promise<{ taskId: string }>;
+
+export async function runExportOrders(
+  queue: TaskQueue,
+  handler: (input: ExportOrdersTask, e: Envelope<ExportOrdersTask>) => Promise<void>,
+  limit = 4,           // the declared `concurrency`
+): Promise<TaskReport>;
+```
+
+The envelope travels with the row. A task that runs an hour after the request that caused
+it has no other way back to it, and the causal chain is not optional here either.
+
+The worker drains its own queue in process; the schedule `axon infra` deploys is the floor
+and not the latency. It is what runs what was enqueued while nobody was up, and what
+claims back what a dead worker was holding — neither is urgent, and both are the
+difference between a queue that drains and one that stops without saying so.
+
+### What `verify` refutes about a task
+
+| | |
+| --- | --- |
+| `max_deliver > 1` and not `idempotent` | a task is retried when the worker that had it dies, and there is no telling whether it died before or after the effect |
+| `runtime = "job"` with tasks declared | a job runs on its schedule and dies; a queue needs somebody awake, and what is enqueued in between waits for the next run with nothing saying so |
+| The `axon_task` table missing, or a column, or a column's type | see above |
+| A handler that is already a method's or an event's | one name is one implementation: shared, it is one function receiving two different shapes |
+| `concurrency = 0` or `max_deliver = 0` | nothing runs it, and the rows pile up with no error anywhere |
+| No `timeout_ms` | a warning: a task that hangs stays `running` forever, because nothing can tell it from one still working |
+
+`axon_task` carries no `tenant_id` and that is not an oversight: like the `outbox` and the
+inbox's dedup table, it is a table axon writes and no tenant owns, so the multi-tenancy
+rules skip it by name.
 
 ## Event sourcing
 
