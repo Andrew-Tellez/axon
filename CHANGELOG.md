@@ -7,6 +7,27 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.37.1] — 2026-09-16
+
+### Corregido
+
+- **El presupuesto de un `[workflow]` no contaba la espera de una señal.** Sumaba las
+  llamadas, sus compensaciones y los timers, pero no el `timeout_ms` de un `awaits`, así
+  que un flujo que puede esperar dos días a que llegue el evento pasaba con un presupuesto
+  de quince minutos. Lo que habría hecho en producción es rendirse en mitad de la espera y
+  compensar algo que no había fallado — que es exactamente lo que esta regla existe para
+  impedir del otro lado.
+
+  Lo encontró `axon verify` sobre el ejemplo que se estaba escribiendo para el README: la
+  regla vio el error antes que quien la escribió.
+
+### Cambiado
+
+- **El README cuenta los cuatro bloques de 0.37.0.** Una sección nueva con la razón de cada
+  uno y no su lista de llaves: qué se rompe si dos servicios no coinciden en el bus, por
+  qué la cola de tareas es una tabla del propio servicio, y qué refuta `verify` sobre la
+  forma de un flujo que tiene instancias en vuelo.
+
 ## [0.37.0] — 2026-09-15
 
 ### Añadido
