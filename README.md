@@ -68,6 +68,40 @@ the diagram is stale: somebody broke the manifest, and CI says so before the mer
 > retry policy, method signatures, infrastructure resources. And it verifies that they
 > stay in agreement.
 
+### What happens outside a request is declared too
+
+A manifest is not only routes and events. The parts that cost the most to get right are
+the ones nobody is watching while they run, and they are declared in the same file:
+
+| | |
+| --- | --- |
+| `[bus]` | The broker the events travel on: `nats`, `kafka` or `rabbit`. Two services that disagree is an event published on one and consumed from the other — the emitter succeeds, the consumer stays quiet, and the only sign is a handler that never runs. On a managed cloud the bus is the cloud's, so a declared `kafka` is **refused** instead of quietly rendered as Pub/Sub |
+| `[consumes]` | What each subscription asks of it: the group that splits the work, the field whose order is kept, the attempts before the dead letter, and the window the handler has before the event comes back. The same numbers come out in the command that creates the consumer and in the generated contract, so they cannot drift |
+| `[tasks]` | Work that runs later, with a ceiling on how much of it runs at once, and that hands back a receipt — the three things a fire-and-forget event cannot do. The queue is a table in the service's own database: enqueuing inside the transaction that made the work necessary is one more write, not a second commit that can be lost |
+| `[workflow]` | A saga that can also wait: a durable timer and a signal. Over Postgres it is the coordinator axon already generated; over Temporal it is a worker, and the flow's shape is compared against the published one — a change that does not bump `version` is the replay that strands every instance in flight, and it fails before the deploy instead of in production |
+
+```toml
+[workflow.checkout]
+engine = "temporal"
+on = "placeOrder"
+# It has to cover the timer and the wait below: a budget that runs out while
+# a step is legitimately waiting compensates something that later succeeds.
+timeout_ms = 604800000
+version = 1
+
+[[workflow.checkout.steps]]
+do = "inventory.reserveStock"
+undo = "inventory.releaseStock"
+retry = { max = 3, initial_ms = 200 }
+
+[[workflow.checkout.steps]]
+sleep_ms = 86400000          # a timer, not a process waiting a day
+
+[[workflow.checkout.steps]]
+awaits = "payment.settled@v1"   # a signal: an event this service already consumes
+timeout_ms = 172800000
+```
+
 ## The demo, in two commands
 
 `examples/` ships three services that really run —one over four Postgres nodes with
