@@ -22,6 +22,13 @@ perderlas.
   servicio —la misma razón que el outbox— y el `claim` entero explicado, que es lo único
   ahí que no se puede escribir a la ligera.
 
+- **La referencia del manifiesto cubre `[bus]`, `[workflow]`, `[tasks]` y las cuatro
+  llaves nuevas de `[consumes]`.** Tres secciones con la forma que tiene el resto de esa
+  página: el bloque declarado, la frase que dice para qué es, y la tabla de lo que
+  `verify` refuta. La del bus es la que más aporta, porque es la única que dice en voz
+  alta que en una nube gestionada el bus es el de la nube y un `kafka` declarado se
+  rechaza en vez de traducirse en silencio.
+
 ## [0.37.1] — 2026-09-16
 
 ### Corregido

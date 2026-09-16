@@ -323,6 +323,46 @@ What it buys:
 Same value Pact gets from recording traffic, without recording anything, and it fails in
 the PR instead of after the deploy.
 
+## `[bus]` and what each subscription asks of it
+
+```toml
+[bus]
+engine       = "kafka"       # nats (the default) · kafka · rabbit · none
+retention_ms = 604800000     # the window a consumer that was down catches up in
+
+[consumes."order.placed@v1"]
+handler     = "onOrderPlaced"
+uses        = ["orderId", "total"]
+group       = "payments"     # competing consumers; the service's name by default
+ordered_by  = "tenantId"     # a field of the EVENT, not necessarily one it reads
+max_deliver = 3              # attempts before the dead letter
+ack_wait_ms = 30000          # what the handler has before the event comes back
+```
+
+The broker lives in the manifest, like `[cache]` and `[search]`, and what keeps five
+services from ending up on five brokers is not a shared file somebody has to remember to
+read: `verify` reads them all and refuses the disagreement by name. An event published on
+one bus and consumed from the other does not fail — the emitter succeeds, the consumer
+stays quiet, and the only sign is a handler that never runs.
+
+The four subscription keys are neutral: each one is translated to its engine, and they
+come out in the command that creates the consumer **and** in the generated contract, so
+wiring the consumer from the code cannot drift from what was declared.
+
+| | |
+| --- | --- |
+| Two services with different engines | a topic has one bus |
+| `ordered_by` over a field the event does not carry | and it says which ones it does carry |
+| `ordered_by` over an engine that does not partition | a warning: the order would have to come from a single consumer, and that is a decision about throughput |
+| Two services sharing a `group` | a group is split, not duplicated: the other one's handler never sees half the events |
+| `ack_wait_ms` under the budget of the flow that event starts | the event comes back while the flow is still going: a second coordinator over the same id, and both compensate |
+| `engine = "none"` with events declared | a publisher with nowhere to publish |
+
+On a managed cloud the bus is the cloud's, so `axon infra --target gcp` with a declared
+`kafka` **refuses** instead of quietly rendering Pub/Sub: another ordering, another
+redelivery, another failure. It comes up on `local`, and `--target plan` carries the
+subscriptions for your own template.
+
 ## `runtime = "job"`: something that runs and ends
 
 ```toml
@@ -421,6 +461,63 @@ version served for less than the declared window, an LTS that dies before the or
 version that follows it, versions out of order —the list is the order the adapters are
 applied in—, a past sunset still declared, a shape that changed with no `adapter` (naming
 the fields), a shape identical to the current one, and the two schemes at once.
+
+## `[workflow.<name>]`: a saga that can also wait
+
+```toml
+[workflow.checkout]
+engine     = "temporal"     # temporal · saga (the default)
+on         = "placeOrder"   # own method or consumed event that starts it
+task_queue = "commerce"     # the service's name by default
+timeout_ms = 604800000      # covers the calls, the timers AND the waits
+version    = 1              # what a replay tells one shape from another by
+
+[[workflow.checkout.steps]]
+do    = "inventory.reserveStock"
+undo  = "inventory.releaseStock"
+retry = { max = 3, backoff = "exponential", initial_ms = 200 }
+heartbeat_ms = 30000
+
+[[workflow.checkout.steps]]
+sleep_ms = 86400000                 # a durable timer
+
+[[workflow.checkout.steps]]
+awaits     = "payment.settled@v1"   # a signal: an event this service consumes
+timeout_ms = 172800000
+```
+
+A step is exactly one of `do`, `sleep_ms` or `awaits`. With `engine = "saga"` it IS a
+saga — the same journal, the same sweep, the same rules — and the keys that need a history
+(`sleep_ms`, `awaits`, `retry`, `heartbeat_ms`) are an error there instead of a key that
+looks declared and does nothing. With `engine = "temporal"` what comes out is the worker.
+
+`axon baseline` records the shape and `verify` refuses a change to it that does not bump
+`version`: a flow in flight replays the history it started with and, from the step that no
+longer matches, neither goes on nor compensates. See
+[Durable workflows](./patterns.md#durable-workflows).
+
+## `[tasks.<name>]`: work that runs later
+
+```toml
+[tasks.exportOrders]
+handler     = "onExportOrders"
+in          = { tenantId = "uuid", month = "string" }
+idempotent  = true
+timeout_ms  = 300000        # how long one run may take before it is taken as dead
+delay_ms    = 3600000       # before it becomes runnable
+concurrency = 4             # how many of it run at once
+max_deliver = 3
+```
+
+Most of what gets called an asynchronous task is an event the service sends to itself, and
+`[emits]` + `[consumes]` already cover that. What an event cannot do is run later, be
+capped, and hand back a receipt — the `taskId` whoever enqueued keeps.
+
+The queue is the `axon_task` table in the service's own database, which `verify` requires
+with the type of every column that gets compared: enqueuing inside the transaction that
+made the work necessary is one more write, not a second commit that can be lost. Retrying
+something that is not `idempotent`, or declaring tasks on a `runtime = "job"`, are errors.
+See [The task queue](./patterns.md#the-task-queue).
 
 ## `[aggregate.<name>]` and `[view.<name>]`
 
