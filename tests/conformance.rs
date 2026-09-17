@@ -11764,3 +11764,69 @@ fn a_fresh_project_passes_its_own_test_command() {
         "`{cmd}` ran no test on a fresh project:\n{printed}"
     );
 }
+
+/// `httpRoutes` is always exported, empty included.
+///
+/// It used to appear only when there were routes, so a service that serves
+/// none —a consumer, a job— generated a module WITHOUT the export, and
+/// everything importing it stopped loading with a SyntaxError about a missing
+/// name instead of reading an empty list. The scaffold `axon init` writes
+/// imports it, so removing the last route from a manifest was a project that
+/// stopped running.
+///
+/// A generated module's SURFACE cannot depend on the data: whoever imports it
+/// wrote their import once.
+#[test]
+fn the_contracts_surface_does_not_change_with_the_data() {
+    let dir = std::env::temp_dir().join("axon-surface");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // A service that serves nothing: it only reacts, which is an ordinary
+    // shape and not a corner case.
+    std::fs::write(
+        dir.join("avisos.toml"),
+        r#"service = "avisos"
+version = "1.0.0"
+owner = "equipo"
+tier = "3"
+
+[analytics]
+export = false
+
+[cap]
+consistency = "eventual"
+on_partition = "degrade"
+max_staleness_ms = 5000
+
+[consumes."pago.liquidado@v1"]
+handler = "onPagoLiquidado"
+uses = []
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("banco.toml"),
+        r#"service = "banco"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[analytics]
+export = false
+
+[emits."pago.liquidado@v1"]
+orderId = "uuid"
+"#,
+    )
+    .unwrap();
+    let (ts, err, ok) = axon(&[
+        "build",
+        dir.join("avisos.toml").to_str().unwrap(),
+        dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "{err}");
+    assert!(
+        ts.contains("export const httpRoutes = [] as const;"),
+        "a service with no routes does not export httpRoutes:\n{ts}"
+    );
+}

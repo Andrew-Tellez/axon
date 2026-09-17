@@ -59,6 +59,14 @@ es exactamente para lo que existe.
   mismo. No lo vio nadie porque cada prueba de la suite comprueba lo que axon **imprime**;
   la nueva comprueba lo que eso impreso **hace**.
 
+- **`httpRoutes` desaparecía en vez de venir vacío.** Un servicio que no sirve ninguna ruta
+  —un consumidor, un job— generaba un módulo **sin** ese export, así que todo lo que lo
+  importaba dejaba de cargar con un `SyntaxError` sobre un nombre que falta en vez de leer
+  una lista vacía. El andamio que escribe `axon init` lo importa, de modo que quitar la
+  última ruta de un manifiesto era un proyecto que dejaba de arrancar. La superficie de un
+  módulo generado no puede depender de los datos: quien lo importa escribió su `import` una
+  vez.
+
 - **`axon tui` no mostraba ninguno de los cinco.** El panel listaba base de datos, caché,
   índice, eventos y rutas, y ni el bus, ni el socket, ni el stream, ni las tareas, ni los
   flujos. Un socket y un stream son puertas también, y una topología que dibuja solo las de

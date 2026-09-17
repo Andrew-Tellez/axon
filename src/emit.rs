@@ -373,13 +373,23 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         .filter_map(|me| me.http.clone())
         .map(|h| format!("\"{h}\""))
         .collect();
-    if !routes.is_empty() {
+    {
+        // ALWAYS, empty included. It used to appear only when there were
+        // routes, so a service that serves none —a consumer, a job— generated a
+        // module without the export, and everything importing it stopped
+        // loading with a SyntaxError about a name instead of an empty list.
+        // The scaffold `axon init` writes imports it, so that was a project
+        // that stopped running for having removed a route.
+        //
         // A declared route nobody serves returns 404 in production and shows up
         // in no test. Startup can refuse — but only if it knows which routes
         // there were supposed to be.
         out.push(format!(
             "\n/** HTTP routes the manifest declares. Startup must fail if any of them\n \
-             *  has no handler: a 404 in production tells nobody. */\n\
+             *  has no handler: a 404 in production tells nobody.\n \
+             *\n \
+             *  Empty is a value: a service that serves nothing —a consumer, a job—\n \
+             *  declares an empty list, and whoever imports it keeps loading. */\n\
              export const httpRoutes = [{}] as const;\n",
             routes.join(", ")
         ));

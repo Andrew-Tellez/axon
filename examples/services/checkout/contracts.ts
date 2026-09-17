@@ -974,7 +974,10 @@ export async function rebuildConversion(
 
 
 /** HTTP routes the manifest declares. Startup must fail if any of them
- *  has no handler: a 404 in production tells nobody. */
+ *  has no handler: a 404 in production tells nobody.
+ *
+ *  Empty is a value: a service that serves nothing —a consumer, a job—
+ *  declares an empty list, and whoever imports it keeps loading. */
 export const httpRoutes = ["POST /v1/checkouts"] as const;
 
 
