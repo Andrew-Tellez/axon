@@ -44,6 +44,11 @@ the attempts and the ack window on each consumer. Comments and not a container t
 them, because the day one of them fails is the day it matters — a bootstrap that swallows
 its own error leaves a consumer that never receives and a compose that came up green.
 
+An `[sse]` stream is an ordinary `GET` whose response stays open: `local`, `k8s` and
+`gcp` render it as a route with a long ceiling, and `aws` **refuses** it — API Gateway v2
+buffers the response and cuts the integration at 30 seconds, so it would deliver nothing
+and then end.
+
 A `[ws]` endpoint is a route like any other on `local` and `k8s` — the handshake is a
 `GET` that gets upgraded — and is **refused** on `gcp` and `aws`, whose edge serves a
 socket from a different resource than these routes render: what would get applied is an

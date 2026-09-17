@@ -5,6 +5,55 @@ use std::path::{Path, PathBuf};
 
 pub type Fields = IndexMap<String, String>;
 
+/// A stream of already-declared events, pushed to a client over one open
+/// HTTP response.
+///
+/// This is the direction a request/response transport does not have, and the
+/// reason it is declarable —where a WebSocket push is not— is that what
+/// travels over it is not new: they are the events of `[emits]` and
+/// `[consumes]`, with their types and their fields already written down. What
+/// gets generated is the wire format, which is finicky and worth getting right
+/// once, and the obligation to decide which connection each event belongs to.
+///
+/// That decision is NOT generated. Whether this event is for this connection
+/// is the only part that knows the domain, and a default there would be either
+/// "everything to everybody" or silence.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sse {
+    /// The route that stays open. Path parameters are what the filter gets to
+    /// decide with: `/v1/tenants/{tenantId}/stream` hands it the tenant.
+    pub path: Option<String>,
+    /// Who may open it. No default, like a method's and like the socket's.
+    pub auth: Option<String>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// The events that travel over it. Every one has to be declared by this
+    /// service —emitted or consumed— or it is a stream of something it never
+    /// receives.
+    #[serde(default)]
+    pub events: Vec<String>,
+    /// How often a comment line goes out. It is not a heartbeat for the
+    /// client's sake: it is what keeps a proxy from closing a connection it
+    /// believes is idle, and a client that reconnects in a loop is the symptom.
+    pub heartbeat_ms: Option<u32>,
+    /// What the browser is told to wait before reconnecting. It travels in the
+    /// stream itself, so it is a decision the server keeps.
+    pub retry_ms: Option<u32>,
+    /// Connections per minute. It is the handshake that gets throttled here —
+    /// unlike a socket, a stream carries nothing upward to limit.
+    pub rate_limit: Option<u32>,
+}
+
+impl Sse {
+    /// 15s. Under the 30-60s that proxies and load balancers usually cut an
+    /// idle connection at, which is the number that matters.
+    pub const HEARTBEAT_MS: u32 = 15_000;
+    pub fn heartbeat_ms(&self) -> u32 {
+        self.heartbeat_ms.unwrap_or(Self::HEARTBEAT_MS)
+    }
+}
+
 /// The WebSocket endpoint: one per service, and the transport of the methods
 /// that declare a `ws` type.
 ///
@@ -2067,6 +2116,9 @@ pub struct Manifest {
     /// The WebSocket endpoint, if the service has one. See `Ws`.
     #[serde(default, skip_serializing_if = "Ws::is_absent")]
     pub ws: Ws,
+    /// The event streams the service pushes over HTTP. See `Sse`.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub sse: IndexMap<String, Sse>,
     /// The broker its events travel on. See `Bus`.
     #[serde(default, skip_serializing_if = "Bus::is_default")]
     pub bus: Bus,

@@ -245,6 +245,23 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         ));
         cls.push("      }\n    });\n  }".into());
     }
+    for (name, st) in &m.sse {
+        cls.push(format!(
+            "  /** Does this event belong on THIS connection? It is the only part of a\n   \
+             *  stream that knows the domain —the tenant of the connection against the\n   \
+             *  tenant of the event— so it is declared as an obligation and not\n   \
+             *  defaulted: the two defaults available are everything to everybody and\n   \
+             *  silence.\n   \
+             *\n   \
+             *  `params` is what the path declares: {}. */\n  \
+             abstract stream{}(e: Envelope<unknown>, params: Record<string, string>): boolean;",
+            match path_params(st.path.as_deref().unwrap_or("")).as_slice() {
+                [] => "nothing; the route carries no parameters".to_string(),
+                ps => ps.join(", "),
+            },
+            pascal(name)
+        ));
+    }
     if m.ws.declared() {
         // Written line by line and not as one continued literal: `cargo fmt`
         // collapses a multi-line literal and the continuation's indentation
@@ -309,6 +326,9 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     }
     if m.ws.declared() {
         out.push(ws_ts(m));
+    }
+    if !m.sse.is_empty() {
+        out.push(sse_ts(m));
     }
     if !m.aggregate.is_empty() {
         out.push(aggregates_ts(m));
@@ -957,6 +977,96 @@ pub fn ws_ts(m: &Manifest) -> String {
         max = ws.max_message_bytes(),
         types = types.join("\n"),
     )
+}
+
+/// The `{name}` pieces of a route, which is what the filter gets to decide with.
+fn path_params(path: &str) -> Vec<String> {
+    path.split('/')
+        .filter_map(|seg| seg.strip_prefix('{')?.strip_suffix('}'))
+        .map(|s| format!("`{s}`"))
+        .collect()
+}
+
+/// The event streams: the wire format, and the decision that is not generated.
+///
+/// The format is worth generating exactly once. `data:` goes one line per line
+/// of payload —a raw newline inside it ends the frame early and the client
+/// sees a truncated event— the frame closes with a blank line, and a line
+/// starting with `:` is a comment, which is what a heartbeat is.
+pub fn sse_ts(m: &Manifest) -> String {
+    let mut o = vec![
+        [
+            "",
+            "/** One frame, as the wire wants it.",
+            " *",
+            " *  The payload goes through `JSON.stringify`, which never emits a raw newline",
+            " *  —it escapes them inside strings— so it is always ONE `data:` line. That is",
+            " *  the reason the frame is built from JSON and not from whatever the caller",
+            " *  has at hand: a raw newline in the payload ends the frame early and the",
+            " *  client reads a truncated event, with nothing saying so. */",
+            "export function sseFrame(id: string, event: string, data: unknown, retryMs?: number): string {",
+            "  const retry = retryMs === undefined ? \"\" : `retry: ${retryMs}\\n`;",
+            "  // The id travels so the client can send it back as `Last-Event-ID` when it",
+            "  // reconnects. What to do with it on the way back is yours: it is only",
+            "  // answerable if there is something to replay from.",
+            "  return `${retry}id: ${id}\\nevent: ${event}\\ndata: ${JSON.stringify(data)}\\n\\n`;",
+            "}",
+            "",
+            "/** The heartbeat: a comment line. It is not for the client —it is what keeps",
+            " *  a proxy from closing a connection it believes idle, and a client",
+            " *  reconnecting in a loop is the symptom of not sending it. */",
+            "export const sseHeartbeat = \": keep-alive\\n\\n\" as const;",
+        ]
+        .join("\n"),
+    ];
+    for (name, st) in &m.sse {
+        let p = pascal(name);
+        let union: Vec<String> = st
+            .events
+            .iter()
+            .map(|ev| format!("  | {{ event: {ev:?}; data: {} }}", pascal(ev)))
+            .collect();
+        o.push(format!(
+            "/** What may travel on the `{name}` stream. The types are the OWNER's: a\n \
+             *  stream does not get to reshape somebody else's event. */\n\
+             export type {p}Stream =\n{};\n",
+            union.join("\n")
+        ));
+    }
+    let rows: Vec<String> = m
+        .sse
+        .iter()
+        .map(|(name, st)| {
+            format!(
+                "  {name}: {{ path: {:?}, auth: {:?}, scopes: [{}], events: [{}], heartbeatMs: {}, retryMs: {} }},",
+                st.path.clone().unwrap_or_default(),
+                st.auth.clone().unwrap_or_default(),
+                st.scopes
+                    .iter()
+                    .map(|s| format!("{s:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                st.events
+                    .iter()
+                    .map(|s| format!("{s:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                st.heartbeat_ms(),
+                match st.retry_ms {
+                    Some(ms) => format!("{ms}"),
+                    None => "null".into(),
+                }
+            )
+        })
+        .collect();
+    o.push(format!(
+        "/** The declared streams. Startup must serve each `path` by holding the\n \
+         *  response open and writing frames: a route that answers and closes is a\n \
+         *  client that reconnects forever. */\n\
+         export const sseStreams = {{\n{}\n}} as const;\n",
+        rows.join("\n")
+    ));
+    o.join("\n")
 }
 
 /// The task queue: what enqueues, what drains it, and the table both agree on.

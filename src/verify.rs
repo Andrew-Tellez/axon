@@ -361,6 +361,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     bus(ms, &emitters, &mut errors, &mut warnings);
     tasks(ms, &esquemas, &mut errors, &mut warnings);
     websocket(ms, &mut errors, &mut warnings);
+    streams(ms, &emitters, &mut errors, &mut warnings);
     event_sourcing(ms, &emitters, &esquemas, &mut errors, &mut warnings);
     // Business metrics. What a funnel answers is derivable from the causal chain;
     // this is not, so the whole value of declaring it is that these things become
@@ -3646,6 +3647,151 @@ fn sagas(
                     "{svc}.{name}: coordinates a {noun} with `consistency = \"strong\"`. \
                  Between the first step and the last there are visible intermediate states \
                  no invariant describes: the real guarantee of the flow is eventual"
+                ));
+            }
+        }
+    }
+}
+
+// streams: what goes out over one connection that stays open, and the two
+// things that make it either useless or a leak
+fn streams(
+    ms: &[Manifest],
+    emitters: &IndexMap<&str, (&str, &Fields)>,
+    errors: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) {
+    for m in ms.iter().filter(|m| !m.external && !m.sse.is_empty()) {
+        let svc = &m.service;
+        if m.infra.runtime.as_deref() == Some("job") {
+            errors.push(format!(
+                "{svc}: `[sse]` on `runtime = \"job\"`. A job runs and ends; a stream is a \
+                 response that stays open, and there is nothing here to keep it open on"
+            ));
+        }
+        for (name, st) in &m.sse {
+            match st.path.as_deref() {
+                None => errors.push(format!(
+                    "{svc}.{name}: `[sse]` with no `path`. It is a route of the edge like any \
+                     other, and the edge cannot route what has no path"
+                )),
+                Some(p) if !p.starts_with('/') => errors.push(format!(
+                    "{svc}.{name}: `path = \"{p}\"` does not start with `/`"
+                )),
+                Some(p) => {
+                    if m.ws.path.as_deref() == Some(p) {
+                        errors.push(format!(
+                            "{svc}.{name}: `path = \"{p}\"` is also the socket's. One of the \
+                             two answers the GET, and which one is not declared anywhere"
+                        ));
+                    }
+                    for (n2, other) in m.methods.iter() {
+                        if other
+                            .http
+                            .as_deref()
+                            .and_then(|h| h.split_once(' '))
+                            .map(|x| x.1)
+                            == Some(p)
+                        {
+                            errors.push(format!(
+                                "{svc}.{name}: `path = \"{p}\"` is also the route of `{n2}`. A \
+                                 stream that stays open and a handler that answers and closes \
+                                 cannot be the same route"
+                            ));
+                        }
+                    }
+                }
+            }
+
+            match st.auth.as_deref() {
+                Some("public") | Some("required") => {}
+                Some(other) => errors.push(format!(
+                    "{svc}.{name}: `auth = \"{other}\"` does not exist; use \"public\" or \
+                     \"required\""
+                )),
+                None => errors.push(format!(
+                    "{svc}.{name}: a stream exposed with no `auth`; declare \"public\" or \
+                     \"required\". It carries events to whoever opens it, and who that may be \
+                     is not a default"
+                )),
+            }
+            if st.auth.as_deref() == Some("public") {
+                if !st.scopes.is_empty() {
+                    errors.push(format!(
+                        "{svc}.{name}: it is `public` and demands scopes. Nobody presents a \
+                         token on a public route: it is either open or it is not"
+                    ));
+                }
+                if st.rate_limit.is_none() {
+                    errors.push(format!(
+                        "{svc}.{name}: it is public and has no `rate_limit`. Each connection \
+                         is held open for as long as the client wants: with nothing \
+                         throttling how many get opened, the ceiling is the process's"
+                    ));
+                }
+            }
+            for sc in &st.scopes {
+                if !m.api.scopes.is_empty() && !m.api.scopes.contains(sc) {
+                    errors.push(format!(
+                        "{svc}.{name}: demands the scope `{sc}`, which is not in the `[api]` \
+                         catalogue"
+                    ));
+                }
+            }
+
+            if st.events.is_empty() {
+                errors.push(format!(
+                    "{svc}.{name}: a stream with no `events`. It holds the connection open and \
+                     sends nothing, which from the client is indistinguishable from a server \
+                     that is not working"
+                ));
+            }
+            for ev in &st.events {
+                // A stream of something this service never receives is a
+                // connection that stays empty, and nothing anywhere says why.
+                if !m.emits.contains_key(ev) && !m.consumes.contains_key(ev) {
+                    errors.push(format!(
+                        "{svc}.{name}: streams `{ev}`, which `{svc}` neither emits nor \
+                         consumes. What it does not receive it cannot push: declare it in \
+                         `[consumes.\"{ev}\"]` or the stream stays empty"
+                    ));
+                    continue;
+                }
+                // The event's fields are the OWNER's, and personal data going
+                // out through a route with no token is personal data published.
+                if st.auth.as_deref() == Some("public") {
+                    let fields = emitters.get(ev.as_str()).map(|(_, f)| *f);
+                    let leaking: Vec<&String> = fields
+                        .map(|f| {
+                            f.keys()
+                                .filter(|k| m.pii.iter().any(|p| normalize(p) == normalize(k)))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !leaking.is_empty() {
+                        errors.push(format!(
+                            "{svc}.{name}: it is `public` and streams `{ev}`, which carries {} \
+                             declared `pii`. A stream with no token is a subscription anybody \
+                             can open: that is personal data published, not exposed",
+                            leaking
+                                .iter()
+                                .map(|s| format!("`{s}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                }
+            }
+
+            // A proxy closes a connection it believes idle —usually between 30
+            // and 60 seconds— and the browser reconnects. Forever, and looking
+            // like the server is dropping it.
+            if st.heartbeat_ms.is_none() {
+                warnings.push(format!(
+                    "{svc}.{name}: no `heartbeat_ms`. A proxy closes a connection it believes \
+                     idle and the client reconnects in a loop, which reads as the server \
+                     dropping it; the default of {}ms is under the usual cut",
+                    Sse::HEARTBEAT_MS
                 ));
             }
         }

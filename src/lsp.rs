@@ -377,6 +377,9 @@ handler = "x"
 [ws]
 path = "/x"
 auth = "required"
+[sse.x]
+path = "/x"
+auth = "required"
 [flags.x]
 [machine.x]
 initial = "x"
@@ -508,6 +511,7 @@ pub(crate) fn values(path: &str, key: &str, block: &Value) -> Vec<&'static str> 
         ("auth", "revocation") => &m::AUTH_REVOCATION,
         ("bus", "engine") => &m::BUS_ENGINES,
         ("ws", "auth") => &["public", "required"],
+        ("sse", "auth") => &["public", "required"],
         ("workflow", "engine") => &m::WORKFLOW_ENGINES,
         ("workflow", "backoff") => &m::BACKOFFS,
         ("cache", "engine") => &m::CACHE_ENGINES,

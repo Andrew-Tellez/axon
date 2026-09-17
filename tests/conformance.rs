@@ -11379,3 +11379,129 @@ fn a_socket_is_not_rendered_where_the_edge_does_not_upgrade() {
         assert!(ok, "{target}: {err}");
     }
 }
+
+/// A service that pushes an event it emits over one open response. `stream`
+/// replaces the `[sse.room]` block, which is what every rule here is about.
+fn fixture_sse(who: &str, stream: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("axon-sse-{who}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("chat.toml"),
+        format!(
+            r#"service = "chat"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+pii = ["authorEmail"]
+
+[analytics]
+export = false
+
+[api]
+scopes = ["chat:read"]
+
+[emits."message.posted@v1"]
+roomId = "uuid"
+body = "string"
+authorEmail = "string"
+
+{stream}
+"#
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+const STREAM: &str = r#"[sse.room]
+path = "/v1/rooms/{roomId}/stream"
+auth = "required"
+scopes = ["chat:read"]
+events = ["message.posted@v1"]
+heartbeat_ms = 15000
+retry_ms = 3000"#;
+
+#[test]
+fn a_stream_pushes_events_that_are_already_declared() {
+    let dir = fixture_sse("ok", STREAM);
+    let d = dir.to_string_lossy().to_string();
+    let (out, err, ok) = axon(&["verify", &d]);
+    assert!(ok, "{out}{err}");
+
+    let manifest = dir.join("chat.toml").to_string_lossy().to_string();
+    let (ts, err, ok) = axon(&["build", &manifest, &d]);
+    assert!(ok, "{err}");
+    for piece in [
+        // the wire format, generated once
+        "export function sseFrame(",
+        "data: ${JSON.stringify(data)}",
+        "export const sseHeartbeat = \": keep-alive\\n\\n\" as const;",
+        // the type of what travels is the OWNER's
+        "| { event: \"message.posted@v1\"; data: MessagePostedV1 }",
+        // and the decision that is not generated, with the path's parameters named
+        "abstract streamRoom(e: Envelope<unknown>, params: Record<string, string>): boolean;",
+        "`roomId`",
+    ] {
+        assert!(ts.contains(piece), "missing `{piece}` in:\n{ts}");
+    }
+
+    let (go, err, ok) = axon(&["build", &manifest, &d, "--lang", "go"]);
+    assert!(ok, "{err}");
+    assert!(
+        go.contains("func SSEFrame(id, event string, data any, retryMS int) []byte"),
+        "{go}"
+    );
+    assert!(
+        go.contains("StreamRoom(ctx context.Context, e Envelope, params map[string]string) bool"),
+        "{go}"
+    );
+}
+
+#[test]
+fn a_stream_of_something_the_service_never_receives() {
+    let dir = fixture_sse(
+        "unknown",
+        &STREAM.replace("message.posted@v1", "order.placed@v1"),
+    );
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("neither emits nor consumes"), "{all}");
+}
+
+#[test]
+fn personal_data_on_a_public_stream_is_published_not_exposed() {
+    let dir = fixture_sse(
+        "pii",
+        &STREAM
+            .replace("auth = \"required\"", "auth = \"public\"\nrate_limit = 60")
+            .replace("scopes = [\"chat:read\"]\n", ""),
+    );
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(
+        all.contains("carries `authorEmail` declared `pii`"),
+        "{all}"
+    );
+}
+
+#[test]
+fn a_stream_with_no_heartbeat_is_a_client_reconnecting_forever() {
+    let dir = fixture_sse("beat", &STREAM.replace("heartbeat_ms = 15000\n", ""));
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("no `heartbeat_ms`"), "{all}");
+}
+
+#[test]
+fn a_stream_is_not_rendered_where_the_edge_buffers_it() {
+    let dir = fixture_sse("cloud", STREAM);
+    let (_, err, ok) = axon(&["infra", &dir.to_string_lossy(), "--target", "aws"]);
+    assert!(!ok, "aws rendered a stream its edge buffers");
+    assert!(err.contains("buffers the response"), "{err}");
+    // gcp serves it: the difference is real, so the refusal is not blanket
+    for target in ["local", "k8s", "gcp"] {
+        let (_, err, ok) = axon(&["infra", &dir.to_string_lossy(), "--target", target]);
+        assert!(ok, "{target}: {err}");
+    }
+}

@@ -1028,6 +1028,73 @@ fn tasks_go(m: &Manifest) -> String {
     o
 }
 
+/// The streams in Go: the same wire format and the same obligation.
+fn sse_go(m: &Manifest) -> String {
+    if m.sse.is_empty() {
+        return String::new();
+    }
+    let mut o = comment(
+        "SSEFrame is one frame, as the wire wants it.\n\nThe payload goes through json.Marshal, \
+         which never emits a raw newline —it escapes them inside strings— so it is always ONE \
+         data: line. That is the reason the frame is built from JSON and not from whatever the \
+         caller has at hand: a raw newline in the payload ends the frame early and the client \
+         reads a truncated event, with nothing saying so.\n\nThe id travels so the client can \
+         send it back as Last-Event-ID when it reconnects. What to do with it on the way back is \
+         yours: it is only answerable if there is something to replay from.",
+    );
+    o.push_str(
+        "func SSEFrame(id, event string, data any, retryMS int) []byte {\n\t\
+           body, err := json.Marshal(data)\n\t\
+           if err != nil {\n\t\tbody = []byte(`null`)\n\t}\n\t\
+           var b strings.Builder\n\t\
+           if retryMS > 0 {\n\t\t\
+             fmt.Fprintf(&b, \"retry: %d\\n\", retryMS)\n\t}\n\t\
+           fmt.Fprintf(&b, \"id: %s\\nevent: %s\\ndata: %s\\n\\n\", id, event, body)\n\t\
+           return []byte(b.String())\n}\n\n",
+    );
+    o.push_str(&comment(
+        "SSEHeartbeat is a comment line. It is not for the client — it is what keeps a proxy \
+         from closing a connection it believes idle, and a client reconnecting in a loop is the \
+         symptom of not sending it.",
+    ));
+    o.push_str("var SSEHeartbeat = []byte(\": keep-alive\\n\\n\")\n\n");
+    o.push_str(&comment(
+        "SSEStreams is what the manifest declares. Startup must serve each Path by holding the \
+         response open and writing frames: a route that answers and closes is a client that \
+         reconnects forever.",
+    ));
+    o.push_str(
+        "type SSEStream struct {\n\t\
+           Path        string\n\t\
+           Auth        string\n\t\
+           Scopes      []string\n\t\
+           Events      []string\n\t\
+           HeartbeatMS int\n\t\
+           RetryMS     int\n}\n\n\
+         var SSEStreams = map[string]SSEStream{\n",
+    );
+    for (name, st) in &m.sse {
+        let list = |v: &[String]| {
+            v.iter()
+                .map(|x| format!("{x:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        o.push_str(&format!(
+            "\t{name:?}: {{Path: {:?}, Auth: {:?}, Scopes: []string{{{}}}, Events: []string{{{}}}, \
+             HeartbeatMS: {}, RetryMS: {}}},\n",
+            st.path.clone().unwrap_or_default(),
+            st.auth.clone().unwrap_or_default(),
+            list(&st.scopes),
+            list(&st.events),
+            st.heartbeat_ms(),
+            st.retry_ms.unwrap_or(0),
+        ));
+    }
+    o.push_str("}\n\n");
+    o
+}
+
 /// The socket in Go: the policy, the type table, and the dispatch that routes
 /// a frame to the method it already implements.
 fn ws_go(m: &Manifest) -> String {
@@ -1181,6 +1248,14 @@ fn handlers(m: &Manifest) -> String {
             exported(name)
         ));
     }
+    for name in m.sse.keys() {
+        o.push_str(&format!(
+            "\t// does this event belong on THIS connection? the only part of a stream\n\t\
+             // that knows the domain, so it is an obligation and not a default\n\t\
+             Stream{}(ctx context.Context, e Envelope, params map[string]string) bool\n",
+            exported(name)
+        ));
+    }
     for name in m.methods.keys() {
         o.push_str(&format!(
             "\t{n}(ctx context.Context, in {n}In, e Envelope) ({n}Out, error)\n",
@@ -1313,7 +1388,7 @@ pub fn build(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     let pkg = m.service.replace(['-', '_'], "");
     let c = crate::contract::of(m, all)?;
     let body = format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}",
         types(&c),
         problem(m),
         failures(m),
@@ -1321,6 +1396,7 @@ pub fn build(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         subscriptions(m),
         tasks_go(m),
         ws_go(m),
+        sse_go(m),
         handlers(m),
         service(m),
         clients(m, &c.calls),

@@ -513,6 +513,46 @@ on `local` and `k8s`. On `gcp` and `aws` it is **refused**: their edge serves We
 from a different resource than these routes render, and what would get applied is an
 endpoint that answers and never upgrades.
 
+## `[sse.<name>]`: the other direction
+
+```toml
+[sse.room]
+path         = "/v1/rooms/{roomId}/stream"
+auth         = "required"        # public · required, and no default
+scopes       = ["chat:read"]
+events       = ["message.posted@v1"]   # already declared: emitted or consumed
+heartbeat_ms = 15000
+retry_ms     = 3000              # what the browser is told to wait before reconnecting
+```
+
+A request/response transport does not have this direction, and what makes it declarable
+—where a WebSocket push is not— is that **what travels over it is not new**: they are the
+events of `[emits]` and `[consumes]`, with their types and their fields already written
+down. So the frame is typed by the event's owner, and a stream does not get to reshape
+somebody else's event.
+
+What gets generated is the wire format, which is finicky and worth getting right once:
+the `id:` that comes back as `Last-Event-ID`, the `event:` that names the type, the
+single `data:` line, and the comment line a heartbeat is. What does **not** get generated
+is whether this event belongs on **this** connection — the tenant of the connection
+against the tenant of the event. That is the only part that knows the domain, so it is an
+abstract method you implement and not a default: the two defaults available are
+everything to everybody, and silence.
+
+| | |
+| --- | --- |
+| An event the service neither emits nor consumes | what it does not receive it cannot push, and the connection stays empty with nothing saying why |
+| `public` streaming an event with a `pii` field | a stream with no token is a subscription anybody can open: that is personal data published, not exposed |
+| `[sse]` with no `auth`, or `public` with no `rate_limit` | each connection is held open for as long as the client wants |
+| `events` empty | it holds the connection open and sends nothing, which from the client is a server that is not working |
+| A `path` that is also a method's or the socket's | a stream that stays open and a handler that answers and closes cannot be the same route |
+| No `heartbeat_ms` | a warning: a proxy closes a connection it believes idle and the client reconnects in a loop, which reads as the server dropping it |
+
+It is an ordinary `GET` whose response stays open, so `local`, `k8s` and `gcp` render it
+as a route with a long ceiling. On `aws` it is **refused**: API Gateway v2 buffers the
+response and cuts the integration at 30 seconds, so what would get applied is a stream
+that delivers nothing and then ends.
+
 ## `[workflow.<name>]`: a saga that can also wait
 
 ```toml

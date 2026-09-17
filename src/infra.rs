@@ -344,6 +344,8 @@ pub fn plan_schema() -> serde_json::Value {
                 "secrets": array(str_.clone()), "subscribes": array(str_.clone()),
                 "owner": str_, "tier": str_, "version": str_
             }), "what runs. `container` listens on a port; `job` runs and ends")),
+            "sse": array(object(serde_json::json!({"service": str_, "path": str_}),
+                "the routes that stay open writing frames")),
             "ws": array(object(serde_json::json!({"service": str_, "path": str_}),
                 "the services with a WebSocket, and where the handshake lands")),
             "temporal": array(str_.clone()),
@@ -379,6 +381,9 @@ pub struct Plan {
     pub crons: Vec<Cron>,
     pub secrets: Vec<Secret>,
     pub workloads: Vec<Workload>,
+    /// The event streams: which routes stay open writing frames.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sse: Vec<WsEndpoint>,
     /// The services with a WebSocket, and where its handshake lands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ws: Vec<WsEndpoint>,
@@ -550,6 +555,24 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 timeout_ms: me.timeout_ms.unwrap_or(10_000),
             });
         }
+        // A stream is a GET whose response stays open. It IS an ordinary route,
+        // so it is rendered as one, with the same long ceiling as the socket:
+        // an edge timeout here closes live streams on a clock and the client
+        // reconnects forever, looking like the server is dropping it.
+        for st in m.sse.values() {
+            let Some(path) = st.path.clone() else {
+                continue;
+            };
+            routes.push(Route {
+                method: "GET".into(),
+                path,
+                service: svc.clone(),
+                port: m.infra.port.unwrap_or(8080),
+                public: st.auth.as_deref() == Some("public"),
+                rate_limit: st.rate_limit,
+                timeout_ms: 3_600_000,
+            });
+        }
         // The handshake is a GET that gets upgraded, so the edge routes it like
         // any other route. Everything AFTER the upgrade is invisible to it,
         // which is why the socket carries its own rate limit and the edge's
@@ -624,6 +647,18 @@ pub fn plan(ms: &[Manifest]) -> Plan {
         workloads,
         // One entry per queue, not per flow: it is the address a worker polls,
         // and `verify` already refused two services sharing one.
+        sse: ms
+            .iter()
+            .filter(|m| !m.external)
+            .flat_map(|m| {
+                m.sse.values().filter_map(|st| {
+                    st.path.clone().map(|path| WsEndpoint {
+                        service: m.service.clone(),
+                        path,
+                    })
+                })
+            })
+            .collect(),
         ws: ms
             .iter()
             .filter(|m| !m.external && m.ws.declared())
@@ -715,6 +750,23 @@ pub fn render(p: &Plan, target: &str) -> Result<String, String> {
                      subscriptions so you can render it with your own template"
                 ));
             }
+        }
+    }
+    // API Gateway v2 buffers the response and cuts the integration at 30
+    // seconds: a stream rendered there delivers nothing until it is over, and
+    // it is over before anything happened. It applies with no error, which is
+    // the failure this file refuses everywhere else.
+    if target == "aws" {
+        if let Some(st) = p.sse.first() {
+            return Err(format!(
+                "{}: `[sse] path = \"{}\"` is not rendered on `aws`. API Gateway v2 buffers \
+                 the response and cuts the integration at 30 seconds: what would get applied \
+                 is a stream that delivers nothing and then ends, with no error anywhere. It \
+                 comes up on `local`, `k8s` and `gcp`, and `--target plan` carries the stream \
+                 so you can render it —an ALB, or a Lambda function URL— with your own \
+                 template",
+                st.service, st.path
+            ));
         }
     }
     // The handshake is a GET that gets upgraded, and on a managed cloud that is

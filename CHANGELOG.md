@@ -11,6 +11,22 @@ perderlas.
 
 ### Añadido
 
+- **`[sse.<name>]`: la otra dirección.** Lo que un transporte de petición/respuesta no
+  tiene, y lo que lo hace declarable —donde un push de WebSocket no lo es— es que lo que
+  viaja por ahí **no es nuevo**: son los eventos de `[emits]` y `[consumes]`, con sus tipos
+  y sus campos ya escritos. La trama la tipa el dueño del evento, y un stream no reescribe
+  el evento de otro.
+
+  Se genera el formato de cable, que es quisquilloso y vale la pena acertarlo una vez: el
+  `id:` que vuelve como `Last-Event-ID`, el `event:`, la única línea `data:` y la línea de
+  comentario que es un heartbeat. No se genera si ese evento le toca a **esa** conexión —el
+  inquilino de la conexión contra el del evento—: es la única parte que sabe del dominio,
+  así que es un método abstracto y no un default, porque los dos defaults disponibles son
+  todo para todos y el silencio.
+
+  Y la regla que paga el bloque entero: un stream `public` que empuja un evento con un
+  campo `pii` es dato personal publicado, no expuesto.
+
 - **`[ws]`: el mismo método, sobre un socket.** `ws = "<tipo>"` en un método es un segundo
   transporte y no un segundo método: el mismo `in`, el mismo `out` y **la misma
   implementación**, que es justo el punto — un cuerpo por transporte es lo que dejaría que
