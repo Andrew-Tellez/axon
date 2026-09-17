@@ -1028,6 +1028,140 @@ fn tasks_go(m: &Manifest) -> String {
     o
 }
 
+/// The socket in Go: the policy, the type table, and the dispatch that routes
+/// a frame to the method it already implements.
+fn ws_go(m: &Manifest) -> String {
+    if !m.ws.declared() {
+        return String::new();
+    }
+    let t = format!("{}Service", exported(&m.service));
+    let list = |v: &[String]| {
+        v.iter()
+            .map(|s| format!("{s:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut o = comment(
+        "WSRoute is where the handshake lands. It is a route of the edge like any other, and \
+         axon infra renders it as one.",
+    );
+    o.push_str(&format!(
+        "const WSRoute = {:?}\n\n",
+        m.ws.path.clone().unwrap_or_default()
+    ));
+    o.push_str(&comment(
+        "WSPolicy is what the edge cannot apply for you. RateLimit is per CONNECTION and per \
+         minute: after the upgrade the edge has seen one request, and every message after it is \
+         invisible to it.",
+    ));
+    o.push_str(&format!(
+        "var WSPolicy = struct {{\n\t\
+           Auth            string\n\t\
+           Scopes          []string\n\t\
+           HeartbeatMS     int\n\t\
+           RateLimit       int\n\t\
+           MaxMessageBytes int\n\t\
+           Origins         []string\n\
+         }}{{\n\t\
+           Auth:            {:?},\n\t\
+           Scopes:          []string{{{}}},\n\t\
+           HeartbeatMS:     {},\n\t\
+           RateLimit:       {},\n\t\
+           MaxMessageBytes: {},\n\t\
+           Origins:         []string{{{}}},\n\
+         }}\n\n",
+        m.ws.auth.clone().unwrap_or_default(),
+        list(&m.ws.scopes),
+        m.ws.heartbeat_ms.unwrap_or(0),
+        m.ws.rate_limit.unwrap_or(0),
+        m.ws.max_message_bytes(),
+        list(&m.ws.origins),
+    ));
+    o.push_str(&comment(
+        "WSMessages is the declared types and the method each one lands on. Startup can refuse \
+         what it does not recognise instead of discovering it on the first frame.",
+    ));
+    o.push_str("var WSMessages = map[string]string{\n");
+    for (name, me) in &m.methods {
+        if let Some(ty) = me.ws.as_deref() {
+            o.push_str(&format!("\t{ty:?}: {name:?},\n"));
+        }
+    }
+    o.push_str("}\n\n");
+    o.push_str(&comment(
+        "WSOriginAllowed says whether a page from this origin may open the socket. CORS does NOT \
+         apply to a WebSocket —the handshake is not a cross-origin request the browser blocks— so \
+         Origin is the only thing that says where it came from. With no declared list this \
+         answers true, and axon verify says so.",
+    ));
+    o.push_str(
+        "func WSOriginAllowed(origin string) bool {\n\t\
+           if len(WSPolicy.Origins) == 0 {\n\t\treturn true\n\t}\n\t\
+           for _, o := range WSPolicy.Origins {\n\t\t\
+             if o == origin {\n\t\t\treturn true\n\t\t}\n\t}\n\t\
+           return false\n}\n\n",
+    );
+    o.push_str(&comment(
+        "WSFrame is what travels in both directions. ID correlates the answer with the request: \
+         without it a client with two in flight cannot tell which answer is whose, and over a \
+         socket there is no request/response pairing to fall back on.",
+    ));
+    o.push_str(
+        "type WSFrame struct {\n\t\
+           ID    string          `json:\"id\"`\n\t\
+           Type  string          `json:\"type,omitempty\"`\n\t\
+           Data  json.RawMessage `json:\"data,omitempty\"`\n\t\
+           Error string          `json:\"error,omitempty\"`\n\
+         }\n\n",
+    );
+    o.push_str(&comment(
+        "DispatchWS parses a frame, routes it by type and answers correlated by the same id. The \
+         implementation is the method's own: one body, two transports. A second one is what \
+         would let HTTP and the socket answer differently.",
+    ));
+    let mut arms = String::new();
+    for (name, me) in &m.methods {
+        let Some(ty) = me.ws.as_deref() else { continue };
+        let n = exported(name);
+        arms.push_str(&format!(
+            "\tcase {ty:?}:\n\t\t\
+               var in {n}In\n\t\t\
+               if err := json.Unmarshal(msg.Data, &in); err != nil {{\n\t\t\t\
+                 return fail(msg.ID, \"malformed\"), nil\n\t\t}}\n\t\t\
+               out, err := s.h.{n}(ctx, in, e)\n\t\t\
+               if err != nil {{\n\t\t\treturn nil, err\n\t\t}}\n\t\t\
+               return json.Marshal(WSFrame{{ID: msg.ID, Data: mustJSON(out)}})\n"
+        ));
+    }
+    o.push_str(&format!(
+        "func (s *{t}) DispatchWS(ctx context.Context, raw []byte, e Envelope) ([]byte, error) \
+         {{\n\t\
+           // Before parsing, not after: the ceiling exists so one message is not an\n\t\
+           // allocation of whatever the other side felt like sending.\n\t\
+           if len(raw) > WSPolicy.MaxMessageBytes {{\n\t\t\
+             return fail(\"\", \"message_too_large\"), nil\n\t}}\n\t\
+           var msg WSFrame\n\t\
+           if err := json.Unmarshal(raw, &msg); err != nil {{\n\t\t\
+             return fail(\"\", \"malformed\"), nil\n\t}}\n\t\
+           switch msg.Type {{\n\
+         {arms}\t}}\n\t\
+           // Named, not swallowed: a type the manifest does not declare is a client\n\t\
+           // that believes it is sending something real.\n\t\
+           return fail(msg.ID, \"type_not_declared\"), nil\n\
+         }}\n\n\
+         func fail(id, code string) []byte {{\n\t\
+           b, _ := json.Marshal(WSFrame{{ID: id, Error: code}})\n\t\
+           return b\n\
+         }}\n\n\
+         func mustJSON(v any) json.RawMessage {{\n\t\
+           b, err := json.Marshal(v)\n\t\
+           if err != nil {{\n\t\treturn json.RawMessage(`null`)\n\t}}\n\t\
+           return b\n\
+         }}\n\n"
+    ));
+    o
+}
+
 /// In Go the business logic implements an interface; it does not inherit.
 fn handlers(m: &Manifest) -> String {
     let s = exported(&m.service);
@@ -1179,13 +1313,14 @@ pub fn build(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     let pkg = m.service.replace(['-', '_'], "");
     let c = crate::contract::of(m, all)?;
     let body = format!(
-        "{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}",
         types(&c),
         problem(m),
         failures(m),
         scopes(m),
         subscriptions(m),
         tasks_go(m),
+        ws_go(m),
         handlers(m),
         service(m),
         clients(m, &c.calls),

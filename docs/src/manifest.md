@@ -462,6 +462,57 @@ version that follows it, versions out of order —the list is the order the adap
 applied in—, a past sunset still declared, a shape that changed with no `adapter` (naming
 the fields), a shape identical to the current one, and the two schemes at once.
 
+## `[ws]`: the same method over a socket
+
+```toml
+[ws]
+path              = "/v1/ws"     # where the handshake lands
+auth              = "required"   # public · required, and no default
+scopes            = ["chat:write"]
+heartbeat_ms      = 30000        # or a dead connection holds its slot for hours
+rate_limit        = 120          # messages per minute PER CONNECTION
+origins           = ["https://app.example.mx"]
+max_message_bytes = 65536        # 64 KiB by default
+
+[methods.sendMessage]
+ws  = "message.send"             # the type it travels under on the wire
+in  = { roomId = "uuid", body = "string" }
+out = { messageId = "uuid" }
+```
+
+`ws` is a second transport on a method, not a second method: the same `in`, the same
+`out` and **the same implementation**, which is the point — a body per transport is what
+would let HTTP and the socket answer differently. What gets generated is a `dispatchWs`
+that parses the frame, routes it by type and answers correlated by the id the client
+sent; without that id a client with two requests in flight cannot tell which answer is
+whose, and a socket has no request/response pairing to fall back on.
+
+The knobs live here and not at the edge because the edge cannot apply them: after the
+upgrade it has seen **one** request, and every message over that connection is invisible
+to it. Same reason `rate_limit` is per connection, and why a public socket without one is
+an error exactly like a public route without one.
+
+| | |
+| --- | --- |
+| `[ws]` with no `auth` | a socket open to whoever, with nobody having decided so |
+| `auth = "public"` with no `rate_limit`, or with `scopes` | the edge throttles handshakes, not messages; and nobody presents a token on a public handshake |
+| A method with `ws` and no `[ws]` block | a type on the wire with no socket to send it over |
+| `[ws]` and no method travelling over it | it connects, and then nothing works |
+| Two methods on one type | which of the two answers would depend on registration order |
+| A `path` that is also an HTTP route | an upgrade that lands on a handler which replies and closes reads as a broken socket |
+| No `origins` | a warning: CORS does **not** apply to a WebSocket, so any page can open it and `Origin` is the only thing that says where it came from |
+| No `heartbeat_ms` | a warning: a connection whose other end disappeared holds its slot until TCP notices |
+
+What this is **not** is the other direction. A server pushing to a connection nobody
+asked for is fan-out, and fan-out needs to know which connection is on which process —
+a registry axon does not model. What travels here is request and response over a
+connection that is already open.
+
+The handshake is a `GET` that gets upgraded, so it is a route of the edge like any other
+on `local` and `k8s`. On `gcp` and `aws` it is **refused**: their edge serves WebSocket
+from a different resource than these routes render, and what would get applied is an
+endpoint that answers and never upgrades.
+
 ## `[workflow.<name>]`: a saga that can also wait
 
 ```toml

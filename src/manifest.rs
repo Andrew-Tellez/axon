@@ -5,6 +5,66 @@ use std::path::{Path, PathBuf};
 
 pub type Fields = IndexMap<String, String>;
 
+/// The WebSocket endpoint: one per service, and the transport of the methods
+/// that declare a `ws` type.
+///
+/// It exists as a block of its own and not as a key per method because a
+/// socket is one thing —one path, one handshake, one connection— and the
+/// methods that travel over it are many. A method carrying `ws` with nothing
+/// here would be a message type nobody can send.
+///
+/// What this is NOT is the other direction. A server that pushes to a
+/// connection nobody asked is fan-out, and fan-out needs to know which
+/// connection is on which process: a registry axon does not model. What
+/// travels here is request and response, correlated by an id, over a
+/// connection that is already open.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Ws {
+    /// Where the handshake lands. It is a route of the edge like any other.
+    pub path: Option<String>,
+    /// Who may open the connection: "public" or "required". Deliberately with
+    /// no default, exactly like a method's: a socket open to whoever, with
+    /// nobody having decided so, is an incident.
+    pub auth: Option<String>,
+    /// What the connection has to present, beyond being somebody. It is
+    /// checked once, at the handshake — a socket does not re-authorize on
+    /// every frame, and pretending it does is a cost with no one paying it.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// How often the server pings. Without it a connection whose other end
+    /// disappeared holds its slot until TCP notices, which can be hours.
+    pub heartbeat_ms: Option<u32>,
+    /// Messages per minute per connection. It is the socket's rate limit and
+    /// not the edge's: once the handshake is done the edge sees one request,
+    /// and everything after it is invisible to it.
+    pub rate_limit: Option<u32>,
+    /// The origins a browser may open it from. CORS does NOT apply to a
+    /// WebSocket —the handshake is not a cross-origin request the browser
+    /// blocks— so the `Origin` header is the only thing that says where the
+    /// page came from.
+    #[serde(default)]
+    pub origins: Vec<String>,
+    /// The biggest frame that gets read. Without a ceiling, one message is a
+    /// memory allocation of whatever the other side felt like sending.
+    pub max_message_bytes: Option<u32>,
+}
+
+impl Ws {
+    pub fn declared(&self) -> bool {
+        *self != Ws::default()
+    }
+    fn is_absent(&self) -> bool {
+        !self.declared()
+    }
+    /// 64 KiB. It is not a declared number: it is a ceiling that has to exist,
+    /// and one big enough that no honest message hits it.
+    pub const MAX_MESSAGE_BYTES: u32 = 65536;
+    pub fn max_message_bytes(&self) -> u32 {
+        self.max_message_bytes.unwrap_or(Self::MAX_MESSAGE_BYTES)
+    }
+}
+
 /// Background work with a name, addressed to this service.
 ///
 /// Most of what gets called an asynchronous task is an event the service emits
@@ -190,6 +250,12 @@ pub struct Method {
     pub output: Fields,
     /// HTTP exposure: "POST /payments". Without it the method is internal RPC only.
     pub http: Option<String>,
+    /// The type this method travels under on the service's WebSocket. The same
+    /// `in` and `out` as over HTTP and the same implementation: what changes is
+    /// the transport, and a second implementation is what would let the two
+    /// answer differently.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws: Option<String>,
     /// Retryable with no duplicated effects. Mandatory on mutating methods.
     #[serde(default)]
     pub idempotent: bool,
@@ -1998,6 +2064,9 @@ pub struct Manifest {
     /// Background work addressed to this service. See `Task`.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub tasks: IndexMap<String, Task>,
+    /// The WebSocket endpoint, if the service has one. See `Ws`.
+    #[serde(default, skip_serializing_if = "Ws::is_absent")]
+    pub ws: Ws,
     /// The broker its events travel on. See `Bus`.
     #[serde(default, skip_serializing_if = "Bus::is_default")]
     pub bus: Bus,

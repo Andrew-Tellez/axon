@@ -245,6 +245,51 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
         ));
         cls.push("      }\n    });\n  }".into());
     }
+    if m.ws.declared() {
+        // Written line by line and not as one continued literal: `cargo fmt`
+        // collapses a multi-line literal and the continuation's indentation
+        // ends up INSIDE the generated string.
+        let mut b = vec![
+            "  /** A frame arrives: it is parsed, its type is routed and the answer goes"
+                .to_string(),
+            "   *  back correlated by the SAME id the client sent. Without that id a client".into(),
+            "   *  with two requests in flight cannot tell which answer is whose, and over a"
+                .into(),
+            "   *  socket there is no request/response pairing to fall back on.".into(),
+            "   *".into(),
+            "   *  The implementation is the method's own: one body, two transports. A".into(),
+            "   *  second one is what would let HTTP and the socket answer differently. */".into(),
+            "  async dispatchWs(raw: string, e: Envelope<unknown>): Promise<string> {".into(),
+            "    // Before parsing, not after: the ceiling exists so one message is not an".into(),
+            "    // allocation of whatever the other side felt like sending.".into(),
+            "    if (raw.length > wsPolicy.maxMessageBytes) {".into(),
+            "      return reply(null, undefined, \"message_too_large\");".into(),
+            "    }".into(),
+            "    let msg: { id: string; type: string; data: unknown };".into(),
+            "    try {".into(),
+            "      msg = JSON.parse(raw);".into(),
+            "    } catch {".into(),
+            "      return reply(null, undefined, \"malformed\");".into(),
+            "    }".into(),
+            "    switch (msg.type) {".into(),
+        ];
+        for (name, me) in &m.methods {
+            let Some(t) = me.ws.as_deref() else { continue };
+            b.push(format!("      case {t:?}:"));
+            b.push(format!(
+                "        return reply(msg.id, await this.{}(msg.data as {}In, e));",
+                camel(name),
+                pascal(name)
+            ));
+        }
+        b.push("      default:".into());
+        b.push("        // Named, not swallowed: a type the manifest does not declare is a".into());
+        b.push("        // client that believes it is sending something real.".into());
+        b.push("        return reply(msg.id, undefined, \"type_not_declared\");".into());
+        b.push("    }".into());
+        b.push("  }".into());
+        cls.push(b.join("\n"));
+    }
     cls.push("}\n".into());
     out.push(cls.join("\n"));
     if !m.machine.is_empty() {
@@ -261,6 +306,9 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
     }
     if !m.tasks.is_empty() {
         out.push(tasks_ts(m));
+    }
+    if m.ws.declared() {
+        out.push(ws_ts(m));
     }
     if !m.aggregate.is_empty() {
         out.push(aggregates_ts(m));
@@ -844,6 +892,73 @@ pub fn build_er(ms: &[Manifest]) -> String {
 /// workflow is replayed against the history it started with, so an edit that
 /// changes the order of the awaits breaks the instances already in flight, and
 /// it breaks them wherever the replay stops matching, not where the edit is.
+/// The socket's policy, and the reply envelope its dispatch answers with.
+///
+/// The knobs come out as values and not as prose because they are the ones
+/// the edge cannot apply: after the upgrade it sees one request, and the rate
+/// limit, the frame ceiling and the heartbeat are all on this side of it.
+pub fn ws_ts(m: &Manifest) -> String {
+    let ws = &m.ws;
+    let list = |v: &[String]| {
+        v.iter()
+            .map(|s| format!("{s:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let types: Vec<String> = m
+        .methods
+        .iter()
+        .filter_map(|(n, me)| me.ws.as_ref().map(|t| format!("  {t:?}: {n:?},")))
+        .collect();
+    format!(
+        "\n/** Where the handshake lands. It is a route of the edge like any other, and\n \
+         *  `axon infra` renders it as one. */\n\
+         export const wsRoute = {path:?} as const;\n\n\
+         /** What the edge cannot apply for you. `rateLimit` is per CONNECTION and per\n \
+         *  minute: after the upgrade the edge has seen one request, and every message\n \
+         *  after it is invisible to it. */\n\
+         export const wsPolicy = {{\n  \
+           auth: {auth:?},\n  \
+           scopes: [{scopes}],\n  \
+           heartbeatMs: {heartbeat},\n  \
+           rateLimit: {rate},\n  \
+           maxMessageBytes: {max},\n  \
+           origins: [{origins}],\n\
+         }} as const;\n\n\
+         /** The declared types, and the method each one lands on. Startup can refuse\n \
+         *  what it does not recognise instead of discovering it on the first frame. */\n\
+         export const wsMessages = {{\n{types}\n}} as const;\n\n\
+         /** CORS does not apply to a WebSocket: the handshake is not a cross-origin\n \
+         *  request the browser blocks, so any page can open it and `Origin` is the only\n \
+         *  thing that says where it came from. With no declared list this answers true\n \
+         *  —there is nothing to compare against— and `axon verify` says so. */\n\
+         export function wsOriginAllowed(origin: string | undefined): boolean {{\n  \
+           const allowed: readonly string[] = wsPolicy.origins;\n  \
+           if (allowed.length === 0) return true;\n  \
+           return origin !== undefined && allowed.includes(origin);\n\
+         }}\n\n\
+         /** The answer, correlated by the id the client sent. `id` is null only when the\n \
+         *  frame was unreadable and there was no id to echo back. */\n\
+         function reply(id: string | null, data?: unknown, error?: string): string {{\n  \
+           return JSON.stringify(error === undefined ? {{ id, data }} : {{ id, error }});\n\
+         }}\n",
+        path = ws.path.clone().unwrap_or_default(),
+        auth = ws.auth.clone().unwrap_or_default(),
+        scopes = list(&ws.scopes),
+        origins = list(&ws.origins),
+        heartbeat = match ws.heartbeat_ms {
+            Some(ms) => format!("{ms}"),
+            None => "null".into(),
+        },
+        rate = match ws.rate_limit {
+            Some(n) => format!("{n}"),
+            None => "null".into(),
+        },
+        max = ws.max_message_bytes(),
+        types = types.join("\n"),
+    )
+}
+
 /// The task queue: what enqueues, what drains it, and the table both agree on.
 ///
 /// The generated part is the mechanical one and, as with the saga, the one
@@ -1151,11 +1266,11 @@ pub fn temporal_ts(m: &Manifest) -> String {
             handlers.push(format!(
                 "  // Registered before the first await: a handler set up later misses a\n  \
                    // signal that already arrived, and it is delivered exactly once.\n  \
-                   let signal{n}: {} | undefined;\n  \
-                   setHandler({c}Signal{n}, (p) => {{\n    \
+                   let signal{n}: {ty} | undefined;\n  \
+                   setHandler({c}Signal{n}, (p: {ty}) => {{\n    \
                      signal{n} = p;\n  \
                    }});",
-                pascal(ev)
+                ty = pascal(ev)
             ));
         }
         o.extend(signals);

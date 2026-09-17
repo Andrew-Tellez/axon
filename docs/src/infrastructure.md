@@ -44,6 +44,11 @@ the attempts and the ack window on each consumer. Comments and not a container t
 them, because the day one of them fails is the day it matters — a bootstrap that swallows
 its own error leaves a consumer that never receives and a compose that came up green.
 
+A `[ws]` endpoint is a route like any other on `local` and `k8s` — the handshake is a
+`GET` that gets upgraded — and is **refused** on `gcp` and `aws`, whose edge serves a
+socket from a different resource than these routes render: what would get applied is an
+endpoint that answers and never upgrades.
+
 A `temporal` workflow brings up the server and its UI on `local`, and every workload gets
 `AXON_TEMPORAL_ADDRESS` — the one that signals a flow needs it too, not only the one
 hosting the worker. On the other targets, nothing: there Temporal is a managed service or

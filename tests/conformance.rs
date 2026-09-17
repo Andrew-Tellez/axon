@@ -11243,3 +11243,139 @@ fn waiting_for_a_signal_is_time_the_flow_spends() {
     assert!(all.contains("`timeout_ms = 900000`"), "{all}");
     assert!(all.contains("add up to"), "{all}");
 }
+
+/// A service whose methods also travel over a socket. `extra` replaces the
+/// `[ws]` block, which is what every rule here is about.
+fn fixture_ws(who: &str, ws: &str, method_extra: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("axon-ws-{who}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("chat.toml"),
+        format!(
+            r#"service = "chat"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[analytics]
+export = false
+
+[api]
+scopes = ["chat:write"]
+
+{ws}
+
+[methods.sendMessage]
+ws = "message.send"
+in = {{ roomId = "uuid", body = "string" }}
+out = {{ messageId = "uuid" }}
+timeout_ms = 2000
+idempotent = true
+{method_extra}
+"#
+        ),
+    )
+    .unwrap();
+    dir
+}
+
+const SOCKET: &str = r#"[ws]
+path = "/v1/ws"
+auth = "required"
+scopes = ["chat:write"]
+heartbeat_ms = 30000
+rate_limit = 120
+origins = ["https://app.prueba.mx"]"#;
+
+#[test]
+fn a_method_over_a_socket_keeps_its_one_implementation() {
+    let dir = fixture_ws("ok", SOCKET, "");
+    let d = dir.to_string_lossy().to_string();
+    let (out, err, ok) = axon(&["verify", &d]);
+    assert!(ok, "{out}{err}");
+
+    let manifest = dir.join("chat.toml").to_string_lossy().to_string();
+    let (ts, err, ok) = axon(&["build", &manifest, &d]);
+    assert!(ok, "{err}");
+    for piece in [
+        // the frame is routed to the METHOD, not to a second handler
+        "case \"message.send\":",
+        "return reply(msg.id, await this.sendMessage(msg.data as SendMessageIn, e));",
+        // the two knobs the edge cannot apply, with their declared values
+        "maxMessageBytes: 65536",
+        "rateLimit: 120",
+        // and the one the browser does not enforce for a socket
+        "export function wsOriginAllowed(",
+    ] {
+        assert!(ts.contains(piece), "missing `{piece}` in:\n{ts}");
+    }
+    // one implementation: no abstract handler of its own is generated
+    assert!(
+        !ts.contains("abstract onMessageSend"),
+        "a second implementation was generated:\n{ts}"
+    );
+
+    let (go, err, ok) = axon(&["build", &manifest, &d, "--lang", "go"]);
+    assert!(ok, "{err}");
+    assert!(go.contains("func (s *ChatService) DispatchWS("), "{go}");
+    assert!(go.contains("s.h.SendMessage(ctx, in, e)"), "{go}");
+
+    // the handshake is a route of the edge like any other
+    let (plan, err, ok) = axon(&["infra", &d, "--target", "plan"]);
+    assert!(ok, "{err}");
+    assert!(plan.contains("\"path\": \"/v1/ws\""), "{plan}");
+}
+
+#[test]
+fn a_socket_with_nobody_deciding_who_may_open_it_is_refused() {
+    let dir = fixture_ws("auth", "[ws]\npath = \"/v1/ws\"", "");
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("`[ws]` with no `auth`"), "{all}");
+}
+
+#[test]
+fn a_public_socket_needs_its_own_rate_limit() {
+    // The edge throttles handshakes. Everything after the upgrade is one
+    // request as far as it can see.
+    let dir = fixture_ws("rate", "[ws]\npath = \"/v1/ws\"\nauth = \"public\"", "");
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("is public and has no `rate_limit`"), "{all}");
+}
+
+#[test]
+fn one_type_is_one_method() {
+    let dir = fixture_ws(
+        "clash",
+        SOCKET,
+        "\n[methods.editMessage]\nws = \"message.send\"\nin = { roomId = \"uuid\" }\nout = { ok = \"bool\" }\ntimeout_ms = 2000\nidempotent = true",
+    );
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("both travel as `message.send`"), "{all}");
+}
+
+#[test]
+fn a_type_with_no_socket_is_a_method_nobody_can_call() {
+    let dir = fixture_ws("nosocket", "", "");
+    let (out, err, _) = axon(&["verify", &dir.to_string_lossy()]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("the service has no `[ws]` block"), "{all}");
+}
+
+#[test]
+fn a_socket_is_not_rendered_where_the_edge_does_not_upgrade() {
+    let dir = fixture_ws("cloud", SOCKET, "");
+    for target in ["gcp", "aws"] {
+        let (_, err, ok) = axon(&["infra", &dir.to_string_lossy(), "--target", target]);
+        assert!(!ok, "{target}: rendered a socket its edge does not serve");
+        assert!(err.contains("is not rendered on"), "{target}: {err}");
+    }
+    // and it IS rendered where it works
+    for target in ["local", "k8s"] {
+        let (_, err, ok) = axon(&["infra", &dir.to_string_lossy(), "--target", target]);
+        assert!(ok, "{target}: {err}");
+    }
+}

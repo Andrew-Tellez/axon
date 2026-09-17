@@ -374,6 +374,9 @@ group = "x"
 ordered_by = "x"
 [tasks.x]
 handler = "x"
+[ws]
+path = "/x"
+auth = "required"
 [flags.x]
 [machine.x]
 initial = "x"
@@ -504,6 +507,7 @@ pub(crate) fn values(path: &str, key: &str, block: &Value) -> Vec<&'static str> 
         ("auth", "verify") => &m::AUTH_VERIFY,
         ("auth", "revocation") => &m::AUTH_REVOCATION,
         ("bus", "engine") => &m::BUS_ENGINES,
+        ("ws", "auth") => &["public", "required"],
         ("workflow", "engine") => &m::WORKFLOW_ENGINES,
         ("workflow", "backoff") => &m::BACKOFFS,
         ("cache", "engine") => &m::CACHE_ENGINES,

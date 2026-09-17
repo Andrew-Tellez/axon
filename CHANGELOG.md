@@ -9,6 +9,27 @@ perderlas.
 
 ## [No publicado]
 
+### Añadido
+
+- **`[ws]`: el mismo método, sobre un socket.** `ws = "<tipo>"` en un método es un segundo
+  transporte y no un segundo método: el mismo `in`, el mismo `out` y **la misma
+  implementación**, que es justo el punto — un cuerpo por transporte es lo que dejaría que
+  HTTP y el socket contestaran distinto. Sale un `dispatchWs` que parsea la trama, la
+  enruta por tipo y contesta correlacionado por el id que mandó el cliente; sin ese id, un
+  cliente con dos peticiones en vuelo no puede saber cuál respuesta es de cuál, y un socket
+  no tiene el emparejamiento de HTTP al que recurrir.
+
+  Los mandos viven en el bloque y no en el edge porque el edge no puede aplicarlos: después
+  del upgrade ha visto **una** petición, y todo lo que viaja por esa conexión le es
+  invisible. Por eso `rate_limit` es por conexión, por eso hay un techo de trama, y por eso
+  `origins` existe — CORS no aplica a un WebSocket: el handshake no es una petición que el
+  navegador bloquee, así que cualquier página puede abrirlo y `Origin` es lo único que dice
+  de dónde vino.
+
+  Lo que no es: la otra dirección. Un servidor que empuja a una conexión que no pidió nada
+  es fan-out, y el fan-out necesita saber qué conexión está en qué proceso — un registro que
+  axon no modela.
+
 ### Cambiado
 
 - **La página de patrones cubre los flujos durables y la cola de tareas.** Los dos bloques

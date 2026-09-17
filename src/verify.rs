@@ -360,6 +360,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     workflows(ms, &mut errors, &mut warnings);
     bus(ms, &emitters, &mut errors, &mut warnings);
     tasks(ms, &esquemas, &mut errors, &mut warnings);
+    websocket(ms, &mut errors, &mut warnings);
     event_sourcing(ms, &emitters, &esquemas, &mut errors, &mut warnings);
     // Business metrics. What a funnel answers is derivable from the causal chain;
     // this is not, so the whole value of declaring it is that these things become
@@ -3190,7 +3191,11 @@ fn scopes_nobody_demands(ms: &[Manifest], warnings: &mut Vec<String>) {
             let used = ms
                 .iter()
                 .filter(|m| !m.external)
-                .any(|m| m.methods.values().any(|me| me.scopes.contains(sc)));
+                // The socket's handshake demands scopes too, and a scope only
+                // demanded there was being reported as guarding nothing.
+                .any(|m| {
+                    m.methods.values().any(|me| me.scopes.contains(sc)) || m.ws.scopes.contains(sc)
+                });
             if !used {
                 warnings.push(format!(
                     "[api] the scope `{sc}` is declared and no method demands it. It can be \
@@ -3641,6 +3646,147 @@ fn sagas(
                     "{svc}.{name}: coordinates a {noun} with `consistency = \"strong\"`. \
                  Between the first step and the last there are visible intermediate states \
                  no invariant describes: the real guarantee of the flow is eventual"
+                ));
+            }
+        }
+    }
+}
+
+// the socket: a transport whose security knobs are not the edge's, because
+// after the handshake the edge sees one request and everything else is
+// invisible to it
+fn websocket(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
+    for m in ms.iter().filter(|m| !m.external) {
+        let svc = &m.service;
+        let over_ws: Vec<&String> = m
+            .methods
+            .iter()
+            .filter(|(_, me)| me.ws.is_some())
+            .map(|(n, _)| n)
+            .collect();
+
+        if !m.ws.declared() {
+            if let Some(first) = over_ws.first() {
+                errors.push(format!(
+                    "{svc}.{first}: declares `ws` and the service has no `[ws]` block. A type \
+                     on the wire with no socket to send it over is a method nobody can call"
+                ));
+            }
+            continue;
+        }
+        if over_ws.is_empty() {
+            errors.push(format!(
+                "{svc}: declares `[ws]` and no method travels over it. A socket that accepts \
+                 the handshake and refuses every message is worse than not having one: it \
+                 connects, and then nothing works"
+            ));
+        }
+
+        // A job runs and ends. A connection that outlives the process is not a
+        // connection, and this would deploy an endpoint nobody can reach.
+        if m.infra.runtime.as_deref() == Some("job") {
+            errors.push(format!(
+                "{svc}: `[ws]` on `runtime = \"job\"`. A job runs and ends; a socket is a \
+                 connection that stays open, and there is nothing here for it to stay open on"
+            ));
+        }
+
+        match m.ws.path.as_deref() {
+            None => errors.push(format!(
+                "{svc}: `[ws]` with no `path`. The handshake is a route of the edge like any \
+                 other, and the edge cannot route what has no path"
+            )),
+            Some(p) if !p.starts_with('/') => errors.push(format!(
+                "{svc}: `[ws] path = \"{p}\"` does not start with `/`"
+            )),
+            Some(p) => {
+                // The same path serving two things is one of them answering: an
+                // upgrade that lands on a handler that answers 200 and closes
+                // reads, from the client, as a broken socket.
+                for (other, me) in ms
+                    .iter()
+                    .flat_map(|o| o.methods.iter().map(move |x| (o, x)))
+                {
+                    let Some((_, route)) = me.1.http.as_deref().and_then(|h| h.split_once(' '))
+                    else {
+                        continue;
+                    };
+                    if route == p {
+                        errors.push(format!(
+                            "{svc}: `[ws] path = \"{p}\"` is also the route of `{}.{}`. One of \
+                             the two answers, and an upgrade that lands on a handler which \
+                             replies and closes reads as a broken socket",
+                            other.service, me.0
+                        ));
+                    }
+                }
+            }
+        }
+
+        // The same decision the edge makes for a route, and for the same
+        // reason: there is no safe default for who may open a connection.
+        match m.ws.auth.as_deref() {
+            Some("public") | Some("required") => {}
+            Some(other) => errors.push(format!(
+                "{svc}: `[ws] auth = \"{other}\"` does not exist; use \"public\" or \"required\""
+            )),
+            None => errors.push(format!(
+                "{svc}: `[ws]` with no `auth`; declare \"public\" or \"required\". A socket \
+                 open to whoever, with nobody having decided so, is an incident"
+            )),
+        }
+        if m.ws.auth.as_deref() == Some("public") {
+            if !m.ws.scopes.is_empty() {
+                errors.push(format!(
+                    "{svc}: `[ws]` is `public` and demands scopes. Nobody presents a token on \
+                     a public handshake: it is either open or it is not"
+                ));
+            }
+            if m.ws.rate_limit.is_none() {
+                errors.push(format!(
+                    "{svc}: `[ws]` is public and has no `rate_limit`. The edge throttles \
+                     handshakes, not messages: after the upgrade it sees one request, and \
+                     everything sent over the connection is invisible to it"
+                ));
+            }
+        }
+        for sc in &m.ws.scopes {
+            if !m.api.scopes.is_empty() && !m.api.scopes.contains(sc) {
+                errors.push(format!(
+                    "{svc}: `[ws]` demands the scope `{sc}`, which is not in the `[api]` \
+                     catalogue. A scope nobody issues is a socket nobody can open"
+                ));
+            }
+        }
+
+        // CORS does not apply to a WebSocket: the handshake is not a request
+        // the browser blocks, so a page on any origin can open it.
+        if m.ws.origins.is_empty() && m.ws.auth.as_deref() == Some("required") {
+            warnings.push(format!(
+                "{svc}: `[ws]` with no `origins`. CORS does not apply to a WebSocket —the \
+                 handshake is not a cross-origin request the browser blocks— so any page can \
+                 open it, and the `Origin` header is the only thing that says where it came \
+                 from"
+            ));
+        }
+        if m.ws.heartbeat_ms.is_none() {
+            warnings.push(format!(
+                "{svc}: `[ws]` with no `heartbeat_ms`. A connection whose other end \
+                 disappeared holds its slot until TCP notices, which can be hours, and \
+                 nothing counts it as gone"
+            ));
+        }
+
+        // One type, one method. Two methods on one type is one of them
+        // answering, and which one depends on the order they got registered in.
+        let mut seen: IndexMap<&str, &str> = IndexMap::new();
+        for (name, me) in &m.methods {
+            let Some(t) = me.ws.as_deref() else { continue };
+            if let Some(before) = seen.insert(t, name) {
+                errors.push(format!(
+                    "{svc}: `{name}` and `{before}` both travel as `{t}`. One type is one \
+                     method: which of the two answers would depend on the order they got \
+                     registered in"
                 ));
             }
         }

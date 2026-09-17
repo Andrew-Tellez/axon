@@ -18,6 +18,15 @@ pub struct Topic {
     pub table: String,
 }
 
+/// A service's WebSocket endpoint. The route is already in `routes` —the
+/// handshake is a GET like any other— and this says which of them is a socket,
+/// which is what a renderer needs to know to treat it differently or refuse it.
+#[derive(Debug, Serialize)]
+pub struct WsEndpoint {
+    pub service: String,
+    pub path: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Sub {
     /// Consumer: it is also the delivery destination.
@@ -335,6 +344,8 @@ pub fn plan_schema() -> serde_json::Value {
                 "secrets": array(str_.clone()), "subscribes": array(str_.clone()),
                 "owner": str_, "tier": str_, "version": str_
             }), "what runs. `container` listens on a port; `job` runs and ends")),
+            "ws": array(object(serde_json::json!({"service": str_, "path": str_}),
+                "the services with a WebSocket, and where the handshake lands")),
             "temporal": array(str_.clone()),
             "bus": str_or_null, "bus_retention_ms": uint_or_null
         }
@@ -368,6 +379,9 @@ pub struct Plan {
     pub crons: Vec<Cron>,
     pub secrets: Vec<Secret>,
     pub workloads: Vec<Workload>,
+    /// The services with a WebSocket, and where its handshake lands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ws: Vec<WsEndpoint>,
     /// The declared broker, if anybody declared one. `None` is not `nats`: a
     /// target that brings its own managed bus refuses a declared engine that
     /// is not theirs, and has nothing to refuse about a default.
@@ -536,6 +550,25 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 timeout_ms: me.timeout_ms.unwrap_or(10_000),
             });
         }
+        // The handshake is a GET that gets upgraded, so the edge routes it like
+        // any other route. Everything AFTER the upgrade is invisible to it,
+        // which is why the socket carries its own rate limit and the edge's
+        // applies to the handshake alone.
+        if let Some(path) = m.ws.path.clone().filter(|_| m.ws.declared()) {
+            routes.push(Route {
+                method: "GET".into(),
+                path,
+                service: svc.clone(),
+                port: m.infra.port.unwrap_or(8080),
+                public: m.ws.auth.as_deref() == Some("public"),
+                rate_limit: m.ws.rate_limit,
+                // Not a message's budget: the ceiling on a connection meant to
+                // stay open. An hour, and it is a ceiling and not a target —
+                // an edge timeout here closes live sockets on a clock, and from
+                // the client that reads as the network dropping them.
+                timeout_ms: 3_600_000,
+            });
+        }
         for (name, b) in &m.infra.buckets {
             buckets.push(Store2 {
                 service: svc.clone(),
@@ -591,6 +624,16 @@ pub fn plan(ms: &[Manifest]) -> Plan {
         workloads,
         // One entry per queue, not per flow: it is the address a worker polls,
         // and `verify` already refused two services sharing one.
+        ws: ms
+            .iter()
+            .filter(|m| !m.external && m.ws.declared())
+            .filter_map(|m| {
+                m.ws.path.clone().map(|path| WsEndpoint {
+                    service: m.service.clone(),
+                    path,
+                })
+            })
+            .collect(),
         bus: ms
             .iter()
             .filter(|m| !m.external)
@@ -672,6 +715,24 @@ pub fn render(p: &Plan, target: &str) -> Result<String, String> {
                      subscriptions so you can render it with your own template"
                 ));
             }
+        }
+    }
+    // The handshake is a GET that gets upgraded, and on a managed cloud that is
+    // not a route of the same resource: API Gateway v2 serves WebSocket from a
+    // different API type, and the HTTP one would apply with no error and never
+    // upgrade. Green infrastructure that does not work is the worst outcome
+    // this project has, and the reason every other refusal here exists.
+    if matches!(target, "gcp" | "aws") {
+        if let Some(w) = p.ws.first() {
+            return Err(format!(
+                "{}: `[ws] path = \"{}\"` is not rendered on `{target}`. The handshake is a \
+                 GET that gets UPGRADED, and the edge there serves that from a different \
+                 resource than the one these routes render: what would get applied is an \
+                 endpoint that answers and never upgrades, with no error anywhere. It comes \
+                 up on `local` and on `k8s`, and `--target plan` carries the endpoint so you \
+                 can render it with your own template",
+                w.service, w.path
+            ));
         }
     }
     // No managed Meilisearch exists on either cloud, and rendering an
