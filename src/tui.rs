@@ -457,6 +457,11 @@ fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
         // The subscriptions, with the handler each one lands in: a topic and
         // the function that answers it are the same fact, and reading them
         // apart is how a consumer nobody wired up looks fine.
+        // Which broker its events travel on. It is an engine of the service like
+        // the cache and the index, and until now the only one not shown.
+        if let Some(e) = m.bus.engine {
+            row("bus", e.as_str().to_string());
+        }
         if !m.consumes.is_empty() {
             row(
                 "subs",
@@ -482,6 +487,59 @@ fn status(ms: &[Manifest], root: &std::path::Path) -> Status {
                     } else {
                         String::new()
                     }
+                ),
+            );
+        }
+        // The transports that are not a route. A socket and a stream are doors
+        // too, and a topology that draws only the HTTP ones shows a service
+        // with fewer ways in than it has.
+        if m.ws.declared() {
+            row(
+                "ws",
+                format!(
+                    "{}  {}  ·  {} types  ·  {}/min per connection",
+                    m.ws.path.clone().unwrap_or_default(),
+                    m.ws.auth.clone().unwrap_or_else(|| "undeclared".into()),
+                    m.methods.values().filter(|me| me.ws.is_some()).count(),
+                    m.ws.rate_limit
+                        .map(|r| r.to_string())
+                        .unwrap_or_else(|| "∞".into())
+                ),
+            );
+        }
+        for (name, st) in &m.sse {
+            row(
+                "sse",
+                format!(
+                    "{}  {name}  ·  {}",
+                    st.path.clone().unwrap_or_default(),
+                    st.events.join(", ")
+                ),
+            );
+        }
+        // The work that does not hang off a request: the flows and the queue.
+        for (name, wf) in &m.workflow {
+            row(
+                "flow",
+                format!(
+                    "{name}  ·  {}  ·  {} steps  ·  v{}",
+                    match wf.engine.temporal() {
+                        true => format!("temporal/{}", wf.task_queue(&m.service)),
+                        false => "postgres".to_string(),
+                    },
+                    wf.steps.len(),
+                    wf.version.unwrap_or(1)
+                ),
+            );
+        }
+        for (name, t) in &m.tasks {
+            row(
+                "task",
+                format!(
+                    "{name} → {}  ·  {} at a time  ·  {} attempts",
+                    t.handler,
+                    t.concurrency.unwrap_or(1),
+                    t.max_deliver()
                 ),
             );
         }

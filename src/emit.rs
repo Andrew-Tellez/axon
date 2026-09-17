@@ -1958,6 +1958,110 @@ pub fn views_ts(m: &Manifest) -> String {
 ///
 /// That the compensation draws itself is half the value of declaring it: in a
 /// review, a step with no arrow back is visible.
+/// A workflow as a diagram. It is the saga's, plus the two things a saga
+/// cannot draw: a timer nobody is waiting through, and an arrow that comes IN
+/// from whoever sends the signal.
+///
+/// Those two are the ones worth seeing. In a review, a flow that waits two days
+/// for an event and then gives up is a decision; spread over three keys of a
+/// manifest it is a number nobody reads.
+fn seq_workflow(ms: &[Manifest], m: &Manifest, name: &str, wf: &Workflow) -> String {
+    let signaller = |ev: &str| -> String {
+        ms.iter()
+            .find(|o| o.emits.contains_key(ev))
+            .map(|o| o.service.clone())
+            // `verify` already refuses an `awaits` over an event nobody emits:
+            // the diagram does not get to be the one that discovers it.
+            .unwrap_or_else(|| "publisher".to_string())
+    };
+    let mut o = vec![
+        "sequenceDiagram".to_string(),
+        "  autonumber".to_string(),
+        format!("  participant coord as {}·{name}", m.service),
+    ];
+    let mut seen: Vec<String> = Vec::new();
+    let add = |o: &mut Vec<String>, seen: &mut Vec<String>, who: String| {
+        if who != m.service && !seen.contains(&who) {
+            o.push(format!("  participant {who}"));
+            seen.push(who);
+        }
+    };
+    for step in &wf.steps {
+        for r in [step.call.as_ref(), step.undo.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some((svc, _)) = Step::parts(r) {
+                add(&mut o, &mut seen, svc.to_string());
+            }
+        }
+        if let Some(ev) = &step.awaits {
+            add(&mut o, &mut seen, signaller(ev));
+        }
+    }
+    o.push(format!(
+        "  Note over coord: {} · budget {}",
+        match wf.engine.temporal() {
+            true => format!(
+                "temporal · queue {} · version {}",
+                wf.task_queue(&m.service),
+                wf.version.unwrap_or(1)
+            ),
+            false => "postgres coordinator".to_string(),
+        },
+        match wf.timeout_ms {
+            Some(ms) => format!("{ms}ms"),
+            None => "undeclared".to_string(),
+        }
+    ));
+    for (i, step) in wf.steps.iter().enumerate() {
+        let n = i + 1;
+        match (&step.call, step.sleep_ms, &step.awaits) {
+            (Some(call), _, _) => {
+                if let Some((svc, met)) = Step::parts(call) {
+                    o.push(format!("  coord->>{svc}: {n} {met}"));
+                    o.push(format!("  {svc}-->>coord: ok"));
+                }
+            }
+            (_, Some(ms), _) => o.push(format!(
+                "  Note over coord: {n} · sleeps {ms}ms · a durable timer, nothing is running"
+            )),
+            (_, _, Some(ev)) => {
+                o.push(format!("  {}-->>coord: {n} · {ev}", signaller(ev)));
+                if let Some(ms) = step.timeout_ms {
+                    o.push(format!(
+                        "  Note over coord: or gives up after {ms}ms and compensates"
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    o.push("  Note over coord: up to here, the happy path".to_string());
+    o.push("  rect rgba(200,80,80,0.12)".to_string());
+    o.push(
+        "  Note over coord: if a step fails —or the signal never comes— what was attempted is undone in REVERSE order"
+            .into(),
+    );
+    for (i, step) in wf.steps.iter().enumerate().rev() {
+        match (&step.undo, &step.call) {
+            (Some(u), _) => {
+                if let Some((svc, met)) = Step::parts(u) {
+                    o.push(format!("  coord->>{svc}: undo {} · {met}", i + 1));
+                    o.push(format!("  {svc}-->>coord: ok (idempotent)"));
+                }
+            }
+            (None, Some(c)) => o.push(format!(
+                "  Note over coord: step {} ({c}) carries no compensation",
+                i + 1
+            )),
+            _ => {}
+        }
+    }
+    o.push("  end".to_string());
+    o.join("\n")
+}
+
 fn seq_saga(m: &Manifest, name: &str, sg: &Saga) -> String {
     let mut o = vec![
         "sequenceDiagram".to_string(),
@@ -2031,11 +2135,30 @@ pub fn build_seq(ms: &[Manifest], root: &str, solo_eventos: bool) -> Result<Stri
     {
         return Ok(seq_saga(m, root, &sg));
     }
+    // A temporal workflow is not in `flows()` —it keeps no journal— and it fell
+    // through to "nobody emits it and no saga is called that", with the list of
+    // sagas right after it EMPTY. The drawing is half the value of declaring a
+    // flow, and the half a workflow has that a saga does not is precisely the
+    // timer and the signal.
+    if let Some((m, wf)) = ms
+        .iter()
+        .find_map(|m| m.workflow.get(root).map(|wf| (m, wf)))
+    {
+        return Ok(seq_workflow(ms, m, root, wf));
+    }
     if !emitter.contains_key(root) {
         let known: Vec<_> = emitter.keys().copied().collect();
-        let sagas: Vec<String> = ms.iter().flat_map(|m| m.flows().into_keys()).collect();
+        let sagas: Vec<String> = ms
+            .iter()
+            .flat_map(|m| {
+                m.flows()
+                    .into_keys()
+                    .chain(m.workflow.keys().cloned())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         return Err(format!(
-            "{root}: nobody emits it and no saga is called that. Events: {}. Sagas: {}",
+            "{root}: nobody emits it and no flow is called that. Events: {}. Flows: {}",
             known.join(", "),
             if sagas.is_empty() {
                 "ninguna".to_string()

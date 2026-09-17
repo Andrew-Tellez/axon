@@ -11505,3 +11505,67 @@ fn a_stream_is_not_rendered_where_the_edge_buffers_it() {
         assert!(ok, "{target}: {err}");
     }
 }
+
+/// The three things the test bench found when the five new blocks went through
+/// it: a flow that could not be drawn, a stream missing from the document a
+/// client reads, and a topology that showed none of them.
+#[test]
+fn a_workflow_draws_its_timer_and_its_signal() {
+    // It used to answer "nobody emits it and no saga is called that", with the
+    // list of flows right after it EMPTY — the flow existed and the message
+    // said the opposite.
+    let dir = fixture_workflow("seq", FLUJO);
+    let (seq, err, ok) = axon(&["seq", "checkout", &dir.to_string_lossy()]);
+    assert!(ok, "{err}");
+    for piece in [
+        "participant coord as tienda·checkout",
+        // the call and its compensation, as a saga would draw them
+        "coord->>banco: 1 cobrar",
+        "coord->>banco: undo 1 · reembolsar",
+        // and the two a saga cannot: a timer nobody waits through, and an
+        // arrow that comes IN
+        "durable timer, nothing is running",
+        "banco-->>coord: 3 · pago.liquidado@v1",
+        "or gives up after",
+        // the number a replay tells one shape from another by
+        "version 1",
+    ] {
+        assert!(seq.contains(piece), "missing `{piece}` in:\n{seq}");
+    }
+}
+
+#[test]
+fn a_stream_is_in_the_document_a_client_reads() {
+    // A socket cannot be expressed in OpenAPI. A stream is an ordinary GET, and
+    // leaving it out means a client reading the document cannot see the
+    // endpoint it is meant to open.
+    let dir = fixture_sse("openapi", STREAM);
+    let (doc, err, ok) = axon(&["openapi", &dir.to_string_lossy()]);
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&doc).expect("valid json");
+    let op = &v["paths"]["/v1/rooms/{roomId}/stream"]["get"];
+    assert!(!op.is_null(), "the stream is not in the document:\n{doc}");
+    assert!(
+        !op["responses"]["200"]["content"]["text/event-stream"].is_null(),
+        "the stream does not answer text/event-stream:\n{op}"
+    );
+    // the path's parameters are what decides whose connection it is
+    assert!(
+        op["parameters"][0]["name"] == "roomId",
+        "the path parameter is missing:\n{op}"
+    );
+}
+
+#[test]
+fn the_topology_shows_the_doors_that_are_not_routes() {
+    let dir = fixture_ws("tui", SOCKET, "");
+    let (tui, err, ok) = axon(&["tui", &dir.to_string_lossy(), "--frames", "1"]);
+    assert!(ok, "{err}");
+    // A socket is a door too, and a topology that draws only the HTTP ones
+    // shows a service with fewer ways in than it has.
+    assert!(
+        tui.contains("ws "),
+        "the socket is not in the topology:\n{tui}"
+    );
+    assert!(tui.contains("/v1/ws"), "{tui}");
+}

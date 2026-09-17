@@ -7,6 +7,31 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [No publicado]
+
+### Corregido
+
+Los tres los encontró el banco de pruebas al declarar en él los cinco bloques nuevos, que
+es exactamente para lo que existe.
+
+- **`axon seq <flujo>` no sabía dibujar un `[workflow]` de Temporal.** Contestaba «nadie lo
+  emite y ningún saga se llama así», con la lista de sagas que venía justo después
+  **vacía**: el flujo existía y el mensaje decía lo contrario. Ahora se dibuja, y lo que se
+  dibuja es la mitad que un saga no tiene — el timer como una nota (nadie está esperando
+  ahí dentro) y la señal como una flecha que **entra**, desde quien emite el evento. En una
+  revisión, un flujo que espera dos días y se rinde es una decisión; repartido en tres
+  claves de un manifiesto es un número que nadie lee.
+
+- **Un `[sse]` no salía en el OpenAPI.** Un socket no se puede expresar ahí y está bien que
+  falte; un stream es un `GET` corriente, así que quien lee el documento no veía el endpoint
+  que tiene que abrir. Sale con `text/event-stream`, sus parámetros de ruta y la descripción
+  de cómo viaja cada trama.
+
+- **`axon tui` no mostraba ninguno de los cinco.** El panel listaba base de datos, caché,
+  índice, eventos y rutas, y ni el bus, ni el socket, ni el stream, ni las tareas, ni los
+  flujos. Un socket y un stream son puertas también, y una topología que dibuja solo las de
+  HTTP enseña un servicio con menos formas de entrar de las que tiene.
+
 ## [0.38.0] — 2026-09-17
 
 ### Añadido

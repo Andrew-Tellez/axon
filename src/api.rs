@@ -154,6 +154,52 @@ pub fn openapi_at(ms: &[Manifest], at: Option<&str>) -> Value {
                 .insert(verb.to_lowercase(), op);
         }
     }
+    // The streams. A socket has no place in an OpenAPI document —there is no
+    // way to express a frame that travels upward— but an `[sse]` IS an ordinary
+    // GET, and leaving it out means a client reading this document cannot see
+    // the endpoint it is supposed to open.
+    for m in ms.iter().filter(|m| !m.external) {
+        for (name, st) in &m.sse {
+            let Some(path) = st.path.as_deref() else {
+                continue;
+            };
+            let mut op = json!({
+                "operationId": format!("{}_{name}_stream", m.service),
+                "summary": format!("Server-Sent Events: {}", st.events.join(", ")),
+                "description": format!(
+                    concat!(
+                        "The response stays open. Each frame carries `event:` with one of ",
+                        "the declared types and `data:` with its payload, and `id:` comes ",
+                        "back as `Last-Event-ID` on a reconnect. A comment line goes out ",
+                        "every {}ms so a proxy does not close it."
+                    ),
+                    st.heartbeat_ms()
+                ),
+                "tags": [m.service.clone()],
+                "responses": {
+                    "200": {
+                        "description": "the stream, open",
+                        "content": {"text/event-stream": {"schema": {"type": "string"}}}
+                    }
+                }
+            });
+            // The path parameters are what decides which connection an event
+            // belongs to, so they are required here like anywhere else.
+            let params = path_params(path, &Fields::new());
+            if !params.is_empty() {
+                op["parameters"] = json!(params);
+            }
+            if st.auth.as_deref() == Some("required") {
+                op["security"] = json!([{"bearerAuth": st.scopes.clone()}]);
+            }
+            paths
+                .entry(path.to_string())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .unwrap()
+                .insert("get".into(), op);
+        }
+    }
     let api = ms.iter().find(|m| !m.external).map(|m| &m.api);
     // With the header scheme the version is a parameter of every operation, and
     // the answer depends on it: a cache that does not know that serves one
