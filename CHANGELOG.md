@@ -9,6 +9,15 @@ perderlas.
 
 ## [No publicado]
 
+### Añadido
+
+- **`axon workflows <manifiesto> <fuentes>`: los flujos de Temporal, como su propio
+  módulo.** Salían dentro de `axon build`, y eso estaba mal por una razón que es de
+  Temporal y no una preferencia: el worker carga el código del workflow en un bundle
+  aislado, así que no puede vivir en el mismo archivo que el transporte, los clientes y los
+  tipos de la base de datos. Lo que necesita del contrato entra como `import type`, que se
+  borra al compilar. El contrato dice adónde se fueron y no los importa.
+
 ### Corregido
 
 Los tres los encontró el banco de pruebas al declarar en él los cinco bloques nuevos, que
@@ -26,6 +35,16 @@ es exactamente para lo que existe.
   falte; un stream es un `GET` corriente, así que quien lee el documento no veía el endpoint
   que tiene que abrir. Sale con `text/event-stream`, sus parámetros de ruta y la descripción
   de cómo viaja cada trama.
+
+- **Un `[workflow]` de Temporal dejaba el contrato entero sin cargar.** El generador
+  importaba `sleep` de `@temporalio/workflow`, y `sleep` ya era el nombre del backoff de
+  los reintentos en ese mismo archivo: dos declaraciones de un nombre en un módulo no
+  parsean. El síntoma era que el testkit —que prueba cosas que no tienen nada que ver con
+  Temporal— no arrancaba. `tsc` no lo vio porque el módulo que no podía resolver tapaba
+  todo lo demás, y ninguna prueba leía el archivo generado como archivo. Arreglado por los
+  dos lados: el import va como `timer`, y los workflows se fueron a su propio módulo. Hay
+  un gate nuevo que lee cada archivo generado y se niega si un nombre está declarado dos
+  veces.
 
 - **`axon tui` no mostraba ninguno de los cinco.** El panel listaba base de datos, caché,
   índice, eventos y rutas, y ni el bus, ni el socket, ni el stream, ni las tareas, ni los

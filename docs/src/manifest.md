@@ -582,6 +582,12 @@ saga — the same journal, the same sweep, the same rules — and the keys that 
 (`sleep_ms`, `awaits`, `retry`, `heartbeat_ms`) are an error there instead of a key that
 looks declared and does nothing. With `engine = "temporal"` what comes out is the worker.
 
+The generated workflow lives in **its own module**, `axon workflows <manifest> <dir>`, and
+not in the contract: the worker loads workflow code in an isolated bundle, so one static
+import of the SDK in `contracts.ts` would stop the whole file loading for a project that
+has not installed it — the testkit included, which tests things that have nothing to do
+with Temporal. What the module needs from the contract comes in as `import type`.
+
 `axon baseline` records the shape and `verify` refuses a change to it that does not bump
 `version`: a flow in flight replays the history it started with and, from the step that no
 longer matches, neither goes on nor compensates. See

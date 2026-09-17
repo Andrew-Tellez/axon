@@ -498,6 +498,12 @@ its own timeout and policy, the `sleep`, the `setHandler` + `condition` on the s
 the compensations in reverse over what actually ran. What does **not** come out is what
 the activities do — that is an interface you implement, like the saga's actions.
 
+It comes out as **its own module** —`axon workflows`— and not inside the contract, and
+that is Temporal's rule and not a preference: the worker loads workflow code in an
+isolated bundle, so it cannot sit in the same file as the transport, the clients and the
+database types. Trying to was how a service that declared one workflow ended up with a
+`contracts.ts` nobody could import.
+
 `--target local` brings up the server and its UI in the compose, because a generated
 worker with nowhere to run is half a feature. On `k8s` only the address: a Temporal in a
 generated manifest is a file nobody can operate, and it is a managed service or its own

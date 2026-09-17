@@ -10850,11 +10850,30 @@ fn a_temporal_workflow_needs_no_journal_and_generates_its_worker() {
     assert!(out.contains("0 errors"), "{out}");
 
     let manifest = dir.join("tienda.toml").to_string_lossy().to_string();
-    let (ts, err, ok) = axon(&["build", &manifest, &d]);
+    // The workflows live in their OWN module: the worker loads them in an
+    // isolated bundle, and one static import of the SDK in the contract makes
+    // the whole file unloadable for a project that has not installed it.
+    let (contract, err, ok) = axon(&["build", &manifest, &d]);
     assert!(ok, "{err}");
+    assert!(
+        // It is NAMED in the contract —the comment says where the workflows went—
+        // and not imported, which is the whole difference.
+        !contract.contains("from \"@temporalio/workflow\""),
+        "the SDK is imported by the contract:\n{contract}"
+    );
+    assert!(
+        contract.contains("temporalWorkflows = [\"checkout\"]"),
+        "the contract does not say where the workflows went:\n{contract}"
+    );
+    let (ts, err, ok) = axon(&["workflows", &manifest, &d]);
+    assert!(ok, "{err}");
+    assert!(
+        ts.contains("import type {"),
+        "the types are not type-only:\n{ts}"
+    );
     for piece in [
         // the timer and the signal, which are what a saga cannot do
-        "await sleep(60000)",
+        "await timer(60000)",
         "defineSignal",
         "await condition(() => signal3 !== undefined, 172800000)",
         // the retry policy declared on the step, not the dependency's
@@ -11568,4 +11587,110 @@ fn the_topology_shows_the_doors_that_are_not_routes() {
         "the socket is not in the topology:\n{tui}"
     );
     assert!(tui.contains("/v1/ws"), "{tui}");
+}
+
+/// Two declarations of one name in a module do not parse, and a generator that
+/// adds an import has no way of knowing what the prelude already calls things.
+///
+/// It happened: the Temporal generator imported `sleep`, which was already the
+/// name of the retry backoff, and the whole `contracts.ts` stopped loading —
+/// including for the testkit, which tests things that have nothing to do with
+/// Temporal. `tsc` did not catch it because the module it could not resolve
+/// masked everything after it, and no test read the generated file as a file.
+///
+/// That particular one is now impossible —the workflows are their own module—
+/// so this does not guard it: it guards the NEXT generator that adds an import
+/// to a file whose prelude it did not write.
+#[test]
+fn no_generated_file_declares_one_name_twice() {
+    // Top level only: a `const p` inside a function body is a different scope
+    // and shadowing there is not a collision. What collides is what sits at
+    // column zero and what an import brings into the module.
+    let bound = |ts: &str| -> Vec<String> {
+        let mut names = Vec::new();
+        let mut importing = false;
+        for line in ts.lines() {
+            if line.starts_with("import ") && line.trim_end().ends_with('{') {
+                importing = !line.contains("import type");
+                continue;
+            }
+            if importing {
+                if line.starts_with('}') {
+                    importing = false;
+                    continue;
+                }
+                let piece = line.trim().trim_end_matches(',').trim();
+                let name = piece.rsplit(" as ").next().unwrap_or(piece);
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                {
+                    names.push(name.to_string());
+                }
+                continue;
+            }
+            for kw in [
+                "export const ",
+                "export async function ",
+                "export function ",
+                "export class ",
+                "export abstract class ",
+                "const ",
+                "function ",
+                "class ",
+            ] {
+                let Some(rest) = line.strip_prefix(kw) else {
+                    continue;
+                };
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                    .collect();
+                if !name.is_empty() {
+                    names.push(name);
+                }
+                break;
+            }
+        }
+        names
+    };
+    let mut checked = 0;
+    for (manifest, dir) in [
+        ("examples/orders.toml", "examples"),
+        ("examples/payments.toml", "examples"),
+        ("examples/checkout.toml", "examples"),
+    ] {
+        let (ts, err, ok) = axon(&["build", manifest, dir]);
+        assert!(ok, "{manifest}: {err}");
+        let names = bound(&ts);
+        for (i, n) in names.iter().enumerate() {
+            assert!(
+                !names[..i].contains(n),
+                "{manifest}: `{n}` is declared twice in the generated module"
+            );
+        }
+        checked += 1;
+    }
+    // and the one that actually collided
+    let dir = fixture_workflow("names", FLUJO);
+    let d = dir.to_string_lossy().to_string();
+    let manifest = dir.join("tienda.toml").to_string_lossy().to_string();
+    for args in [
+        vec!["build", &manifest, &d],
+        vec!["workflows", &manifest, &d],
+    ] {
+        let (ts, err, ok) = axon(&args);
+        assert!(ok, "{err}");
+        let names = bound(&ts);
+        for (i, n) in names.iter().enumerate() {
+            assert!(
+                !names[..i].contains(n),
+                "{}: `{n}` is declared twice in the generated module",
+                args[0]
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked >= 5, "only {checked} modules were checked");
 }
