@@ -46,6 +46,19 @@ es exactamente para lo que existe.
   un gate nuevo que lee cada archivo generado y se niega si un nombre está declarado dos
   veces.
 
+- **El `test_cmd` que escribía `axon init` no corría en el proyecto que `axon init`
+  escribe.** La policy decía `node --test services/{service}`, y node no busca dentro de un
+  directorio: intenta **ejecutarlo**, y falla con `MODULE_NOT_FOUND` — que no es «no hay
+  pruebas», es un error. Encima no había ningún archivo de prueba ahí dentro, porque el
+  testkit generado es una librería que se cablea desde uno propio y ese archivo no existía.
+  El pipeline que emite `axon ci` salía rojo en el primer build de cada proyecto nuevo.
+
+  Arreglado por los dos lados: el default es un glob, y `init` escribe
+  `services/{service}/axon.test.ts` con una aserción de verdad —que el contrato sirve las
+  rutas que el manifiesto declara— y el comentario que dice cómo cablear el testkit ahí
+  mismo. No lo vio nadie porque cada prueba de la suite comprueba lo que axon **imprime**;
+  la nueva comprueba lo que eso impreso **hace**.
+
 - **`axon tui` no mostraba ninguno de los cinco.** El panel listaba base de datos, caché,
   índice, eventos y rutas, y ni el bus, ni el socket, ni el stream, ni las tareas, ni los
   flujos. Un socket y un stream son puertas también, y una topología que dibuja solo las de

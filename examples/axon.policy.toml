@@ -11,5 +11,5 @@ max_deps_per_service = 7
 [ci]
 manifests_dir  = "."
 service_dir    = "services/{service}"
-test_cmd       = "node --test services/{service}"
+test_cmd       = "node --test services/{service}/*.test.ts"
 contracts_path = "services/{service}/contracts.ts"

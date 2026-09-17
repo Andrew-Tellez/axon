@@ -49,6 +49,10 @@ pub fn run(root: &Path, service: &str) -> Result<String, String> {
             DOCKERFILE.replace("SERVICE", service),
         ),
         (format!("services/{service}/index.ts"), index_ts(service)),
+        (
+            format!("services/{service}/axon.test.ts"),
+            TEST_TS.to_string(),
+        ),
         (".env.local".into(), ENV_LOCAL.into()),
         ("axon.policy.toml".into(), POLICY.into()),
         (".gitignore".into(), GITIGNORE.into()),
@@ -159,6 +163,43 @@ COPY services ./services
 CMD ["node", "--experimental-strip-types", "services/SERVICE/index.ts"]
 "#;
 
+/// The project's first test, and the file the generated testkit gets wired
+/// from.
+///
+/// It exists because the policy `init` writes says `node --test
+/// services/<service>`, and with no test file at all node does not say "no
+/// tests": it fails with `MODULE_NOT_FOUND`, which reads as a broken project
+/// and is an empty one. The generated testkit is a LIBRARY —it exports suites
+/// somebody has to call— so until this file existed there was nowhere to call
+/// them from, and the pipeline `axon ci` writes was red on the first run of
+/// every new project.
+const TEST_TS: &str = r#"// Your tests. The ones that come from the manifest are generated:
+//
+//   axon test <service>.toml . > services/<service>/testkit.ts
+//
+// and wired from here, which is what the testkit's own header says and what
+// this file exists to make possible:
+//
+//   import { contractTests, machineTests, errorTests } from "./testkit.ts";
+//   import { Service } from "./index.ts";
+//   contractTests((bus, inbox, outbox) => new Service(bus, inbox, outbox));
+//
+// Until then, one real assertion. It is not decoration: it fails the day a
+// route is declared —or removed— in the manifest and nobody regenerated the
+// contract, which is the drift this whole project is about, seen from the
+// side the compiler cannot.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { httpRoutes } from "./contracts.ts";
+
+test("the contract serves the routes the manifest declares", () => {
+  assert.deepEqual([...httpRoutes].sort(), [
+    "GET /v1/things/{thingId}",
+    "POST /v1/things",
+  ]);
+});
+"#;
+
 fn index_ts(service: &str) -> String {
     format!(
         r#"// Your code. Everything that crosses a process boundary is generated; what is
@@ -206,7 +247,11 @@ require_tier = true
 [ci]
 manifests_dir  = "."
 service_dir    = "services/{service}"
-test_cmd       = "node --test services/{service}"
+# A GLOB and not the directory: `node --test <dir>` does not search it, it
+# tries to RUN it, and fails with MODULE_NOT_FOUND —which reads as a broken
+# project and is a directory. The pipeline `axon ci` writes carries this line
+# verbatim, so a default that does not run is a red first build.
+test_cmd       = "node --test services/{service}/*.test.ts"
 contracts_path = "services/{service}/contracts.ts"
 "#;
 

@@ -11694,3 +11694,73 @@ fn no_generated_file_declares_one_name_twice() {
     }
     assert!(checked >= 5, "only {checked} modules were checked");
 }
+
+/// The `test_cmd` `axon init` writes has to RUN on the project `axon init`
+/// writes. It did not: the policy said `node --test services/<service>`, node
+/// does not search a directory —it tries to run it— and there was no test file
+/// in there anyway, so the pipeline `axon ci` emits was red on the first build
+/// of every new project, with `MODULE_NOT_FOUND` as the reason.
+///
+/// Nothing caught it because every test here checks what axon PRINTS. This one
+/// checks what the printed thing does.
+#[test]
+fn a_fresh_project_passes_its_own_test_command() {
+    if !has("node") {
+        eprintln!("salteado: node no esta instalado");
+        return;
+    }
+    let dir = std::env::temp_dir().join("axon-init-test-cmd");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_axon"))
+        .args(["init", "tienda"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "init: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The contract, which the scaffolded test imports: `init` writes the
+    // project, not the generated code.
+    let (ts, err, ok) = axon(&[
+        "build",
+        dir.join("tienda.toml").to_str().unwrap(),
+        dir.to_str().unwrap(),
+    ]);
+    assert!(ok, "{err}");
+    std::fs::write(dir.join("services/tienda/contracts.ts"), ts).unwrap();
+
+    // The command the policy declares, read from the policy and not retyped.
+    let policy = std::fs::read_to_string(dir.join("axon.policy.toml")).unwrap();
+    let cmd = policy
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("test_cmd"))
+        .and_then(|l| l.split('"').nth(1))
+        .expect("the policy declares a test_cmd")
+        .replace("{service}", "tienda");
+
+    let run = Command::new("sh")
+        .args(["-c", &cmd])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        run.status.success(),
+        "`{cmd}` fails on a project `axon init` just wrote:\n{printed}"
+    );
+    // And it ran something: a command that finds no tests and exits 0 would
+    // pass this without testing anything, which is the failure one level up.
+    assert!(
+        printed.contains("pass 1"),
+        "`{cmd}` ran no test on a fresh project:\n{printed}"
+    );
+}
