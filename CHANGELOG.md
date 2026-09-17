@@ -29,6 +29,13 @@ perderlas.
   alta que en una nube gestionada el bus es el de la nube y un `kafka` declarado se
   rechaza en vez de traducirse en silencio.
 
+- **La página de infraestructura dice qué levanta cada objetivo con el bus declarado.** La
+  tabla de arriba seguía diciendo «NATS JetStream» para `local`, que ahora es el motor que
+  se declare; y la lista de crons no mencionaba el drenado de la cola de tareas. Con ello,
+  por qué los comandos que crean los topics y los consumidores salen como comentarios y no
+  como un contenedor que los ejecute, y qué levanta —y qué no— un flujo `temporal` en cada
+  objetivo.
+
 ## [0.37.1] — 2026-09-16
 
 ### Corregido

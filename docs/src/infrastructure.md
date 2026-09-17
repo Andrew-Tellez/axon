@@ -5,7 +5,7 @@ then renders it:
 
 | Target | Edge | Messaging | Compute | State, objects and secrets |
 | --- | --- | --- | --- | --- |
-| `local` | Traefik | NATS JetStream | your services with `build:` | Postgres + MinIO + Jaeger + migrations applied |
+| `local` | Traefik | the declared bus; NATS JetStream by default | your services with `build:` | Postgres + MinIO + Jaeger + migrations applied |
 | `gcp` | url_map + backends | Pub/Sub with push and a DLQ | Cloud Run + service account | Cloud SQL, GCS + Cloud CDN, Secret Manager |
 | `aws` | API Gateway v2 | SNS → SQS with redrive | ECS Fargate + autoscaling | RDS, S3 + CloudFront, Secrets Manager |
 | `k8s` | Gateway API HTTPRoute | Knative Broker/Trigger | Deployment + Service + HPA | External Secrets |
@@ -19,10 +19,35 @@ variable.
 Beyond that, and derived from the same manifest: one topic per event and one
 subscription per consumer with a DLQ always, one database per service with its standby,
 its backups and its read replicas, the pooler and its shard nodes, the migration jobs
-and the RLS policy jobs, the cron that hits the saga sweep and the snapshot prune, the
-warehouse ingest path, the OpenTelemetry variables, flagd with its configuration when
+and the RLS policy jobs, the crons that hit the saga's sweep, the snapshot prune and the
+task queue's drain, the warehouse ingest path, the OpenTelemetry variables, flagd with its configuration when
 there are flags, and —on `local`, when something exports— a Metabase to read the
 warehouse with.
+
+## The bus is declared, and each target renders what it has
+
+```toml
+[bus]
+engine       = "kafka"       # nats (the default) · kafka · rabbit · none
+retention_ms = 604800000     # the window a consumer that was down catches up in
+```
+
+| | |
+| --- | --- |
+| `local` | the container the engine names — NATS with JetStream, Redpanda, or RabbitMQ with its management UI — always as a service called `broker`. What changes in your code is one variable, `AXON_BROKER_URL`, so moving between brokers is not also a rename in every file that ever referenced the old one |
+| `gcp` · `aws` | the bus is the cloud's: Pub/Sub and SQS. A declared `kafka` is **refused** instead of rendered as either of them — another ordering, another redelivery, another failure — and `--target plan` carries the subscriptions so you can render it with your own template |
+| `k8s` | Knative Broker and Trigger, as before |
+
+The commands that create the topics and the consumers come out at the end of the compose,
+as comments, with the declared numbers inside: the retention on the topic, and the group,
+the attempts and the ack window on each consumer. Comments and not a container that runs
+them, because the day one of them fails is the day it matters — a bootstrap that swallows
+its own error leaves a consumer that never receives and a compose that came up green.
+
+A `temporal` workflow brings up the server and its UI on `local`, and every workload gets
+`AXON_TEMPORAL_ADDRESS` — the one that signals a flow needs it too, not only the one
+hosting the worker. On the other targets, nothing: there Temporal is a managed service or
+its own chart, and a generated StatefulSet would be a file nobody can operate.
 
 ## A service that runs and ends
 
