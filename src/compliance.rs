@@ -915,15 +915,25 @@ pub fn build(
         s.push('\n');
     }
     s.push_str(&format!(
-        "---\n\n{gaps} gap(s). Put `frameworks = [{}]` in `axon.policy.toml` and each one becomes \
-         an `axon verify` error, which is the difference between a matrix somebody reads once and \
-         a rule that fails the build.\n",
-        FRAMEWORKS
-            .iter()
-            .filter(|(id, _)| only.is_none_or(|f| f == *id))
-            .map(|(id, _)| format!("\"{id}\""))
-            .collect::<Vec<_>>()
-            .join(", ")
+        "---\n\n{gaps} gap(s){}\n",
+        // Suggesting a regime already in the policy reads as if it were not
+        // applying, which is the one thing the reader has to be sure about.
+        match only {
+            Some(f) if !frameworks.contains(&f.to_string()) => format!(
+                ". `{f}` is not in `axon.policy.toml`, so none of this is enforced yet: add it to \
+                 `frameworks` —or to this service's `compliance`— and every gap above becomes an \
+                 `axon verify` error"
+            ),
+            _ if frameworks.is_empty() => ". Nothing is declared in `axon.policy.toml`, so none \
+                 of this is enforced: a matrix somebody reads once is not a rule that fails the \
+                 build"
+                .to_string(),
+            _ => format!(
+                ", enforced by `axon verify` on every change: `{}` {} declared in the policy",
+                frameworks.join("`, `"),
+                if frameworks.len() == 1 { "is" } else { "are" }
+            ),
+        }
     ));
     Ok(s)
 }
