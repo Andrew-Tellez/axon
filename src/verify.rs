@@ -11,9 +11,35 @@ pub struct Policy {
     pub require_tier: bool,
     pub allowed_event_prefixes: Vec<String>,
     pub max_deps_per_service: usize,
+    /// The regimes this repo is audited against: `hipaa`, `soc2`. Declaring
+    /// one turns every control `axon compliance` marks as a gap into an error,
+    /// which is the whole difference between a matrix somebody reads once and
+    /// a rule that fails the build.
+    pub frameworks: Vec<String>,
+    /// Regimes this repo declares for itself, mapped onto controls axon
+    /// already checks. See `compliance::Framework`.
+    pub framework: IndexMap<String, Framework>,
     /// The repo layout belongs to the team, not to axon. Without this, `axon ci`
     /// would have to guess it, and guessing is what made it useless.
     pub ci: Ci,
+}
+
+/// A regime declared by the repo in `axon.policy.toml`:
+///
+///   [framework.nom151]
+///   name = "NOM-151-SCFI-2016"
+///   controls = { backup = "numeral 7", "encryption-at-rest" = "numeral 5.2" }
+///
+/// The keys of `controls` are control ids —`axon compliance --ids` lists
+/// them— and a key that names no control is refused, not ignored: a mapping
+/// with a typo in it is a control somebody believes is covered.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Framework {
+    #[serde(skip)]
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub controls: indexmap::IndexMap<String, String>,
 }
 
 /// `{service}` is replaced with the service's name.
@@ -83,6 +109,8 @@ impl Default for Policy {
             require_tier: true,
             allowed_event_prefixes: vec![],
             max_deps_per_service: 7, // synchronous coupling: past this, it is a distributed monolith
+            frameworks: vec![],
+            framework: IndexMap::new(),
             ci: Ci::default(),
         }
     }

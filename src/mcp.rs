@@ -110,6 +110,10 @@ Verifying at the end means unpicking everything at once.
 why, and they are meant to be acted on, not summarised to the user. An error is a \
 refusal; a warning is a decision somebody has to take.
 
+Calling a service you did not write: `docs` is the integration guide —auth, scopes, \
+declared failures, the events to subscribe to— and it is the one to read before \
+writing the caller, not after it 401s.
+
 What axon will not tell you: where the service boundary goes, or what an event should \
 be called. That is the part you are for.";
 
@@ -160,6 +164,18 @@ fn tools() -> Vec<Value> {
                 "required": ["manifest"]
             },
         }),
+        json!({
+            "name": "docs",
+            "description": "The integration guide for a service, as Markdown: which issuer                 signs the token and what the claims are called, what you may call and with                 which scopes, the failures it declares and which of them are worth retrying,                 the events you can subscribe to instead of polling. Read it before writing a                 caller for a service you did not write.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "a manifest, or a directory of them" },
+                    "service": { "type": "string", "description": "one service; omitted, every                         non-external one" }
+                },
+                "required": ["path"]
+            },
+        }),
     ]
 }
 
@@ -192,6 +208,18 @@ fn call(name: &str, args: &Value) -> Result<String, String> {
             path()?.to_string()
         ])?)),
         "manifest_schema" => Ok(described()),
+        "docs" => {
+            let p = path()?;
+            let ms = manifest::discover(&[p.to_string()])?;
+            let dir = Path::new(p);
+            let root = if dir.is_dir() {
+                dir
+            } else {
+                dir.parent().unwrap_or(Path::new("."))
+            };
+            let pol = crate::verify::load_policy(root);
+            crate::docs::build(&ms, &pol, root, args.get("service").and_then(Value::as_str))
+        }
         "contracts" => {
             let m = args
                 .get("manifest")

@@ -13,8 +13,10 @@ mod cap;
 mod carga;
 mod catalog;
 mod color;
+mod compliance;
 mod contract;
 mod dbsec;
+mod docs;
 mod emit;
 mod gen_go;
 mod import;
@@ -358,6 +360,28 @@ enum Cmd {
         #[arg(long = "service", short = 's', add = ArgValueCandidates::new(services_here))]
         service: Option<String>,
     },
+    /// the integration guide: how to authenticate, what you can call and
+    /// which events you can subscribe to. For whoever consumes the service,
+    /// not for whoever writes it
+    Docs {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        sources: Vec<String>,
+        /// which service. Omitted, every non-external one is documented.
+        #[arg(long = "service", short = 's', add = ArgValueCandidates::new(services_here))]
+        service: Option<String>,
+    },
+    /// the control matrix: which clause of HIPAA or SOC 2 each declaration
+    /// answers, and which ones a manifest cannot answer at all
+    Compliance {
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        sources: Vec<String>,
+        /// one framework instead of every one axon knows.
+        #[arg(long)]
+        framework: Option<String>,
+        /// the control ids, which is what `[framework.*] controls` maps onto.
+        #[arg(long)]
+        ids: bool,
+    },
     /// data access policies: per-row RLS and masked views
     Rls {
         #[arg(value_hint = clap::ValueHint::AnyPath)]
@@ -457,6 +481,14 @@ fn full_report(ms: &[manifest::Manifest], root: &std::path::Path) -> verify::Rep
             ),
         ));
     }
+    // The declared regimes. Off the list nothing is checked: a framework
+    // nobody signed up for is a suggestion, and `axon compliance` is where a
+    // suggestion belongs.
+    let pol = verify::load_policy(root);
+    for gap in compliance::findings(ms, &pol, root) {
+        r.errors.push(verify::place(ms, gap));
+    }
+
     let payload = serde_json::to_string(ms).unwrap_or_default();
     for bin in plugin::checks() {
         match plugin::run(&bin, &payload) {
@@ -548,7 +580,10 @@ fn run() -> Result<ExitCode, String> {
             let m = manifest::load(&manifest)?;
             let dir = manifest.parent().unwrap_or(std::path::Path::new("."));
             let pol = verify::load_policy(dir);
-            println!("{}", emit::build_ci(&m, &pol.ci, &target, &forge)?);
+            println!(
+                "{}",
+                emit::build_ci(&m, &pol.ci, &pol.frameworks, &target, &forge)?
+            );
         }
         Cmd::Infra {
             sources,
@@ -1113,6 +1148,29 @@ fn run() -> Result<ExitCode, String> {
         Cmd::Catalog { sources, service } => {
             let ms = manifest::discover(&sources)?;
             print!("{}", catalog::build(&ms, service.as_deref())?)
+        }
+        Cmd::Docs { sources, service } => {
+            let (ms, root) = discover_with_root(&sources)?;
+            let pol = verify::load_policy(&root);
+            print!("{}", docs::build(&ms, &pol, &root, service.as_deref())?)
+        }
+        Cmd::Compliance {
+            sources,
+            framework,
+            ids,
+        } => {
+            if ids {
+                for id in compliance::ids() {
+                    println!("{id}");
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            let (ms, root) = discover_with_root(&sources)?;
+            let pol = verify::load_policy(&root);
+            print!(
+                "{}",
+                compliance::build(&ms, &root, &pol, framework.as_deref())?
+            )
         }
         Cmd::Rls { sources, target } => {
             let ms = manifest::discover(&sources)?;

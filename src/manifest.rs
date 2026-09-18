@@ -2040,6 +2040,21 @@ pub struct Manifest {
     /// them from leaving through a public route.
     #[serde(default)]
     pub pii: Vec<String>,
+    /// The regimes THIS service is held to, on top of the ones the repo
+    /// declares in `axon.policy.toml`.
+    ///
+    /// Two levels because the two questions are different. SOC 2 and ISO
+    /// 27001 are the organisation's: every service is in scope and the policy
+    /// says so once. CFDI and PCI DSS are a service's: only the one that
+    /// stamps invoices holds a CSD, only the one that talks to the processor
+    /// is in the card's scope, and demanding a signing key from a product
+    /// catalogue is how a compliance report becomes noise nobody reads.
+    ///
+    /// Not serialized when empty, for the same reason `workflow` is not: the
+    /// manifest travels embedded in every generated contract, and a new key on
+    /// it is a diff in every file of every repo that regenerates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compliance: Vec<String>,
     #[serde(default)]
     pub external: bool,
     #[serde(default)]

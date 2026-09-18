@@ -91,6 +91,8 @@ axon init billing                                 # a project that verifies clea
 axon auth manifests/orders.toml                   # the verifier, from the declared claims
 axon crud manifests/shop.toml --expand            # what a [crud.*] stands for, to paste and edit
 axon catalog manifests/ --service orders          # the declared lists: table, seed and type
+axon docs manifests/ --service orders             # the integration guide: auth, methods, events
+axon compliance manifests/ --framework hipaa      # the control matrix, and what it cannot answer
 axon rls manifests/                               # per-row RLS and masked views
 axon pooler manifests/ --service orders --target local   # pgdog, from the manifest
 axon flags manifests/                             # flagd config (OpenFeature)

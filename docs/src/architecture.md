@@ -65,6 +65,8 @@ flowchart TB
   MAN --> BI["bi.rs<br/><i>warehouse: 3 dialects,<br/>funnels, metrics, drift</i>"]
   MAN --> DBS["dbsec.rs<br/><i>RLS, masked views,<br/>pg_anon</i>"]
   MAN --> CAT["catalog.rs<br/><i>the declared lists:<br/>table, seed and type</i>"]
+  MAN --> DOC["docs.rs<br/><i>the integration guide,<br/>for whoever consumes it</i>"]
+  MAN --> CPL["compliance.rs<br/><i>HIPAA and SOC 2:<br/>the control matrix</i>"]
   INIT["init.rs<br/><i>a project that verifies<br/>clean and comes up</i>"] --> MAN
   MAN --> POOL["pooler.rs<br/><i>pgdog.toml + users</i>"]
   MAN --> CAP["cap.rs<br/><i>CAP consequences</i>"]
