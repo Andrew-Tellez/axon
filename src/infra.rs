@@ -2126,6 +2126,24 @@ spec:
                 max = w.max_instances
             ));
         }
+        // A budget only where there is something to spare. On one replica
+        // `minAvailable: 1` is a drain that never finishes: the node waits
+        // forever for a pod it is not allowed to evict and the upgrade stalls
+        // on a service nobody noticed was a single copy.
+        if w.min_instances.max(1) > 1 {
+            o.push(format!(
+                "---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {svc}
+spec:
+  minAvailable: {keep}
+  selector:
+    matchLabels: {{ app: {svc} }}",
+                keep = w.min_instances.max(1) - 1
+            ));
+        }
     }
     for s in &p.stores {
         if let Some(y) = k8s_pooler(s) {
