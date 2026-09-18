@@ -8746,7 +8746,9 @@ fn the_gitlab_pipeline_keeps_the_same_gates() {
 
     let stages = doc["stages"].as_sequence().expect("no stages");
     let stages: Vec<_> = stages.iter().map(|s| s.as_str().unwrap()).collect();
-    assert_eq!(stages, ["contracts", "test", "deploy"]);
+    // `docs` is a stage and not a gate: it renders the integration guide and
+    // is deliberately outside what blocks the deploy.
+    assert_eq!(stages, ["contracts", "test", "docs", "deploy"]);
 
     // the three gates, in the job that blocks the merge
     let contracts = serde_yaml_ng::to_string(&doc["contracts"]["script"]).unwrap();

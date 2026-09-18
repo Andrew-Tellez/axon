@@ -495,16 +495,22 @@ fn from_repo_root(manifests_dir: &str, route: &str) -> String {
 pub fn build_ci(
     m: &Manifest,
     ci: &crate::verify::Ci,
+    frameworks: &[String],
     target: &str,
     forge: &str,
 ) -> Result<String, String> {
     if forge == "gitlab" {
-        return build_ci_gitlab(m, ci, target);
+        return build_ci_gitlab(m, ci, frameworks, target);
     }
-    Ok(build_ci_github(m, ci, target))
+    Ok(build_ci_github(m, ci, frameworks, target))
 }
 
-fn build_ci_github(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String {
+fn build_ci_github(
+    m: &Manifest,
+    ci: &crate::verify::Ci,
+    frameworks: &[String],
+    target: &str,
+) -> String {
     let svc = &m.service;
     let en = |field: &String| ci.path(field, svc);
     let (dir, test, image, manifests) = (
@@ -543,6 +549,62 @@ fn build_ci_github(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> String
 "
         ));
     }
+
+    // The matrix, attached to the commit that produced it. `axon verify`
+    // already REFUSES a gap —the regimes are declared in the policy— so this
+    // job is not the gate: it is the evidence. An auditor asks what was true
+    // on a date, and a green check does not answer that.
+    //
+    // The artifact is a convenience. The durable record is the commit: the
+    // matrix is derived from the manifests, so it can be regenerated from any
+    // sha, years later, without trusting a retention setting.
+    // The integration guide, rebuilt from the manifest on every merge. It is
+    // NOT in the deploy's `needs`: a guide that failed to render is not a
+    // reason to hold a release, and wiring it as a gate is how a team learns
+    // to skip the gate.
+    let documentacion = format!(
+        "
+  documentacion:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
+      - run: axon docs {manifests}/ --service {svc} > integracion.md
+      - run: cat integracion.md >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: integracion-{svc}
+          path: integracion.md
+"
+    );
+
+    let (cumplimiento, needs) = if frameworks.is_empty() {
+        (String::new(), String::new())
+    } else {
+        (
+            format!(
+                "
+  cumplimiento:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
+      - name: control matrix ({regimes})
+        run: axon compliance {manifests}/ > compliance.md
+      # in the run's summary, not only in a zip: evidence nobody opens is
+      # evidence nobody checked
+      - run: cat compliance.md >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compliance-${{{{ github.sha }}}}
+          path: compliance.md
+          retention-days: 90
+",
+                regimes = frameworks.join(", "),
+            ),
+            ", cumplimiento".to_string(),
+        )
+    };
 
     let despliegue = match target {
         "gcp" => format!(
@@ -625,9 +687,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: {test}
-
+{documentacion}{cumplimiento}
   deploy:
-    needs: [contratos, test]
+    needs: [contratos, test{needs}]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production
@@ -656,7 +718,12 @@ jobs:
 /// carries GitHub's expression syntax: that is literal text for GitLab, so the
 /// deploy would push an image whose tag is the expression itself and nothing
 /// would say so until somebody read the registry.
-fn build_ci_gitlab(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> Result<String, String> {
+fn build_ci_gitlab(
+    m: &Manifest,
+    ci: &crate::verify::Ci,
+    frameworks: &[String],
+    target: &str,
+) -> Result<String, String> {
     let svc = &m.service;
     let en = |field: &String| ci.path(field, svc);
     let (dir, test, image, manifests) = (
@@ -696,6 +763,39 @@ fn build_ci_gitlab(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> Result
         ));
     }
 
+    // Same job, GitLab's syntax. `artifacts:expire_in` is longer than
+    // GitHub's ceiling because GitLab allows it; the matrix is still
+    // reproducible from the commit, which is the record that actually lasts.
+    let documentacion = format!(
+        "documentacion:\n  \
+           stage: docs\n  \
+           extends: .axon\n  \
+           script:\n    \
+             - axon docs {manifests}/ --service {svc} > integracion.md\n  \
+           artifacts:\n    \
+             paths: [integracion.md]\n\n"
+    );
+
+    let (cumplimiento, stages) = if frameworks.is_empty() {
+        (String::new(), String::new())
+    } else {
+        (
+            format!(
+                "cumplimiento:\n  \
+                   stage: cumplimiento\n  \
+                   extends: .axon\n  \
+                   script:\n    \
+                     # the gate is `axon verify`, which already refuses a gap.\n    \
+                     # this is the evidence, dated by the commit that produced it\n    \
+                     - axon compliance {manifests}/ > compliance.md\n  \
+                   artifacts:\n    \
+                     paths: [compliance.md]\n    \
+                     expire_in: 1 year\n\n"
+            ),
+            "cumplimiento, ".to_string(),
+        )
+    };
+
     let deploy = match target {
         "gcp" => format!(
             "    - axon infra {manifests}/ --target gcp --env prod > infra/generated.tf\n    \
@@ -723,7 +823,7 @@ fn build_ci_gitlab(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> Result
 
     Ok(format!(
         "# generated by axon — do not edit\n\
-         stages: [contracts, test, deploy]\n\n\
+         stages: [contracts, test, docs, {stages}deploy]\n\n\
          # One pipeline per service: it only runs when its own code or its own\n\
          # manifest changes. Without this every merge runs everything and the\n\
          # gates stop being read.\n\
@@ -754,6 +854,8 @@ fn build_ci_gitlab(m: &Manifest, ci: &crate::verify::Ci, target: &str) -> Result
              - changes: [\"{dir}/**/*\", \"{manifests}/{svc}.toml\"]\n  \
            script:\n    \
              - {test}\n\n\
+{documentacion}\
+{cumplimiento}\
          deploy:\n  \
            stage: deploy\n  \
            extends: .axon\n  \
