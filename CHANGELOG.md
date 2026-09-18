@@ -7,6 +7,95 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.40.0] — 2026-09-18
+
+### Añadido
+
+- **`axon docs <fuentes>`: la guía de integración, para quien va a llamar un servicio que
+  no escribió.** `axon openapi` ya describe las rutas y sus formas, y de ahí sale un
+  cliente. Lo que no carga es todo lo que un integrador pregunta antes del primer request:
+  qué emisor firma el token, cómo se llama el claim del tenant, a qué eventos puede
+  suscribirse en vez de encuestar, qué pasa cuando el otro lado está particionado. Todo eso
+  estaba declarado —en `[auth]`, en `[emits]`, en `[cap]`— y solo existía como código
+  generado que nadie fuera del repo lee.
+
+  Markdown y no otro JSON a propósito: el lector es una persona haciendo onboarding o un
+  agente leyendo contexto, y los dos van mejor con un documento que con cuatro comandos
+  cuyas salidas tienen que unir. También es la quinta herramienta del servidor MCP.
+
+  **No hay bloque `[docs]` y no debería haberlo.** Prosa que no se deriva de una
+  declaración es prosa que se pudre sin que nada falle, que es exactamente el problema que
+  el manifiesto existe para resolver. Lo que no está declarado, el documento lo dice —«este
+  servicio no declara `[auth]`, pregúntale a quien opera el gateway»— en vez de inventarlo.
+
+- **`axon compliance <fuentes>`: la matriz de controles.** Un auditor no pide el código.
+  Pide qué control cubre un requisito, dónde se aplica y cómo sabes que no se desvió. El
+  manifiesto ya contesta la mitad —quién puede llamar qué, qué campos son personales,
+  cuánto se guarda un respaldo, qué campos puede recibir un consumidor— y la respuesta
+  estaba ahí sin leerse.
+
+  Cinco regímenes: HIPAA, SOC 2, ISO/IEC 27001, la LFPDPPP y PCI DSS. Un control es **una
+  propiedad del sistema**; lo que cambia entre regímenes es cómo le llaman, así que cada
+  uno carga su propia cláusula y `--framework soc2` imprime `CC6.1`, no la cita de la ley
+  de al lado.
+
+  **No es una certificación, y el reporte lo dice en el encabezado.** El cifrado en reposo,
+  el TLS, dónde caen los logs de acceso y si la gente tomó el entrenamiento vuelven
+  `manual`, con la pregunta que una persona tiene que contestar. Marcarlos en verde sería
+  peor que no tener la herramienta: sería una auditoría que pasa sin que nadie mire.
+
+  El que más se gana con estar declarado es *minimum necessary* (HIPAA §164.502(b)): `uses`
+  ya lo implementaba sin llamarlo así. Declaras tres campos, el tipo generado trae tres, y
+  un campo que nadie pidió **no compila**. No es una política escrita, es el compilador.
+
+- **Dos niveles para declarar un régimen, porque son dos preguntas distintas.** SOC 2 e ISO
+  27001 son de la organización: todo servicio está en alcance y `frameworks` en
+  `axon.policy.toml` lo dice una vez. PCI DSS es de un servicio —solo el que habla con el
+  procesador está en alcance de la tarjeta— y va en `compliance` del manifiesto. Un control
+  se evalúa contra la unión.
+
+  Sin esa separación, declarar un régimen de dominio a nivel repo le pedía una llave de
+  sellado a un catálogo de productos, y un reporte de cumplimiento con ruido es un reporte
+  que nadie lee. `compliance` no se serializa vacío, por lo mismo que `workflow`: el
+  manifiesto viaja embebido en cada contrato generado y una llave nueva es un diff en todos
+  los archivos de todos los repos que regeneren.
+
+- **`[framework.*]` en la policy: los regímenes del equipo.** No agregan controles —eso es
+  un release— le ponen **su** cláusula a un control que ya existe. La asimetría es el
+  punto: un equipo mapea sus obligaciones sobre lo que el compilador de verdad revisa, y no
+  puede pintar algo de verde escribiéndolo en un archivo de configuración.
+
+  Las llaves son ids de control, que `axon compliance --ids` lista. La lista no está escrita
+  a mano: se **evalúa** contra un manifiesto de referencia que dispara todas las
+  condiciones, así que no puede desviarse el día que se agregue un control. Un mapeo que
+  nombra un id inexistente se rechaza en vez de ignorarse: es un control que alguien cree
+  cubierto.
+
+- **`PodDisruptionBudget` en `--target k8s`, donde hay réplicas que perder.** Solo con
+  `min_instances > 1`. Sobre una sola copia, `minAvailable: 1` es un drain que nunca
+  termina: el nodo espera por un pod que no tiene permiso de desalojar, y el upgrade se
+  atora en un servicio que nadie notó que era copia única. Sin presupuesto es mejor que con
+  uno imposible.
+
+- **`axon ci` publica los dos reportes.** La compuerta ya existía: con los regímenes en la
+  policy, `axon verify` rechaza un hueco igual que un evento que nadie consume. Lo que
+  faltaba era la evidencia — un check verde no contesta qué era cierto en una fecha.
+
+  `cumplimiento` solo se emite si hay regímenes declarados, y va en el `needs` del deploy.
+  `documentacion` sale siempre y **no** va: una guía que no renderizó no es razón para
+  detener un release, y cablearla como compuerta es cómo un equipo aprende a saltarse las
+  compuertas. Los dos escriben al summary del run y no solo a un zip: evidencia que nadie
+  abre es evidencia que nadie revisó.
+
+  El artifact es comodidad. El registro durable es el commit: la matriz se deriva de los
+  manifiestos, así que se regenera desde cualquier sha años después sin depender de un
+  ajuste de retención que alguien cambió.
+
+### Cambiado
+
+- El pipeline de GitLab gana una etapa, `docs`, entre `test` y el deploy. Las compuertas
+  siguen siendo las mismas y siguen en `contracts`.
+
 ## [0.39.0] — 2026-09-17
 
 ### Añadido
