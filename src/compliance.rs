@@ -100,22 +100,65 @@ const LOOKS_LIKE_A_CARD: &[&str] = &[
 /// Field names that are personal in every jurisdiction that has a word for it.
 /// Normalized the same way the generated `redact` normalizes, so `customer_email`,
 /// `customerEmail` and `customer-email` are one name.
+/// Matched as a WHOLE token, never as a substring. `ine` —the Mexican ID— is
+/// inside `lineId`, `rfc` is inside `rfcache`, and a control that cries wolf
+/// is a control somebody learns to scroll past, which costs more than the one
+/// field it would have caught.
 const LOOKS_PERSONAL: &[&str] = &[
     "email",
+    "mail",
     "phone",
+    "tel",
     "ssn",
     "curp",
     "rfc",
     "dob",
     "birthdate",
+    "birthday",
     "address",
+    "passport",
+    "ine",
+    "nss",
+];
+
+/// Matched against the name with its separators removed, because these are two
+/// tokens that only mean something together.
+const LOOKS_PERSONAL_JOINED: &[&str] = &[
     "fullname",
     "lastname",
     "firstname",
-    "passport",
-    "ine",
+    "givenname",
     "taxid",
+    "legalname",
 ];
+
+/// `customer_email`, `customerEmail` and `customer-email` are one name and
+/// three tokens. Splitting on the case change is what lets a token be matched
+/// whole instead of found anywhere inside.
+fn tokens(name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in name.chars() {
+        if (c.is_ascii_uppercase() || !c.is_alphanumeric()) && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+        if c.is_alphanumeric() {
+            cur.push(c.to_ascii_lowercase());
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+fn reads_personal(name: &str) -> bool {
+    let joined = norm(name);
+    LOOKS_PERSONAL_JOINED.iter().any(|p| joined.contains(p))
+        || tokens(name)
+            .iter()
+            .any(|t| LOOKS_PERSONAL.contains(&t.as_str()))
+}
 
 fn norm(s: &str) -> String {
     s.to_lowercase()
@@ -281,14 +324,15 @@ pub fn controls(m: &Manifest, root: &std::path::Path, custom: &[Framework]) -> V
 
     // --- personal data, declared -----------------------------------------
     let declared: Vec<String> = m.pii.iter().map(|p| norm(p)).collect();
-    let missed: Vec<String> = all_fields(m)
+    let mut missed: Vec<String> = all_fields(m)
         .iter()
-        .filter(|f| {
-            let n = norm(f);
-            LOOKS_PERSONAL.iter().any(|p| n.contains(p)) && !declared.contains(&n)
-        })
+        .filter(|f| reads_personal(f) && !declared.contains(&norm(f)))
         .map(|f| (*f).clone())
         .collect();
+    // The same field can be declared on an event and on a method; naming it
+    // twice reads as two problems.
+    missed.sort();
+    missed.dedup();
     push(
         "data-inventory",
         &[

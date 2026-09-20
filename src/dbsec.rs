@@ -221,7 +221,39 @@ pub fn build(ms: &[Manifest], only: Option<&str>) -> String {
         let pii = &m.pii;
 
         for (t, cols) in tables {
-            if OWN_TABLES.contains(&t.as_str()) || m.infra.tenant_exempt.contains(t) {
+            // The tables axon names itself carry no tenant column —there is
+            // nothing per-tenant about a relay queue— but the application is
+            // the one that writes them, and it writes them as `axon_app`
+            // inside its own transaction. Without the grant, `SET LOCAL ROLE
+            // axon_app` turns the outbox into `permission denied` and the two
+            // patterns axon insists on most, the outbox and the idempotent
+            // inbox, cannot run under the policies axon generates. Found by
+            // posting one entry through a stack that had them applied.
+            if OWN_TABLES.contains(&t.as_str()) {
+                o.push(format!(
+                    "\n-- {svc}.{t}: axon's own plumbing. No policy —it holds no tenant's\n\
+                     -- rows— and the grant is not optional: the application writes it in\n\
+                     -- the same transaction as the change it belongs to.\n\
+                     GRANT SELECT, INSERT, UPDATE, DELETE ON {tq} TO axon_app;",
+                    svc = m.service,
+                    tq = q(t)
+                ));
+                continue;
+            }
+            // A catalogue is a closed list, and a list the application cannot
+            // read is a foreign key it cannot explain.
+            if t.starts_with("catalog_") {
+                o.push(format!(
+                    "\n-- {svc}.{t}: a declared list. Read-only for the application: it is\n\
+                     -- regenerated from the manifest, never written at runtime.\n\
+                     GRANT SELECT ON {tq} TO axon_app;\n\
+                     GRANT SELECT ON {tq} TO axon_reader;",
+                    svc = m.service,
+                    tq = q(t)
+                ));
+                continue;
+            }
+            if m.infra.tenant_exempt.contains(t) {
                 continue;
             }
             // ---- per-row RLS ----
@@ -295,6 +327,17 @@ pub fn build(ms: &[Manifest], only: Option<&str>) -> String {
              DO $$ BEGIN\n  \
                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'axon_app') THEN\n    \
                  CREATE ROLE axon_app NOLOGIN NOSUPERUSER NOBYPASSRLS;\n  END IF;\nEND $$;"
+                .to_string(),
+        );
+        // The sequences, and not only the tables. A `bigserial` primary key
+        // takes its next value from a sequence, and a grant on the table
+        // without one turns an INSERT into `permission denied for sequence
+        // <table>_id_seq` —which reads like a different problem than the one
+        // it is. It is not a tenant boundary: a sequence holds no rows.
+        o.push(
+            "\n-- Every sequence of this schema, because a table granted without its\n\
+             -- sequence still refuses the INSERT that needs the next value.\n\
+             GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO axon_app;"
                 .to_string(),
         );
     }
