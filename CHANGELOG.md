@@ -7,6 +7,45 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.43.0] — 2026-09-20
+
+### Añadido
+
+- **`[auth] plan_claim`: de dónde sale el plan contratado.** `[methods.*] plans` ya existía y
+  generaba su guardia, pero `requirePlan` recibía el plan como parámetro y nada decía de
+  dónde venía: `[auth]` tenía `roles_claim` y no tenía su equivalente. El resultado era que
+  el guardia recibía `null` en cada llamada, rechazaba a todos, y parecía una caída del
+  sistema de cobros.
+
+  El plan sale del token por la misma razón que los scopes: preguntarle al servicio de cobros
+  en cada llamada mete una dependencia síncrona delante de toda ruta de paga. Una baja de
+  plan surte efecto cuando el token se vuelve a emitir, que es lo que `max_token_age_s`
+  acota — la misma historia que `revocation = "eventual"`, y declarada igual.
+
+  `axon verify` se niega si un método exige un plan y `[auth]` no nombra el claim, del mismo
+  modo que se niega con un servicio multi-inquilino sin `tenant_claim`.
+
+- **La guía de integración cuenta el plan y la cuota.** `axon docs` ganó dos columnas, y
+  solo aparecen donde algo las declara: una columna vacía en todos los renglones se lee como
+  «aquí no aplica», que es lo contrario de lo que significaría. Con ellas viajan las dos
+  frases que un integrador necesita: que un plan no es un rol —el rol dice quién eres dentro
+  de tu empresa, el plan dice qué compró tu empresa— y que el límite se aplica en el edge,
+  así que un 429 cuesta un reintento y no un timeout.
+
+### Cambiado
+
+- **`requirePlan` toma el contexto y ya no un string.** Era el único guardia generado que
+  recibía un valor suelto mientras `requireRoles` recibía el `AuthContext`, y esa asimetría
+  era justamente el síntoma de que el plan no estaba en el contexto.
+
+  ```diff
+  - requirePlan(plan, "pro", "enterprise")
+  + requirePlan(ctx, "pro", "enterprise")
+  ```
+
+  Rompe a quien ya lo llamara. El cambio es de una línea por llamada y el compilador lo
+  señala; se avisa aquí porque el CHANGELOG es donde se avisa, no porque sea difícil.
+
 ## [0.42.0] — 2026-09-20
 
 ### Añadido
