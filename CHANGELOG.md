@@ -7,6 +7,29 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.43.1] — 2026-09-20
+
+### Corregido
+
+- **La regla que impide reintentar algo que no lo aguanta fallaba abierto, y justo contra las
+  APIs externas.** `is_idempotent()` leía `self.idempotent || !self.mutating()`, y
+  `mutating()` pregunta por el verbo HTTP. Un manifiesto `external` no declara rutas nuestras
+  —congela el contrato de alguien más, no nuestras URLs— así que sus métodos no tienen verbo:
+  `mutating()` contestaba `false`, `!mutating()` contestaba `true`, y el método volvía como
+  idempotente **con `idempotent = false` escrito justo al lado**.
+
+  El resultado es que `[[depends]] retries = 2` contra un método declarado no idempotente
+  pasaba sin una palabra. La regla existe precisamente para eso, y donde más importa es
+  donde fallaba: la parte que no controlas.
+
+  Ahora un método sin verbo no se asume seguro —`self.idempotent || (self.http.is_some() &&
+  !self.mutating())`—. Hay que declararlo, que es lo que el comentario de la función decía
+  desde siempre: «GET/HEAD lo son por definición; todo lo demás se declara».
+
+  Salió de congelar el contrato de un proveedor real de facturación cuyo endpoint de timbrado
+  no tiene llave de idempotencia y cobra por cada llamada. Sin baterías: ningún manifiesto
+  correcto cambia, porque uno correcto ya declaraba `idempotent = true` cuando lo era.
+
 ## [0.43.0] — 2026-09-20
 
 ### Añadido

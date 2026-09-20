@@ -429,8 +429,19 @@ impl Method {
         matches!(self.verb(), Some("POST" | "PUT" | "PATCH" | "DELETE"))
     }
     /// GET/HEAD are by definition; everything else has to be declared.
+    ///
+    /// A method with no HTTP verb is NOT assumed safe. The rule used to read
+    /// `self.idempotent || !self.mutating()`, and `mutating()` asks the verb:
+    /// with none —which is every method of an `external` contract, because a
+    /// frozen contract declares no routes of ours— it answered false, so
+    /// `!mutating()` answered true and the method came back idempotent even
+    /// with `idempotent = false` written next to it.
+    ///
+    /// That failed OPEN on the one rule that stops a retry against something
+    /// that cannot take one. Found against a real payments API whose stamping
+    /// call has no idempotency key and costs money each time.
     pub fn is_idempotent(&self) -> bool {
-        self.idempotent || !self.mutating()
+        self.idempotent || (self.http.is_some() && !self.mutating())
     }
 }
 
