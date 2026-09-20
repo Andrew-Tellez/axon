@@ -7,6 +7,49 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.40.1] — 2026-09-20
+
+### Corregido
+
+Los cinco salieron de pasar la CLI recién liberada por el banco de pruebas, que es
+exactamente para lo que existe. Cuatro son de lo que 0.40.0 acababa de traer.
+
+- **`axon docs` no dibujaba la máquina de estados.** Para quien integra, el orden de las
+  operaciones **es** el contrato: llamar `pay` sobre una factura cancelada falla, y el
+  manifiesto lo declaraba desde siempre sin que el documento lo dijera. Ahora sale como una
+  tabla de `call | from | to`, con solo las transiciones que un llamador puede causar —una
+  que dispara un evento que él no emite es asunto del servicio, no suyo.
+
+- **La guía de un servicio sin métodos se contradecía a sí misma.** Decía «checks only the
+  scopes below» sin scopes abajo, «it reacts to events —see below—» sin consumir ninguno, y
+  ofrecía OpenAPI «for the routes above» sin rutas. Y no decía lo único que un integrador
+  necesitaba saber: que era un job con horario. Ahora distingue los tres casos —el cron, el
+  consumidor de eventos y el que solo llama— la sección de autenticación desaparece cuando
+  no hay nada alcanzable, y el pie no ofrece un OpenAPI que estaría vacío.
+
+- **El job `cumplimiento` de `axon ci` reportaba de más.** Corría `axon compliance` sobre el
+  repo entero dentro de un pipeline que es de un servicio, así que el artefacto de `billing`
+  hablaba de los seis. `axon compliance` gana `--service`, como `docs` y `catalog` ya tenían,
+  y el pipeline lo usa.
+
+- **`axon docs --service <externo>` decía que no era un servicio.** Sí lo es; es externo, y
+  eso es otra cosa. Un manifiesto `external` es la copia congelada de la API de alguien más,
+  y su guía de integración es de quien la escribió. Ahora lo dice, y apunta a `axon discover`
+  para lo que sí es de esta plataforma: qué le llama.
+
+### Añadido
+
+- **Un `GET` que mueve el estado es un warning.** Salió de que el banco declaraba la
+  transición `ship` colgando de `getOrderV2`: data de relleno que llevaba meses ahí y que
+  nadie había visto, porque hasta ahora nada dibujaba el ciclo de vida. Un read que cambia el
+  estado se cachea, se prefetchea y lo reintenta cualquier cliente con timeout — la
+  transición vuelve a ocurrir y nadie la pidió dos veces.
+
+- **La guía de integración, servida en la página.** Es la salida real de `axon docs` sobre
+  `examples/`, regenerada antes de cada `mdbook build`, por la misma razón y en el mismo
+  lugar que el playground compila el wasm: un ejemplo pegado a mano se queda viejo la primera
+  vez que el generador cambia una palabra, y nada falla.
+
 ## [0.40.0] — 2026-09-18
 
 ### Añadido
