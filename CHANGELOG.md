@@ -7,6 +7,38 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.42.0] — 2026-09-20
+
+### Añadido
+
+- **`[env.<nombre>.auth]`: el emisor y el juego de llaves, por ambiente.** El verificador que
+  escribe `axon auth` lleva dentro el `jwks_uri` y los `issuers` del manifiesto, que es lo
+  correcto en producción y lo que hacía imposible probarlo en una laptop: no hay a quién
+  preguntarle, y `[env.*]` solo aceptaba claves de `[infra]`. La única salida era editar
+  código generado.
+
+  ```toml
+  [env.local.auth]
+  issuers  = ["http://authmock:8080"]
+  jwks_uri = "http://authmock:8080/jwks.json"
+  ```
+
+  ```sh
+  axon auth ledger.toml              # el emisor de producción
+  axon auth ledger.toml --env local  # el de la laptop
+  ```
+
+  **Cuatro llaves y no más**: `issuers`, `audience`, `jwks_uri` e `introspection_url`. El
+  emisor y el juego de llaves son una **dirección**, y difieren entre un ambiente y otro
+  igual que el host de una base de datos. Los algoritmos, los nombres de los claims y la edad
+  máxima del token **no** se pueden sobrescribir: eso es la forma del token, es el contrato,
+  y un ambiente capaz de aflojarlo sería uno donde el contrato es una sugerencia.
+
+  `axon auth` gana `--env`, con `prod` por defecto. El bloque no se serializa cuando está
+  vacío, por lo mismo que `workflow` y `compliance`: el manifiesto viaja embebido en cada
+  contrato generado y una llave nueva es un diff en todos los archivos de todos los repos que
+  regeneren.
+
 ## [0.41.2] — 2026-09-20
 
 ### Corregido
