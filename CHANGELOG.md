@@ -7,6 +7,29 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.41.0] — 2026-09-20
+
+### Añadido
+
+- **El baseline guarda la topología de shards.** Cambiar `shards = 4` a `shards = 16` pasaba
+  en silencio, con `axon.baseline.json` generado y todo, y es probablemente el edit más
+  peligroso de un manifiesto: el sharder coloca una fila hasheando su `shard_key` módulo ese
+  número, así que toda fila ya escrita pasa a hashear a otro nodo. La query va al nodo nuevo,
+  no encuentra nada, y devuelve **vacío en vez de un error**.
+
+  `verify` obliga a declarar `shard_key`, obliga a `tenant_binding = "set_local"` y obliga a
+  admitir que con varios nodos la consistencia real es eventual —y después dejaba cambiar el
+  divisor del hash sin decir una palabra.
+
+  Subir y bajar no comparten mensaje porque no son el mismo desastre: al subir, el dato sigue
+  donde estaba y nadie lo encuentra; al bajar, lo que vive en los nodos que desaparecen deja
+  de ser alcanzable. Los dos contestan vacío sin error, que es exactamente lo que los hace
+  difíciles de ver. Un servicio sharded que todavía no está en el baseline es un warning, no
+  un error, igual que cualquier otro contrato sin registrar.
+
+  Va en el mismo archivo que los contratos aunque no sea un contrato con un llamador. Es un
+  contrato con los datos.
+
 ## [0.40.1] — 2026-09-20
 
 ### Corregido
