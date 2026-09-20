@@ -389,6 +389,10 @@ enum Cmd {
     Rls {
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         sources: Vec<String>,
+        /// which service. The compose mounts one directory per service, so
+        /// emitting every service into one file applies the wrong policies.
+        #[arg(long = "service", short = 's', add = ArgValueCandidates::new(services_here))]
+        service: Option<String>,
         /// `sql` protects the live query; `pg_anon` generates the dictionary for
         /// making a masked copy.
         #[arg(long, default_value = "sql", value_parser = ["sql", "pg_anon"])]
@@ -1176,13 +1180,22 @@ fn run() -> Result<ExitCode, String> {
                 compliance::build(&ms, &root, &pol, framework.as_deref(), service.as_deref())?
             )
         }
-        Cmd::Rls { sources, target } => {
+        Cmd::Rls {
+            sources,
+            service,
+            target,
+        } => {
             let ms = manifest::discover(&sources)?;
+            if let Some(s) = &service {
+                if !ms.iter().any(|m| !m.external && &m.service == s) {
+                    return Err(format!("`{s}` is not a service in these manifests"));
+                }
+            }
             print!(
                 "{}",
                 match target.as_str() {
                     "pg_anon" => dbsec::build_pg_anon(&ms),
-                    _ => dbsec::build(&ms),
+                    _ => dbsec::build(&ms, service.as_deref()),
                 }
             )
         }

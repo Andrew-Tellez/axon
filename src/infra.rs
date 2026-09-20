@@ -2764,14 +2764,22 @@ services:
     image: flyway/flyway:10-alpine
     depends_on: {{ migrate-{host}: {{ condition: service_completed_successfully }} }}
     volumes: [\"./sql-catalog/{svc}:/flyway/sql:ro\"]
-    command: >
-      -url=jdbc:postgresql://{host}:5432/{svc}
-      -user=postgres -password=local -connectRetries=10
-      -table=axon_catalog_history
-      -baselineOnMigrate=true
-      {axon_flags}
-      -validateMigrationNaming=true
-      migrate
+    # The guard before Flyway, and the reason it exists: docker creates a bind
+    # mount that does not exist as an EMPTY directory, Flyway finds no
+    # migration, baselines, reports \"schema is up to date\" and exits 0. A green
+    # job and lists that live in the generated type and not in the database.
+    entrypoint: [\"/bin/sh\", \"-c\"]
+    command:
+      - |
+        ls /flyway/sql/*.sql >/dev/null 2>&1 || {{
+          echo \"axon: sql-catalog/{svc}/ has no .sql. The declared lists would live in the type and not in the database.\" >&2
+          echo \"      axon catalog . --service {svc} > sql-catalog/{svc}/R__catalog.sql\" >&2
+          exit 1
+        }}
+        flyway -url=jdbc:postgresql://{host}:5432/{svc} \\
+          -user=postgres -password=local -connectRetries=10 \\
+          -table=axon_catalog_history -baselineOnMigrate=true \\
+          {axon_flags} -validateMigrationNaming=true migrate
 "
                 ));
             }
@@ -2787,16 +2795,24 @@ services:
     # `baselineOnMigrate`: this history is the SECOND over a schema that already
     # has tables, created by the other one. Without it Flyway refuses to
     # initialise over a non-empty schema, which is the normal situation here.
-    # And the comment goes HERE and not inside the `>` block: in there a `#` is
-    # text, and ends up as an argument to Flyway.
-    command: >
-      -url=jdbc:postgresql://{host}:5432/{svc}
-      -user=postgres -password=local -connectRetries=10
-      -table=axon_policies_history
-      -baselineOnMigrate=true
-      {axon_flags}
-      -validateMigrationNaming=true
-      migrate
+    #
+    # The guard before it is the one that matters. An empty mount made Flyway
+    # baseline and exit 0, so the stack came up with no policy and no
+    # `axon_app` role: the application works locally while seeing every row of
+    # every tenant, which is the sentence the generated file opens with. Three
+    # green jobs said nothing.
+    entrypoint: [\"/bin/sh\", \"-c\"]
+    command:
+      - |
+        ls /flyway/sql/*.sql >/dev/null 2>&1 || {{
+          echo \"axon: sql-policies/{svc}/ has no .sql. No policy is applied and no role is created: every query reads every tenant's rows.\" >&2
+          echo \"      axon rls . --service {svc} > sql-policies/{svc}/R__rls.sql\" >&2
+          exit 1
+        }}
+        flyway -url=jdbc:postgresql://{host}:5432/{svc} \\
+          -user=postgres -password=local -connectRetries=10 \\
+          -table=axon_policies_history -baselineOnMigrate=true \\
+          {axon_flags} -validateMigrationNaming=true migrate
 "
                 ));
             }
@@ -3244,6 +3260,29 @@ fn bootstrap(p: &Plan, engine: &str) -> String {
     o
 }
 
+/// A declared path as a regex Traefik can match: every `{param}` is one
+/// segment and nothing else. Anchored at both ends, so `/tenants` does not
+/// match `/tenants/x/y`.
+fn path_regex(path: &str) -> String {
+    let mut out = String::from("^");
+    for seg in path.split('/').skip(1) {
+        out.push('/');
+        if seg.starts_with('{') && seg.ends_with('}') {
+            out.push_str("[^/]+");
+        } else {
+            for c in seg.chars() {
+                if ".+*?()|[]^$\\".contains(c) {
+                    out.push('\\');
+                }
+                out.push(c);
+            }
+        }
+    }
+    // doubled for docker compose's interpolation; Traefik receives one
+    out.push_str("$$");
+    out
+}
+
 /// The plan's same routes, as Traefik rules. Local is not a separate
 /// subsystem: it is another render of the same edge.
 fn edge_labels(p: &Plan, svc: &str) -> String {
@@ -3251,15 +3290,17 @@ fn edge_labels(p: &Plan, svc: &str) -> String {
     if mine.is_empty() {
         return String::new();
     }
+    // The route's own shape, not a prefix cut at its first parameter. With the
+    // prefix, `/tenants/{tenantId}/entries` becomes `/tenants`, and every
+    // service whose routes start the same way claims the same rule: Traefik
+    // picks one and answers every request with it. Three services came up
+    // healthy and the ledger's route was served by the periods service.
+    //
+    // `$` is doubled because the file is read by docker compose, which
+    // interpolates before Traefik ever sees the label.
     let rules: Vec<String> = mine
         .iter()
-        .map(|r| {
-            let prefijo = match r.path.find('{') {
-                Some(i) => r.path[..i].trim_end_matches('/').to_string(),
-                None => r.path.clone(),
-            };
-            format!("PathPrefix(`{prefijo}`)")
-        })
+        .map(|r| format!("PathRegexp(`{}`)", path_regex(&r.path)))
         .collect();
     let mut u: Vec<String> = rules;
     u.sort();
