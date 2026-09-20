@@ -2171,7 +2171,7 @@ pub struct Manifest {
     pub infra: Infra,
     /// Per-environment overrides: `[env.prod] min_instances = 3`.
     #[serde(default)]
-    pub env: IndexMap<String, Infra>,
+    pub env: IndexMap<String, EnvOverride>,
     #[serde(skip)]
     pub origin: PathBuf,
 }
@@ -2181,56 +2181,111 @@ pub struct Manifest {
 pub fn for_env(m: &Manifest, env: &str) -> Manifest {
     let mut out = m.clone();
     if let Some(o) = m.env.get(env) {
-        if o.state.is_some() {
-            out.infra.state = o.state.clone();
+        if o.infra.state.is_some() {
+            out.infra.state = o.infra.state.clone();
         }
-        if o.runtime.is_some() {
-            out.infra.runtime = o.runtime.clone();
+        if o.infra.runtime.is_some() {
+            out.infra.runtime = o.infra.runtime.clone();
         }
-        if o.migrations.is_some() {
-            out.infra.migrations = o.migrations.clone();
+        if o.infra.migrations.is_some() {
+            out.infra.migrations = o.infra.migrations.clone();
         }
-        if o.min_instances.is_some() {
-            out.infra.min_instances = o.min_instances;
+        if o.infra.min_instances.is_some() {
+            out.infra.min_instances = o.infra.min_instances;
         }
-        if !o.secrets.is_empty() {
-            out.infra.secrets = o.secrets.clone();
+        if !o.infra.secrets.is_empty() {
+            out.infra.secrets = o.infra.secrets.clone();
         }
-        if o.max_instances.is_some() {
-            out.infra.max_instances = o.max_instances;
+        if o.infra.max_instances.is_some() {
+            out.infra.max_instances = o.infra.max_instances;
         }
-        if o.port.is_some() {
-            out.infra.port = o.port;
+        if o.infra.port.is_some() {
+            out.infra.port = o.infra.port;
         }
-        if !o.buckets.is_empty() {
-            out.infra.buckets = o.buckets.clone();
+        if !o.infra.buckets.is_empty() {
+            out.infra.buckets = o.infra.buckets.clone();
         }
-        if o.tenant_column.is_some() {
-            out.infra.tenant_column = o.tenant_column.clone();
+        if o.infra.tenant_column.is_some() {
+            out.infra.tenant_column = o.infra.tenant_column.clone();
         }
-        if !o.tenant_exempt.is_empty() {
-            out.infra.tenant_exempt = o.tenant_exempt.clone();
+        if !o.infra.tenant_exempt.is_empty() {
+            out.infra.tenant_exempt = o.infra.tenant_exempt.clone();
         }
-        if o.pool_size.is_some() {
-            out.infra.pool_size = o.pool_size;
+        if o.infra.pool_size.is_some() {
+            out.infra.pool_size = o.infra.pool_size;
         }
-        if o.max_connections.is_some() {
-            out.infra.max_connections = o.max_connections;
+        if o.infra.max_connections.is_some() {
+            out.infra.max_connections = o.infra.max_connections;
         }
-        if o.read_replicas.is_some() {
-            out.infra.read_replicas = o.read_replicas;
+        if o.infra.read_replicas.is_some() {
+            out.infra.read_replicas = o.infra.read_replicas;
         }
-        if o.ha.is_some() {
-            out.infra.ha = o.ha;
+        if o.infra.ha.is_some() {
+            out.infra.ha = o.infra.ha;
         }
-        if o.backup_retention_days.is_some() {
-            out.infra.backup_retention_days = o.backup_retention_days;
+        if o.infra.backup_retention_days.is_some() {
+            out.infra.backup_retention_days = o.infra.backup_retention_days;
         }
-        if o.pitr.is_some() {
-            out.infra.pitr = o.pitr;
+        if o.infra.pitr.is_some() {
+            out.infra.pitr = o.infra.pitr;
+        }
+        // Where the token comes from, and nothing about what it has to say.
+        if !o.auth.issuers.is_empty() {
+            out.auth.issuers = o.auth.issuers.clone();
+        }
+        if o.auth.audience.is_some() {
+            out.auth.audience = o.auth.audience.clone();
+        }
+        if o.auth.jwks_uri.is_some() {
+            out.auth.jwks_uri = o.auth.jwks_uri.clone();
+        }
+        if o.auth.introspection_url.is_some() {
+            out.auth.introspection_url = o.auth.introspection_url.clone();
         }
     }
     out
+}
+
+/// What an environment overrides. The infrastructure keys sit at the block's
+/// own level —`[env.local] min_instances = 1`— and `[env.local.auth]` carries
+/// the few `[auth]` keys that are an ADDRESS and not a decision.
+///
+/// The issuer and the key set are where a token comes from, and that differs
+/// between a laptop and production the same way a database host does. What is
+/// NOT overridable is the shape of the token: the algorithms, the claim names
+/// and the maximum age are the contract, and an environment that could soften
+/// them is an environment where the contract is a suggestion.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct EnvOverride {
+    #[serde(flatten)]
+    pub infra: Infra,
+    /// Not serialized when empty, for the same reason `compliance` is not: the
+    /// manifest travels embedded in every generated contract, and a new key on
+    /// it is a diff in every file of every repo that regenerates.
+    #[serde(default, skip_serializing_if = "AuthOverride::is_empty")]
+    pub auth: AuthOverride,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthOverride {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issuers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub introspection_url: Option<String>,
+}
+
+impl AuthOverride {
+    pub fn is_empty(&self) -> bool {
+        self.issuers.is_empty()
+            && self.audience.is_none()
+            && self.jwks_uri.is_none()
+            && self.introspection_url.is_none()
+    }
 }
 
 /// A piece of a service's manifest: the blocks of one feature.

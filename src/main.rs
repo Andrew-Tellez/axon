@@ -340,6 +340,12 @@ enum Cmd {
     Auth {
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         manifest: String,
+        /// environment: applies the `[env.<name>.auth]` overrides. The issuer
+        /// and the key set are an address and differ between a laptop and
+        /// production; the algorithms and the claim names are the contract and
+        /// do not.
+        #[arg(long, default_value = "prod")]
+        env: String,
         #[arg(long, default_value = "ts", value_parser = ["ts"])]
         lang: String,
     },
@@ -1140,9 +1146,13 @@ fn run() -> Result<ExitCode, String> {
             }
             print!("{}", emit::workflows_ts(&m, &all)?)
         }
-        Cmd::Auth { manifest, lang } => {
+        Cmd::Auth {
+            manifest,
+            env,
+            lang,
+        } => {
             let _ = lang;
-            let m = manifest::load_any(&manifest)?;
+            let m = manifest::for_env(&manifest::load_any(&manifest)?, &env);
             print!("{}", emit::verifier_ts(&m)?)
         }
         Cmd::Crud { manifest, expand } => {
