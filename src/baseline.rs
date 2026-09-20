@@ -54,6 +54,15 @@ pub struct Baseline {
     /// Keyed by `service.workflow`. Only the ones with a history to break.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub workflows: IndexMap<String, Flujo>,
+    /// How many shard nodes each sharded service was published with.
+    ///
+    /// It is not a contract with a caller, which is what the rest of this file
+    /// is, and it is recorded anyway: it is a contract with the DATA. The
+    /// sharder places a row by hashing its `shard_key` modulo this number, so
+    /// changing it moves every row that already exists to a different node —
+    /// and the symptom is not an error, it is an empty result.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub shards: IndexMap<String, u32>,
 }
 
 pub fn tomar(ms: &[Manifest]) -> Baseline {
@@ -94,8 +103,14 @@ pub fn tomar(ms: &[Manifest]) -> Baseline {
             );
         }
     }
+    for m in ms.iter().filter(|m| !m.external) {
+        if m.pooler.shards > 1 {
+            b.shards.insert(m.service.clone(), m.pooler.shards);
+        }
+    }
     b.events.sort_keys();
     b.methods.sort_keys();
+    b.shards.sort_keys();
     b
 }
 
@@ -160,6 +175,34 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     let ahora = tomar(ms);
+
+    // The shard topology. Up and down are both disasters and they are not the
+    // same disaster, so they do not get the same sentence.
+    for (svc, ahora_n) in &ahora.shards {
+        let Some(antes) = b.shards.get(svc) else {
+            warnings.push(format!(
+                "{svc}: `shards = {ahora_n}` is not recorded in {ARCHIVO}. Until it is, a change \
+                 to the shard count is a change nothing compares against; run `axon baseline`"
+            ));
+            continue;
+        };
+        match ahora_n.cmp(antes) {
+            std::cmp::Ordering::Equal => {}
+            std::cmp::Ordering::Greater => errors.push(format!(
+                "{svc}: published with {antes} shard nodes and now declares {ahora_n}. The \
+                 sharder places a row by hashing its `shard_key` modulo that number, so every \
+                 row already written now hashes to a different node: the query goes to the new \
+                 one, finds nothing, and returns an empty result instead of an error. Move the \
+                 data first and record the new topology with `axon baseline`, or keep {antes}"
+            )),
+            std::cmp::Ordering::Less => errors.push(format!(
+                "{svc}: published with {antes} shard nodes and now declares {ahora_n}. The nodes \
+                 that disappear are not empty: what lives on them stops being reachable, and \
+                 nothing in the answer says so. Drain them first and record the new topology \
+                 with `axon baseline`, or keep {antes}"
+            )),
+        }
+    }
 
     // A contract that is not registered is not protected: tomorrow a field can
     // change on it and nobody will notice.
