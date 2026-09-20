@@ -7,6 +7,44 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.41.1] — 2026-09-20
+
+### Corregido
+
+Los tres salieron de escribir un proyecto nuevo con la CLI y **levantarlo**. Ninguno se ve
+sin correrlo: los contratos compilan, las pruebas pasan, `axon verify` da 0 errores y los
+contenedores dicen `healthy`.
+
+- **El edge mandaba cada petición al servicio equivocado.** La regla de Traefik salía de
+  cortar la ruta en su primer `{`, así que `/tenants/{tenantId}/entries` se volvía
+  `PathPrefix(/tenants)` y los tres servicios reclamaban exactamente la misma: se pedía una
+  ruta del mayor y contestaba el de periodos, con un 501 que nombraba una ruta de otro
+  manifiesto. Ahora cada ruta viaja como su propia forma —`PathRegexp` anclado en los dos
+  extremos, donde un `{param}` es exactamente un segmento— y el `$` va doblado porque el
+  archivo lo lee docker compose, que interpola antes de que Traefik vea la etiqueta.
+
+  El banco de pruebas lo tenía desde siempre, con cuatro servicios reclamando
+  `PathPrefix(/v1/tenants)`. No había salido porque nadie había pegado al stack por el edge.
+
+- **El stack subía sin RLS y sin catálogos, con los tres trabajos en verde.** El compose
+  monta `sql-catalog/<servicio>` y `sql-policies/<servicio>` en un trabajo de Flyway cada
+  uno, y nada escribe esos archivos. Docker crea un bind mount inexistente como un
+  directorio **vacío**, Flyway no encuentra migraciones, baseliniza, reporta «schema is up to
+  date» y sale con 0. La base queda sin políticas y sin el rol `axon_app`: la aplicación
+  funciona localmente viendo todas las filas de todos los inquilinos, que es literalmente la
+  frase con la que abre el archivo de políticas que nadie aplicó.
+
+  El guardia va en el trabajo y no en `verify` ni en `axon infra`: en los dos rompía pruebas
+  que estaban bien. Un repositorio es libre de aplicar sus políticas de otra forma, y generar
+  un compose no es correrlo. El contenedor sale con 1 nombrando el directorio, la
+  consecuencia y el comando que lo llena, así que `docker compose --wait` falla y no hay
+  forma de no verlo.
+
+- **`axon rls` emitía todos los servicios en un archivo** mientras el compose monta uno por
+  servicio. Seguir la instrucción del encabezado que él mismo escribe aplicaba las políticas
+  de todos a la base del primero. Gana `--service`, como `axon catalog` ya tenía, y el
+  encabezado que genera trae el servicio ya puesto.
+
 ## [0.41.0] — 2026-09-20
 
 ### Añadido
