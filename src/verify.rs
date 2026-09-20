@@ -401,7 +401,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
         .collect();
     let mut metric_owner: IndexMap<String, String> = IndexMap::new();
     business_metrics(ms, &emitted, &mut metric_owner, &mut errors, &mut warnings);
-    state_machines(ms, &mut errors);
+    state_machines(ms, &mut errors, &mut warnings);
     what_is_named_exists(ms, &emitters, &known, &mut errors, &mut warnings);
     migration_order(ms, &mut errors, &mut warnings);
     // database per service: no FK crosses the boundary
@@ -4872,7 +4872,7 @@ fn business_metrics(
 }
 
 // state machines: dead states, unreachable ones and phantom triggers
-fn state_machines(ms: &[Manifest], errors: &mut Vec<String>) {
+fn state_machines(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         for (name, mac) in &m.machine {
             let states = mac.states();
@@ -4922,6 +4922,22 @@ fn state_machines(ms: &[Manifest], errors: &mut Vec<String>) {
                     .push(format!(
                     "{}.{name}.{act}: triggered by `{}`, which is neither a method nor a consumed event",
                     m.service, t.on));
+                }
+                // A GET that moves the state is a GET that is not a read, and
+                // everything between the caller and here treats it as one: a
+                // proxy caches it, a browser prefetches it, a client retries
+                // it on a timeout. The transition happens again and nobody
+                // asked for it twice.
+                if m.methods
+                    .get(&t.on)
+                    .and_then(|me| me.http.as_deref())
+                    .is_some_and(|h| h.starts_with("GET"))
+                {
+                    warnings.push(format!(
+                        "{}.{name}.{act}: fired by `{}`, which is a GET. A read that moves the \
+                         state gets cached, prefetched and retried like the read it claims to be",
+                        m.service, t.on
+                    ));
                 }
                 if let Some(ev) = &t.emits {
                     if !m.emits.contains_key(ev) {

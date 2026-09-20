@@ -590,7 +590,7 @@ fn build_ci_github(
       - uses: actions/checkout@v4
       - run: curl -fsSL https://raw.githubusercontent.com/Andrew-Tellez/axon/main/install.sh | sh
       - name: control matrix ({regimes})
-        run: axon compliance {manifests}/ > compliance.md
+        run: axon compliance {manifests}/ --service {svc} > compliance.md
       # in the run's summary, not only in a zip: evidence nobody opens is
       # evidence nobody checked
       - run: cat compliance.md >> $GITHUB_STEP_SUMMARY
@@ -787,7 +787,7 @@ fn build_ci_gitlab(
                    script:\n    \
                      # the gate is `axon verify`, which already refuses a gap.\n    \
                      # this is the evidence, dated by the commit that produced it\n    \
-                     - axon compliance {manifests}/ > compliance.md\n  \
+                     - axon compliance {manifests}/ --service {svc} > compliance.md\n  \
                    artifacts:\n    \
                      paths: [compliance.md]\n    \
                      expire_in: 1 year\n\n"

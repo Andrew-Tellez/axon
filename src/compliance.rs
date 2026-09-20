@@ -824,7 +824,13 @@ pub fn build(
     root: &std::path::Path,
     pol: &Policy,
     only: Option<&str>,
+    service: Option<&str>,
 ) -> Result<String, String> {
+    if let Some(s) = service {
+        if !ms.iter().any(|m| !m.external && m.service == s) {
+            return Err(format!("`{s}` is not a service in these manifests"));
+        }
+    }
     let custom = declared(pol);
     let frameworks = &pol.frameworks;
     let known = known(pol);
@@ -870,7 +876,11 @@ pub fn build(
     }
 
     let mut gaps = 0;
-    for m in ms.iter().filter(|m| !m.external) {
+    for m in ms
+        .iter()
+        .filter(|m| !m.external)
+        .filter(|m| service.is_none_or(|s| m.service == s))
+    {
         let held = in_effect(m, frameworks);
         let cs: Vec<Control> = controls(m, root, &custom)
             .into_iter()

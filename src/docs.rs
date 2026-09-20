@@ -34,6 +34,10 @@ fn shape(f: &Fields) -> String {
 fn auth_section(m: &Manifest) -> String {
     let a = &m.auth;
     if a.issuers.is_empty() && a.jwks_uri.is_none() && a.introspection_url.is_none() {
+        if m.methods.is_empty() && m.ws.path.is_none() && m.sse.is_empty() {
+            // Nothing is reachable, so there is no token to talk about.
+            return String::new();
+        }
         return "## Authentication\n\nThis service declares no `[auth]`: it trusts whatever the \
                 gateway put in front of it, and checks only the scopes below. Ask the platform \
                 team which issuer that gateway accepts —it is not declared here, so this document \
@@ -105,9 +109,33 @@ fn auth_section(m: &Manifest) -> String {
 
 fn methods_section(m: &Manifest) -> String {
     if m.methods.is_empty() {
-        return "## What you can call\n\nNothing: this service exposes no methods. It reacts to \
-                events —see below— and that is its whole surface.\n\n"
-            .into();
+        // Why there is nothing to call differs, and saying the wrong reason is
+        // worse than saying none: a job that runs on a cron and a consumer
+        // that reacts to the bus are two different things to integrate with.
+        let mut s = String::from(
+            "## What you can call\n\nNothing: this service exposes no \
+                                  methods. ",
+        );
+        s.push_str(match (m.infra.runtime.as_deref(), m.consumes.is_empty()) {
+            (Some("job"), _) => match &m.infra.schedule {
+                Some(cron) => {
+                    return format!(
+                        "## What you can call\n\nNothing: this service exposes no methods. It is \
+                         a job on a schedule (`{cron}`), so there is nothing to call and nothing \
+                         to subscribe to —what it does, it does on its own. If you need it \
+                         sooner, that is a conversation with its owner, not an endpoint.\n\n"
+                    )
+                }
+                None => "It is a job somebody triggers; there is no endpoint.",
+            },
+            (_, false) => "It reacts to the events below, and that is its whole surface.",
+            (_, true) => {
+                "It neither serves routes nor consumes events: whatever it does, it \
+                          does through what it calls."
+            }
+        });
+        s.push_str("\n\n");
+        return s;
     }
     let mut s = String::from("## What you can call\n\n| method | route | scopes | idempotent | timeout |\n| --- | --- | --- | --- | --- |\n");
     for (name, me) in &m.methods {
@@ -336,6 +364,49 @@ fn guarantees_section(m: &Manifest) -> String {
     s
 }
 
+/// The order of operations. A caller that does not know `pay` is illegal from
+/// `void` finds out with a failure, and the manifest declared it all along.
+fn lifecycle_section(m: &Manifest) -> String {
+    let mut s = String::new();
+    for (name, mc) in &m.machine {
+        // Only the transitions a caller can actually cause: one fired by an
+        // event they cannot emit is this service's business, not theirs.
+        let callable: Vec<_> = mc
+            .transitions
+            .iter()
+            .filter(|(_, t)| m.methods.contains_key(&t.on))
+            .collect();
+        if callable.is_empty() {
+            continue;
+        }
+        s.push_str(&format!(
+            "## The lifecycle of `{name}`\n\nIt starts at `{}`",
+            mc.initial
+        ));
+        if !mc.final_states.is_empty() {
+            s.push_str(&format!(
+                " and ends at `{}` — from there nothing moves, so a call against one is refused \
+                 rather than quietly ignored",
+                mc.final_states.join("` or `")
+            ));
+        }
+        s.push_str(".\n\n| call | from | to |\n| --- | --- | --- |\n");
+        for (_, t) in callable {
+            s.push_str(&format!(
+                "| `{}` | `{}` | `{}` |\n",
+                t.on,
+                t.from.join("`, `"),
+                t.to
+            ));
+        }
+        s.push_str(
+            "\nThe table is the contract, not a description of it: the generated code refuses a \
+             transition that is not on it.\n\n",
+        );
+    }
+    s
+}
+
 /// What this service is held to, for whoever is deciding whether to build on
 /// it. Not the matrix —that is `axon compliance`, and a control table belongs
 /// in an evidence pack, not in an integration guide— but the fact that there
@@ -409,15 +480,20 @@ fn one(m: &Manifest, pol: &crate::verify::Policy, root: &std::path::Path) -> Str
     );
     s.push_str(&auth_section(m));
     s.push_str(&methods_section(m));
+    s.push_str(&lifecycle_section(m));
     s.push_str(&events_section(m));
     s.push_str(&streams_section(m));
     s.push_str(&guarantees_section(m));
     s.push_str(&compliance_section(m, pol, root));
+    s.push_str("## The machine-readable versions\n\n");
+    if m.methods.values().any(|me| me.http.is_some()) {
+        s.push_str(
+            "- `axon openapi` — OpenAPI 3.1 for the routes above, to generate a client from\n",
+        );
+    }
     s.push_str(
-        "## The machine-readable versions\n\n- `axon openapi` — OpenAPI 3.1 for the routes above, \
-         to generate a client from\n- `axon discover` — the registry as JSON\n- \
-         `/.well-known/axon.json` — served by the running service, so you can check what is \
-         deployed instead of what is in the repo\n",
+        "- `axon discover` — the registry as JSON\n- `/.well-known/axon.json` — served by the \
+         running service, so you can check what is deployed instead of what is in the repo\n",
     );
     s
 }
@@ -438,6 +514,11 @@ pub fn build(
         .filter(|m| only.is_none_or(|s| m.service == s))
         .collect();
     match (with.as_slice(), only) {
+        ([], Some(s)) if ms.iter().any(|m| m.external && m.service == s) => Err(format!(
+            "`{s}` is external: its manifest is a frozen copy of somebody else's API, and the \
+             guide for it is theirs to write. What axon can say about it is what THIS platform \
+             calls: `axon discover`"
+        )),
         ([], Some(s)) => Err(format!("`{s}` is not a service in these manifests")),
         ([], None) => Err("no services to document: every manifest here is `external`".into()),
         _ => Ok(with

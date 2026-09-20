@@ -381,6 +381,9 @@ enum Cmd {
         /// the control ids, which is what `[framework.*] controls` maps onto.
         #[arg(long)]
         ids: bool,
+        /// one service. Omitted, every non-external one.
+        #[arg(long = "service", short = 's', add = ArgValueCandidates::new(services_here))]
+        service: Option<String>,
     },
     /// data access policies: per-row RLS and masked views
     Rls {
@@ -1158,6 +1161,7 @@ fn run() -> Result<ExitCode, String> {
             sources,
             framework,
             ids,
+            service,
         } => {
             if ids {
                 for id in compliance::ids() {
@@ -1169,7 +1173,7 @@ fn run() -> Result<ExitCode, String> {
             let pol = verify::load_policy(&root);
             print!(
                 "{}",
-                compliance::build(&ms, &root, &pol, framework.as_deref())?
+                compliance::build(&ms, &root, &pol, framework.as_deref(), service.as_deref())?
             )
         }
         Cmd::Rls { sources, target } => {
