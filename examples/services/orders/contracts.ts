@@ -404,6 +404,7 @@ export const manifest = {
     "tenant_claim": "org_id",
     "scopes_claim": "scope",
     "roles_claim": "roles",
+    "plan_claim": "plan",
     "impersonation": {
       "claim": "act",
       "roles": [
@@ -688,6 +689,10 @@ export interface AuthContext {
   tenant: string | null;
   scopes: readonly string[];
   roles: readonly string[];
+  /** What was CONTRACTED, from `plan`. Not a role: a role says who
+   *  somebody is, a plan says what was paid for, and mixing them is how a
+   *  downgrade silently keeps a feature. */
+  plan: string | null;
   /** Who is REALLY calling when somebody acts on another's behalf. */
   actor: string | null;
 }
@@ -727,8 +732,8 @@ export function requireRoles(ctx: AuthContext, ...any_of: string[]): void {
 
 /** The contracted entitlement. It is not a role: a plan is what was paid
  *  for, and mixing the two is how a downgrade silently keeps a feature. */
-export function requirePlan(plan: string | null, ...any_of: string[]): void {
-  if (plan && any_of.includes(plan)) return;
+export function requirePlan(ctx: AuthContext, ...any_of: string[]): void {
+  if (ctx.plan && any_of.includes(ctx.plan)) return;
   throw new AxonProblem(403, "insufficient_scope", `requires plan ${any_of.join(" or ")}`);
 }
 

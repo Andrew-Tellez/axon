@@ -301,6 +301,10 @@ subject_claim = "sub"
 tenant_claim  = "org_id"
 scopes_claim  = "scope"
 roles_claim   = "roles"
+# Lo contratado, puesto por el cobro al emitir el token. `getOrderV2` exige un
+# plan y hasta ahora nada decia de donde salia: el guardia generado recibia
+# `null` y rechazaba a todos.
+plan_claim    = "plan"
 
 # Actuar en nombre de otro. Decide dos cosas: a que inquilino se ata el RLS —al
 # del impersonado, o la fila es invisible y el ticket no se puede contestar— y

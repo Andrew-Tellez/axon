@@ -1627,6 +1627,20 @@ fn endpoint_scopes(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec
                      requirement is decoration"
                     ));
                 }
+                // The requirement is declared and where the answer comes from
+                // is not: the generated guard would be handed `null` on every
+                // call and refuse everybody, which reads as a billing outage.
+                let claim = match kind {
+                    "role" => &m.auth.roles_claim,
+                    _ => &m.auth.plan_claim,
+                };
+                if claim.is_none() && !m.auth.issuers.is_empty() {
+                    errors.push(format!(
+                        "{svc}.{name}: demands a {kind} and `[auth]` declares no `{kind}_claim`. \
+                     The guard has nowhere to read it from, so it refuses everybody —which \
+                     looks like the billing is down and is really a claim nobody named"
+                    ));
+                }
                 match catalog_names(ms, kind) {
                     Some(catalogue) => {
                         for v in values {

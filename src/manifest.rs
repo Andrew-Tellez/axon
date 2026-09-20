@@ -1829,6 +1829,15 @@ pub struct Auth {
     pub tenant_claim: Option<String>,
     pub scopes_claim: Option<String>,
     pub roles_claim: Option<String>,
+    /// Which claim carries the CONTRACTED plan.
+    ///
+    /// A plan is not a role: the role says who somebody is inside the company,
+    /// the plan says what the company bought. It comes off the token for the
+    /// same reason the scopes do —asking a billing service on every call puts
+    /// a synchronous dependency in front of every paid route— and a downgrade
+    /// takes effect when the token is next minted, which is what
+    /// `max_token_age_s` bounds. The window is declared, like `revocation`.
+    pub plan_claim: Option<String>,
     /// Acting on somebody else's behalf. See `Impersonation`.
     pub impersonation: Option<Impersonation>,
 }

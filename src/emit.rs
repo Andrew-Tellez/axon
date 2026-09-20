@@ -3387,6 +3387,10 @@ fn auth_ts(m: &Manifest) -> String {
            tenant: string | null;\n  \
            scopes: readonly string[];\n  \
            roles: readonly string[];\n  \
+           /** What was CONTRACTED, from `{plan}`. Not a role: a role says who\n   \
+            *  somebody is, a plan says what was paid for, and mixing them is how a\n   \
+            *  downgrade silently keeps a feature. */\n  \
+           plan: string | null;\n  \
            /** Who is REALLY calling when somebody acts on another's behalf. */\n  \
            actor: string | null;\n\
          }}\n\n\
@@ -3400,6 +3404,7 @@ fn auth_ts(m: &Manifest) -> String {
         tenant = claim(&a.tenant_claim, "—"),
         scopes = claim(&a.scopes_claim, "scope"),
         roles = claim(&a.roles_claim, "roles"),
+        plan = claim(&a.plan_claim, "not declared"),
         issuers = a.issuers.join(", "),
     )];
     // The tenant, from the token to the transaction, with nothing in between.
@@ -3444,8 +3449,8 @@ fn auth_ts(m: &Manifest) -> String {
              }\n\n\
              /** The contracted entitlement. It is not a role: a plan is what was paid\n \
              *  for, and mixing the two is how a downgrade silently keeps a feature. */\n\
-             export function requirePlan(plan: string | null, ...any_of: string[]): void {\n  \
-               if (plan && any_of.includes(plan)) return;\n  \
+             export function requirePlan(ctx: AuthContext, ...any_of: string[]): void {\n  \
+               if (ctx.plan && any_of.includes(ctx.plan)) return;\n  \
                throw new AxonProblem(403, \"insufficient_scope\", `requires plan ${any_of.join(\" or \")}`);\n\
              }\n"
                 .to_string(),
@@ -3574,6 +3579,7 @@ export const verifier: AuthVerifier = {{
       tenant: {tenant},
       scopes: list(payload[{scopes:?}]),
       roles: list(payload[{roles:?}]),
+      plan: {plan},
       actor: {actor},
     }};
   }},
@@ -3597,6 +3603,13 @@ export const verifier: AuthVerifier = {{
         sub = sub,
         scopes = scopes,
         roles = roles,
+        plan = match &a.plan_claim {
+            Some(c) =>
+                format!("typeof payload[{c:?}] === \"string\" ? (payload[{c:?}] as string) : null"),
+            // Declared nowhere means there is nothing to read, and inventing a
+            // default would be guessing which claim somebody's billing writes.
+            None => "null".to_string(),
+        },
         tenant = match &tenant {
             Some(t) =>
                 format!("typeof payload[{t:?}] === \"string\" ? (payload[{t:?}] as string) : null"),

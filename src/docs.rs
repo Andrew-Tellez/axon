@@ -137,7 +137,26 @@ fn methods_section(m: &Manifest) -> String {
         s.push_str("\n\n");
         return s;
     }
-    let mut s = String::from("## What you can call\n\n| method | route | scopes | idempotent | timeout |\n| --- | --- | --- | --- | --- |\n");
+    // The plan and the quota only get a column where something declares one:
+    // an empty column on every row reads as "this does not apply here", which
+    // is the opposite of what it would mean.
+    let con_plan = m.methods.values().any(|me| !me.plans.is_empty());
+    let con_cuota = m.methods.values().any(|me| me.rate_limit.is_some());
+    let mut s = String::from("## What you can call\n\n| method | route | scopes |");
+    if con_plan {
+        s.push_str(" plan |");
+    }
+    if con_cuota {
+        s.push_str(" rate |");
+    }
+    s.push_str(" idempotent | timeout |\n| --- | --- | --- |");
+    if con_plan {
+        s.push_str(" --- |");
+    }
+    if con_cuota {
+        s.push_str(" --- |");
+    }
+    s.push_str(" --- | --- |\n");
     for (name, me) in &m.methods {
         let route = me.http.clone().unwrap_or_else(|| "_not over HTTP_".into());
         let scopes = if me.scopes.is_empty() {
@@ -150,8 +169,22 @@ fn methods_section(m: &Manifest) -> String {
         } else {
             ""
         };
+        s.push_str(&format!("| `{name}`{dep} | `{route}` | {scopes} |"));
+        if con_plan {
+            s.push_str(&if me.plans.is_empty() {
+                " any |".to_string()
+            } else {
+                format!(" `{}` |", me.plans.join("` or `"))
+            });
+        }
+        if con_cuota {
+            s.push_str(&match me.rate_limit {
+                Some(r) => format!(" {r}/min |"),
+                None => " — |".to_string(),
+            });
+        }
         s.push_str(&format!(
-            "| `{name}`{dep} | `{route}` | {scopes} | {} | {} |\n",
+            " {} | {} |\n",
             if me.idempotent { "yes" } else { "no" },
             me.timeout_ms
                 .map(|t| format!("{t}ms"))
@@ -159,6 +192,26 @@ fn methods_section(m: &Manifest) -> String {
         ));
     }
     s.push('\n');
+    if con_plan {
+        s.push_str(
+            "A plan is what was contracted, and it is not a role: the role says who you are \
+             inside your company, the plan says what your company bought. It travels in the \
+             token",
+        );
+        match &m.auth.plan_claim {
+            Some(c) => s.push_str(&format!(
+                ", in `{c}`, so a change to it takes effect the next time the token is minted \
+                 —at most `max_token_age_s`— and not on the next call.\n\n"
+            )),
+            None => s.push_str(".\n\n"),
+        }
+    }
+    if con_cuota {
+        s.push_str(
+            "The rate is per minute and applied at the edge, so a burst is refused before it \
+             reaches the service: a 429 costs a retry, not a timeout.\n\n",
+        );
+    }
 
     // Idempotency is the one an integrator has to act on: a method declared
     // idempotent is one they may retry, and the generated server keys off the

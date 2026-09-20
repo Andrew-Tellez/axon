@@ -290,6 +290,7 @@ export const manifest = {
     "tenant_claim": "org_id",
     "scopes_claim": "scope",
     "roles_claim": "roles",
+    "plan_claim": null,
     "impersonation": null
   },
   "search": {
@@ -1000,6 +1001,10 @@ export interface AuthContext {
   tenant: string | null;
   scopes: readonly string[];
   roles: readonly string[];
+  /** What was CONTRACTED, from `not declared`. Not a role: a role says who
+   *  somebody is, a plan says what was paid for, and mixing them is how a
+   *  downgrade silently keeps a feature. */
+  plan: string | null;
   /** Who is REALLY calling when somebody acts on another's behalf. */
   actor: string | null;
 }
