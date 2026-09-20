@@ -7,6 +7,42 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.41.2] — 2026-09-20
+
+### Corregido
+
+- **Los dos patrones que axon más exige no podían correr bajo las políticas que axon
+  genera.** `axon rls` crea el rol `axon_app` y le da permisos sobre las tablas con columna
+  de inquilino. Las que axon nombra él mismo —`outbox`, `inbox_seen`, `axon_task`— quedaban
+  fuera, y son justamente las que **escribe la aplicación**, en su propia transacción y como
+  ese rol. Registrar el primer asiento contra un stack con las políticas aplicadas contestaba
+  `permission denied for table outbox`.
+
+  O sea: el outbox transaccional y el inbox idempotente, los dos que `axon verify` obliga a
+  tener, eran imposibles de usar en cuanto alguien hacía `SET LOCAL ROLE axon_app`. No había
+  salido porque nadie había corrido la aplicación como ese rol.
+
+  Y al arreglarlo apareció la otra mitad: con una llave `bigserial`, el permiso sobre la
+  tabla no alcanza —el INSERT necesita el siguiente valor— y el error dice `permission denied
+  for sequence <tabla>_id_seq`, que se lee como un problema distinto del que es. Ahora las
+  secuencias del esquema también se otorgan: una secuencia no guarda filas de nadie y no es
+  una frontera de inquilino.
+
+  Los `catalog_*` reciben `SELECT`, para la aplicación y para el rol de lectura. Una lista
+  que la aplicación no puede leer es una llave foránea que no puede explicar.
+
+- **La heurística de datos personales cazaba lobos que no existían.** Buscaba cada nombre
+  como subcadena, así que `ine` —la credencial mexicana— aparecía dentro de `lineId` y un
+  campo con un identificador de renglón se reportaba como dato personal sin declarar. Ahora
+  se compara por **token completo**: el nombre se parte en el cambio de mayúscula y en cada
+  separador, de modo que `customerEmail` sigue cayendo y `lineId`, `machineId` y `pipelineId`
+  no. Los compuestos —`fullName`, `taxId`, `legalName`— se comparan contra el nombre sin
+  separadores, que es donde sí significan algo. Y un campo que aparece en un evento y en un
+  método se nombra una vez, no dos.
+
+  Un control que grita en falso es un control que alguien aprende a saltarse, y eso cuesta
+  más que el campo que habría cazado.
+
 ## [0.41.1] — 2026-09-20
 
 ### Corregido
