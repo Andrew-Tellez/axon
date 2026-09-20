@@ -22,6 +22,7 @@
 # What gets generated
 
 - [Infrastructure](./infrastructure.md)
+- [The integration guide](./integration.md)
 - [Traceability](./traceability.md)
 - [Scaling and load](./scaling.md)
 - [Security](./security.md)

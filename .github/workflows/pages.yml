@@ -39,6 +39,12 @@ jobs:
         with: { tool: "mdbook,mdbook-mermaid,wasm-bindgen@0.2.128" }
       - uses: actions/configure-pages@v5
 
+      # The integration guide is the real output of `axon docs` over the
+      # examples, regenerated here so the page cannot drift from the compiler
+      # in this commit. Same reason as the playground, one step earlier.
+      - name: the integration guide, for the page
+        run: sh docs/integration.sh
+
       # The playground: the real compiler, compiled to wasm and served next to
       # the book. It goes into `docs/src/`, which mdBook copies verbatim, so the
       # build order is the only thing that matters —before `mdbook build`.
