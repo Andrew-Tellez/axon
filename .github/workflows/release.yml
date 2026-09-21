@@ -11,8 +11,12 @@ jobs:
           # macos-13 (Intel) is retired and queues forever:
           # x86_64 is cross-compiled from the arm64 runner
           - { os: macos-latest, target: x86_64-apple-darwin }
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          # 22.04 y no `latest`: el binario pide la glibc del runner que lo
+          # compilo, y con 24.04 pedia 2.39 —o sea que no corre en Debian 12
+          # ni en Ubuntu 22.04, que es justo donde vive medio mundo. Compilar
+          # contra la vieja corre en las dos; al reves no.
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
