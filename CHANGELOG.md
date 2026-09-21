@@ -7,6 +7,24 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.44.1] — 2026-09-21
+
+### Corregido
+
+- **El `rate_limit` de una ruta estrangulaba a las que no declaraban ninguno.** El edge
+  montaba un middleware por SERVICIO, así que todas las rutas compartían router y la única
+  elección segura era la más estricta —tomar la más suelta dejaría a la más apretada
+  declarada y desprotegida—. Esa parte estaba bien; lo que estaba mal era aplanar.
+
+  El efecto se ve en cuanto un servicio tiene una ruta pública: un alta a 10/min dejaba las
+  lecturas de toda la plataforma en 10/min, y un `GET` que no declaraba límite contestaba
+  429. Medido contra un stack de verdad, con doce lecturas seguidas.
+
+  Traefik acepta varios routers hacia el mismo servicio. Ahora las rutas se agrupan por el
+  límite que declaran, cada grupo con el suyo, y las que no declaran ninguno van juntas y sin
+  middleware. El sufijo nombra el límite —`onboarding-60`— así que el router se lee solo. El
+  manifiesto ya tenía un número por ruta; lo que faltaba era no colapsarlos.
+
 ## [0.44.0] — 2026-09-20
 
 ### Corregido
