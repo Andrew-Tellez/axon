@@ -7,6 +7,38 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.44.4] — 2026-09-21
+
+### Corregido
+
+- **El stack local no creaba sus topics, así que las particiones declaradas no existían.** Los
+  comandos estaban en el compose como comentario, con un argumento razonable: un bootstrap que
+  se traga su error deja un consumidor que nunca recibe y una pila que sube verde. El
+  resultado fue peor. Nadie corre un comentario, así que el primer cliente que se conecta hace
+  que el broker **autocree** el topic —una partición, retención por defecto— y `partitions = 4`
+  se queda en el manifiesto.
+
+  Medido en un proyecto real: `partitions = 4` declarado, `PARTITIONS 1` en el broker, y un
+  grupo de consumo que no puede pasar de un miembro activo por más réplicas que se levanten.
+  Es la regla de particiones que `verify` aprendió a comprobar, tirada por el stack que iba a
+  probarla. Ni una línea de error.
+
+  Ahora `crear-topics` es un contenedor que corre: `sh -euc`, `|| true` sólo en los `create`
+  —correr `up` dos veces no puede fallar por algo que ya estaba— y después **pregunta por lo
+  que creó**, porque un `create` que devuelve 0 sin crear nada sigue siendo una pila verde
+  sobre una mentira. Los servicios lo esperan con `service_completed_successfully`.
+
+- **Dos de esos comandos nunca funcionaron**, y se vio al ejecutarlos por primera vez: un
+  stream de NATS no puede llamarse `order.placed.v1` —el punto no es legal en el nombre, sólo
+  en el sujeto— y `rabbitmqadmin declare exchange name=X type=topic` es la sintaxis del script
+  de Python de RabbitMQ 3.x, mientras que la imagen que el compose levanta trae la CLI 2.x en
+  Rust, donde es `--name X --type topic`. Un comentario no falla nunca porque nadie lo corre.
+
+  La rama de kafka se verificó contra el redpanda del propio compose y la de NATS contra un
+  servidor de verdad. La de rabbit va con la sintaxis de la CLI que trae la imagen, comprobada
+  contra su `--help`, pero sin ejecutar: `rabbitmq:4-management-alpine` no arranca en la
+  máquina donde se hizo.
+
 ## [0.44.3] — 2026-09-21
 
 ### Corregido
