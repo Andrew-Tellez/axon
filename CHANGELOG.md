@@ -7,6 +7,38 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.45.0] — 2026-09-21
+
+### Añadido
+
+- **`verify` cruza lo generado que vive en el repo contra lo que el manifiesto genera hoy.** Un
+  archivo generado y viejo no falla: compila, se lee bien y miente. Dos veces el mismo día, en
+  un proyecto real, con `verify` diciendo 0 errores:
+
+  - `contracts.ts` traía `plans: []` cuando el manifiesto ya decía `plans = ["pro",
+    "enterprise"]`. El guardia lee el manifiesto **embebido en el contrato**, así que un
+    cliente sin plan podía timbrar.
+  - `R__rls.sql` daba políticas a una tabla que las migraciones ya no creaban. Flyway se cayó
+    y la pila no subió, con un error que no decía por qué.
+
+  Se comparan los contratos que declara `[ci] contracts_path` —ts y go—,
+  `sql-policies/<servicio>/R__rls.sql` y `sql-catalog/<servicio>/R__catalog.sql`. Es un error
+  y no un aviso porque es exactamente lo que este compilador promete: que lo declarado y lo
+  que corre son lo mismo. Un archivo que el repo no guarda no se inventa —hay proyectos que no
+  versionan lo generado— y un lenguaje que sale de un plugin no se compara, porque decir que
+  está al día sería adivinarlo.
+
+  **Esto puede reprobar un repo que hoy pasa limpio**, y por eso es una minor: si lo generado
+  quedó viejo, el arreglo es el comando que el propio error escribe.
+
+### Corregido
+
+- **Las políticas de los ejemplos de este repo llevaban versiones viejas.** Lo primero que
+  encontró la regla nueva fue `examples/sql-policies/orders` y `payments` sin el
+  `GRANT USAGE, SELECT ON ALL SEQUENCES` que se arregló en 0.41.2 —el mismo fallo que allá se
+  describió como «un `INSERT` que necesita el siguiente valor de la secuencia se sigue
+  negando»—, dentro del repo que lo publica.
+
 ## [0.44.4] — 2026-09-21
 
 ### Corregido
