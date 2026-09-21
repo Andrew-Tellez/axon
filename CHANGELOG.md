@@ -7,6 +7,41 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.46.0] — 2026-09-21
+
+### Añadido
+
+- **`axon load` toma los datos de verdad.** Corrida contra un stack real: 272 peticiones, p95
+  de 5 a 21ms, los umbrales de tiempo en verde y `http_req_failed` en 100%. El mismo verde
+  engañoso que daba medir el 401, una capa más adentro.
+
+  Los tipos del manifiesto dan la **forma** del cuerpo y no su contenido: `plan` es un
+  `string` y `"plan"` no es un plan, así que el ejemplo generado contesta 422 y lo que se mide
+  es el camino del rechazo. Ahora `--env AXON_LOAD_DATA=datos.json` lleva un objeto por
+  método que pisa el ejemplo campo por campo, también en los parámetros de la ruta:
+
+  ```json
+  { "registerCompany": { "externalId": "@uuid", "plan": "pro", "taxId": "AAA010101AAA" } }
+  ```
+
+  El valor `"@uuid"` se renueva en **cada** petición. Es lo que hace falta para una llave que
+  tiene que ser única: con un `externalId` fijo, un alta idempotente devuelve siempre la misma
+  fila y la prueba mide el camino del duplicado.
+
+### Corregido
+
+- **Un GET no mandaba los parámetros que el método exige.** Lo que `in` declara y la ruta no
+  nombra —`?from=&to=`— no viajaba, así que la petición era una que ningún cliente mandaría.
+  Contra un servicio real contestaba 500, y ese 500 era un bug de verdad que sólo salió por
+  aquí.
+
+- **El veredicto de `--check` confundía «no aguanta» con «no midió nada».** Un escenario con
+  los checks en el suelo, sin un solo 5xx y sin un solo 429, no es un servicio que se dobla
+  bajo la carga: es un servicio que rechazó las peticiones por inválidas o sin permiso.
+  Llamarle a eso «no aguanta el tráfico que el manifiesto declara» manda a buscar el problema
+  en el sitio equivocado —capacidad— cuando está en los datos. Ahora lo dice con esas
+  palabras y nombra la salida.
+
 ## [0.45.0] — 2026-09-21
 
 ### Añadido
