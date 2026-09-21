@@ -12001,6 +12001,48 @@ fn the_local_stack_creates_its_topics() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `tenant_exempt` says a table carries nothing that belongs to a tenant. It
+/// does NOT say the application cannot read it: without the grant, the first
+/// read is `permission denied for table ...` at runtime, out of a service that
+/// verified clean. It happened with a projection's heartbeat row.
+#[test]
+fn an_exempt_table_is_still_granted() {
+    let dir = std::env::temp_dir().join("axon-exempt");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/001.sql"),
+        "CREATE TABLE thing (tenant_id uuid NOT NULL, id uuid PRIMARY KEY);\n\
+         CREATE TABLE heartbeat (id bool PRIMARY KEY, beat_at timestamptz NOT NULL);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+         [infra]\nstate = \"postgres\"\nmigrations = \"sql/shop\"\n\
+         tenant_column = \"tenant_id\"\ntenant_exempt = [\"heartbeat\"]\n\n\
+         [analytics]\nexport = false\n\n\
+         [api]\nversioning = \"header\"\ndefault = \"2026-01-15\"\n\
+         scopes = [\"shop:write\"]\n\n[[api.version]]\ndate = \"2026-01-15\"\n\n\
+         [methods.doIt]\nhttp = \"POST /things\"\nauth = \"required\"\n\
+         idempotent = true\nscopes = [\"shop:write\"]\n\
+         in = { id = \"uuid\" }\nout = { id = \"uuid\" }\n",
+    )
+    .unwrap();
+    let (sql, err, ok) = axon(&["rls", dir.to_str().unwrap(), "--service", "shop"]);
+    assert!(ok, "{err}");
+    assert!(
+        sql.contains(r#"GRANT SELECT, INSERT, UPDATE, DELETE ON "heartbeat" TO axon_app;"#),
+        "the exempt table is unreachable by the application:\n{sql}"
+    );
+    // and it is exempt from the POLICY, which is what it was declared for
+    assert!(
+        !sql.contains(r#"CREATE POLICY "heartbeat_tenant""#),
+        "an exempt table got a tenant policy:\n{sql}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Un archivo generado y viejo no falla: compila, se lee bien y miente. El
 /// `contracts.ts` de un servicio real traia `plans: []` cuando el manifiesto
 /// ya exigia un plan —y el guardia lee el contrato, asi que quien no pagaba

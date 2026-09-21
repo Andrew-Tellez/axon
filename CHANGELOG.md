@@ -7,6 +7,22 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.48.1] — 2026-09-21
+
+### Corregido
+
+- **Una tabla en `tenant_exempt` quedaba sin permisos para la aplicación.** `rls` la
+  saltaba entera —ni política ni `GRANT`— así que la primera lectura era `permission
+  denied for table ...` en ejecución, desde un servicio que `verify` daba por limpio.
+
+  Exenta de la POLÍTICA no es exenta de existir: lo que guarda una tabla así —un latido,
+  un registro compartido— no es de ningún inquilino, y el rol con el que corre la
+  aplicación sigue teniendo que alcanzarla. Ahora se emite el `GRANT` y se sigue sin
+  emitir la política, que es lo que se declaró.
+
+  Salió levantando la pila de un proyecto real: la proyección tenía una tabla de latido
+  para medir su propio atraso, y el primer diagnóstico que alguien pidió contestó 500.
+
 ## [0.48.0] — 2026-09-21
 
 ### Cambiado

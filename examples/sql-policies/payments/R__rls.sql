@@ -114,6 +114,11 @@ CREATE POLICY "payout_tenant" ON "payout"
 -- clause fixes that. With this the policy has somebody to apply to.
 GRANT SELECT, INSERT, UPDATE, DELETE ON "payout" TO axon_app;
 
+-- payments.attempt: declared in `tenant_exempt`. No policy, because what it
+-- holds belongs to no tenant —and the grant stays, because exempt from
+-- the policy is not exempt from existing.
+GRANT SELECT, INSERT, UPDATE, DELETE ON "attempt" TO axon_app;
+
 -- Every sequence of this schema, because a table granted without its
 -- sequence still refuses the INSERT that needs the next value.
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO axon_app;

@@ -253,7 +253,21 @@ pub fn build(ms: &[Manifest], only: Option<&str>) -> String {
                 ));
                 continue;
             }
+            // Exempt from the POLICY, not from existing. A table named in
+            // `tenant_exempt` holds something that belongs to nobody —a
+            // heartbeat, a shared registry— and it still has to be reachable by
+            // the role the application runs as. Without the grant the first
+            // read of it is `permission denied for table ...` at runtime, from
+            // a service that verified clean.
             if m.infra.tenant_exempt.contains(t) {
+                o.push(format!(
+                    "\n-- {svc}.{t}: declared in `tenant_exempt`. No policy, because what it\n\
+                     -- holds belongs to no tenant —and the grant stays, because exempt from\n\
+                     -- the policy is not exempt from existing.\n\
+                     GRANT SELECT, INSERT, UPDATE, DELETE ON {tq} TO axon_app;",
+                    svc = m.service,
+                    tq = q(t)
+                ));
                 continue;
             }
             // ---- per-row RLS ----
