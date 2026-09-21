@@ -944,12 +944,12 @@ export async function withPolicy<T>(
       // An unknown code still counts, because an unknown failure could be the
       // network. A declared RETRIABLE one counts too: that is the callee
       // struggling, which is exactly what the breaker is for.
-      // Por la FORMA y no por la clase. El transporte lo escribe quien usa
-      // esto —axon declara la politica y no como viaja la llamada— asi que un
-      // `instanceof` obliga a que el transporte importe esta clase para que
-      // `retriable` signifique algo. Uno escrito a mano, que lanza un `Error`
-      // con `code`, perdia el mecanismo entero en silencio: el reintento y el
-      // breaker volvian a tratar cada 4xx declarado como si fuera una caida.
+      // By SHAPE and not by class. The transport is written by whoever uses
+      // this —axon declares the policy and not how the call travels— so an
+      // `instanceof` would force the transport to import this class for
+      // `retriable` to mean anything. A hand-written one, throwing an `Error`
+      // with `code`, lost the whole mechanism in silence: the retry and the
+      // breaker went back to treating every declared 4xx as an outage.
       const codigo = (err as { code?: unknown }).code;
       const respondio = typeof codigo === "string" && !retriable(codigo);
       if (!respondio) breaker?.failed(Date.now());

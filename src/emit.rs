@@ -3569,14 +3569,14 @@ export const verifier: AuthVerifier = {{
       // `none` and the HMAC-over-a-public-key trick: without it the library
       // trusts the token's own header about how to verify the token.
       algorithms: {algorithms},
-      // Dos relojes nunca son el mismo reloj. Con tolerancia cero, un token
-      // firmado en una maquina cuyo segundo va medio adelante se rechaza con
-      // «"iat" claim timestamp check failed» —un 401 que se lee como token
-      // invalido y es un problema de horas. Pasa de verdad entre el host y un
-      // contenedor en la misma maquina.
+      // Two clocks are never the same clock. With zero tolerance, a token
+      // signed on a machine whose second runs half ahead is rejected with
+      // «"iat" claim timestamp check failed» —a 401 that reads as an invalid
+      // token and is a problem about hours. It really happens between the host
+      // and a container on the same machine.
       //
-      // 30s por omision, que es lo que usan Auth0 y Keycloak, y nada al lado
-      // de `maxTokenAge`. `clock_skew_s` en el manifiesto lo cambia.
+      // 30s by default, which is what Auth0 and Keycloak use, and nothing next
+      // to `maxTokenAge`. `clock_skew_s` in the manifest changes it.
       clockTolerance: {skew},
       maxTokenAge: {max_age},
     }});
@@ -3981,12 +3981,12 @@ export async function withPolicy<T>(
       // An unknown code still counts, because an unknown failure could be the
       // network. A declared RETRIABLE one counts too: that is the callee
       // struggling, which is exactly what the breaker is for.
-      // Por la FORMA y no por la clase. El transporte lo escribe quien usa
-      // esto —axon declara la politica y no como viaja la llamada— asi que un
-      // `instanceof` obliga a que el transporte importe esta clase para que
-      // `retriable` signifique algo. Uno escrito a mano, que lanza un `Error`
-      // con `code`, perdia el mecanismo entero en silencio: el reintento y el
-      // breaker volvian a tratar cada 4xx declarado como si fuera una caida.
+      // By SHAPE and not by class. The transport is written by whoever uses
+      // this —axon declares the policy and not how the call travels— so an
+      // `instanceof` would force the transport to import this class for
+      // `retriable` to mean anything. A hand-written one, throwing an `Error`
+      // with `code`, lost the whole mechanism in silence: the retry and the
+      // breaker went back to treating every declared 4xx as an outage.
       const codigo = (err as { code?: unknown }).code;
       const respondio = typeof codigo === "string" && !retriable(codigo);
       if (!respondio) breaker?.failed(Date.now());
