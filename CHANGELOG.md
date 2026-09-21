@@ -7,6 +7,48 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.44.0] — 2026-09-20
+
+### Corregido
+
+- **El k6 que escribía `axon load` medía el camino del 401.** No mandaba credencial, y un
+  servicio cuyos métodos declaran `auth = "required"` contesta 401 a todo. El resultado es el
+  verde más engañoso que puede dar una prueba de carga: los umbrales de latencia pasan
+  —rechazar es barato, `p(95) = 8ms`— mientras el de checks se queda en cero. Medido contra
+  un stack de verdad, con las siete rutas de un servicio real.
+
+  Ahora la credencial viaja en cada petición cuando alguna ruta la exige, y el script **se
+  niega a arrancar** sin `AXON_TOKEN`, diciendo por qué: entregar números que engañan es peor
+  que no entregar ninguno.
+
+### Añadido
+
+- **`[bus] partitions`: el techo del consumo en paralelo, dicho en voz alta.** Un grupo de
+  consumidores nunca tiene más miembros **activos** que particiones el topic. Un servicio que
+  declara ocho réplicas contra un topic de una partición corre siete que no reciben un solo
+  evento —y unirse al grupo sin recibir asignación no levanta ningún error, así que cuestan
+  dinero y no se quejan.
+
+  El compose que escribía `axon infra --target local` imprimía `rpk topic create <topic>` sin
+  `-p`, o sea partición única por defecto, mientras el mismo manifiesto declaraba
+  `max_instances = 8` un par de líneas más arriba. Los dos números estaban ahí y nadie los
+  cruzaba.
+
+  **Se declara y no se deriva de `max_instances`**, por la misma razón que el número de
+  shards no se deriva: la partición donde cae una llave es su hash módulo ese número, así que
+  subirlo después mueve toda llave que ya está en vuelo y rompe el orden que `ordered_by`
+  promete. Es una decisión con una migración atrás, no una perilla.
+
+  El número es de **quien emite**: el topic es suyo, y un consumidor que quisiera más estaría
+  pidiéndole a otro que reconfigure algo que no le pertenece. Por eso el aviso nombra al
+  emisor.
+
+  `axon verify` avisa —no falla— cuando las réplicas de un consumidor pasan de las particiones
+  del topic que lee. El servicio sí escala para las peticiones, y ese puede ser justo el
+  motivo por el que escala; lo que está topado es el consumo, y eso se dice en vez de
+  decidirlo por alguien. El mensaje deja la salida abierta: subir las particiones, o decir
+  que las réplicas son para las peticiones.
+
 ## [0.43.1] — 2026-09-20
 
 ### Corregido
