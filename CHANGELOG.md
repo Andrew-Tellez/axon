@@ -7,6 +7,26 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.47.2] — 2026-09-21
+
+### Corregido
+
+- **El verificador generado rechazaba tokens buenos por medio segundo de reloj.** Conectando
+  un emisor de verdad —better-auth con EdDSA— el token salía bien firmado y el servicio
+  contestaba 401. El verificador decía por qué: `"iat" claim timestamp check failed (it should
+  be in the past)`. El token se firmó en el host y se verificó en un contenedor de la **misma
+  máquina**: basta con que el segundo de uno vaya medio por delante para que `iat` caiga en el
+  futuro, y con `clockTolerance: 0` eso es un rechazo.
+
+  Un 401 que se lee como token inválido y es un problema de horas es lo peor que puede pasarle
+  a un error: apunta al sitio equivocado. Por omisión ahora son **30s**, lo que usan Auth0 y
+  Keycloak, y nada al lado de los 900 de `max_token_age_s`. `clock_skew_s` en el manifiesto lo
+  cambia, que era lo único que existía antes.
+
+- **`verify` avisa cuando esa tolerancia pasa de 300s.** Media hora de margen no es prudencia:
+  es cuánto tiempo sigue valiendo un token ya vencido. La deriva entre dos servidores con NTP
+  son segundos, no minutos.
+
 ## [0.47.1] — 2026-09-21
 
 ### Corregido
