@@ -476,8 +476,98 @@ fn discover_with_root(sources: &[String]) -> Result<(Vec<manifest::Manifest>, Pa
 
 /// Everything `verify` knows: the rules, the published contracts and whatever
 /// the check plugins say.
+/// Lo generado que vive en el repo, contra lo que el manifiesto genera HOY.
+///
+/// Un archivo generado y viejo no falla: compila, se lee bien y miente. Dos
+/// veces en un proyecto real, el mismo dia:
+///
+///   - `contracts.ts` traia `plans: []` cuando el manifiesto ya decia
+///     `plans = ["pro", "enterprise"]`. El guardia lee el contrato, asi que un
+///     cliente sin plan podia timbrar. `verify`: 0 errores.
+///   - `R__rls.sql` daba politicas a una tabla que las migraciones ya no
+///     creaban. Flyway se cayo y la pila no subio. `verify`: 0 errores.
+///
+/// Error y no aviso: es exactamente lo que este compilador promete —que lo
+/// declarado y lo que corre son lo mismo—. Compara bytes, porque el generador
+/// es determinista, e ignora el salto final, que lo pone el `>` de la shell.
+///
+/// Vive aqui y no en `verify` porque es el binario el que sabe generar: la
+/// biblioteca no carga los generadores de Go, de politicas ni de catalogos.
+fn generated_is_current(ms: &[manifest::Manifest], pol: &verify::Policy) -> Vec<String> {
+    let mut out = Vec::new();
+    let vivo = |p: std::path::PathBuf| std::fs::read_to_string(p).ok();
+    let igual = |a: &str, b: &str| a.trim_end() == b.trim_end();
+    for m in ms.iter().filter(|m| !m.external) {
+        let root = m.origin.parent().unwrap_or(std::path::Path::new("."));
+        let otros: Vec<manifest::Manifest> = ms
+            .iter()
+            .filter(|o| o.service != m.service)
+            .cloned()
+            .collect();
+        let manifiesto = m
+            .origin
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| ".".into());
+        let mut pendientes: Vec<(String, String)> = Vec::new();
+        for rel in pol.ci.contracts(&m.service) {
+            let Some(en_disco) = vivo(root.join(&rel)) else {
+                continue;
+            };
+            // Otro lenguaje sale de un plugin: no se puede regenerar aqui para
+            // compararlo, y decir que esta al dia seria inventarlo.
+            let generado = if rel.ends_with(".go") {
+                gen_go::build(m, &otros)
+            } else if rel.ends_with(".ts") {
+                emit::build_ts(m, &otros)
+            } else {
+                continue;
+            };
+            if let Ok(g) = generado {
+                if !igual(&en_disco, &g) {
+                    let lang = if rel.ends_with(".go") {
+                        " --lang go"
+                    } else {
+                        ""
+                    };
+                    pendientes.push((rel, format!("axon build {manifiesto} .{lang}")));
+                }
+            }
+        }
+        let politicas = format!("sql-policies/{}/R__rls.sql", m.service);
+        if let Some(en_disco) = vivo(root.join(&politicas)) {
+            if !igual(&en_disco, &dbsec::build(ms, Some(&m.service))) {
+                pendientes.push((politicas, format!("axon rls . --service {}", m.service)));
+            }
+        }
+        let listas = format!("sql-catalog/{}/R__catalog.sql", m.service);
+        if let Some(en_disco) = vivo(root.join(&listas)) {
+            if let Ok(g) = catalog::build(ms, Some(&m.service)) {
+                if !igual(&en_disco, &g) {
+                    pendientes.push((listas, format!("axon catalog . --service {}", m.service)));
+                }
+            }
+        }
+        for (archivo, comando) in pendientes {
+            out.push(format!(
+                "{}: `{archivo}` is not what this manifest generates today. A stale generated \
+                 file does not fail —it compiles, it reads fine, and it lies about what was \
+                 declared— so regenerate it: `{comando}`",
+                m.service
+            ));
+        }
+    }
+    out
+}
+
 fn full_report(ms: &[manifest::Manifest], root: &std::path::Path) -> verify::Report {
-    let mut r = verify::verify(ms, &verify::load_policy(root));
+    let pol = verify::load_policy(root);
+    let mut r = verify::verify(ms, &pol);
+    r.errors.extend(
+        generated_is_current(ms, &pol)
+            .into_iter()
+            .map(|e| verify::place(ms, e)),
+    );
     if let Some(b) = baseline::cargar(root) {
         let (errors, warnings) = baseline::comparar(ms, &b);
         r.errors

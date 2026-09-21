@@ -11978,3 +11978,91 @@ fn the_local_stack_creates_its_topics() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Un archivo generado y viejo no falla: compila, se lee bien y miente. El
+/// `contracts.ts` de un servicio real traia `plans: []` cuando el manifiesto
+/// ya exigia un plan —y el guardia lee el contrato, asi que quien no pagaba
+/// pasaba igual—. `verify` decia 0 errores.
+#[test]
+fn a_stale_generated_file_is_an_error() {
+    let dir = std::env::temp_dir().join("axon-stale");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::create_dir_all(dir.join("services/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/001.sql"),
+        "CREATE TABLE thing (id uuid PRIMARY KEY);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("axon.policy.toml"),
+        "[ci]\nmanifests_dir = \".\"\nservice_dir = \"services/{service}\"\n\
+         test_cmd = \"true\"\ncontracts_path = \"services/{service}/contracts.ts\"\n",
+    )
+    .unwrap();
+    let manifest = |plans: &str| {
+        format!(
+            "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+             [infra]\nstate = \"postgres\"\nmigrations = \"sql/shop\"\n\n\
+             [analytics]\nexport = false\n\n\
+             [api]\nversioning = \"header\"\ndefault = \"2026-01-15\"\n\
+             scopes = [\"shop:write\"]\n\n[[api.version]]\ndate = \"2026-01-15\"\n\n\
+             [methods.doIt]\nhttp = \"POST /things\"\nauth = \"required\"\n\
+             idempotent = true\nscopes = [\"shop:write\"]\n{plans}\
+             in = {{ id = \"uuid\" }}\nout = {{ id = \"uuid\" }}\n"
+        )
+    };
+    let path = dir.to_str().unwrap().to_string();
+
+    // el contrato, al dia: limpio
+    std::fs::write(dir.join("shop.toml"), manifest("")).unwrap();
+    let (contrato, _, ok) = axon(&["build", dir.join("shop.toml").to_str().unwrap(), &path]);
+    assert!(ok, "build failed");
+    std::fs::write(dir.join("services/shop/contracts.ts"), &contrato).unwrap();
+    let (_, err, ok) = axon(&["verify", &path]);
+    assert!(ok, "a contract that IS current must not fail:\n{err}");
+
+    // ahora el manifiesto exige un plan y el contrato en disco no se entera
+    std::fs::write(dir.join("shop.toml"), manifest("plans = [\"pro\"]\n")).unwrap();
+    let (_, err, ok) = axon(&["verify", &path]);
+    assert!(!ok, "a stale contract passed clean");
+    assert!(err.contains("services/shop/contracts.ts"), "{err}");
+    assert!(
+        err.contains("axon build shop.toml ."),
+        "it does not say how to fix it:\n{err}"
+    );
+
+    // regenerarlo lo arregla, que es la unica salida que el mensaje ofrece
+    let (nuevo, _, _) = axon(&["build", dir.join("shop.toml").to_str().unwrap(), &path]);
+    assert!(
+        nuevo.contains("\"pro\""),
+        "the plan did not reach the contract"
+    );
+    std::fs::write(dir.join("services/shop/contracts.ts"), &nuevo).unwrap();
+    let (_, err, ok) = axon(&["verify", &path]);
+    assert!(ok, "regenerating did not clear it:\n{err}");
+
+    // lo mismo con las politicas: una tabla que las migraciones ya no crean
+    let rls = axon(&["rls", &path, "--service", "shop"]).0;
+    std::fs::create_dir_all(dir.join("sql-policies/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql-policies/shop/R__rls.sql"),
+        format!("{rls}\nALTER TABLE \"fantasma\" ENABLE ROW LEVEL SECURITY;\n"),
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&["verify", &path]);
+    assert!(!ok, "a policy file that nothing generates passed clean");
+    assert!(err.contains("sql-policies/shop/R__rls.sql"), "{err}");
+    assert!(err.contains("axon rls . --service shop"), "{err}");
+
+    // y un archivo que no existe no se inventa: un repo que no guarda lo
+    // generado no tiene nada que comparar
+    std::fs::remove_file(dir.join("sql-policies/shop/R__rls.sql")).unwrap();
+    std::fs::remove_file(dir.join("services/shop/contracts.ts")).unwrap();
+    let (_, err, ok) = axon(&["verify", &path]);
+    assert!(
+        ok,
+        "it complains about files the repo does not keep:\n{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
