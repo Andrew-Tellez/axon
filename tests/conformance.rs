@@ -8404,8 +8404,10 @@ fn the_load_ramp_walks_into_the_declared_limit() {
 fn the_declared_rate_limit_is_enforced_at_the_edge() {
     let (yml, err, ok) = axon(&["infra", "examples", "--target", "local"]);
     assert!(ok, "{err}");
+    // El sufijo nombra el limite: hay un router POR limite declarado, no uno
+    // por servicio.
     assert!(
-        yml.contains("traefik.http.middlewares.orders-rl.ratelimit.average=60"),
+        yml.contains("traefik.http.middlewares.orders-rl-60.ratelimit.average=60"),
         "{yml}"
     );
     assert!(yml.contains("ratelimit.period=1m"), "{yml}");
@@ -8413,13 +8415,30 @@ fn the_declared_rate_limit_is_enforced_at_the_edge() {
     // own declared limit
     assert!(yml.contains("ratelimit.burst=6"), "{yml}");
     assert!(
-        yml.contains("traefik.http.routers.orders.middlewares=orders-rl"),
+        yml.contains("traefik.http.routers.orders-60.middlewares=orders-rl-60"),
         "{yml}"
     );
     // a service with no declared limit gets no middleware invented for it
     assert!(
         !yml.contains("checkout-rl.ratelimit"),
         "it invented a limit nobody declared:\n{yml}"
+    );
+    // Y lo que costo descubrir corriendo un stack: una ruta SIN limite no
+    // hereda el de otra. Con un router por servicio compartian middleware, y
+    // el mas estricto —la unica eleccion segura con un solo router— dejaba un
+    // `GET` que no declaraba nada contestando 429.
+    let sin_limite: Vec<&str> = yml
+        .lines()
+        .filter(|l| l.contains("traefik.http.routers.orders.rule="))
+        .collect();
+    assert_eq!(
+        sin_limite.len(),
+        1,
+        "las rutas sin limite van en su propio router:\n{yml}"
+    );
+    assert!(
+        !yml.contains("traefik.http.routers.orders.middlewares="),
+        "una ruta sin limite declarado no debe heredar el de otra:\n{yml}"
     );
 }
 

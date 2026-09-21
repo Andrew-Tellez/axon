@@ -3311,44 +3311,63 @@ fn edge_labels(p: &Plan, svc: &str) -> String {
     //
     // `$` is doubled because the file is read by docker compose, which
     // interpolates before Traefik ever sees the label.
-    let rules: Vec<String> = mine
-        .iter()
-        .map(|r| format!("PathRegexp(`{}`)", path_regex(&r.path)))
-        .collect();
-    let mut u: Vec<String> = rules;
-    u.sort();
-    u.dedup();
-    // The declared `rate_limit`, ENFORCED and not just annotated. Until now it
-    // travelled to k8s as a label for somebody else's controller to read, and
-    // on `local` it did nothing at all: a limit that nobody applies is a number
-    // in a document, and the load test walked right past it without a single
-    // 429 to show for it.
     //
-    // The strictest of the routes wins: they share a router, and taking the
-    // loosest would leave the tightest one declared and unprotected.
-    let limite = mine.iter().filter_map(|r| r.rate_limit).min();
-    let rl = limite
-        .map(|rpm| {
-            format!(
-                "      - traefik.http.routers.{svc}.middlewares={svc}-rl\n      \
-                 # `average` per minute, which is the unit `rate_limit` is declared in.\n      \
-                 # The burst is a tenth: without one, traffic that is not perfectly\n      \
-                 # smooth gets throttled below its own declared limit.\n      \
-                 - traefik.http.middlewares.{svc}-rl.ratelimit.average={rpm}\n      \
-                 - traefik.http.middlewares.{svc}-rl.ratelimit.period=1m\n      \
-                 - traefik.http.middlewares.{svc}-rl.ratelimit.burst={}\n",
-                (rpm / 10).max(1)
-            )
-        })
-        .unwrap_or_default();
-    format!(
+    // UN ROUTER POR LIMITE, y no uno por servicio.
+    //
+    // Con un solo router hay un solo middleware, y la unica eleccion segura es
+    // la mas estricta de todas las rutas —tomar la mas suelta dejaria a la mas
+    // apretada declarada y desprotegida—. El efecto es que un limite ajustado
+    // en UNA ruta estrangula el servicio entero: un alta publica a 10/min
+    // dejaba las lecturas de toda la plataforma en 10/min, y `getCompany`
+    // contestaba 429 sin declarar limite ninguno.
+    //
+    // Traefik acepta varios routers hacia el mismo servicio. Las rutas se
+    // agrupan por el limite que declaran, cada grupo con el suyo, y las que no
+    // declaran ninguno van juntas y sin middleware. Es lo que el manifiesto ya
+    // decia; lo que faltaba era no aplanarlo.
+    let mut grupos: std::collections::BTreeMap<Option<u32>, Vec<String>> = Default::default();
+    for r in &mine {
+        grupos
+            .entry(r.rate_limit)
+            .or_default()
+            .push(format!("PathRegexp(`{}`)", path_regex(&r.path)));
+    }
+
+    let mut o = format!(
         "    labels:\n      \
          - traefik.enable=true\n      \
-         - traefik.http.routers.{svc}.rule={}\n      \
-         - traefik.http.services.{svc}.loadbalancer.server.port={}\n{rl}",
-        u.join(" || "),
+         - traefik.http.services.{svc}.loadbalancer.server.port={}\n",
         mine[0].port
-    )
+    );
+    for (limite, reglas) in &grupos {
+        let mut u = reglas.clone();
+        u.sort();
+        u.dedup();
+        // El sufijo nombra el limite, asi que el router se lee solo y dos
+        // despliegues del mismo servicio no chocan de nombre.
+        let (name, rl) = match limite {
+            Some(rpm) => (
+                format!("{svc}-{rpm}"),
+                format!(
+                    "      - traefik.http.routers.{svc}-{rpm}.middlewares={svc}-rl-{rpm}\n      \
+                     # `average` per minute, which is the unit `rate_limit` is declared in.\n      \
+                     # The burst is a tenth: without one, traffic that is not perfectly\n      \
+                     # smooth gets throttled below its own declared limit.\n      \
+                     - traefik.http.middlewares.{svc}-rl-{rpm}.ratelimit.average={rpm}\n      \
+                     - traefik.http.middlewares.{svc}-rl-{rpm}.ratelimit.period=1m\n      \
+                     - traefik.http.middlewares.{svc}-rl-{rpm}.ratelimit.burst={}\n",
+                    (rpm / 10).max(1)
+                ),
+            ),
+            None => (svc.to_string(), String::new()),
+        };
+        o.push_str(&format!(
+            "      - traefik.http.routers.{name}.rule={}\n      \
+             - traefik.http.routers.{name}.service={svc}\n{rl}",
+            u.join(" || ")
+        ));
+    }
+    o
 }
 /// The bucket name differs per environment, so the app reads it from a
 /// variable instead of building it. Same variable name on all four targets.

@@ -204,11 +204,30 @@ pub fn controls(m: &Manifest, root: &std::path::Path, custom: &[Framework]) -> V
     };
 
     // --- access control ---------------------------------------------------
+    //
+    // `auth = "public"` escrito a mano NO es lo mismo que no haber declarado
+    // nada. Una ruta de alta es publica porque tiene que serlo —quien se
+    // registra todavia no tiene token, y pedirle uno seria pedirle la
+    // credencial de la cuenta que intenta crear—. Tratarlas igual obliga a
+    // elegir entre un sistema que no se puede usar y un control apagado, y un
+    // control que obliga a apagarlo es un control que nadie deja prendido.
+    //
+    // Lo que sigue siendo hueco: una ruta sin `auth` de ninguna clase, o una
+    // con `required` y sin scopes —ahi el token entra y nada mas se revisa.
     let unguarded: Vec<String> = m
         .methods
         .iter()
         .filter(|(_, me)| me.http.is_some())
+        .filter(|(_, me)| me.auth.as_deref() != Some("public"))
         .filter(|(_, me)| me.auth.as_deref() != Some("required") || me.scopes.is_empty())
+        .map(|(n, _)| n.clone())
+        .collect();
+    let publicas: Vec<String> = m
+        .methods
+        .iter()
+        .filter(|(n, me)| {
+            me.http.is_some() && me.auth.as_deref() == Some("public") && !n.is_empty()
+        })
         .map(|(n, _)| n.clone())
         .collect();
     push(
@@ -225,15 +244,21 @@ pub fn controls(m: &Manifest, root: &std::path::Path, custom: &[Framework]) -> V
         if m.methods.values().all(|me| me.http.is_none()) {
             Status::Met("no HTTP surface: nothing to reach from outside".into())
         } else if unguarded.is_empty() {
-            Status::Met(format!(
-                "{n} route{s}, each with `auth = \"required\"` and declared scopes",
-                n = m.methods.values().filter(|me| me.http.is_some()).count(),
-                s = if m.methods.values().filter(|me| me.http.is_some()).count() == 1 {
-                    ""
-                } else {
-                    "s"
-                },
-            ))
+            let n = m.methods.values().filter(|me| me.http.is_some()).count();
+            let s = if n == 1 { "" } else { "s" };
+            // Las publicas se NOMBRAN, aunque no sean hueco: quien audita
+            // tiene que poder discutirlas, y una decision que no se ve no se
+            // discute.
+            Status::Met(if publicas.is_empty() {
+                format!("{n} route{s}, each with `auth = \"required\"` and declared scopes")
+            } else {
+                format!(
+                    "{n} route{s}; all but {} behind `auth = \"required\"` with declared \
+                     scopes. Declared public, on purpose: {}",
+                    publicas.len(),
+                    list(&publicas)
+                )
+            })
         } else {
             Status::Gap(format!(
                 "no auth or no scopes: {}. A route with neither is reachable by whoever finds it",
