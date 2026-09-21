@@ -2723,6 +2723,7 @@ services:
 ",
     );
     o.push_str(&broker);
+    o.push_str(&crear_topics(p, engine));
     o.push_str(&temporal);
     for s in p.stores.iter() {
         let svc = &s.service;
@@ -2958,6 +2959,13 @@ services:
             "broker: { condition: service_healthy }".to_string(),
             "trace: { condition: service_healthy }".to_string(),
         ];
+        // Y no antes de que existan los topics. Sin esto el cliente se
+        // conecta primero y el broker AUTOCREA lo que pida —con una particion
+        // y la retencion por defecto—, que es como las particiones declaradas
+        // se pierden sin una sola linea de error.
+        if !p.topics.is_empty() && p.bus.as_deref().unwrap_or("nats") != "none" {
+            deps.push("crear-topics: { condition: service_completed_successfully }".into());
+        }
         // Do not start the app before its buckets exist. And without this,
         // `up --wait` counts the creation job as a container that died.
         if !env_buckets(p, &w.service, PROJ).is_empty() {
@@ -3195,46 +3203,130 @@ services:
     );
     o
 }
-/// The commands that create the topics and the subscriptions, as comments.
+/// El contenedor que crea los topics antes de que arranque nadie.
 ///
-/// They are comments and not a container that runs them because the day one
-/// of them fails is the day it matters: a bootstrap that swallows its own
-/// error leaves a consumer that never receives, and the compose comes up
-/// green. Here the group, the attempts and the ack window are visible, which
-/// is the only place they can be compared with what the manifest declared.
-fn bootstrap(p: &Plan, engine: &str) -> String {
-    if engine == "none" {
+/// Antes esto era un comentario en el compose, con el argumento de que un
+/// bootstrap que se traga su error deja un consumidor que nunca recibe y una
+/// pila que sube verde. El argumento es bueno y el resultado fue peor: nadie
+/// corre un comentario, asi que el primer cliente que se conecta hace que el
+/// broker AUTOCREE el topic —una particion, retencion por defecto— y las
+/// particiones declaradas se pierden sin una linea de error. Medido en un
+/// proyecto real: `partitions = 4` en el manifiesto, `PARTITIONS 1` en el
+/// broker, y un grupo que no puede pasar de un miembro activo.
+///
+/// Asi que el bootstrap existe, corre de verdad y se cae fuerte: `set -e`, y
+/// quien lo espera lo hace con `service_completed_successfully`. Un topic que
+/// no se pudo crear ahora detiene la pila en vez de degradarla.
+fn crear_topics(p: &Plan, engine: &str) -> String {
+    if engine == "none" || p.topics.is_empty() {
         return String::new();
     }
-    let mut o = String::from("\n# to create at startup:\n");
-    // Retention belongs on the topic and not on the subscription: it is the
-    // same window for everyone reading it.
     let keep = p.bus_retention_ms;
     let age = |fmt: fn(u64) -> String| keep.map(fmt).unwrap_or_default();
+    // Un stream de NATS no puede llamarse `order.placed.v1`: el punto no es
+    // legal en el nombre. El SUJETO si lo lleva —es por donde viaja— y el
+    // stream se llama igual con guiones bajos. Esto vivio como comentario
+    // durante versiones, con el punto adentro, porque un comentario que nadie
+    // corre tampoco falla nunca.
+    let stream = |t: &str| t.replace('.', "_");
+    let mut cmds: Vec<String> = Vec::new();
+    let mut checks: Vec<String> = Vec::new();
     for t in &p.topics {
-        o.push_str(&match engine {
-            "kafka" => format!(
-                "#   rpk topic create {} -p {}{}\n#   rpk topic create {}\n",
-                t.name,
-                t.partitions,
-                age(|ms| format!(" -c retention.ms={ms}")),
-                t.dlq
-            ),
-            "rabbit" => format!(
-                "#   rabbitmqadmin declare exchange name={} type=topic\n\
-                 #   rabbitmqadmin declare queue name={}{}\n",
-                t.name,
-                t.dlq,
-                age(|ms| format!(" arguments='{{\"x-message-ttl\":{ms}}}'"))
-            ),
-            _ => format!(
-                "#   nats stream add {} --subjects {}{}\n",
-                t.name,
-                t.name,
-                age(|ms| format!(" --max-age {}s", ms / 1000))
-            ),
-        });
+        match engine {
+            "kafka" => {
+                // `|| true`: `topic create` sobre uno que ya existe devuelve
+                // error, y `up` dos veces no puede fallar por eso. Lo que no
+                // se perdona lo caza el `describe` de abajo.
+                cmds.push(format!(
+                    "rpk -X brokers=broker:9092 topic create {} -p {}{} || true",
+                    t.name,
+                    t.partitions,
+                    age(|ms| format!(" -c retention.ms={ms}"))
+                ));
+                cmds.push(format!(
+                    "rpk -X brokers=broker:9092 topic create {} || true",
+                    t.dlq
+                ));
+                checks.push(format!(
+                    "rpk -X brokers=broker:9092 topic describe {} {} >/dev/null",
+                    t.name, t.dlq
+                ));
+            }
+            // `declare` en rabbit es idempotente, asi que va sin red: si falla,
+            // falla de verdad.
+            //
+            // Sintaxis de rabbitmqadmin 2.x —`--name`, `--type`— y no la del
+            // script de Python que traia la imagen vieja (`name=`, `type=`).
+            // El comentario que esto reemplaza llevaba la vieja, que en
+            // `rabbitmq:4-management-alpine` no existe.
+            "rabbit" => {
+                cmds.push(format!(
+                    "rabbitmqadmin --non-interactive -H broker -u guest -p guest declare exchange --name {} --type topic --durable true",
+                    t.name
+                ));
+                cmds.push(format!(
+                    "rabbitmqadmin --non-interactive -H broker -u guest -p guest declare queue --name {} --durable true{}",
+                    t.dlq,
+                    age(|ms| format!(" --arguments '{{\"x-message-ttl\":{ms}}}'"))
+                ));
+            }
+            _ => {
+                cmds.push(format!(
+                    "nats -s nats://broker:4222 stream add {} --subjects {} --defaults{} >/dev/null || true",
+                    stream(&t.name),
+                    t.name,
+                    age(|ms| format!(" --max-age {}s", ms / 1000))
+                ));
+                cmds.push(format!(
+                    "nats -s nats://broker:4222 stream add {} --subjects {} --defaults >/dev/null || true",
+                    stream(&t.dlq),
+                    t.dlq
+                ));
+                checks.push(format!(
+                    "nats -s nats://broker:4222 stream info {} >/dev/null",
+                    stream(&t.name)
+                ));
+            }
+        }
     }
+    let image = match engine {
+        "kafka" => "redpandadata/redpanda:v24.2.7",
+        "rabbit" => "rabbitmq:4-management-alpine",
+        _ => "natsio/nats-box:0.14.1",
+    };
+    let script = cmds
+        .into_iter()
+        .chain(checks)
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "  crear-topics:
+    image: {image}
+    depends_on: {{ broker: {{ condition: service_healthy }} }}
+    # `-e`: un topic que no se pudo crear PARA la pila, en vez de dejar que el
+    # primer cliente lo autocree con una particion. Y despues de crearlos
+    # pregunta por ellos: un `create` que devuelve 0 sin haber creado nada
+    # sigue siendo una pila verde sobre una mentira.
+    entrypoint: [\"/bin/sh\", \"-euc\", \"{script}\"]
+    restart: \"no\"
+"
+    )
+}
+
+/// Las suscripciones, como comentario. Estas no se crean con un comando: las
+/// declara el cliente al conectarse, con lo que `subscriptions` le entrega en
+/// el contrato. Escribirlas aqui es lo que permite compararlas con lo que el
+/// manifiesto declaro sin abrir el codigo del servicio.
+fn bootstrap(p: &Plan, engine: &str) -> String {
+    if engine == "none" || p.subs.is_empty() {
+        return String::new();
+    }
+    // Los topics ya NO estan aqui: los crea `crear-topics`, que corre. Lo que
+    // queda son las suscripciones, que el cliente declara al conectarse —el
+    // grupo, los intentos y la ventana de ack salen de `subscriptions`, en el
+    // contrato generado—. Siguen escritas porque este es el unico lugar donde
+    // se pueden comparar con lo que el manifiesto declaro.
+    let mut o = String::from("\n# lo que el consumidor declara al conectarse:\n");
     for s in &p.subs {
         let t = topic(&s.event);
         // The ack window has an engine-specific name everywhere and the same

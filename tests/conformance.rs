@@ -11911,3 +11911,70 @@ fn the_api_mismatch_names_the_key() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Los topics se CREAN, con las particiones declaradas, antes de que arranque
+/// nadie. Eran un comentario en el compose; nadie corre un comentario, asi que
+/// el primer cliente hacia que el broker autocreara el topic con una sola
+/// particion y `partitions = 4` no llegaba a existir.
+#[test]
+fn the_local_stack_creates_its_topics() {
+    let dir = std::env::temp_dir().join("axon-topics");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/001.sql"),
+        "CREATE TABLE thing (id uuid PRIMARY KEY);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+         [infra]\nstate = \"postgres\"\nmigrations = \"sql/shop\"\n\n\
+         [bus]\nengine = \"kafka\"\npartitions = 6\n\n\
+         [patterns]\noutbox = true\n\n\
+         [analytics]\nexport = false\n\n\
+         [emits.\"thing.done@v1\"]\nid = \"uuid\"\n\n\
+         [methods.doIt]\nhttp = \"POST /things\"\nauth = \"required\"\n\
+         in = { id = \"uuid\" }\nout = { id = \"uuid\" }\nemits = [\"thing.done@v1\"]\n",
+    )
+    .unwrap();
+    let (out, _, ok) = axon(&["infra", dir.to_str().unwrap(), "--target", "local"]);
+    assert!(ok, "infra failed");
+
+    // un contenedor, no un comentario
+    assert!(out.contains("  crear-topics:"), "{out}");
+    assert!(
+        out.contains("rpk -X brokers=broker:9092 topic create thing.done.v1 -p 6"),
+        "the declared partitions do not reach the broker:\n{out}"
+    );
+    // y lo comprueba despues de crearlo: un `create` que devuelve 0 sin haber
+    // creado nada es una pila verde sobre una mentira
+    assert!(out.contains("topic describe thing.done.v1"), "{out}");
+    // `-e`, o el fallo se pierde
+    assert!(out.contains("\"-euc\""), "{out}");
+    // y nadie arranca antes
+    assert!(
+        out.contains("crear-topics: { condition: service_completed_successfully }"),
+        "the app starts before its topics exist:\n{out}"
+    );
+    // correr `up` dos veces no puede fallar por algo que ya estaba
+    assert!(
+        out.contains("topic create thing.done.v1.dlq || true"),
+        "{out}"
+    );
+
+    // el nombre de un stream de NATS no admite puntos; el sujeto si
+    std::fs::write(
+        dir.join("shop.toml"),
+        std::fs::read_to_string(dir.join("shop.toml"))
+            .unwrap()
+            .replace("engine = \"kafka\"\npartitions = 6", "engine = \"nats\""),
+    )
+    .unwrap();
+    let (nats, _, _) = axon(&["infra", dir.to_str().unwrap(), "--target", "local"]);
+    assert!(
+        nats.contains("stream add thing_done_v1 --subjects thing.done.v1"),
+        "a NATS stream cannot be called thing.done.v1:\n{nats}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
