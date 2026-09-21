@@ -7,6 +7,41 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.47.0] — 2026-09-21
+
+### Añadido
+
+- **La guía de integración dice el rol que hace falta.** `axon docs` tenía columna para el
+  plan y no para `roles`, así que un método con `roles = ["owner"]` se documentaba como si
+  bastara el scope. Quien se integraba con el permiso correcto recibía un `403
+  insufficient_role` y ni una línea en ninguna parte que dijera que había que ser `owner`. La
+  columna del plan se escribió cuando el plan empezó a exigirse; el rol se quedó fuera.
+
+  Las columnas siguen apareciendo sólo cuando algo las declara: una columna vacía en todas las
+  filas se lee como «aquí no aplica», que es lo contrario de lo que significaría.
+
+### Corregido
+
+- **Una ruta pública se leía igual que una con token y sin scopes**: la celda vacía era la
+  misma. Y la que no pide token es justo por la que empieza quien se integra. Ahora dice
+  `**no token**`.
+
+- **`docs`, `compliance` y `versions` no tenían una sola prueba que las invocara.** 170
+  pruebas de conformidad y ninguna las llamaba: eran las tres únicas features del CLI en esa
+  situación, y las dos primeras se habían escrito en las versiones recientes. Los dos huecos
+  de arriba salieron al escribirlas —la misma historia que los scopes y los planes, que se
+  declaraban, se generaban y no los miraba nadie.
+
+  Lo que ahora afirman: la guía dice lo que el guardia va a exigir (scope, rol, plan, cuota);
+  la matriz admite lo que **no** puede contestar en vez de darlo por bueno, no filtra de más
+  con `--framework`, no se inventa un régimen que no existe, y un régimen declarado en un
+  servicio no alcanza a los demás —el CFDI donde hay CFDIs—; y el ciclo de mantenimiento
+  enseña el `default` que recibe quien no fija versión y la fecha de retiro con su sucesor
+  antes de que llegue.
+
+  La de `compliance` se comprobó mutando `in_effect` para que ignorara el régimen del
+  servicio: la prueba falla, que es lo único que demuestra que mira.
+
 ## [0.46.1] — 2026-09-21
 
 ### Corregido
