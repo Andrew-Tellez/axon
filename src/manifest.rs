@@ -195,6 +195,20 @@ pub struct Bus {
     /// How long a published event is kept. It is the window a consumer that
     /// was down can still catch up in.
     pub retention_ms: Option<u64>,
+    /// How many partitions the topics this service emits are created with.
+    ///
+    /// It is the ceiling on parallel consumption: a consumer group never has
+    /// more active members than the topic has partitions, so a service that
+    /// scales to eight replicas against one partition runs seven that never
+    /// receive a message —and joining a group without getting an assignment is
+    /// silent.
+    ///
+    /// Declared and not derived from `max_instances`, for the same reason the
+    /// shard count is not: the partition a key lands in is its hash modulo
+    /// this number, so raising it later moves every key that is already in
+    /// flight and breaks the order `ordered_by` promises. It is a decision
+    /// with a migration attached, not a knob.
+    pub partitions: Option<u32>,
 }
 
 impl Bus {

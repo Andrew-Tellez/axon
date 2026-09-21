@@ -11,6 +11,9 @@ pub struct Topic {
     pub event: String,
     pub name: String,
     pub dlq: String,
+    /// Partitions the topic is created with. The ceiling on how many replicas
+    /// of a consumer group can actually receive.
+    pub partitions: u32,
     /// The event is exported to the warehouse: it carries its own direct-write
     /// subscription, separate from the consumers'.
     pub analytics: bool,
@@ -295,7 +298,8 @@ pub fn plan_schema() -> serde_json::Value {
                 "public": bool_, "rate_limit": uint_or_null, "timeout_ms": uint
             }), "the gateway, from the methods that declare `http`")),
             "topics": array(object(serde_json::json!({
-                "event": str_, "name": str_, "dlq": str_, "analytics": bool_, "table": str_
+                "event": str_, "name": str_, "dlq": str_, "partitions": uint,
+                "analytics": bool_, "table": str_
             }), "one per event, with its dead-letter queue. Always")),
             "subs": array(object(serde_json::json!({
                 "service": str_, "event": str_, "name": str_, "max_attempts": uint,
@@ -432,6 +436,14 @@ pub fn plan(ms: &[Manifest]) -> Plan {
             event: ev.to_string(),
             name: topic(ev),
             dlq: format!("{}.dlq", topic(ev)),
+            // From whoever EMITS it: the topic belongs to its emitter, and a
+            // consumer that wanted more would be asking the other side to
+            // reshape a topic it does not own.
+            partitions: ms
+                .iter()
+                .find(|m| !m.external && m.emits.contains_key(ev.as_str()))
+                .and_then(|m| m.bus.partitions)
+                .unwrap_or(1),
             analytics: ms
                 .iter()
                 .any(|m| m.analytics.export && !m.external && m.emits.contains_key(ev.as_str())),
@@ -3202,8 +3214,9 @@ fn bootstrap(p: &Plan, engine: &str) -> String {
     for t in &p.topics {
         o.push_str(&match engine {
             "kafka" => format!(
-                "#   rpk topic create {}{}\n#   rpk topic create {}\n",
+                "#   rpk topic create {} -p {}{}\n#   rpk topic create {}\n",
                 t.name,
+                t.partitions,
                 age(|ms| format!(" -c retention.ms={ms}")),
                 t.dlq
             ),

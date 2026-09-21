@@ -402,6 +402,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     let mut metric_owner: IndexMap<String, String> = IndexMap::new();
     business_metrics(ms, &emitted, &mut metric_owner, &mut errors, &mut warnings);
     state_machines(ms, &mut errors, &mut warnings);
+    partitions_cap_the_consumers(ms, &mut warnings);
     what_is_named_exists(ms, &emitters, &known, &mut errors, &mut warnings);
     migration_order(ms, &mut errors, &mut warnings);
     // database per service: no FK crosses the boundary
@@ -4886,6 +4887,46 @@ fn business_metrics(
 }
 
 // state machines: dead states, unreachable ones and phantom triggers
+/// Replicas that will never receive an event.
+///
+/// A consumer group never has more ACTIVE members than the topic has
+/// partitions: the rest join, get no assignment and sit there. Nothing errors
+/// —joining without an assignment is how a group behaves— so a service that
+/// declares eight replicas against a one-partition topic runs seven that cost
+/// money and consume nothing.
+///
+/// A warning and not an error: the service still scales for requests, and the
+/// HTTP side may be the reason it scales at all. What is capped is consumption,
+/// and that is worth saying out loud rather than deciding for somebody.
+fn partitions_cap_the_consumers(ms: &[Manifest], warnings: &mut Vec<String>) {
+    for m in ms.iter().filter(|m| !m.external) {
+        let Some(replicas) = m.infra.max_instances.filter(|r| *r > 1) else {
+            continue;
+        };
+        for ev in m.consumes.keys() {
+            // The topic belongs to whoever emits it, and so does the number.
+            let Some(emisor) = ms.iter().find(|o| !o.external && o.emits.contains_key(ev)) else {
+                continue;
+            };
+            let parts = emisor.bus.partitions.unwrap_or(1);
+            if u64::from(parts) < u64::from(replicas) {
+                warnings.push(format!(
+                    "{}: scales to {replicas} replicas and consumes `{ev}`, a topic {} creates \
+                     with {parts} partition{}. A consumer group has no more active members than \
+                     partitions, so {} of them would receive nothing —and getting no assignment \
+                     raises no error. Raise `[bus] partitions` on {}, or say the replicas are \
+                     for the requests",
+                    m.service,
+                    emisor.service,
+                    if parts == 1 { "" } else { "s" },
+                    replicas - parts,
+                    emisor.service
+                ));
+            }
+        }
+    }
+}
+
 fn state_machines(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         for (name, mac) in &m.machine {
