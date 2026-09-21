@@ -7,6 +7,25 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.46.1] — 2026-09-21
+
+### Corregido
+
+- **Un `rate_limit` declarado no lo aplicaba nadie cuando otro método compartía el camino.** La
+  regla del edge nombraba la ruta y no el verbo, así que `POST /companies` —con
+  `rate_limit = 60`— y `GET /companies` —sin límite— producían dos routers con reglas
+  idénticas. Traefik elige uno: gana el de la regla más larga, que es el del grupo sin
+  middleware, y el alta quedaba servida sin límite.
+
+  Medido contra un stack real: 100 altas seguidas contra un límite declarado de 60/min, **100
+  respuestas 200 y ni un 429**. Estaba en el manifiesto, en las labels y en el edge, y no lo
+  aplicaba nadie. Lo encontró la prueba de carga de 0.46.0, con el aviso que ya existía —«ni
+  un 429 en toda la rampa»— y que hasta hoy se leía como que la rampa se quedaba corta.
+
+  Ahora cada regla lleva su verbo: `(Method(`POST`) && PathRegexp(...))`. Los routers dejan de
+  solaparse, así que no hay nada que elegir. La misma ráfaga después del arreglo: 7 pasan —el
+  burst declarado— y 93 contestan 429, mientras el `GET` del mismo camino sigue sin límite.
+
 ## [0.46.0] — 2026-09-21
 
 ### Añadido
