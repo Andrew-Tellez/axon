@@ -7,6 +7,27 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.47.3] — 2026-09-21
+
+### Corregido
+
+- **Un 4xx que el callee declara abría el circuito para todos los demás.** Corrida mensual de
+  cobro contra la pila entera: tres clientes, dos sin régimen fiscal. Los dos primeros
+  recibieron el 422 que facturación declara —un dato que falta— y el tercero, que estaba bien,
+  no se pudo facturar: `invoicing.invoices.create: circuit open`.
+
+  Un fallo declarado y no reintentable es el callee **contestando**, no el callee caído.
+  Contarlo en el breaker hace que un llamante con datos malos tumbe la dependencia para todos
+  los demás del proceso. Ahora sólo cuentan los desconocidos, los timeouts y lo que no trae
+  código —una caída de red se parece a eso— y los declarados **retriables**, que sí son el
+  callee sufriendo.
+
+- **El fallo declarado se reconocía por `instanceof AxonProblem`.** El transporte lo escribe
+  quien usa esto —axon declara la política, no cómo viaja la llamada— así que un transporte
+  escrito a mano que lanza un `Error` con `code` perdía el mecanismo entero **en silencio**:
+  cada 4xx volvía a ser un reintento y un fallo del breaker, y `[methods.*] errors` volvía a
+  ser documentación. Ahora se mira la forma: `code` es una cadena y el callee la declaró.
+
 ## [0.47.2] — 2026-09-21
 
 ### Corregido
