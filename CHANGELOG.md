@@ -7,6 +7,21 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.44.3] — 2026-09-21
+
+### Corregido
+
+- **Los binarios de Linux no arrancaban en Debian 12 ni en Ubuntu 22.04.** Salían de un
+  runner 24.04, así que pedían `GLIBC_2.39`, y en una base más vieja el error es
+  `version \`GLIBC_2.39\' not found` antes de imprimir una sola línea. Se vio bajando el
+  release de la 0.44.2 y corriéndolo en un contenedor, no leyendo el workflow: los cuatro
+  assets estaban ahí, con el tamaño correcto y la arquitectura correcta.
+
+  glibc es compatible hacia adelante y no hacia atrás. Lo compilado contra 2.35 corre en
+  24.04; lo compilado contra 2.39 no corre en 22.04. El runner que publica se fija a
+  `ubuntu-22.04` y `ubuntu-22.04-arm`; `ci` y `pages` se quedan en `ubuntu-latest`, porque
+  eso prueba y lo que prueba conviene que sea lo nuevo.
+
 ## [0.44.2] — 2026-09-21
 
 ### Corregido
