@@ -7,6 +7,24 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.47.1] — 2026-09-21
+
+### Corregido
+
+- **La respuesta del servidor MCP no decía qué compilador la había escrito.** La primera
+  llamada de verdad a `axon mcp` —una de las features que la suite cubría sin que nadie la
+  usara— contestó `unknown field \`partitions\`, expected \`engine\` or \`retention_ms\``. El
+  manifiesto estaba bien: lo viejo era el servidor.
+
+  Un servidor MCP es un proceso largo y sigue corriendo con el binario con el que arrancó, así
+  que después de actualizar axon contesta el compilador de antes. El mensaje se lee como «tu
+  manifiesto está mal» cuando la verdad es «quien te contesta tiene meses», y un agente que lo
+  crea se pone a arreglar un manifiesto que no tiene nada.
+
+  Ahora la versión viaja en la respuesta: como campo `axon` en el veredicto de `verify`, y
+  delante de cualquier error —que es donde más falta hace, porque es el único sitio donde la
+  respuesta parece culpa de quien pregunta.
+
 ## [0.47.0] — 2026-09-21
 
 ### Añadido
