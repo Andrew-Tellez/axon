@@ -3417,12 +3417,23 @@ fn edge_labels(p: &Plan, svc: &str) -> String {
     // agrupan por el limite que declaran, cada grupo con el suyo, y las que no
     // declaran ninguno van juntas y sin middleware. Es lo que el manifiesto ya
     // decia; lo que faltaba era no aplanarlo.
+    //
+    // Y EL METODO EN LA REGLA, no solo la ruta. Dos metodos sobre el mismo
+    // camino —`POST /companies` con limite y `GET /companies` sin el— caian en
+    // grupos distintos con reglas identicas, y entonces Traefik elige una: gana
+    // la de la regla mas larga, que es la del grupo sin limite. El alta quedaba
+    // servida por el router sin middleware.
+    //
+    // Medido: 100 altas seguidas contra un `rate_limit = 60` declarado, 100
+    // respuestas 200 y ni un 429. El limite estaba declarado, generado y
+    // publicado en las labels, y no lo aplicaba nadie.
     let mut grupos: std::collections::BTreeMap<Option<u32>, Vec<String>> = Default::default();
     for r in &mine {
-        grupos
-            .entry(r.rate_limit)
-            .or_default()
-            .push(format!("PathRegexp(`{}`)", path_regex(&r.path)));
+        grupos.entry(r.rate_limit).or_default().push(format!(
+            "(Method(`{}`) && PathRegexp(`{}`))",
+            r.method.to_uppercase(),
+            path_regex(&r.path)
+        ));
     }
 
     let mut o = format!(

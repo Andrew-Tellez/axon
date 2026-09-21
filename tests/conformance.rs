@@ -12153,3 +12153,58 @@ fn the_load_test_takes_real_data_and_says_when_it_measured_refusal() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Dos metodos sobre el MISMO camino, uno con limite y otro sin el. Sin el
+/// metodo en la regla, los dos routers declaran la misma ruta y Traefik elige
+/// uno solo: gana el de la regla mas larga, que es el grupo sin limite. Medido
+/// contra un stack real: 100 altas seguidas contra un `rate_limit = 60`, 100
+/// respuestas 200 y ni un 429.
+#[test]
+fn the_rate_limited_route_is_not_swallowed_by_its_own_path() {
+    let dir = std::env::temp_dir().join("axon-rl-path");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/001.sql"),
+        "CREATE TABLE thing (id uuid PRIMARY KEY);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+         [infra]\nstate = \"postgres\"\nmigrations = \"sql/shop\"\n\n\
+         [analytics]\nexport = false\n\n\
+         [api]\nversioning = \"header\"\ndefault = \"2026-01-15\"\nscopes = [\"shop:read\"]\n\n\
+         [[api.version]]\ndate = \"2026-01-15\"\n\n\
+         [methods.createThing]\nhttp = \"POST /things\"\nauth = \"public\"\n\
+         idempotent = true\nrate_limit = 60\n\
+         in = { id = \"uuid\" }\nout = { id = \"uuid\" }\n\n\
+         [methods.listThings]\nhttp = \"GET /things\"\nauth = \"required\"\n\
+         scopes = [\"shop:read\"]\nin = { cursor = \"string\" }\n\
+         out = { id = \"uuid\", cursor = \"string\" }\n",
+    )
+    .unwrap();
+    let (out, err, ok) = axon(&["infra", dir.to_str().unwrap(), "--target", "local"]);
+    assert!(ok, "{err}");
+
+    // el router con limite atiende SOLO el POST
+    assert!(
+        out.contains(
+            "traefik.http.routers.shop-60.rule=(Method(`POST`) && PathRegexp(`^/things$$`))"
+        ),
+        "{out}"
+    );
+    // y el de sin limite SOLO el GET: si nombrara el mismo camino sin metodo,
+    // se quedaria tambien con el POST y el limite no lo aplicaria nadie
+    let sin_limite = out
+        .lines()
+        .find(|l| l.contains("routers.shop.rule="))
+        .unwrap_or("");
+    assert!(sin_limite.contains("Method(`GET`)"), "{sin_limite}");
+    assert!(
+        !sin_limite.contains("Method(`POST`)"),
+        "the unlimited router swallows the limited route:\n{sin_limite}"
+    );
+    assert!(out.contains("ratelimit.average=60"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
