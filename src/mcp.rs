@@ -72,7 +72,16 @@ pub fn serve() -> Result<(), String> {
                     // protocol error: the model has to see what went wrong to
                     // fix it, and a transport error it never reads is a model
                     // that repeats the same call
-                    Err(e) => (e, true),
+                    //
+                    // Y CON LA VERSION QUE CONTESTO. Este servidor es un
+                    // proceso largo: sigue corriendo con el binario con el que
+                    // arranco, asi que despues de actualizar axon sigue
+                    // contestando el compilador viejo. Pasa de verdad —un
+                    // servidor con 0.42 contra un manifiesto de hoy— y el
+                    // error es «unknown field `partitions`», que se lee como
+                    // que el manifiesto esta mal cuando lo viejo es quien
+                    // responde. Con la version delante, eso se ve de una.
+                    Err(e) => (format!("axon {} — {e}", env!("CARGO_PKG_VERSION")), true),
                 };
                 reply(
                     id,
@@ -197,6 +206,11 @@ fn call(name: &str, args: &Value) -> Result<String, String> {
             };
             let r = crate::full_report(&ms, root);
             serde_json::to_string_pretty(&json!({
+                // Quien contesto. Un servidor MCP vive tanto como su proceso,
+                // asi que puede ser un compilador mas viejo que el repo que
+                // esta juzgando —y un veredicto sin version se lee como si
+                // fuera el de hoy.
+                "axon": env!("CARGO_PKG_VERSION"),
                 "ok": r.errors.is_empty(),
                 "services": ms.len(),
                 "errors": r.errors,

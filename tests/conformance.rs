@@ -10438,6 +10438,24 @@ fn the_mcp_server_speaks_the_protocol() {
     let report: serde_json::Value = serde_json::from_str(report)
         .unwrap_or_else(|e| panic!("`verify` did not answer JSON: {e}\n{report}"));
     assert!(report["services"].as_u64().unwrap() > 1, "{report}");
+    // QUIEN contesto. Este servidor es un proceso largo y sigue corriendo con
+    // el binario con el que arranco: despues de actualizar axon contesta el
+    // compilador viejo, y un veredicto sin version se lee como el de hoy.
+    // Paso de verdad —un servidor viejo contra un manifiesto nuevo— y el error
+    // decia «unknown field `partitions`», que suena a manifiesto mal escrito.
+    assert_eq!(report["axon"], env!("CARGO_PKG_VERSION"), "{report}");
+
+    // y el error tambien la lleva, que es donde mas falta hace: es el unico
+    // sitio donde la respuesta parece culpa de quien pregunta
+    let fallo = answer(5)["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        answer(5)["result"]["isError"].as_bool().unwrap_or(false),
+        "{fallo}"
+    );
+    assert!(
+        fallo.contains(env!("CARGO_PKG_VERSION")),
+        "an error that does not say which compiler answered:\n{fallo}"
+    );
 
     let vocabulary = answer(4)["result"]["content"][0]["text"].as_str().unwrap();
     for block in [
