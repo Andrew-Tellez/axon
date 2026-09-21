@@ -7,6 +7,25 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.44.2] — 2026-09-21
+
+### Corregido
+
+- **El desacuerdo de `[api]` entre dos servicios hablaba siempre de versionamiento.** La
+  comprobación cubre cuatro llaves —el esquema, las fechas de `[[api.version]]`, el `default`
+  y el registro de `scopes`— y el mensaje nombraba una sola. Un servicio al que le faltaba un
+  scope recibía un párrafo sobre cómo pedir una versión, y de ahí en adelante el camino es
+  diferenciar dos manifiestos a ojo buscando qué cadena cambió.
+
+  Salió montando un servicio nuevo en un proyecto real: dos manifiestos con el mismo
+  `versioning`, las mismas fechas y el mismo `default` seguían fallando, y el error no decía
+  por qué.
+
+  Ahora cada llave trae su propia razón y los dos valores. El de `scopes` además dice quién no
+  declara cuál —`billing does not declare \`billing:read\``—, que es la única parte que se
+  puede arreglar sin abrir los dos archivos, y dos listas iguales en distinto orden se dicen
+  así en vez de «diferentes».
+
 ## [0.44.1] — 2026-09-21
 
 ### Corregido
