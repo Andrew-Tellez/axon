@@ -1389,6 +1389,21 @@ fn catalogs(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String
 
 fn auth(ms: &[Manifest], errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
+        // Una tolerancia grande no es prudencia: es cuanto tiempo sigue
+        // valiendo un token ya vencido. Media hora de margen sobre una edad
+        // maxima de quince minutos convierte el limite en una sugerencia.
+        if let Some(skew) = m.auth.clock_skew_s {
+            if skew > 300 {
+                warnings.push(format!(
+                    "{}: `[auth] clock_skew_s = {skew}` is a replay window, not prudence: a \
+                     token stays valid {skew}s past its own expiry. NTP drift between two \
+                     servers is seconds, not minutes",
+                    m.service
+                ));
+            }
+        }
+    }
+    for m in ms.iter().filter(|m| !m.external) {
         let svc = &m.service;
         let a = &m.auth;
         let declared = !a.issuers.is_empty() || a.verify.is_some();

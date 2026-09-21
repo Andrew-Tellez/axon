@@ -3569,6 +3569,14 @@ export const verifier: AuthVerifier = {{
       // `none` and the HMAC-over-a-public-key trick: without it the library
       // trusts the token's own header about how to verify the token.
       algorithms: {algorithms},
+      // Dos relojes nunca son el mismo reloj. Con tolerancia cero, un token
+      // firmado en una maquina cuyo segundo va medio adelante se rechaza con
+      // «"iat" claim timestamp check failed» —un 401 que se lee como token
+      // invalido y es un problema de horas. Pasa de verdad entre el host y un
+      // contenedor en la misma maquina.
+      //
+      // 30s por omision, que es lo que usan Auth0 y Keycloak, y nada al lado
+      // de `maxTokenAge`. `clock_skew_s` en el manifiesto lo cambia.
       clockTolerance: {skew},
       maxTokenAge: {max_age},
     }});
@@ -3595,7 +3603,7 @@ export const verifier: AuthVerifier = {{
             None => "// no `audience` declared: nothing is checked against it\n      ".to_string(),
         },
         algorithms = serde_json::to_string(&a.algorithms).unwrap_or_default(),
-        skew = a.clock_skew_s.unwrap_or(0),
+        skew = a.clock_skew_s.unwrap_or(30),
         max_age = a
             .max_token_age_s
             .map(|s| s.to_string())

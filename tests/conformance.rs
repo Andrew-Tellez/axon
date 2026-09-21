@@ -12448,3 +12448,48 @@ fn the_maintenance_cycle_can_be_read() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Dos relojes nunca son el mismo reloj. Con tolerancia cero, un token firmado
+/// en una maquina cuyo segundo va medio adelante se rechaza con «"iat" claim
+/// timestamp check failed» —un 401 que se lee como token invalido y es un
+/// problema de horas. Paso entre el host y un contenedor en la MISMA maquina,
+/// con better-auth firmando de un lado y el verificador generado del otro.
+#[test]
+fn the_verifier_allows_for_two_clocks() {
+    let dir = std::env::temp_dir().join("axon-skew");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifiesto = |extra: &str| {
+        format!(
+            "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+             [auth]\nissuers = [\"https://auth.shop.mx\"]\naudience = \"shop\"\nverify = \"jwks\"\n\
+             jwks_uri = \"https://auth.shop.mx/jwks.json\"\nalgorithms = [\"EdDSA\"]\n\
+             max_token_age_s = 900\ntenant_claim = \"org_id\"\n{extra}\n\
+             [methods.readThing]\nhttp = \"GET /things/{{id}}\"\nauth = \"required\"\n\
+             in = {{ id = \"uuid\" }}\nout = {{ id = \"uuid\" }}\n"
+        )
+    };
+    let path = dir.join("shop.toml");
+    std::fs::write(&path, manifiesto("")).unwrap();
+    let (v, err, ok) = axon(&["auth", path.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    // 30s por omision, lo mismo que Auth0 y Keycloak, y nada al lado de los
+    // 900 de `max_token_age_s`
+    assert!(v.contains("clockTolerance: 30,"), "{v}");
+    assert!(v.contains("maxTokenAge: 900,"), "{v}");
+
+    // y el manifiesto manda
+    std::fs::write(&path, manifiesto("clock_skew_s = 2\n")).unwrap();
+    let (v, _, _) = axon(&["auth", path.to_str().unwrap()]);
+    assert!(v.contains("clockTolerance: 2,"), "{v}");
+
+    // una tolerancia enorme no es prudencia: es cuanto tiempo sigue valiendo
+    // un token ya vencido
+    std::fs::write(&path, manifiesto("clock_skew_s = 1800\n")).unwrap();
+    let (out, _, _) = axon(&["verify", path.to_str().unwrap()]);
+    assert!(
+        out.contains("replay window"),
+        "a half-hour of slack passed quietly:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
