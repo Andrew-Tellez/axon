@@ -12066,3 +12066,90 @@ fn a_stale_generated_file_is_an_error() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// La prueba de carga se corre contra un servicio de verdad o no mide nada.
+/// Los tipos del manifiesto dan la FORMA del cuerpo y no su contenido: `plan`
+/// es un `string` y `"plan"` no es un plan, asi que el ejemplo generado
+/// contesta 422 y lo que se mide es el camino del rechazo —el mismo verde
+/// enganoso que daba medir el 401, una capa mas adentro.
+#[test]
+fn the_load_test_takes_real_data_and_says_when_it_measured_refusal() {
+    let (js, err, ok) = axon(&["load", "examples/orders.toml"]);
+    assert!(ok, "{err}");
+
+    // los datos de verdad pisan el ejemplo, campo por campo
+    assert!(js.contains("__ENV.AXON_LOAD_DATA"), "{js}");
+    assert!(
+        js.contains(r#"...de("placeOrder")"#),
+        "no override on the body:\n{js}"
+    );
+    // y tambien el id de la ruta, que si no es inventado
+    assert!(
+        js.contains(r#"dato("getOrder", "orderId", uuid())"#),
+        "{js}"
+    );
+    // `@uuid` se renueva en cada peticion: una llave idempotente fija mide el
+    // camino del duplicado
+    assert!(js.contains(r#"v === "@uuid" ? uuid() : v"#), "{js}");
+
+    // un GET lleva en la query lo que el `in` declara y la ruta no nombra.
+    // Sin esto la peticion sale sin los parametros que el metodo EXIGE, y eso
+    // encontro un 500 en un servicio real.
+    let (js2, _, _) = axon(&["load", "examples/checkout.toml"]);
+    let con_query = js.contains("?") || js2.contains("encodeURIComponent(dato(");
+    assert!(
+        con_query,
+        "a GET with declared inputs sends none of them:\n{js2}"
+    );
+
+    // el veredicto distingue «no aguanta» de «no midio nada»: checks en el
+    // suelo, ni un 5xx y ni un 429 es una peticion que el servicio rechazo
+    let dir = std::env::temp_dir().join("axon-carga-datos");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rechazo = dir.join("rechazo.json");
+    std::fs::write(
+        &rechazo,
+        r#"{"metrics":{
+             "checks{scenario:placeOrder}":{"value":0.0,"thresholds":{"rate>0.99":true}},
+             "server_errors{scenario:placeOrder}":{"value":0.0,"thresholds":{"rate<0.01":false}},
+             "throttled{scenario:placeOrder}":{"value":0.0,"thresholds":{}}}}"#,
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&[
+        "load",
+        "examples/orders.toml",
+        "--check",
+        rechazo.to_str().unwrap(),
+    ]);
+    assert!(!ok, "a run where nothing succeeded passed");
+    assert!(err.contains("it measured refusal"), "{err}");
+    assert!(
+        err.contains("AXON_LOAD_DATA"),
+        "it does not say how to fix it:\n{err}"
+    );
+
+    // y una que si midio capacidad sigue diciendo lo de siempre
+    let lento = dir.join("lento.json");
+    std::fs::write(
+        &lento,
+        r#"{"metrics":{
+             "checks{scenario:placeOrder}":{"value":0.2,"thresholds":{"rate>0.99":true}},
+             "server_errors{scenario:placeOrder}":{"value":0.3,"thresholds":{"rate<0.01":true}},
+             "throttled{scenario:placeOrder}":{"value":0.0,"thresholds":{}}}}"#,
+    )
+    .unwrap();
+    let (_, err, ok) = axon(&[
+        "load",
+        "examples/orders.toml",
+        "--check",
+        lento.to_str().unwrap(),
+    ]);
+    assert!(!ok);
+    assert!(err.contains("does not hold up under the traffic"), "{err}");
+    assert!(
+        !err.contains("it measured refusal"),
+        "a run WITH 5xx is not a refusal:\n{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

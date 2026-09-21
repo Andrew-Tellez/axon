@@ -109,9 +109,14 @@ pub fn build_k6(m: &Manifest) -> Result<String, String> {
         umbrales.push(format!(
             "    \"server_errors{{scenario:{tag}}}\": [\"rate<0.01\"],"
         ));
+        // El cuerpo generado, y encima el que hayan dado. Los tipos del
+        // manifiesto alcanzan para la FORMA y no para el contenido: `plan` es
+        // un `string` y `"plan"` no es un plan, asi que sin datos de verdad
+        // esto mide el camino del 422. Es el mismo verde enganoso que daba
+        // medir el 401, una capa mas adentro.
         let cuerpo = if me.mutating() {
             format!(
-                "JSON.stringify({{{}}})",
+                "JSON.stringify({{ ...{{{}}}, ...de(\"{tag}\") }})",
                 me.input
                     .iter()
                     .map(|(k, t)| format!("{k}: {}", ejemplo(t, k)))
@@ -132,9 +137,38 @@ pub fn build_k6(m: &Manifest) -> Result<String, String> {
             (false, true) => "{ \"authorization\": `Bearer ${token}` }",
             (false, false) => "{}",
         };
+        // Un GET no lleva cuerpo, asi que lo que el manifiesto declara en `in` y
+        // la ruta no nombra viaja en la query. Sin esto la peticion sale sin
+        // los parametros que el metodo EXIGE —`?from=&to=`— y lo que se mide
+        // es como contesta el servicio a algo que nadie mandaria. Encontro un
+        // 500 en un servicio real la primera vez que se genero.
+        let en_ruta: Vec<&str> = route
+            .split('/')
+            .filter(|s| s.starts_with('{'))
+            .map(|s| s.trim_matches(|c| c == '{' || c == '}'))
+            .collect();
+        let query = if me.mutating() {
+            String::new()
+        } else {
+            let pares: Vec<String> = me
+                .input
+                .iter()
+                .filter(|(k, _)| !en_ruta.contains(&k.as_str()))
+                .map(|(k, t)| {
+                    format!(
+                        "{k}=${{encodeURIComponent(dato(\"{tag}\", \"{k}\", {}))}}",
+                        ejemplo(t, k)
+                    )
+                })
+                .collect();
+            match pares.is_empty() {
+                true => String::new(),
+                false => format!("?{}", pares.join("&")),
+            }
+        };
         peticiones.push(format!(
             "export function {tag}() {{\n  \
-               const r = http.request(\"{verbo}\", `${{base}}{ruta_js}`, {cuerpo}, {{\n    \
+               const r = http.request(\"{verbo}\", `${{base}}{ruta_js}{query}`, {cuerpo}, {{\n    \
                  headers: {cabeceras},\n    \
                  tags: {{ scenario: \"{tag}\" }},\n    \
                  timeout: \"{timeout}ms\",\n  }});\n  \
@@ -150,7 +184,13 @@ pub fn build_k6(m: &Manifest) -> Result<String, String> {
                 .split('/')
                 .map(|seg| {
                     if seg.starts_with('{') {
-                        "${uuid()}".to_string()
+                        // El id de verdad si lo dieron, y uno inventado si no.
+                        // Un `{tenantId}` inventado contesta 404: mide el
+                        // camino, no una lectura que encontro algo.
+                        format!(
+                            "${{dato(\"{tag}\", \"{campo}\", uuid())}}",
+                            campo = seg.trim_matches(|c| c == '{' || c == '}')
+                        )
                     } else {
                         seg.to_string()
                     }
@@ -217,6 +257,26 @@ pub fn build_k6(m: &Manifest) -> Result<String, String> {
          const uuid = () =>\n  \
            \"xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx\".replace(/x/g, () =>\n    \
              Math.floor(Math.random() * 16).toString(16),\n  );\n\n\
+         // Los datos de verdad: `--env AXON_LOAD_DATA=./datos.json`, un objeto\n\
+         // por metodo con lo que el manifiesto no puede saber —que un `plan`\n\
+         // es `\"pro\"` y no la cadena `\"plan\"`, que ese inquilino existe—.\n\
+         // Lo que traiga pisa lo generado, campo por campo, y lo que falte\n\
+         // sigue siendo el ejemplo.\n\
+         //\n\
+         //   {{ \"registerCompany\": {{ \"plan\": \"pro\", \"taxId\": \"AAA010101AAA\" }} }}\n\
+         //\n\
+         // Sin esto un `POST` con el ejemplo contesta 422 y la prueba mide el\n\
+         // camino del rechazo: latencia buenisima, checks en cero. Es el mismo\n\
+         // verde enganoso que daba medir el 401, una capa mas adentro.\n\
+         // `\"@uuid\"` como valor se cambia por uno nuevo EN CADA peticion. Es\n\
+         // lo que hace falta para una llave que tiene que ser unica —un alta\n\
+         // idempotente por `externalId` repite la misma fila si el valor es\n\
+         // fijo, y entonces la prueba mide el camino del duplicado.\n\
+         const datos = __ENV.AXON_LOAD_DATA ? JSON.parse(open(__ENV.AXON_LOAD_DATA)) : {{}};\n\
+         const vivo = (v) => (v === \"@uuid\" ? uuid() : v);\n\
+         const de = (tag) =>\n  \
+           Object.fromEntries(Object.entries(datos[tag] ?? {{}}).map(([k, v]) => [k, vivo(v)]));\n\
+         const dato = (tag, campo, porDefecto) => vivo(datos[tag]?.[campo]) ?? porDefecto;\n\n\
          export const options = {{\n  \
            scenarios: {{\n{scenarios}\n  }},\n  \
            thresholds: {{\n{umbrales}\n  }},\n\
@@ -278,9 +338,43 @@ pub fn review(m: &Manifest, json: &str) -> Result<(Vec<String>, Vec<String>), St
     let r: Summary = serde_json::from_str(json).map_err(|e| format!("invalid summary: {e}"))?;
     let (mut errors, mut warnings) = (Vec::new(), Vec::new());
 
+    // Una tasa de k6, por nombre de metrica. `value` y no `rate`: leer la
+    // llave equivocada devuelve `None`, y `None` aqui se lee como «no hay nada
+    // que decir».
+    let tasa_de = |name: &str| {
+        r.metrics
+            .get(name)
+            .and_then(|t| t.value("value").or_else(|| t.value("rate")))
+    };
     for (metric, met) in &r.metrics {
         for (threshold, breached) in &met.thresholds {
-            if *breached {
+            if !*breached {
+                continue;
+            }
+            // «No aguanta la carga» es un diagnostico, y cuando NADA salio
+            // bien es el diagnostico equivocado: no se midio la capacidad, se
+            // midio el rechazo. Se distinguen mirando lo que el propio script
+            // exporta —ni un 5xx, ni un 429 y los checks en el suelo: todo
+            // fueron 4xx de peticion invalida.
+            let escenario = metric
+                .strip_prefix("checks{scenario:")
+                .and_then(|s| s.strip_suffix('}'));
+            let rechazo = escenario.is_some_and(|tag| {
+                tasa_de(metric).is_some_and(|c| c < 0.5)
+                    && tasa_de(&format!("server_errors{{scenario:{tag}}}")).unwrap_or(0.0) == 0.0
+                    && tasa_de(&format!("throttled{{scenario:{tag}}}")).unwrap_or(0.0) == 0.0
+            });
+            if let (true, Some(tag)) = (rechazo, escenario) {
+                errors.push(format!(
+                    "{}: `{tag}` answered almost nothing with a 2xx, and not one answer was a \
+                     5xx or a 429. This did not measure capacity, it measured refusal: the \
+                     service rejected the requests as invalid or unauthorized. The generated \
+                     body carries the manifest's SHAPE and not its content —`plan` is a \
+                     `string` and `\"plan\"` is not a plan— so pass the real values with \
+                     `--env AXON_LOAD_DATA=datos.json` and run it again",
+                    m.service
+                ));
+            } else {
                 errors.push(format!(
                     "{}: `{metric}` breached `{threshold}`. What the manifest declares does not \
                      hold up under the traffic the manifest itself declares",
