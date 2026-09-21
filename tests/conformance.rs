@@ -5974,11 +5974,15 @@ fn the_generated_client_only_retries_what_is_declared_retriable() {
         !ts.contains("\"merchant_ceiling\"].includes(code)"),
         "a failure declared as final came out as retriable"
     );
-    // and the loop that uses it: without this line the list decides nothing
+    // and the loop that uses it: without esto la lista no decide nada. Se mira
+    // la FORMA del error y no su clase: el transporte lo escribe quien usa
+    // esto, y un `instanceof` obliga a que importe la clase para que el
+    // mecanismo exista.
     assert!(
-        ts.contains("if (err instanceof AxonProblem && !retriable(err.code)) throw err;"),
+        ts.contains("const respondio = typeof codigo === \"string\" && !retriable(codigo);"),
         "withPolicy does not consult the declared codes"
     );
+    assert!(ts.contains("if (respondio) throw err;"), "{ts}");
 
     // the server side: `fail` typed against the manifest, so a code that is not
     // declared does not compile
@@ -12492,4 +12496,35 @@ fn the_verifier_allows_for_two_clocks() {
         "a half-hour of slack passed quietly:\n{out}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Un 4xx declarado por el callee es el callee CONTESTANDO, no el callee
+/// caido. Contarlo en el breaker hace que un llamante con datos malos abra el
+/// circuito para todos los demas del proceso. Medido en la corrida mensual de
+/// cobro: dos clientes sin regimen fiscal —un 422 que el otro lado declara—
+/// dejaron sin facturacion al tercero, que estaba bien.
+#[test]
+fn a_declared_4xx_does_not_open_the_breaker() {
+    let (ts, err, ok) = axon(&["build", "examples/orders.toml", "examples"]);
+    assert!(ok, "{err}");
+    // el fallo declarado y no reintentable no cuenta
+    assert!(
+        ts.contains("const respondio = typeof codigo === \"string\" && !retriable(codigo);"),
+        "{ts}"
+    );
+    // por la FORMA y no por la clase: el transporte lo escribe quien usa esto,
+    // y un `instanceof` hace que un transporte a mano pierda el mecanismo
+    assert!(
+        !ts.contains("err instanceof AxonProblem && !retriable"),
+        "{ts}"
+    );
+    assert!(
+        ts.contains("if (!respondio) breaker?.failed(Date.now());"),
+        "{ts}"
+    );
+    // y sigue sin reintentarse: gastar el presupuesto para la misma respuesta
+    assert!(ts.contains("if (respondio) throw err;"), "{ts}");
+    // lo que si cuenta: un timeout, un 5xx, y cualquier codigo que nadie
+    // declaro —una caida de red se parece a eso
+    assert!(ts.contains("breaker?.succeeded();"), "{ts}");
 }
