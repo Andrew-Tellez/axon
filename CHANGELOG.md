@@ -7,6 +7,26 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.48.0] — 2026-09-21
+
+### Cambiado
+
+- **Un evento que alimenta una métrica ya no se reporta como huérfano.** `X has no
+  consumers` se disparaba también sobre los eventos que llevan una métrica declarada:
+  el almacén los lee, una regla vigila esa serie, y `verify` decía que no los leía
+  nadie. Una regla que se equivoca sobre un montaje correcto es la que alguien
+  silencia, arrastrando detrás a toda su familia.
+
+  Ahora los distingue, y sigue avisando —porque son cosas distintas y las dos
+  importan—: «sólo alimenta el almacén y nadie REACCIONA». Un número en un tablero no
+  suspende una cuenta ni hace un asiento.
+
+- **Los comentarios del código generado, en inglés.** El verificador de tokens y el
+  breaker del cliente llevaban en español dos de los comentarios más largos que axon
+  escribe, y aterrizan en cada repo que lo usa: el resto del código generado ya estaba
+  en inglés. Cambia sólo el texto de los comentarios; el código emitido es el mismo,
+  pero `verify` pedirá regenerar los archivos ya escritos con una versión anterior.
+
 ## [0.47.3] — 2026-09-21
 
 ### Corregido
