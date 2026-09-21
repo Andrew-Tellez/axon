@@ -12528,3 +12528,57 @@ fn a_declared_4xx_does_not_open_the_breaker() {
     // declaro —una caida de red se parece a eso
     assert!(ts.contains("breaker?.succeeded();"), "{ts}");
 }
+
+/// Un evento que alimenta una metrica declarada SI lo lee alguien. No
+/// reacciona —eso es lo que hace un consumidor— pero decir «no lo lee nadie»
+/// es decir algo falso, y una regla que se equivoca sobre un montaje correcto
+/// es la que alguien silencia arrastrando a toda su familia.
+#[test]
+fn a_measured_event_is_not_an_ignored_one() {
+    let dir = std::env::temp_dir().join("axon-medido");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/001.sql"),
+        "CREATE TABLE thing (id uuid PRIMARY KEY);\n",
+    )
+    .unwrap();
+    let manifiesto = |metrica: &str| {
+        format!(
+            "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+             [infra]\nstate = \"postgres\"\nmigrations = \"sql/shop\"\n\n\
+             [analytics]\nexport = true\nwarehouse = \"clickhouse\"\nretention_days = 90\n\n\
+             [bus]\nengine = \"kafka\"\n\n[patterns]\noutbox = true\n\n\
+             [api]\nversioning = \"header\"\ndefault = \"2026-01-15\"\n\n\
+             [[api.version]]\ndate = \"2026-01-15\"\n\n\
+             [emits.\"thing.done@v1\"]\nid = \"uuid\"\n\n{metrica}\
+             [methods.doIt]\nhttp = \"POST /things\"\nauth = \"required\"\nidempotent = true\n\
+             in = {{ id = \"uuid\" }}\nout = {{ id = \"uuid\" }}\nemits = [\"thing.done@v1\"]\n"
+        )
+    };
+    let path = dir.to_str().unwrap().to_string();
+
+    // sin metrica: nadie lo lee, y eso es lo que dice
+    std::fs::write(dir.join("shop.toml"), manifiesto("")).unwrap();
+    let (out, _, _) = axon(&["verify", &path]);
+    assert!(out.contains("thing.done@v1 has no consumers"), "{out}");
+
+    // con una metrica encima: lo lee el almacen, y nadie REACCIONA. Es otra
+    // cosa y se dice distinto.
+    std::fs::write(
+        dir.join("shop.toml"),
+        manifiesto(
+            "[metrics.hechas]\non = [\"thing.done@v1\"]\nkind = \"count\"\nwindow = \"1d\"\n\n",
+        ),
+    )
+    .unwrap();
+    let (out, _, _) = axon(&["verify", &path]);
+    assert!(
+        !out.contains("has no consumers"),
+        "a measured event still reads as ignored:\n{out}"
+    );
+    assert!(out.contains("only feeds the warehouse"), "{out}");
+    // y sigue siendo un aviso: un numero en un tablero no suspende una cuenta
+    assert!(out.contains("REACTS"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

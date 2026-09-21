@@ -5244,6 +5244,22 @@ fn events_with_no_consumers(
 ) {
     for (ev, (owner, _)) in emitters {
         if !ms.iter().any(|m| m.consumes.contains_key(*ev)) {
+            // Una metrica declarada SI lo lee. No reacciona —eso es lo que un
+            // consumidor hace— pero decir «no lo lee nadie» de un evento que
+            // alimenta una serie que una regla vigila es decir algo falso, y
+            // una regla que se equivoca sobre un montaje correcto es una regla
+            // que alguien silencia con toda su familia detras.
+            let medido = ms
+                .iter()
+                .any(|m| m.metrics.values().any(|me| me.on.iter().any(|e| e == *ev)));
+            if medido {
+                warnings.push(format!(
+                    "{owner}: {ev} only feeds the warehouse —a declared metric reads it— and \
+                     nothing in the system REACTS to it. That is a decision, not a gap: a \
+                     number on a dashboard cannot suspend an account or post an entry"
+                ));
+                continue;
+            }
             // The one rule that used to name its subject in parentheses, so it
             // was the one finding the editor could not place on a file.
             warnings.push(format!("{owner}: {ev} has no consumers"));
