@@ -141,8 +141,12 @@ fn methods_section(m: &Manifest) -> String {
     // an empty column on every row reads as "this does not apply here", which
     // is the opposite of what it would mean.
     let con_plan = m.methods.values().any(|me| !me.plans.is_empty());
+    let con_rol = m.methods.values().any(|me| !me.roles.is_empty());
     let con_cuota = m.methods.values().any(|me| me.rate_limit.is_some());
     let mut s = String::from("## What you can call\n\n| method | route | scopes |");
+    if con_rol {
+        s.push_str(" role |");
+    }
     if con_plan {
         s.push_str(" plan |");
     }
@@ -150,6 +154,9 @@ fn methods_section(m: &Manifest) -> String {
         s.push_str(" rate |");
     }
     s.push_str(" idempotent | timeout |\n| --- | --- | --- |");
+    if con_rol {
+        s.push_str(" --- |");
+    }
     if con_plan {
         s.push_str(" --- |");
     }
@@ -159,10 +166,13 @@ fn methods_section(m: &Manifest) -> String {
     s.push_str(" --- | --- |\n");
     for (name, me) in &m.methods {
         let route = me.http.clone().unwrap_or_else(|| "_not over HTTP_".into());
-        let scopes = if me.scopes.is_empty() {
-            "—".into()
-        } else {
-            format!("`{}`", me.scopes.join("`, `"))
+        // Una ruta PUBLICA se dice, y no se deja adivinar por una celda vacia:
+        // sin token y sin scopes se ven igual en una tabla, y la que no pide
+        // token es justo por la que empieza quien se integra.
+        let scopes = match (me.auth.as_deref(), me.scopes.is_empty()) {
+            (Some("public"), _) => "**no token**".into(),
+            (_, true) => "—".into(),
+            _ => format!("`{}`", me.scopes.join("`, `")),
         };
         let dep = if me.deprecated.is_some() {
             " ⚠️"
@@ -170,6 +180,16 @@ fn methods_section(m: &Manifest) -> String {
             ""
         };
         s.push_str(&format!("| `{name}`{dep} | `{route}` | {scopes} |"));
+        // El rol, con el mismo trato que el plan. Faltaba, y el guardia SI lo
+        // exige: quien tenia el scope correcto recibia un 403 `insufficient_role`
+        // sin una linea en ningun lado que dijera que hacia falta ser `owner`.
+        if con_rol {
+            s.push_str(&if me.roles.is_empty() {
+                " any |".to_string()
+            } else {
+                format!(" `{}` |", me.roles.join("` or `"))
+            });
+        }
         if con_plan {
             s.push_str(&if me.plans.is_empty() {
                 " any |".to_string()

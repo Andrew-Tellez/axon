@@ -12208,3 +12208,225 @@ fn the_rate_limited_route_is_not_swallowed_by_its_own_path() {
     assert!(out.contains("ratelimit.average=60"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// La guia de integracion dice lo que el manifiesto declara, y sobre todo lo
+/// que le va a costar un 4xx a quien se integre: el scope, el ROL y el plan.
+/// Los tres son cosas que el guardia exige y que un integrador no puede
+/// adivinar —un 403 `insufficient_role` sin una linea que diga «hace falta ser
+/// owner» es un ticket.
+#[test]
+fn the_guide_says_what_the_guard_will_demand() {
+    let dir = std::env::temp_dir().join("axon-docs");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/001.sql"),
+        "CREATE TABLE thing (id uuid PRIMARY KEY);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        "service = \"shop\"\nversion = \"2.1.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+         [infra]\nstate = \"postgres\"\nmigrations = \"sql/shop\"\n\n\
+         [analytics]\nexport = false\n\n\
+         [api]\nversioning = \"header\"\nheader = \"Shop-Version\"\ndefault = \"2026-01-15\"\n\
+         scopes = [\"shop:read\", \"shop:write\"]\n\n[[api.version]]\ndate = \"2026-01-15\"\n\n\
+         [auth]\nissuers = [\"https://auth.shop.mx\"]\naudience = \"shop\"\nverify = \"jwks\"\n\
+         jwks_uri = \"https://auth.shop.mx/jwks.json\"\nalgorithms = [\"EdDSA\"]\n\
+         max_token_age_s = 900\ntenant_claim = \"org_id\"\nroles_claim = \"roles\"\n\
+         plan_claim = \"plan\"\n\n\
+         [methods.signUp]\nhttp = \"POST /signups\"\nauth = \"public\"\nidempotent = true\n\
+         rate_limit = 60\nin = { email = \"string\" }\nout = { id = \"uuid\" }\n\n\
+         [methods.exportAll]\nhttp = \"POST /exports\"\nauth = \"required\"\n\
+         scopes = [\"shop:write\"]\nroles = [\"owner\"]\nplans = [\"pro\"]\nidempotent = true\n\
+         in = { id = \"uuid\" }\nout = { id = \"uuid\" }\n",
+    )
+    .unwrap();
+    let (doc, err, ok) = axon(&["docs", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+
+    // la autenticacion, tal como se declaro
+    assert!(doc.contains("https://auth.shop.mx"), "{doc}");
+    assert!(doc.contains("EdDSA") && doc.contains("900s"), "{doc}");
+    assert!(
+        doc.contains("`org_id`"),
+        "the tenant claim is not in the guide:\n{doc}"
+    );
+
+    // el rol y el plan tienen columna porque algo los declara
+    assert!(
+        doc.contains("| role |") && doc.contains("| plan |"),
+        "{doc}"
+    );
+    assert!(doc.contains("`owner`") && doc.contains("`pro`"), "{doc}");
+    // y una ruta publica se DICE: sin token y sin scopes se ven igual en una
+    // tabla, y la que no pide token es por la que empieza quien se integra
+    assert!(
+        doc.contains("**no token**"),
+        "a public route reads as one with no scopes:\n{doc}"
+    );
+    // la cuota, que es un 429 y no un fallo
+    assert!(doc.contains("60/min"), "{doc}");
+
+    // lo que NADIE declara no gana una columna vacia: leerla como «aqui no
+    // aplica» es lo contrario de lo que significaria
+    std::fs::write(
+        dir.join("shop.toml"),
+        std::fs::read_to_string(dir.join("shop.toml"))
+            .unwrap()
+            .replace("roles = [\"owner\"]\nplans = [\"pro\"]\n", ""),
+    )
+    .unwrap();
+    let (sin, _, _) = axon(&["docs", dir.to_str().unwrap()]);
+    assert!(
+        !sin.contains("| role |"),
+        "an empty column for what nobody declares:\n{sin}"
+    );
+    assert!(!sin.contains("| plan |"), "{sin}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// La matriz de control: cada regimen, contra lo que el manifiesto declara. Lo
+/// que importa es que un control se pueda quedar SIN responder —`manual`— en
+/// vez de darse por bueno, y que un regimen declarado por servicio no arrastre
+/// a los demas: el CFDI aplica donde hay CFDIs.
+#[test]
+fn the_control_matrix_admits_what_it_cannot_answer() {
+    // los ids son la lista con la que `[framework.*] controls` se escribe
+    let (ids, err, ok) = axon(&["compliance", "--ids"]);
+    assert!(ok, "{err}");
+    assert!(
+        ids.contains("tenant-isolation") && ids.contains("access-control"),
+        "{ids}"
+    );
+
+    let dir = std::env::temp_dir().join("axon-compliance");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::create_dir_all(dir.join("sql/blog")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/001.sql"),
+        "CREATE TABLE thing (id uuid PRIMARY KEY, tenant_id uuid NOT NULL);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sql/blog/001.sql"),
+        "CREATE TABLE post (id uuid PRIMARY KEY, tenant_id uuid NOT NULL);\n",
+    )
+    .unwrap();
+    let svc = |name: &str, extra: &str| {
+        format!(
+            "service = \"{name}\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n{extra}\n\
+             [infra]\nstate = \"postgres\"\nmigrations = \"sql/{name}\"\ntenant_column = \"tenant_id\"\n\n\
+             [analytics]\nexport = false\n\n\
+             [api]\nversioning = \"header\"\ndefault = \"2026-01-15\"\nscopes = [\"{name}:read\"]\n\n\
+             [[api.version]]\ndate = \"2026-01-15\"\n\n\
+             [auth]\nissuers = [\"https://auth.shop.mx\"]\naudience = \"{name}\"\nverify = \"jwks\"\n\
+             jwks_uri = \"https://auth.shop.mx/jwks.json\"\nalgorithms = [\"EdDSA\"]\n\
+             max_token_age_s = 900\ntenant_claim = \"org_id\"\n\n\
+             [methods.read{name}]\nhttp = \"GET /{name}/{{id}}\"\nauth = \"required\"\n\
+             scopes = [\"{name}:read\"]\nin = {{ id = \"uuid\" }}\nout = {{ id = \"uuid\" }}\n"
+        )
+    };
+    // el CFDI sólo donde hay CFDIs: declarado en UN servicio, no en el otro
+    std::fs::write(
+        dir.join("shop.toml"),
+        svc("shop", "compliance = [\"cfdi\"]\n"),
+    )
+    .unwrap();
+    std::fs::write(dir.join("blog.toml"), svc("blog", "")).unwrap();
+    let path = dir.to_str().unwrap();
+    let (m, err, ok) = axon(&["compliance", path]);
+    assert!(ok, "{err}");
+    // La seccion de cada servicio, por su nombre. Partir el informe a ojo es
+    // como una prueba pasa afirmando lo contrario de lo que cree.
+    let seccion = |quien: &str| -> String {
+        let desde = m
+            .find(&format!("## `{quien}`"))
+            .expect("service missing from the report");
+        let resto = &m[desde + 1..];
+        let hasta = resto
+            .find("\n## ")
+            .map(|i| desde + 1 + i)
+            .unwrap_or(m.len());
+        m[desde..hasta].to_string()
+    };
+    let (shop, blog) = (seccion("shop"), seccion("blog"));
+    assert!(
+        shop.contains("cfdi"),
+        "the declared regime is not in effect:\n{shop}"
+    );
+    assert!(
+        !blog.contains("cfdi"),
+        "a regime declared on ONE service reached another:\n{blog}"
+    );
+
+    // un solo regimen, para todos, aunque no lo declaren
+    let (solo, _, ok) = axon(&["compliance", path, "--framework", "soc2"]);
+    assert!(ok);
+    assert!(solo.contains("SOC 2"), "{solo}");
+    assert!(!solo.contains("HIPAA"), "another regime leaked in:\n{solo}");
+    // y lo que una declaracion NO puede contestar vuelve como `manual`, con lo
+    // que una persona tiene que enseñar: darlo por cumplido seria la mentira
+    assert!(solo.contains("manual"), "everything came back met:\n{solo}");
+    assert!(solo.contains("not a certification"), "{solo}");
+
+    // un regimen que no existe no se inventa
+    let (_, err, ok) = axon(&["compliance", path, "--framework", "nada"]);
+    assert!(!ok, "an unknown regime was accepted");
+    assert!(err.contains("nada"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// El ciclo de mantenimiento, leido: que versiones hay, cual sirve a quien no
+/// fija ninguna, y que se esta muriendo. Es la unica vista donde una fecha de
+/// retiro se ve antes de que llegue.
+#[test]
+fn the_maintenance_cycle_can_be_read() {
+    // versionado por cabecera: la cabecera, el default y la ventana
+    let dir = std::env::temp_dir().join("axon-versions");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
+    std::fs::write(
+        dir.join("sql/shop/001.sql"),
+        "CREATE TABLE thing (id uuid PRIMARY KEY);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("shop.toml"),
+        "service = \"shop\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+         [infra]\nstate = \"postgres\"\nmigrations = \"sql/shop\"\n\n\
+         [analytics]\nexport = false\n\n\
+         [api]\nversioning = \"header\"\nheader = \"Shop-Version\"\ndefault = \"2026-06-01\"\n\
+         support_window_days = 365\n\n\
+         [[api.version]]\ndate = \"2026-01-15\"\nsunset = \"2027-01-15\"\n\n\
+         [[api.version]]\ndate = \"2026-06-01\"\n\n\
+         [methods.readThing]\nhttp = \"GET /things/{id}\"\nauth = \"required\"\n\
+         in = { id = \"uuid\" }\nout = { id = \"uuid\" }\n",
+    )
+    .unwrap();
+    let (v, err, ok) = axon(&["versions", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    assert!(v.contains("header") && v.contains("Shop-Version"), "{v}");
+    // el default es lo que recibe quien no fija version: sin verlo, nadie sabe
+    // en que version esta corriendo su integracion
+    assert!(v.contains("2026-06-01"), "{v}");
+    assert!(v.contains("365"), "the support window is not shown:\n{v}");
+    // y la que se muere, con su fecha, antes de que llegue
+    assert!(
+        v.contains("2027-01-15"),
+        "a declared sunset is not shown:\n{v}"
+    );
+    assert!(v.contains("2026-01-15"), "{v}");
+
+    // versionado por ruta: el retiro es por metodo, y ahi es donde se lee
+    let (p, _, ok) = axon(&["versions", "examples"]);
+    assert!(ok);
+    assert!(p.contains("versioning = path"), "{p}");
+    assert!(p.contains("sunset 2027-12-31"), "{p}");
+    assert!(
+        p.contains("successor getOrderV2"),
+        "a retirement with no successor is a dead end:\n{p}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
