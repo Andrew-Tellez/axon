@@ -11851,3 +11851,63 @@ orderId = "uuid"
         "a service with no routes does not export httpRoutes:\n{ts}"
     );
 }
+
+/// Two services that disagree about `[api]` get told WHICH key differs and
+/// what each one says. The message used to name only "versioning", which sent
+/// whoever read it to diff two manifests by eye over a scope.
+#[test]
+fn the_api_mismatch_names_the_key() {
+    let dir = std::env::temp_dir().join("axon-api-mismatch");
+    let svc = |name: &str, api: &str| {
+        format!(
+            "service = \"{name}\"\nversion = \"1.0.0\"\nowner = \"team\"\ntier = \"1\"\n\n\
+             [api]\n{api}\n\
+             [methods.read{name}]\nhttp = \"GET /{name}\"\nauth = \"required\"\n\
+             scopes = [\"shop:read\"]\n\
+             in = {{ id = \"uuid\" }}\nout = {{ id = \"uuid\" }}\n"
+        )
+    };
+    let run = |other: &str| -> String {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = "versioning = \"header\"\ndefault = \"2026-01-15\"\n\
+                    scopes = [\"shop:read\"]\n\n[[api.version]]\ndate = \"2026-01-15\"\n\n";
+        std::fs::write(dir.join("shop.toml"), svc("shop", base)).unwrap();
+        std::fs::write(dir.join("cart.toml"), svc("cart", other)).unwrap();
+        let (_, err, ok) = axon(&["verify", dir.to_str().unwrap()]);
+        assert!(!ok, "it passed clean");
+        err
+    };
+
+    // the scheme itself
+    let err = run("versioning = \"path\"\ndefault = \"2026-01-15\"\n\
+                   scopes = [\"shop:read\"]\n\n[[api.version]]\ndate = \"2026-01-15\"\n\n");
+    assert!(err.contains("`versioning`"), "{err}");
+    assert!(err.contains("`header`") && err.contains("`path`"), "{err}");
+
+    // the dates
+    let err = run("versioning = \"header\"\ndefault = \"2026-01-15\"\n\
+                   scopes = [\"shop:read\"]\n\n[[api.version]]\ndate = \"2026-01-15\"\n\n\
+                   [[api.version]]\ndate = \"2026-06-01\"\n\n");
+    assert!(err.contains("[[api.version]]"), "{err}");
+    assert!(err.contains("2026-06-01"), "{err}");
+
+    // the default an unpinned caller gets
+    let err = run("versioning = \"header\"\ndefault = \"2026-06-01\"\n\
+                   scopes = [\"shop:read\"]\n\n[[api.version]]\ndate = \"2026-01-15\"\n\n");
+    assert!(err.contains("`default`"), "{err}");
+    assert!(err.contains("2026-06-01"), "{err}");
+
+    // the scope registry: it says who is missing what, and does not say
+    // "versioning" about a permission
+    let err = run("versioning = \"header\"\ndefault = \"2026-01-15\"\n\
+                   scopes = [\"shop:read\", \"shop:write\"]\n\n\
+                   [[api.version]]\ndate = \"2026-01-15\"\n\n");
+    assert!(err.contains("`scopes`"), "{err}");
+    assert!(err.contains("shop does not declare `shop:write`"), "{err}");
+    assert!(
+        !err.contains("how to ask for a version"),
+        "a scope is not a version:\n{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

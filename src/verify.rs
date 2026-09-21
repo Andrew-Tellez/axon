@@ -2847,18 +2847,83 @@ fn fields_nobody_reads(ms: &[Manifest], warnings: &mut Vec<String>) {
     }
 }
 
+/// What `[api]` is shared by the whole platform, and what each key means when
+/// two services disagree about it. Saying only "different `[api]`" sends
+/// somebody to diff two manifests by eye over one word.
+fn api_difference(a: &Api, b: &Api, one: &str, two: &str) -> Option<String> {
+    fn or_absent(v: Option<&str>) -> String {
+        v.map_or_else(|| "nothing".to_string(), |v| format!("`{v}`"))
+    }
+    if a.versioning != b.versioning {
+        return Some(format!(
+            "`versioning`: {one} declares {}, {two} declares {}. It is one decision for the \
+             whole platform: with two, whoever calls has to know which service it is talking \
+             to before it can know how to ask for a version",
+            or_absent(a.versioning.as_deref()),
+            or_absent(b.versioning.as_deref()),
+        ));
+    }
+    if a.dates() != b.dates() {
+        return Some(format!(
+            "the `[[api.version]]` dates: {one} declares [{}], {two} declares [{}]. A version \
+             is the platform's and not a service's, so a date that exists on one side and not \
+             on the other is a version whoever calls can pin and only half the system honours",
+            a.dates().join(", "),
+            b.dates().join(", "),
+        ));
+    }
+    if a.default != b.default {
+        return Some(format!(
+            "`default`: {one} serves {}, {two} serves {}. Whoever does not pin a version gets \
+             the default, so with two of them one unpinned caller is on two versions at once",
+            or_absent(a.default.as_deref()),
+            or_absent(b.default.as_deref()),
+        ));
+    }
+    if a.scopes != b.scopes {
+        let missing = |from: &Api, present: &Api| -> Vec<String> {
+            present
+                .scopes
+                .iter()
+                .filter(|s| !from.scopes.contains(s))
+                .map(|s| format!("`{s}`"))
+                .collect()
+        };
+        let (in_b, in_a) = (missing(a, b), missing(b, a));
+        let mut said = Vec::new();
+        if !in_b.is_empty() {
+            said.push(format!("{one} does not declare {}", in_b.join(", ")));
+        }
+        if !in_a.is_empty() {
+            said.push(format!("{two} does not declare {}", in_a.join(", ")));
+        }
+        // Same set, different order: the list is a registry, not a sequence,
+        // and saying "they differ" about two equal sets is how somebody spends
+        // an afternoon on it.
+        if said.is_empty() {
+            said.push(format!(
+                "{one} and {two} list the same scopes in a different order"
+            ));
+        }
+        return Some(format!(
+            "`scopes`: {}. The registry is one list for the whole platform —every service \
+             declares all of it, including the ones that expose no route— because a scope that \
+             exists in one service and not in another is a permission granted in a token and \
+             ignored on the other side",
+            said.join(", and "),
+        ));
+    }
+    None
+}
+
 fn one_versioning_scheme(internal: &[&Manifest], errors: &mut Vec<String>) {
     if let Some(first) = internal.first() {
         for other in internal.iter().skip(1) {
-            if other.api.versioning != first.api.versioning
-                || other.api.dates() != first.api.dates()
-                || other.api.default != first.api.default
-                || other.api.scopes != first.api.scopes
+            if let Some(what) =
+                api_difference(&first.api, &other.api, &first.service, &other.service)
             {
                 errors.push(format!(
-                    "{} and {} declare different `[api]`. The versioning is one decision for \
-                 the whole platform: with two, whoever calls has to know which service \
-                 it is talking to before it can know how to ask for a version",
+                    "{} and {} declare different `[api]` — {what}",
                     first.service, other.service
                 ));
                 break;
