@@ -3427,10 +3427,19 @@ fn edge_labels(p: &Plan, svc: &str) -> String {
     // Medido: 100 altas seguidas contra un `rate_limit = 60` declarado, 100
     // respuestas 200 y ni un 429. El limite estaba declarado, generado y
     // publicado en las labels, y no lo aplicaba nadie.
+    //
+    // Y `OPTIONS` JUNTO AL METODO —en su propio `Method()`, porque el de
+    // Traefik v3 acepta UN parametro y con dos rechaza la regla entera y deja
+    // el router sin servir nada—. Con el metodo solo en la regla, la pregunta
+    // que el navegador hace ANTES de la llamada de verdad no casaba con ningun
+    // router y el edge contestaba 404: la peticion nunca llegaba al servicio,
+    // que ya sabe contestar un preflight. Una app web o de escritorio no podia
+    // llamar a nada —«load failed» en la pantalla de alta— y desde el lado del
+    // servidor todo estaba verde.
     let mut grupos: std::collections::BTreeMap<Option<u32>, Vec<String>> = Default::default();
     for r in &mine {
         grupos.entry(r.rate_limit).or_default().push(format!(
-            "(Method(`{}`) && PathRegexp(`{}`))",
+            "((Method(`{}`) || Method(`OPTIONS`)) && PathRegexp(`{}`))",
             r.method.to_uppercase(),
             path_regex(&r.path)
         ));

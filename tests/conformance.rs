@@ -12254,7 +12254,7 @@ fn the_rate_limited_route_is_not_swallowed_by_its_own_path() {
     // el router con limite atiende SOLO el POST
     assert!(
         out.contains(
-            "traefik.http.routers.shop-60.rule=(Method(`POST`) && PathRegexp(`^/things$$`))"
+            "traefik.http.routers.shop-60.rule=((Method(`POST`) || Method(`OPTIONS`)) && PathRegexp(`^/things$$`))"
         ),
         "{out}"
     );
@@ -12270,6 +12270,21 @@ fn the_rate_limited_route_is_not_swallowed_by_its_own_path() {
         "the unlimited router swallows the limited route:\n{sin_limite}"
     );
     assert!(out.contains("ratelimit.average=60"), "{out}");
+    // And the browser's question reaches the service. With the method alone in
+    // the rule, a preflight matched no router and the edge answered 404: the
+    // request never got to the service, which does know how to answer one, and
+    // a web or desktop app could not call anything —«load failed» on the
+    // sign-up screen— with every server-side check green.
+    // Each method in its own `Method()`: Traefik v3 takes exactly one, and
+    // with two it rejects the whole rule and the router serves nothing.
+    assert!(
+        sin_limite.contains("Method(`OPTIONS`)"),
+        "the preflight reaches no router:\n{sin_limite}"
+    );
+    assert!(
+        !sin_limite.contains("`, `OPTIONS`"),
+        "two parameters in one Method():\n{sin_limite}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

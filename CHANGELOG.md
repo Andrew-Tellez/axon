@@ -7,6 +7,25 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.48.2] — 2026-09-22
+
+### Corregido
+
+- **El preflight de un navegador no llegaba a ningún servicio.** La regla de Traefik
+  lleva el método —lo que hizo falta para que un `rate_limit` se aplicara de verdad— y
+  un `OPTIONS` no casaba con ningún router: el edge contestaba 404 y la llamada moría
+  antes de tocar el servicio, que sí sabe contestarlo.
+
+  Una app web o de escritorio no podía llamar a nada —«load failed» en la pantalla de
+  alta— con todas las comprobaciones del lado del servidor en verde. Ahora cada ruta
+  acepta también `OPTIONS`, **cada método en su propio `Method()`**: el de Traefik v3
+  admite un parámetro y con dos rechaza la regla entera, que deja al router sin servir
+  nada. Salió de romperlo así: los tres routers de un servicio se quedaron mudos a la
+  vez y lo dijo el log del edge.
+
+  Los `axon.local.yml` ya escritos hay que regenerarlos —`axon infra . --target
+  local`— para que el cambio llegue a las labels.
+
 ## [0.48.1] — 2026-09-21
 
 ### Corregido
