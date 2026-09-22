@@ -394,6 +394,23 @@ pub fn build_ts(m: &Manifest, all: &[Manifest]) -> Result<String, String> {
             routes.join(", ")
         ));
     }
+    for (name, me) in m.methods.iter() {
+        let Some(cron) = &me.schedule else { continue };
+        out.push(format!(
+            "\n/** The route the scheduler hits to run `{name}` ({cron}). `axon infra`\n \
+             *  deploys it on all four targets, so startup has to serve it by calling\n \
+             *  `{name}`: a scheduler pointed at a 404 applies without an error and\n \
+             *  runs nothing.\n \
+             *\n \
+             *  It is NOT the method's own route. A scheduler carries no token, and the\n \
+             *  method's route is guarded: a `curl` against it is a 401 forever. This one\n \
+             *  is internal —it does not go out through the gateway— and what lets it\n \
+             *  through is the network policy, which names exactly one pod. */\n\
+             export const scheduleRoute{p} = \"POST {route}\" as const;\n",
+            p = pascal(name),
+            route = Method::schedule_route(name),
+        ));
+    }
     out.push(retirement_ts(m));
     out.push(api_versions_ts(m));
     out.push(format!(

@@ -7,6 +7,22 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.49.1] — 2026-09-22
+
+### Corregido
+
+- **El cron de un método programado pedía un token que nadie le puede dar.**
+  Apuntaba a la ruta del propio método, que está guardada —tiene `scopes` y
+  `roles`, como cualquier método—, y un `curl` sin token contra ella es un 401
+  para siempre: el cron se aplica sin error y no corre nada.
+
+  Ahora apunta a una ruta interna, `POST /internal/method/<nombre>/run`, por la
+  misma razón por la que el barrido de una saga tampoco es un método: no sale
+  por el gateway y lo que la deja pasar es la NetworkPolicy, que nombra un solo
+  pod. El contrato la declara —`scheduleRoute<Nombre>`— para que el arranque la
+  sirva; un generador y un planificador que concatenan la misma ruta por
+  separado es exactamente cómo un barrido se queda 404 en silencio.
+
 ## [0.49.0] — 2026-09-22
 
 ### Añadido

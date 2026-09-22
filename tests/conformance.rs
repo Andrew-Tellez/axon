@@ -12702,9 +12702,12 @@ fn a_scheduled_method_is_deployed_on_all_four_targets() {
             out.contains(marker),
             "{target} does not deploy the schedule"
         );
+        // NOT the method's own route: a scheduler carries no token and that
+        // one is guarded. The internal one is let through by the network
+        // policy, which names one pod.
         assert!(
-            out.contains("/sweep"),
-            "{target} does not point at the method's route"
+            out.contains("/internal/method/barrer/run"),
+            "{target} does not point at the route the scheduler can actually reach"
         );
     }
     // The declared HOUR and not an interval: `every_ms` is the deadline here,
@@ -12731,6 +12734,34 @@ fn a_scheduled_method_is_deployed_on_all_four_targets() {
     );
 }
 
+/// The route the code serves and the one the scheduler hits, again: the same
+/// drift that left a saga sweep 404ing, one level up.
+#[test]
+fn the_schedules_cron_hits_the_route_the_contract_declares() {
+    let dir = fixture_scheduled("route", "0 5 * * *", "");
+    let f = dir.to_str().unwrap();
+    let (ts, err, ok) = axon(&["build", &format!("{f}/asesor.toml"), f]);
+    assert!(ok, "{err}");
+    let route = "/internal/method/barrer/run";
+    assert!(
+        ts.contains(&format!("scheduleRouteBarrer = \"POST {route}\"")),
+        "the contract does not declare the route startup has to serve:\n{ts}"
+    );
+    let (plan, err, ok) = axon(&["infra", f, "--target", "plan"]);
+    assert!(ok, "{err}");
+    assert!(
+        plan.contains(route),
+        "the cron does not hit the route the contract declares:\n{plan}"
+    );
+    // and it does not go out through the gateway: the routes at the edge are
+    // the declared methods, and this is not one of them
+    let (g, _, _) = axon(&["infra", f, "--target", "gcp"]);
+    assert!(
+        !g.contains(&format!("paths = [\"{route}\"")),
+        "the scheduled route slipped into the edge"
+    );
+}
+
 /// What a scheduled method has to be. The caller is a scheduler: it cannot be
 /// asked anything, it retries on its own, and it is not a person.
 #[test]
@@ -12738,7 +12769,6 @@ fn a_schedule_demands_a_route_it_can_survive_being_called_twice() {
     for (schedule, extra, expected) in [
         ("@daily", "", "not five cron fields"),
         ("0 5 * * *", "", "is not `idempotent`"),
-        ("0 5 * * *", "idempotent = true", "has no `http`"),
         (
             "0 5 * * *",
             "http = \"POST /sweep\"\nidempotent = true\nauth = \"public\"",

@@ -402,6 +402,23 @@ impl Method {
     pub fn retiring(&self) -> bool {
         self.deprecated.is_some() || self.sunset.is_some()
     }
+
+    /// The route the scheduler hits, for a method that declares a `schedule`.
+    ///
+    /// Not the method's own route, and for the reason the saga sweep is not
+    /// one either: a scheduler carries no token. Its own route is guarded —it
+    /// is a method, with scopes and roles— and a plain `curl` against it is a
+    /// 401 forever, which is a cron that applies with no error and runs
+    /// nothing. This one is internal: it never leaves through the gateway, and
+    /// what lets it through is the network policy, which names exactly one
+    /// pod.
+    ///
+    /// It lives here for the same reason `Saga::sweep_route` does: two
+    /// generators concatenate it, and when they drift the cron 404s in
+    /// silence.
+    pub fn schedule_route(name: &str) -> String {
+        format!("/internal/method/{name}/run")
+    }
 }
 
 /// Whether a cron expression has the five fields every scheduler here speaks.

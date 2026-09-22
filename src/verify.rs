@@ -517,17 +517,6 @@ fn governance(ms: &[Manifest], pol: &Policy, errors: &mut Vec<String>, warnings:
                     m.service
                 ));
             }
-            // The scheduler calls it over HTTP, which is the only entrypoint
-            // every generated language shares. Without a route there is
-            // nothing to point it at, and the cron would apply against
-            // nothing.
-            if mt.http.is_none() {
-                errors.push(format!(
-                    "{}.{name}: it is scheduled and has no `http`. A scheduler calls a route, \
-                 so a scheduled method with no route is a cron aimed at nothing",
-                    m.service
-                ));
-            }
             // A scheduler retries; the route it hits has to survive being
             // called twice. This is the same demand mutating methods already
             // carry, made for the caller nobody can talk to.

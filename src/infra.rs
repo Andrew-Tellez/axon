@@ -530,13 +530,13 @@ pub fn plan(ms: &[Manifest]) -> Plan {
             });
         }
         for (name, me) in m.methods.iter() {
-            let (Some(cron), Some(route)) = (&me.schedule, me.path()) else {
-                continue;
-            };
+            let Some(cron) = &me.schedule else { continue };
             crons.push(Cron {
                 service: svc.clone(),
                 name: format!("method.{name}"),
-                path: route.to_string(),
+                // Not the method's own route: a scheduler carries no token,
+                // and the method's route is guarded.
+                path: Method::schedule_route(name),
                 port: m.infra.port.unwrap_or(8080),
                 // The deadline, not the interval: what the method promises the
                 // edge is what the scheduler gives it before cutting it off.
