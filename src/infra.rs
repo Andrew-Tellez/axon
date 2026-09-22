@@ -205,6 +205,11 @@ pub struct Cron {
     /// How often. It comes from the saga's declared budget: nothing becomes
     /// eligible before that, so firing more often is work with no result.
     pub every_ms: u32,
+    /// The declared time, when somebody said one. An interval answers "not
+    /// before this"; a nightly close answers "at this hour", and rounding it
+    /// to "every 1440 minutes" moves the hour every time the scheduler is
+    /// redeployed.
+    pub schedule: Option<String>,
 }
 
 impl Cron {
@@ -215,9 +220,21 @@ impl Cron {
         self.every_ms.div_ceil(60_000).max(1)
     }
 
+    /// The five-field cron every scheduler here is given: what was declared,
+    /// or the interval turned into one.
+    pub fn expr(&self) -> String {
+        match &self.schedule {
+            Some(c) => c.clone(),
+            None => format!("*/{} * * * *", self.minutes()),
+        }
+    }
+
     /// EventBridge's `rate(...)`: with 1 the unit goes in the SINGULAR.
     /// `rate(1 minutes)` is not a warning, it is a validation error.
     pub fn rate(&self) -> String {
+        if let Some(c) = &self.schedule {
+            return format!("cron({})", aws_cron(c));
+        }
         match self.minutes() {
             1 => "rate(1 minute)".to_string(),
             n => format!("rate({n} minutes)"),
@@ -335,7 +352,8 @@ pub fn plan_schema() -> serde_json::Value {
             }), "one cache per service. Nothing in it survives losing it: no backup, \
                  no replica, no PITR")),
             "crons": array(object(serde_json::json!({
-                "service": str_, "name": str_, "path": str_, "port": uint, "every_ms": uint
+                "service": str_, "name": str_, "path": str_, "port": uint, "every_ms": uint,
+                "schedule": str_or_null
             }), "what has to be hit periodically: a saga's sweep, a snapshot prune")),
             "secrets": array(object(serde_json::json!({
                 "service": str_, "key": str_, "name": str_
@@ -492,6 +510,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 // measured in events, not in time. What matters is that it runs at
                 // all; falling behind only costs space.
                 every_ms: 3_600_000,
+                schedule: None,
             });
         }
         for name in m.tasks.keys() {
@@ -507,6 +526,22 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 // both of them are the difference between a queue that drains
                 // and one that stops without saying so.
                 every_ms: 60_000,
+                schedule: None,
+            });
+        }
+        for (name, me) in m.methods.iter() {
+            let (Some(cron), Some(route)) = (&me.schedule, me.path()) else {
+                continue;
+            };
+            crons.push(Cron {
+                service: svc.clone(),
+                name: format!("method.{name}"),
+                path: route.to_string(),
+                port: m.infra.port.unwrap_or(8080),
+                // The deadline, not the interval: what the method promises the
+                // edge is what the scheduler gives it before cutting it off.
+                every_ms: me.timeout_ms.unwrap_or(10_000),
+                schedule: Some(cron.clone()),
             });
         }
         for (name, sg) in &m.flows() {
@@ -516,6 +551,7 @@ pub fn plan(ms: &[Manifest]) -> Plan {
                 path: Saga::sweep_route(name),
                 port: m.infra.port.unwrap_or(8080),
                 every_ms: sg.timeout_ms.unwrap_or(60_000),
+                schedule: None,
             });
         }
         if m.search.active() {
@@ -1153,7 +1189,7 @@ fn gcp(p: &Plan) -> String {
         o.push(format!(
             "resource \"google_cloud_scheduler_job\" \"{sv}_{n}\" {{\n  \
              name     = \"{svc}-{name}\"\n  \
-             schedule = \"*/{min} * * * *\"\n  \
+             schedule = \"{cron}\"\n  \
              # if one pass takes longer than the interval, this one is cut off before\n  \
              # the next one starts\n  \
              attempt_deadline = \"{plazo}s\"\n  \
@@ -1166,7 +1202,7 @@ fn gcp(p: &Plan) -> String {
                  audience              = google_cloud_run_v2_service.{sv}.uri\n    }}\n  }}\n}}\n",
             svc = c.service,
             name = c.name.replace('.', "-"),
-            min = c.minutes(),
+            cron = c.expr(),
             plazo = (c.every_ms / 1000).max(30),
             path = c.path,
         ));
@@ -2491,7 +2527,7 @@ kind: CronJob
 metadata:
   name: {svc}-{name}
 spec:
-  schedule: \"*/{min} * * * *\"
+  schedule: \"{cron}\"
   # `Forbid`: if one pass takes longer than the interval, the next does NOT start.
   # Two sweeps at once claim the same saga, and although `claim` prevents that,
   # there is no reason to lean on it from the scheduler.
@@ -2529,7 +2565,7 @@ spec:
                 readOnlyRootFilesystem: true
                 capabilities: {{ drop: [ALL] }}",
             svc = c.service,
-            min = c.minutes(),
+            cron = c.expr(),
             plazo = (c.every_ms / 1000).max(30),
             port = c.port,
             path = c.path,
@@ -3100,18 +3136,38 @@ services:
         // thing it does, which is hitting the route every so often. That way
         // the sweep runs here too, and nobody discovers in production that
         // the route did not exist.
+        // An interval is a loop; a declared hour is a clock. `sleep 600` for
+        // something that says "at five in the morning" would run it every ten
+        // minutes here and once a day in production —and the difference would
+        // only show up the first night after a deploy.
+        let disparo = match &c.schedule {
+            Some(cron) => format!(
+                "mkdir -p /tmp/ct && echo '{cron} curl -fsS -m {plazo} -X POST \
+                 http://{svc}:{port}{path}' > /tmp/ct/root && crond -f -d 8 -c /tmp/ct",
+                plazo = (c.every_ms / 1000).max(30),
+                port = c.port,
+                path = c.path,
+            ),
+            // `while` and not a single `sleep`: a job that runs once and exits
+            // leaves `up --wait` counting a container that died.
+            None => format!(
+                "while :; do sleep {seg}; curl -fsS -m 10 -X POST http://{svc}:{port}{path} || true; done",
+                seg = (c.every_ms / 1000).max(1),
+                port = c.port,
+                path = c.path,
+            ),
+        };
         o.push_str(&format!(
             "  cron-{n}:
     image: curlimages/curl:8.11.1
     depends_on: {{ {svc}: {{ condition: service_started }} }}
-    # `while` and not a single `sleep`: a job that runs once and exits leaves
-    # `up --wait` counting a container that died
-    command: [\"sh\", \"-c\", \"while :; do sleep {seg}; curl -fsS -m 10 -X POST http://{svc}:{port}{path} || true; done\"]
+    # UTC, which is what the three providers' schedulers speak. A container on
+    # the laptop's timezone runs the nightly close at a different hour here
+    # than in production, and that is the kind of difference nobody looks for.
+    environment: {{ TZ: UTC }}
+    command: [\"sh\", \"-c\", \"{disparo}\"]
 ",
             n = tfname(&c.name.replace('.', "-")),
-            seg = (c.every_ms / 1000).max(1),
-            port = c.port,
-            path = c.path,
         ));
         let _ = i;
     }

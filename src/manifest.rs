@@ -385,6 +385,16 @@ pub struct Method {
     /// change this method, and the adapter chain skips it.
     #[serde(default)]
     pub at: IndexMap<String, Shape>,
+    /// When a scheduler calls it, as a five-field cron expression.
+    ///
+    /// `runtime = "job"` covers the process whose whole reason to exist is to
+    /// run at a time. This covers the other half: a method OF a service that
+    /// also has to happen without anybody asking —a nightly sweep, a monthly
+    /// close— and whose code, database and outbox already live here. Declaring
+    /// it in a crontab somewhere else is how a renamed route keeps applying
+    /// with no error and 404s forever.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
 }
 
 impl Method {
@@ -392,6 +402,14 @@ impl Method {
     pub fn retiring(&self) -> bool {
         self.deprecated.is_some() || self.sunset.is_some()
     }
+}
+
+/// Whether a cron expression has the five fields every scheduler here speaks.
+/// It does not judge the fields —a scheduler knows its own dialect— only that
+/// there are five: `"0 5 * *"` is accepted by nobody and rejected clearly by
+/// no one either.
+pub fn cron_well_formed(expr: &str) -> bool {
+    expr.split_whitespace().count() == 5
 }
 
 /// A declared failure of a method.

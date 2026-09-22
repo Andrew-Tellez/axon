@@ -12639,3 +12639,151 @@ fn a_measured_event_is_not_an_ignored_one() {
     assert!(out.contains("REACTS"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A fixture whose only point is a method that runs on a schedule.
+fn fixture_scheduled(suffix: &str, schedule: &str, extra: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("axon-sched-{suffix}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("asesor.toml"),
+        format!(
+            r#"service = "asesor"
+version = "1.0.0"
+owner = "equipo"
+tier = "2"
+
+[analytics]
+export = false
+
+[methods.barrer]
+in = {{ period = "string" }}
+out = {{ seen = "int" }}
+http = "POST /sweep"
+timeout_ms = 60000
+idempotent = true
+auth = "required"
+schedule = "{schedule}"
+{extra}
+
+[infra]
+state = "postgres"
+migrations = "sql/"
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(
+        dir.join("sql/001_init.expand.sql"),
+        "CREATE TABLE nota (\n  id uuid PRIMARY KEY,\n  tenant_id uuid NOT NULL\n);\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// A method of a service that also has to run without anybody asking. The
+/// scheduler existed already for sagas; what did not exist was declaring it,
+/// so the cron lived in somebody's crontab and the route it hit could be
+/// renamed with nothing saying so.
+#[test]
+fn a_scheduled_method_is_deployed_on_all_four_targets() {
+    let dir = fixture_scheduled("targets", "0 5 * * *", "");
+    let f = dir.to_str().unwrap();
+    for (target, marker) in [
+        ("local", "cron-method_barrer"),
+        ("gcp", "resource \"google_cloud_scheduler_job\""),
+        ("aws", "resource \"aws_scheduler_schedule\""),
+        ("k8s", "kind: CronJob"),
+    ] {
+        let (out, err, ok) = axon(&["infra", f, "--target", target]);
+        assert!(ok, "{target}: {err}");
+        assert!(
+            out.contains(marker),
+            "{target} does not deploy the schedule"
+        );
+        assert!(
+            out.contains("/sweep"),
+            "{target} does not point at the method's route"
+        );
+    }
+    // The declared HOUR and not an interval: `every_ms` is the deadline here,
+    // and turning it into `*/1 * * * *` would run a nightly close every minute.
+    let (k, _, _) = axon(&["infra", f, "--target", "k8s"]);
+    assert!(
+        k.contains("schedule: \"0 5 * * *\""),
+        "k8s lost the declared hour:\n{k}"
+    );
+    let (g, _, _) = axon(&["infra", f, "--target", "gcp"]);
+    assert!(g.contains("schedule = \"0 5 * * *\""), "gcp lost the hour");
+    // EventBridge speaks six fields and refuses `*` in both day fields.
+    let (a, _, _) = axon(&["infra", f, "--target", "aws"]);
+    assert!(
+        a.contains("cron(0 5 * * ? *)"),
+        "aws did not get a cron it accepts:\n{a}"
+    );
+    // Locally it is a clock too, not a `sleep` loop: the difference would only
+    // show up the first night after a deploy.
+    let (l, _, _) = axon(&["infra", f, "--target", "local"]);
+    assert!(
+        l.contains("crond") && l.contains("0 5 * * * curl"),
+        "local runs the schedule as an interval:\n{l}"
+    );
+}
+
+/// What a scheduled method has to be. The caller is a scheduler: it cannot be
+/// asked anything, it retries on its own, and it is not a person.
+#[test]
+fn a_schedule_demands_a_route_it_can_survive_being_called_twice() {
+    for (schedule, extra, expected) in [
+        ("@daily", "", "not five cron fields"),
+        ("0 5 * * *", "", "is not `idempotent`"),
+        ("0 5 * * *", "idempotent = true", "has no `http`"),
+        (
+            "0 5 * * *",
+            "http = \"POST /sweep\"\nidempotent = true\nauth = \"public\"",
+            "auth = \"public\"",
+        ),
+    ] {
+        // the fixture's own defaults get overridden by what comes last
+        let dir = std::env::temp_dir().join("axon-sched-bad");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sql")).unwrap();
+        std::fs::write(
+            dir.join("sql/001_init.expand.sql"),
+            "CREATE TABLE nota (\n  id uuid PRIMARY KEY\n);\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("asesor.toml"),
+            format!(
+                r#"service = "asesor"
+version = "1.0.0"
+owner = "equipo"
+tier = "2"
+
+[analytics]
+export = false
+
+[methods.barrer]
+in = {{ period = "string" }}
+out = {{ seen = "int" }}
+timeout_ms = 60000
+schedule = "{schedule}"
+{extra}
+
+[infra]
+state = "postgres"
+migrations = "sql/"
+"#
+            ),
+        )
+        .unwrap();
+        let (out, err, _) = axon(&["verify", dir.to_str().unwrap()]);
+        let all = format!("{out}{err}");
+        assert!(
+            all.contains(expected),
+            "`{schedule}` with `{extra}` was not refused with `{expected}`:\n{all}"
+        );
+    }
+}

@@ -7,6 +7,38 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.49.0] — 2026-09-22
+
+### Añadido
+
+- **Un método puede declarar cuándo se llama solo.** `runtime = "job"` cubría el
+  proceso cuya razón de existir es correr a una hora. Faltaba la otra mitad: un
+  método **de un servicio** que además tiene que ocurrir sin que nadie lo pida —un
+  barrido nocturno, un cierre mensual— y cuyo código, base de datos y outbox ya
+  viven ahí. Eso acababa en el crontab de alguien, fuera del manifiesto: renombrar
+  la ruta dejaba el cron apuntando a un 404 y nada lo decía.
+
+  ```toml
+  [methods.sweep]
+  http = "POST /sweep"
+  idempotent = true
+  auth = "required"
+  schedule = "0 5 * * *"
+  ```
+
+  Sale en los cuatro objetivos, con la **hora declarada** y no un intervalo:
+  `CronJob` en k8s, `google_cloud_scheduler_job` en GCP, `aws_scheduler_schedule`
+  en AWS —seis campos y `?` en uno de los dos días, que es lo único que EventBridge
+  acepta— y en local un `crond` en UTC, que es lo que hablan los tres. Con un
+  `sleep` local, un cierre «a las cinco» corría cada minuto en la laptop y una vez
+  al día en producción, y esa diferencia solo aparece la primera noche después de
+  un despliegue.
+
+  `verify` exige lo que el llamador implica: cinco campos de cron, una ruta a la
+  que apuntar, `idempotent` —un planificador que pierde una ventana vuelve a
+  disparar y no hay nadie para decidir si estuvo bien— y que no sea `public`: lo
+  que corre solo sobre los datos de todos no lo dispara internet.
+
 ## [0.48.2] — 2026-09-22
 
 ### Corregido
