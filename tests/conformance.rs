@@ -12732,6 +12732,12 @@ fn a_scheduled_method_is_deployed_on_all_four_targets() {
         l.contains("crond") && l.contains("0 5 * * * curl"),
         "local runs the schedule as an interval:\n{l}"
     );
+    // And as root: busybox `crond` as the image's own user starts, logs that
+    // it started, and never runs a single job.
+    assert!(
+        l.contains("user: root"),
+        "the local cron cannot run anything:\n{l}"
+    );
 }
 
 /// The route the code serves and the one the scheduler hits, again: the same

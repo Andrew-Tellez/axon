@@ -3165,6 +3165,11 @@ services:
     # the laptop's timezone runs the nightly close at a different hour here
     # than in production, and that is the kind of difference nobody looks for.
     environment: {{ TZ: UTC }}
+    # root, which is what busybox `crond` needs to run anything: as the image's
+    # own user it starts, says so in the log and never fires a single job.
+    # Measured —two hours of `* * * * *` with an empty output file— and it is
+    # the whole reason this container exists.
+    user: root
     command: [\"sh\", \"-c\", \"{disparo}\"]
 ",
             n = tfname(&c.name.replace('.', "-")),

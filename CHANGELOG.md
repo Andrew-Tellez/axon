@@ -7,6 +7,16 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.49.2] — 2026-09-22
+
+### Corregido
+
+- **El cron local arrancaba y no disparaba nada.** `crond` de busybox necesita ser
+  root para ejecutar una entrada: como el usuario de la imagen arranca, escribe en
+  el log que arrancó y no corre un solo trabajo. Dos horas de `* * * * *` con el
+  fichero de salida vacío, que es exactamente el fallo que este contenedor existe
+  para no tener. Ahora lleva `user: root`.
+
 ## [0.49.1] — 2026-09-22
 
 ### Corregido
