@@ -7,6 +7,26 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.50.0] — 2026-09-23
+
+### Añadido
+
+- **Un campo nuevo en un método publicado, sin romper a quien ya llama.** La regla
+  que lo rechazaba tiene razón —para quien ya está llamando no existe tal cosa como
+  un campo opcional— y sin forma de satisfacerla solo quedaban dos salidas: romper a
+  los clientes, o mentir en el baseline.
+
+  `[methods.x.at."<version>"]` con un `adapter` ES la mitigación, y el compilador
+  puede verla. Con la forma anterior declarada en la versión anterior, un campo
+  nuevo deja de ser un error y pasa a ser una advertencia que dice lo que tiene que
+  ser cierto: que esos clientes fijen esa versión.
+
+### Corregido
+
+- **Dos pruebas compartían `axon-docs` en el temporal** y competían por él: la que
+  corría segunda encontraba el manifiesto de la otra y documentaba un servicio del
+  que nunca había oído hablar. Fallaba una de cada tres veces.
+
 ## [0.49.2] — 2026-09-22
 
 ### Corregido

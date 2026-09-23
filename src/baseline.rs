@@ -383,8 +383,32 @@ pub fn comparar(ms: &[Manifest], b: &Baseline) -> (Vec<String>, Vec<String>) {
                         _ => {}
                     }
                 }
+                // The method as it was, declared and adapted. `[methods.x.at."<version>"]`
+                // with an adapter is the mitigation this rule exists to demand:
+                // a caller pinned to the old version sends what it always sent
+                // and the adapter fills the rest. Without looking at it, the
+                // only way to add a field to a published method was to break
+                // its callers or to lie in the baseline.
+                let cubierto = |field: &String| {
+                    ms.iter()
+                        .find(|m| key.starts_with(&format!("{}.", m.service)))
+                        .and_then(|m| {
+                            m.methods
+                                .get(key.split_once('.').map(|x| x.1).unwrap_or(key))
+                        })
+                        .is_some_and(|me| {
+                            me.at.values().any(|shape| {
+                                shape.adapter.is_some() && !shape.input.contains_key(field)
+                            })
+                        })
+                };
                 for (field, kind) in &now_.input {
                     match before.input.get(field) {
+                        None if cubierto(field) => warnings.push(format!(
+                            "{key}: new input `{field}`, and the previous shape is declared at an \
+                             older version with an adapter. Old callers keep working; what has \
+                             to be true is that they pin that version"
+                        )),
                         None => errors.push(format!(
                             "{key}: new input `{field}`, required; the old callers do not send it"
                         )),

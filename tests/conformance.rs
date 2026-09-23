@@ -12295,7 +12295,10 @@ fn the_rate_limited_route_is_not_swallowed_by_its_own_path() {
 /// owner» es un ticket.
 #[test]
 fn the_guide_says_what_the_guard_will_demand() {
-    let dir = std::env::temp_dir().join("axon-docs");
+    // Its own directory: this and the test above both used `axon-docs`,
+    // so whichever ran second found the other's manifest and documented
+    // a service it had never heard of. It failed about one time in three.
+    let dir = std::env::temp_dir().join("axon-docs-guia");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("sql/shop")).unwrap();
     std::fs::write(
@@ -12822,4 +12825,99 @@ migrations = "sql/"
             "`{schedule}` with `{extra}` was not refused with `{expected}`:\n{all}"
         );
     }
+}
+
+/// Adding a field to a published method, without breaking the callers that
+/// are already deployed.
+///
+/// The rule that refuses it is right —there is no such thing as an optional
+/// input for somebody who is already calling— and without a way to satisfy
+/// it, the only options were to break them or to lie in the baseline.
+/// `[methods.x.at."<version>"]` with an adapter is the mitigation, and the
+/// compiler can see it.
+#[test]
+fn an_older_shape_with_an_adapter_covers_a_new_input() {
+    let dir = std::env::temp_dir().join("axon-at-nuevo");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(
+        dir.join("sql/001_init.expand.sql"),
+        "CREATE TABLE nota (\n  id uuid PRIMARY KEY,\n  tenant_id uuid NOT NULL\n);\n",
+    )
+    .unwrap();
+
+    let manifiesto = |extra: &str| {
+        format!(
+            r#"service = "tienda"
+version = "1.0.0"
+owner = "equipo"
+tier = "2"
+
+[analytics]
+export = false
+
+[api]
+versioning = "header"
+header = "X-Version"
+default = "2026-01-01"
+scopes = []
+
+[[api.version]]
+date = "2026-01-01"
+
+[methods.crear]
+in = {{ id = "uuid"{extra} }}
+out = {{ id = "uuid" }}
+http = "POST /crear"
+idempotent = true
+
+[infra]
+state = "postgres"
+migrations = "sql/"
+"#
+        )
+    };
+
+    // published as it was
+    std::fs::write(dir.join("tienda.toml"), manifiesto("")).unwrap();
+    let (base, err, ok) = axon(&["baseline", dir.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    std::fs::write(dir.join("axon.baseline.json"), &base).unwrap();
+
+    // a new input, with nothing said about the old shape: refused
+    std::fs::write(
+        dir.join("tienda.toml"),
+        manifiesto(r#", lineas = "string""#),
+    )
+    .unwrap();
+    let (out, err, _) = axon(&["verify", dir.to_str().unwrap()]);
+    let todo = format!("{out}{err}");
+    assert!(
+        todo.contains("new input `lineas`, required"),
+        "a new input on a published method was not refused:\n{todo}"
+    );
+
+    // the same, with the previous shape declared at the previous version and
+    // an adapter: a warning about what has to be true, and not a refusal
+    std::fs::write(
+        dir.join("tienda.toml"),
+        manifiesto(r#", lineas = "string""#)
+            + r#"
+[methods.crear.at."2026-01-01"]
+in = { id = "uuid" }
+out = { id = "uuid" }
+adapter = "sinLineas"
+"#,
+    )
+    .unwrap();
+    let (out, err, _) = axon(&["verify", dir.to_str().unwrap()]);
+    let todo = format!("{out}{err}");
+    assert!(
+        !todo.contains("new input `lineas`, required"),
+        "the declared older shape did not cover the new input:\n{todo}"
+    );
+    assert!(
+        todo.contains("Old callers keep working"),
+        "it went silent instead of saying what has to be true:\n{todo}"
+    );
 }
