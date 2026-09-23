@@ -12921,3 +12921,102 @@ adapter = "sinLineas"
         "it went silent instead of saying what has to be true:\n{todo}"
     );
 }
+
+/// The shape of a sweep: a method that runs for everybody, in a service that
+/// calls routes which are about one company.
+///
+/// What goes wrong is always the same and it is invisible from outside — the
+/// call is made with the service's own context, the callee matches its row
+/// policy against a tenant that owns no rows, and the answer comes back
+/// EMPTY. Not an error. A sweep that reads "nothing outstanding" for every
+/// company in the system and reports success.
+#[test]
+fn a_method_that_runs_for_everybody_is_told_whose_behalf_to_ask_on() {
+    let dir = std::env::temp_dir().join("axon-barrido");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sql")).unwrap();
+    std::fs::write(
+        dir.join("sql/001_init.expand.sql"),
+        "CREATE TABLE nota (\n  id uuid PRIMARY KEY,\n  tenant_id uuid NOT NULL\n);\n",
+    )
+    .unwrap();
+    // The callee: everything it serves is about ONE company.
+    std::fs::write(
+        dir.join("banco.toml"),
+        r#"service = "banco"
+version = "1.0.0"
+owner = "equipo"
+tier = "1"
+
+[analytics]
+export = false
+
+[methods.saldo]
+in = { tenantId = "uuid" }
+out = { saldo = "int" }
+http = "GET /tenants/{tenantId}/saldo"
+idempotent = true
+"#,
+    )
+    .unwrap();
+
+    let vigilante = |extra_in: &str| {
+        format!(
+            r#"service = "vigilante"
+version = "1.0.0"
+owner = "equipo"
+tier = "2"
+
+[analytics]
+export = false
+
+[methods.barrer]
+in = {{ {extra_in} }}
+out = {{ vistos = "int" }}
+http = "POST /barrer"
+idempotent = true
+
+[[depends]]
+service = "banco"
+method = "saldo"
+timeout_ms = 3000
+uses = ["saldo"]
+
+[infra]
+state = "postgres"
+migrations = "sql/"
+"#
+        )
+    };
+
+    // It sweeps: its own input names no tenant, and it calls one that does.
+    std::fs::write(
+        dir.join("vigilante.toml"),
+        vigilante(r#"period = "string""#),
+    )
+    .unwrap();
+    let (out, err, _) = axon(&["verify", dir.to_str().unwrap()]);
+    let todo = format!("{out}{err}");
+    assert!(
+        todo.contains("runs for everybody") && todo.contains("banco.saldo"),
+        "the sweep shape was not named:\n{todo}"
+    );
+    assert!(
+        todo.contains("ON BEHALF OF"),
+        "it said the shape and not what to do about it:\n{todo}"
+    );
+
+    // And a method that speaks for one company says so in its own input:
+    // there is nothing to warn about.
+    std::fs::write(
+        dir.join("vigilante.toml"),
+        vigilante(r#"tenantId = "uuid", period = "string""#),
+    )
+    .unwrap();
+    let (out, err, _) = axon(&["verify", dir.to_str().unwrap()]);
+    let todo = format!("{out}{err}");
+    assert!(
+        !todo.contains("runs for everybody"),
+        "a method that takes a tenant was warned about anyway:\n{todo}"
+    );
+}

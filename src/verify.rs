@@ -369,6 +369,7 @@ pub fn verify(ms: &[Manifest], pol: &Policy) -> Report {
     versions_are_not_mixed(ms, &mut errors);
     retirement(ms, ahora, &mut errors, &mut warnings);
     callers_of_what_dies(ms, &mut warnings);
+    speaking_for_everybody(ms, &mut warnings);
     scopes_nobody_demands(ms, &mut warnings);
     declared_failures(ms, &mut errors, &mut warnings);
     retries_with_nothing_to_retry(ms, &mut warnings);
@@ -3305,6 +3306,74 @@ fn retirement(
 // And the one that only a platform-wide view can see: somebody still calls
 // what is about to die. Inside a single repo this is a grep; across twenty
 // services it is the question nobody can answer.
+/// Whether a field names the tenant. The convention is `tenantId` and the
+/// column is `tenant_id`; both of them, and anything else somebody spells
+/// with `tenant` in it, mean the same thing here.
+fn names_a_tenant(fields: &Fields) -> bool {
+    fields.keys().any(|k| k.to_lowercase().contains("tenant"))
+}
+
+/// A method that runs for EVERYBODY, in a service that calls routes which are
+/// about ONE company.
+///
+/// It is the shape of a sweep: walk every tenant, ask something of another
+/// service for each of them. What goes wrong is always the same, and it is
+/// invisible from the outside: the call is made with the SERVICE's own
+/// context instead of the company's, the callee matches its row policy
+/// against a tenant that owns no rows, and the answer comes back EMPTY. Not
+/// an error —empty. A sweep that reads "nothing outstanding" for every
+/// company in the system and reports success.
+///
+/// It has cost three fixes in one repository: an advisor that read zero
+/// collections for everybody, a poster whose ledger calls were 401 for every
+/// tenant, and a diagnosis that went quiet about the chart. Two of the three
+/// failed silently.
+///
+/// A warning and not an error: the compiler can see the shape and cannot see
+/// the wiring. What it can do is say where to look.
+fn speaking_for_everybody(ms: &[Manifest], warnings: &mut Vec<String>) {
+    for m in ms.iter().filter(|m| !m.external) {
+        // Dependencies whose callee takes a tenant. Those are the ones that
+        // have to be asked on somebody's behalf.
+        let por_inquilino: Vec<String> = m
+            .depends
+            .iter()
+            .filter(|d| {
+                ms.iter()
+                    .find(|o| o.service == d.target())
+                    .and_then(|o| o.methods.get(&d.method))
+                    .is_some_and(|sig| names_a_tenant(&sig.input))
+            })
+            .map(|d| format!("{}.{}", d.target(), d.method))
+            .collect();
+        if por_inquilino.is_empty() {
+            continue;
+        }
+        for (name, me) in &m.methods {
+            // Its own input says nothing about a tenant: it is not about one
+            // company. A method that takes a `tenantId` is speaking for that
+            // company already and there is nothing to warn about.
+            if names_a_tenant(&me.input) {
+                continue;
+            }
+            // And it is reachable: a method with no route and no schedule is
+            // not a sweep, it is a helper.
+            if me.http.is_none() && me.schedule.is_none() {
+                continue;
+            }
+            warnings.push(format!(
+                "{}.{name} runs for everybody —its input names no tenant— and this service calls {}, \
+                 which does. Each of those has to be asked ON BEHALF OF the company being looked at: \
+                 with the service's own context the row policy on the other side matches nothing and \
+                 the answer comes back empty, which is not an error and reads exactly like a company \
+                 with nothing outstanding",
+                m.service,
+                por_inquilino.join(", ")
+            ));
+        }
+    }
+}
+
 fn callers_of_what_dies(ms: &[Manifest], warnings: &mut Vec<String>) {
     for m in ms.iter().filter(|m| !m.external) {
         for d in &m.depends {

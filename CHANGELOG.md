@@ -7,6 +7,26 @@ El **formato del manifiesto** todavía puede cambiar de forma incompatible antes
 `1.0.0`. La superficie de comandos es estable: un comando puede ganar banderas, no
 perderlas.
 
+## [0.51.0] — 2026-09-23
+
+### Añadido
+
+- **Un método que corre para todos, en un servicio que llama rutas que son de uno.**
+  Es la forma de un barrido: recorrer cada inquilino y preguntarle algo a otro
+  servicio por cada uno. Lo que sale mal es siempre lo mismo y no se ve desde
+  fuera: la llamada se hace con el contexto del SERVICIO y no con el de la
+  empresa, la política de filas del otro lado no encuentra nada, y la respuesta
+  vuelve **vacía**. No un error: vacía. Un barrido que lee «no hay nada
+  pendiente» para todas las empresas del sistema y reporta éxito.
+
+  Costó tres arreglos en un solo repositorio —un asesor que leía cero cobros para
+  todos, un contabilizador cuyas llamadas al libro mayor eran 401 para cada
+  inquilino, y un diagnóstico que se quedaba callado sobre el catálogo de
+  cuentas— y dos de los tres fallaban en silencio.
+
+  Es una advertencia y no un error: el compilador ve la forma y no ve el cableado.
+  Lo que sí puede hacer es decir dónde mirar.
+
 ## [0.50.0] — 2026-09-23
 
 ### Añadido
